@@ -1,0 +1,61 @@
+# FileID TUI — cross-platform `fileid-tui` terminal front-end.
+#
+# Like platforms/cli, this crate lives under platforms/ but is CROSS-OS: it
+# links the shared Rust engine as a library and uses only portable std +
+# SQLite + a pure-Rust terminal stack (ratatui + crossterm). It builds and runs
+# identically on macOS, Linux, and Windows. It is its OWN standalone Cargo
+# workspace (mirroring platforms/cli), not a member of any platform workspace.
+#
+# Engine integration mirrors the CLI: reads go through the engine's library
+# surface IN-PROCESS (db::open_read + migrations, paths, pipeline::restructure,
+# discovery::FileKind) so the DB/IPC contract can never drift. Live engine
+# command-spawn over stdio (scan/cluster) is a documented follow-on — see the
+# README "Stubbed" section.
+
+[workspace]
+
+[package]
+name = "fileid-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "FileID — local AI file organizer. Cross-platform terminal UI (ratatui) over the shared Rust engine."
+license = "TBD"
+publish = false
+
+[[bin]]
+name = "fileid-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Reuse the engine crate directly so the IPC/DB contract can never drift — same
+# schema + migrations, same FileKind classification, same restructure rule
+# cascade as the CLI and the desktop apps. `default-features = false` drops the
+# engine's `pdf-analyze` (pdfium) feature — the TUI never rasterizes PDFs.
+fileid-engine = { path = "../windows/src/engine", default-features = false }
+
+# Terminal UI. ratatui (immediate-mode TUI framework) + crossterm (its default,
+# pure-Rust terminal backend: raw mode, alt-screen, key events). Both are
+# pure-Rust with NO system-library / C build dependency, so they keep the
+# "user just downloads and runs" promise and CI builds with no extra apt
+# packages. These are the only genuinely new dependencies this crate
+# introduces; justified in shared/docs/DECISIONS.md.
+ratatui   = "0.29"
+crossterm = "0.28"
+
+# Already an engine dependency; declaring it here at the same version means
+# Cargo unifies it (no new crate in the lock graph). Used for the read SQL the
+# TUI runs against connections returned by `fileid_engine::db::open_read`.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+anyhow = "1"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 16
+strip         = "symbols"
+
+[lints.rust]
+unused_imports = "warn"
+dead_code      = "warn"

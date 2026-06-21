@@ -8,10 +8,16 @@
 //! follow-on and is intentionally NOT implemented here.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
+use fileid_engine::ipc::RestructureMove;
 use fileid_engine::pipeline::discovery::FileKind;
-use fileid_engine::pipeline::restructure::{category_counts, classify, FileForClassify};
+use fileid_engine::pipeline::restructure::{
+    category_counts, classify, FileForClassify, ProposedMove,
+};
+use fileid_engine::pipeline::restructure_apply::RestructureApply;
+use parking_lot::Mutex;
 use rusqlite::params;
 
 use crate::context::{print_json, Ctx};
@@ -24,9 +30,19 @@ SELECT f.id, f.path_text, f.kind, f.modified_at, f.created_at, f.location_lat, f
      WHERE fp.file_id = f.id AND p.name IS NOT NULL AND TRIM(p.name) <> '' LIMIT 1) AS person_name
 FROM files f WHERE f.failed = 0";
 
-pub fn run(ctx: &Ctx, plan: bool, root: Option<PathBuf>) -> Result<()> {
-    if !plan {
-        anyhow::bail!("the CLI MVP only supports `restructure --plan` (read-only). Apply is a follow-on.");
+pub fn run(
+    ctx: &Ctx,
+    plan: bool,
+    apply: bool,
+    dry_run: bool,
+    symlinks: bool,
+    yes: bool,
+    root: Option<PathBuf>,
+) -> Result<()> {
+    if !plan && !apply {
+        anyhow::bail!(
+            "specify --plan (read-only) or --apply (execute). See `fileid restructure --help`."
+        );
     }
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
@@ -72,6 +88,12 @@ pub fn run(ctx: &Ctx, plan: bool, root: Option<PathBuf>) -> Result<()> {
 
     let moves = classify(&files, &library_root);
     let counts = category_counts(&moves);
+
+    if apply {
+        drop(stmt);
+        drop(conn);
+        return apply_moves(ctx, &library_root, &moves, dry_run, symlinks, yes);
+    }
 
     if ctx.json {
         let moves_json: Vec<serde_json::Value> = moves
@@ -191,4 +213,135 @@ fn common_ancestor<'a>(paths: impl Iterator<Item = &'a Path>) -> Option<PathBuf>
         out = out.parent().map(Path::to_path_buf).unwrap_or(out);
     }
     Some(out)
+}
+
+// ---- apply -------------------------------------------------------------------
+
+/// Execute (or, with `dry_run`, preview) the proposed moves via the engine's
+/// exact `RestructureApply` — the same code path the `applyRestructure` IPC
+/// command runs (collision-uniquify, stale-plan + path-traversal guards, undo
+/// journal). In-process and cross-platform (MoveFileExW on Windows;
+/// `std::fs::rename` elsewhere). `--symlinks` previews the layout without
+/// relocating originals.
+fn apply_moves(
+    ctx: &Ctx,
+    library_root: &Path,
+    proposed: &[ProposedMove],
+    dry_run: bool,
+    symlinks: bool,
+    yes: bool,
+) -> Result<()> {
+    if proposed.is_empty() {
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "restructure", "mode": "apply", "moveCount": 0, "dryRun": dry_run,
+            }));
+        } else {
+            println!("{}", ctx.bold("Nothing to move — the library is already organized."));
+        }
+        return Ok(());
+    }
+
+    let moves: Vec<RestructureMove> = proposed.iter().map(to_ipc_move).collect();
+    let verb = if symlinks { "symlink" } else { "move" };
+
+    if ctx.json && dry_run {
+        print_json(&serde_json::json!({
+            "command": "restructure", "mode": "apply", "dryRun": true,
+            "useSymlinks": symlinks,
+            "libraryRoot": library_root.to_string_lossy(),
+            "moveCount": moves.len(),
+            "moves": moves.iter().map(|m| serde_json::json!({
+                "fileId": m.file_id, "source": m.source, "destination": m.destination,
+                "category": m.category, "confidence": m.confidence, "reason": m.reason,
+            })).collect::<Vec<_>>(),
+        }));
+        return Ok(());
+    }
+
+    println!(
+        "{} {} file(s) into {}:",
+        if dry_run {
+            ctx.bold("DRY RUN — would")
+        } else {
+            ctx.bold(&format!("Will {verb}"))
+        },
+        moves.len(),
+        library_root.display(),
+    );
+    for m in moves.iter().take(MAX_PRINTED_MOVES) {
+        let src = Path::new(&m.source)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| m.source.clone());
+        let dest = rel_to(library_root, Path::new(&m.destination));
+        println!("    {}  {}  {}", src, ctx.dim("→"), dest);
+    }
+    if moves.len() > MAX_PRINTED_MOVES {
+        println!(
+            "    {}",
+            ctx.dim(&format!("… and {} more", moves.len() - MAX_PRINTED_MOVES))
+        );
+    }
+
+    if dry_run {
+        ctx.progress(&format!("  {}", ctx.dim("dry run — nothing was moved.")));
+        return Ok(());
+    }
+
+    let prompt = format!(
+        "{} {} file(s) under {}?{}",
+        if symlinks { "Create symlinks for" } else { "Move" },
+        moves.len(),
+        library_root.display(),
+        if symlinks {
+            ""
+        } else {
+            " Originals are relocated (an undo journal is written)."
+        },
+    );
+    if !ctx.confirm(&prompt, yes) {
+        println!(
+            "Aborted — nothing moved. {}",
+            ctx.dim("(pass --yes to skip the prompt)")
+        );
+        return Ok(());
+    }
+
+    let conn = fileid_engine::db::open_writer(&ctx.db)?;
+    let applier =
+        RestructureApply::new(Arc::new(Mutex::new(conn)), library_root.to_path_buf(), symlinks);
+    let result = applier.apply(&moves)?;
+
+    if ctx.json {
+        print_json(&serde_json::json!({
+            "command": "restructure", "mode": "apply", "dryRun": false,
+            "useSymlinks": symlinks,
+            "applied": result.applied,
+            "failed": result.failed,
+            "privilegeError": result.privilege_error,
+        }));
+        return Ok(());
+    }
+    println!("{}", ctx.bold("Restructure apply complete."));
+    println!("  Applied:  {}", result.applied);
+    if result.failed > 0 {
+        println!("  Failed:   {}", result.failed);
+    }
+    if let Some(pe) = &result.privilege_error {
+        println!("  {} {}", ctx.bold("Symlink privilege:"), pe);
+    }
+    Ok(())
+}
+
+fn to_ipc_move(pm: &ProposedMove) -> RestructureMove {
+    RestructureMove {
+        file_id: pm.file_id,
+        source: pm.source.to_string_lossy().into_owned(),
+        destination: pm.destination.to_string_lossy().into_owned(),
+        category: pm.category.clone(),
+        tier: None,
+        confidence: pm.confidence.as_str().to_string(),
+        reason: pm.reason.clone(),
+    }
 }

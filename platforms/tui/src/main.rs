@@ -1,0 +1,114 @@
+//! `fileid-tui` — FileID terminal UI (ratatui + crossterm) over the shared
+//! Rust engine.
+//!
+//! Like `platforms/cli`, this links `fileid-engine` as a library and reuses its
+//! read surface (`db::open_read`), path resolution (`paths`), and restructure
+//! rule cascade (`pipeline::restructure::classify`) IN-PROCESS, so the
+//! DB/IPC contract can never drift. Reads are live; engine-spawn command IPC
+//! (scan/cluster) is a documented follow-on (see README).
+//!
+//! Cross-OS despite living under `platforms/`: builds + runs identically on
+//! macOS, Linux, and Windows.
+
+mod app;
+mod context;
+mod data;
+mod ui;
+
+use std::io::{self, Stdout};
+use std::process::ExitCode;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
+
+use anyhow::{Context as _, Result};
+use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+
+use app::App;
+use context::{Ctx, Invocation};
+use data::LoadMsg;
+
+fn main() -> ExitCode {
+    match context::parse_args(std::env::args().skip(1)) {
+        Invocation::Print(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Invocation::Error(msg) => {
+            eprintln!("error: {msg}");
+            eprintln!("try `fileid-tui --help`");
+            ExitCode::from(2)
+        }
+        Invocation::Run { db } => match run(db) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
+fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
+    let ctx = Ctx::resolve(db_flag)?;
+    let mut app = App::new(ctx.db_label());
+
+    let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
+    data::spawn_load(ctx.db.clone(), tx.clone());
+
+    let mut terminal = setup_terminal().context("entering terminal raw/alt-screen mode")?;
+    let result = event_loop(&mut terminal, &mut app, &ctx, &tx, &rx);
+    restore_terminal(&mut terminal).context("restoring terminal")?;
+    result
+}
+
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    ctx: &Ctx,
+    tx: &Sender<LoadMsg>,
+    rx: &Receiver<LoadMsg>,
+) -> Result<()> {
+    loop {
+        terminal.draw(|f| ui::render(f, app))?;
+
+        // Drain any pending loader events (non-blocking).
+        while let Ok(msg) = rx.try_recv() {
+            app.apply_load(msg);
+        }
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    app.on_key(key.code, key.modifiers);
+                }
+            }
+        }
+
+        if app.reload_requested {
+            app.reload_requested = false;
+            data::spawn_load(ctx.db.clone(), tx.clone());
+        }
+        if app.should_quit {
+            return Ok(());
+        }
+    }
+}
+
+fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+    Ok(terminal)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}

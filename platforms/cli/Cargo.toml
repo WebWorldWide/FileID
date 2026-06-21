@@ -47,6 +47,12 @@ serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow     = "1"
 walkdir    = "2"
+# `parking_lot::Mutex` is the lock type the engine's `RestructureApply::new`
+# wraps the writer Connection in. Already an engine dependency (transitive) —
+# declaring it here at the same version adds NO crate to the lock graph, it just
+# makes the type nameable so `restructure --apply` calls the engine's exact
+# apply path in-process (zero drift). Justified in shared/docs/DECISIONS.md.
+parking_lot = "0.12"
 
 [profile.release]
 opt-level     = 3

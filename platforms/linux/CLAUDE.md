@@ -127,17 +127,18 @@ The engine and the app build separately today. Phase 1 plans a unified `build/bu
 
 These are blockers for full feature parity on Linux but not for the scaffold. See `shared/docs/NEXT.md` for the schedule.
 
-| Module | Linux implementation | Complexity |
+| Module | Linux implementation | Status |
 |---|---|---|
-| `shell/trash` | `gio::File::trash()` (gio-rs) or `xdg-trash` spec | ~3 days |
-| `shell/thumbnail` | `gdk-pixbuf` thumbnail factory + xdg thumbnail spec at `~/.cache/thumbnails/` | ~3 days |
-| `shell/ocr` | tesseract via `tesseract-rs` | ~5 days |
-| `shell/video` | ffmpeg via `ffmpeg-next` for keyframe extraction | ~2 days |
-| `shell/reveal` | `xdg-open` subprocess + DBus `org.freedesktop.FileManager1.ShowItems` | ~1 day |
-| `shell/tags` | xattr `user.xdg.tags` (XDG standard) via `xattr-rs` | ~1 day |
-| `shell/sleep` | DBus `org.freedesktop.ScreenSaver.Inhibit` | ~1 day |
+| `shell/trash` | freedesktop Trash spec via `std::fs` (move to `$XDG_DATA_HOME/Trash/files/` + `.trashinfo`, collision suffixing, `EXDEV` copy-fallback) | **Done** (no crate) |
+| `shell/reveal` | DBus `org.freedesktop.FileManager1.ShowItems` via `dbus-send`/`gdbus`, `xdg-open` parent-dir fallback | **Done** (no crate) |
+| `shell/tags` | xattr `user.xdg.tags` (XDG standard) via libc `{set,get,list,remove}xattr` | **Done** (no crate) |
+| `shell/ocr` | `tesseract` CLI on a temp PPM, best-effort (empty when absent) | **Done** (no crate) |
+| `shell/video` | `ffmpeg` keyframe → P6 PPM we parse, best-effort (`ffprobe` for the 25% seek) | **Done** (no crate) |
+| `shell/thumbnail` | `gdk-pixbuf` thumbnail factory + xdg thumbnail spec at `~/.cache/thumbnails/` | TODO (~3 days) |
+| `shell/heic` | libheif decode | TODO |
+| `shell/sleep` | DBus `org.freedesktop.ScreenSaver.Inhibit` | TODO (~1 day) |
 
-Each currently returns `Err("…not implemented on this platform")` from the stubs in `platforms/windows/src/engine/src/shell/mod.rs`.
+The five "Done" backends are gated `#[cfg(target_os = "linux")]` in `platforms/windows/src/engine/src/shell/mod.rs` and built only with **std + libc + subprocess** (no new crates). macOS / other Unix keep the `#[cfg(all(not(windows), not(target_os = "linux")))]` graceful stub; `thumbnail` + `heic` are still stubbed on every non-Windows OS. CI: `linux.yml` runs `cargo clippy --all-targets -D warnings` + `cargo test --lib` on the Linux target (where these arms actually compile).
 
 ### Done
 

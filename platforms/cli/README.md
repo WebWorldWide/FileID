@@ -23,16 +23,22 @@ migrations), `pipeline::discovery::FileKind` (classification),
 `pipeline::restructure::classify` (the restructure rule cascade), and `paths`
 (default library location). Two reasons for the in-process choice:
 
-1. The MVP is **read/query + plan**. Most of these operations (search, info,
-   people, dedupe) have **no IPC command** — the desktop apps run them as
-   direct read-only SQL against the engine's DB. The CLI does the same.
-2. The engine's `startScan` IPC **hard-requires ML models**, which is
-   incompatible with a model-free CLI. The CLI's `scan` is a model-free FTS
-   indexer that writes through the engine's own schema/migrations.
+1. **Reads + plan** (search, info, people, dedupe-list, restructure-plan) have
+   **no IPC command** — the desktop apps run them as direct read-only SQL
+   against the engine's DB. The CLI does the same.
+2. **Apply** (`dedupe --apply`, `restructure --apply`) calls the engine's exact
+   apply code in-process — the *same* `pipeline::restructure_apply::RestructureApply`
+   and `shell::trash::trash` that the `applyRestructure` / `trashFiles` IPC
+   handlers invoke — so there's no second implementation to drift.
+3. **`scan --models`** is the one path that can't be a library call: the
+   engine's `startScan` hard-requires ML models *and* owns its own async + ORT
+   runtime. There the CLI **spawns the `FileIDEngine` binary** and speaks the
+   engine's own newline-JSON IPC (`ipc::IpcCommand` / `IpcEvent`). The default
+   model-free `scan` stays an in-process FTS indexer through the engine schema.
 
 Reusing the engine crate (path dependency) means the CLI **can't drift** from
-the engine: same tables, same migrations, same `FileKind`, same restructure
-logic.
+the engine: same tables, same migrations, same `FileKind`, same restructure +
+apply + trash logic, same IPC types.
 
 ## Build
 
@@ -61,11 +67,15 @@ rasterizes PDFs.)
 | Command | What it does | Models? |
 |---|---|---|
 | `fileid scan <path> [--rescan]` | Index a directory: one `files` row per file + plain-text content into `doc_text` (FTS). Incremental by default; `--rescan` reprocesses everything. | No |
-| `fileid search <query…> [--limit N] [--similar]` | FTS5 keyword search over document text + image OCR text, plus a filename fallback. `--similar` (semantic/CLIP) prints a "needs models" notice. | No (FTS) |
+| `fileid scan <path> --models [--rescan]` | FULL pipeline — image tags, CLIP embeddings, faces, perceptual + content hashes — by spawning the engine binary and streaming its progress. Prints an actionable message if models (or the engine binary) aren't installed. | **Yes** |
+| `fileid search <query…> [--limit N]` | FTS5 keyword search over document text + image OCR text, plus a filename fallback. | No (FTS) |
+| `fileid search --similar <path-or-id> [--limit N]` | Visual / semantic nearest-neighbor: ranks files by cosine similarity to the seed file's CLIP embedding. Clear message when no embeddings are present. | reads embeddings |
 | `fileid info <path-or-id>` | A file's metadata, flags, tags, people, and a text snippet. | No |
 | `fileid people` | Person clusters (id, name, face count). Empty until a full engine scan with face models has run. | reads only |
-| `fileid dedupe [--exact\|--similar] [--threshold N]` | `--exact`: byte-identical groups by BLAKE3 `content_hash`. `--similar`: near-dups by perceptual-hash Hamming distance (default ≤ 8, the engine's threshold). | reads only |
-| `fileid restructure --plan [root]` | Compute + print the proposed reorg using the engine's exact rule cascade. Read-only — never moves files. | No |
+| `fileid dedupe [--exact\|--similar] [--threshold N]` | List duplicate groups. `--exact`: byte-identical by BLAKE3 `content_hash`. `--similar`: near-dups by perceptual-hash Hamming distance (default ≤ 8). | reads only |
+| `fileid dedupe --apply [--similar] [--dry-run] [--delete] [--yes]` | Keep one file per group, remove the rest — to Trash/Recycle Bin (recoverable; Windows + Linux) or permanently with `--delete`. SAFE: nothing removed without `--apply`; prompts unless `--yes`. | reads signal |
+| `fileid restructure --plan [root]` | Compute + print the proposed reorg using the engine's exact rule cascade. Read-only. | No |
+| `fileid restructure --apply [--dry-run] [--symlinks] [--yes] [root]` | Execute the plan via the engine's exact `applyRestructure` code path (collision-uniquify, stale-plan + path-traversal guards, undo journal). `--symlinks` previews without moving. Prompts unless `--yes`. | No |
 
 ### Global flags
 
@@ -91,21 +101,37 @@ Precedence for the library DB:
 To isolate a library (e.g. for scripting or tests) without touching the real
 one, pass `--db /tmp/lib.sqlite` or set `XDG_DATA_HOME`.
 
-## What the CLI does *not* do (documented follow-ons)
+## The full pipeline (`scan --models`)
 
-The CLI's `scan` is **model-free**: it indexes filenames + plain-text/markdown/
-source content for FTS. It does **not** run the ML pipeline (RAM++ image tags,
-CLIP embeddings, face detection/clustering, perceptual/content hashes) or
-extract text from binary documents (`.docx`/`.pdf`). Those are produced by a
-full engine scan and light up `people`, `dedupe`, and semantic `search` when
-present. Planned follow-ons:
+The default `scan` is **model-free**: filenames + plain-text content for FTS.
+`scan --models` runs the **full ML pipeline** — RAM++ image tags, CLIP
+embeddings, face detect/embed/cluster, perceptual + content hashes, binary-
+document text. The engine's `startScan` hard-requires the AI models and owns its
+own async + ORT runtime, so this path **spawns the `FileIDEngine` binary** and
+speaks newline-delimited JSON over stdio (reusing the engine's own
+`ipc::IpcCommand` / `IpcEvent` types — no schema drift), exactly as the desktop
+apps do. It writes the engine's own library (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`
+location), so a pinned `--db` is reported as not-applicable here.
 
-- **`apply`** for restructure / rename / trash (maps to `applyRestructure`,
-  `bulkAction`, `trashFiles` — destructive, deliberately out of the MVP).
-- **Semantic search** wiring (`embedTextQuery` → CLIP) once models are wired in.
-- A **full-pipeline `scan --models`** path that spawns/drives the engine's
-  `startScan` for ML enrichment.
-- An optional **TUI** (ratatui) on top of these same in-process calls.
+Two pre-flights before it spawns anything:
+
+1. **Models installed?** Mirrors the engine's `startScan` gate (`mobileclip_s2`
+   + `arcface` sentinels). If missing, it prints which models are missing, the
+   models directory, and how to install them (the desktop app's Welcome screen /
+   Settings → Local AI; see `shared/docs/MODELS.md`).
+2. **Engine binary located?** Looks at `$FILEID_ENGINE_BIN`, next to the
+   `fileid` executable, the dev-layout engine `target/` dir, then `PATH`. If
+   absent, it says how to provide it.
+
+Installing the models needs the desktop app (the CLI has no downloader). Once
+they're installed, `fileid scan --models <path>` lights up `people`, `dedupe
+--exact/--similar`, and `search --similar`.
+
+## Still out of scope
+
+- A **TUI** (ratatui) over the same in-process calls.
+- A CLI model **installer** (`scan --models` consumes models; it doesn't fetch
+  them — the desktop app's downloader does, with HF egress + SHA-256 pinning).
 
 ## Examples
 
@@ -115,8 +141,17 @@ fileid --db /tmp/lib.sqlite scan ~/Documents
 fileid --db /tmp/lib.sqlite search invoice 2024
 fileid --db /tmp/lib.sqlite --json info ~/Documents/invoice.pdf
 
-# Query the library your desktop app already built
+# Full ML pipeline on the engine's library (needs installed models)
+fileid scan --models ~/Pictures
+
+# Query the library a desktop app (or `scan --models`) already built
 fileid people
+fileid search --similar ~/Pictures/IMG_4011.jpg --limit 20
 fileid dedupe --similar --threshold 8
-fileid restructure --plan ~/Pictures
+
+# Destructive actions are opt-in, prompt unless --yes, and have --dry-run
+fileid dedupe --apply --dry-run                 # preview: keep one per group
+fileid dedupe --apply --yes                     # → Trash/Recycle Bin (recoverable)
+fileid restructure --apply --dry-run ~/Pictures # preview the reorg
+fileid restructure --apply --symlinks ~/Pictures # preview as symlinks, no move
 ```

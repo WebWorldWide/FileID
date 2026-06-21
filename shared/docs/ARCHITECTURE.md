@@ -95,6 +95,21 @@ Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64
 - **Windows** — `MoveFileExW` (with the `\\?\` extended-length prefix for >260-char paths, `MOVEFILE_COPY_ALLOWED`, no `REPLACE_EXISTING`) and `CreateSymbolicLinkW` (unprivileged-create flag).
 - **Non-Windows (Linux/macOS, `#[cfg(not(windows))]`)** — a portable `std`-only path: `std::fs::rename` for the common same-filesystem move, falling back to `std::fs::copy` + `remove_file` on `EXDEV` (cross-device, e.g. a NAS mount → local disk) so the file is preserved; `std::os::unix::fs::symlink` for the symlink option. Both arms create the destination parent on demand and never clobber an existing destination (parity with the Windows no-`REPLACE_EXISTING` contract). The collision-uniquify logic (case-folded `claimed` set) sits above this and is platform-agnostic.
 
+### Shell / system integrations (`engine/src/shell/`)
+
+`shell/mod.rs` is the per-platform surface for OS-level actions (reveal-in-file-manager, trash, file tags, OCR, video keyframes, thumbnails, HEIC decode). Each module is gated three ways with one identical public signature so every caller is platform-agnostic:
+
+- **Windows (`#[cfg(windows)]`)** — the real Win32/WinRT backends (`SHOpenFolderAndSelectItems`, `IFileOperation`, `IPropertyStore` `System.Keywords`, `Windows.Media.Ocr`, Media Foundation, `IThumbnailProvider`).
+- **Linux (`#[cfg(target_os = "linux")]`)** — dependency-free backends on **std + libc + subprocess** (no new crates):
+  - **trash** — freedesktop Trash spec via `std::fs`: move the file into `$XDG_DATA_HOME/Trash/files/` (default `~/.local/share/Trash`), write `Trash/info/<name>.trashinfo` (`Path=` percent-encoded, `DeletionDate=` local ISO-8601 from libc `localtime_r`), atomically claim the name with `create_new` + numeric suffix on collision, and copy-fallback on `EXDEV`.
+  - **reveal** — `org.freedesktop.FileManager1.ShowItems` over the session bus (spawning `dbus-send`, then `gdbus`), selecting the item; falls back to `xdg-open` on the parent directory.
+  - **tags** — the `user.xdg.tags` extended attribute (comma-separated, the Nautilus/Tracker convention) via libc `setxattr`/`getxattr`/`listxattr`/`removexattr`. Moves need no sidecar: `rename(2)` carries the xattr with the inode.
+  - **ocr** — best-effort: write the RGB buffer to a temp P6 PPM and run the `tesseract` CLI (`tesseract <ppm> stdout`); returns empty text (never an error) when tesseract is not on `PATH`.
+  - **video** — best-effort keyframe: `ffprobe` for the duration → `ffmpeg -ss <25%> … -vcodec ppm` to a temp P6 PPM we parse directly (no image decoder); graceful `Err` when ffmpeg is absent, which the callers already tolerate.
+- **macOS / other Unix (`#[cfg(all(not(windows), not(target_os = "linux")))]`)** — graceful stubs (bail or empty) so the macOS engine compiles unchanged; macOS file actions are handled app-side. `thumbnail` + `heic` stay stubbed on every non-Windows OS (TODO: gdk-pixbuf / libheif on Linux).
+
+The Linux arms compile and are clippy/test-gated only on the Linux target (`.github/workflows/linux.yml`); the macOS build parses but cfg-strips them.
+
 ## ML inference
 
 ### macOS
