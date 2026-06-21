@@ -1,5 +1,12 @@
 # NEXT — resume here
 
+## 2026-06-21 — performance follow-ups (RAM++ is the scan bottleneck)
+
+- **Revise the throughput target**: ≥140 files/s predates RAM++ and is unreachable with a 926MB Swin-L tagger (RTX 2060 ≈6 f/s, M1 ≈1 f/s). Set a realistic RAM++-on target + keep the old number only for the no-heavy-tagger path.
+- **Make tagging async/non-blocking** (biggest UX win): let scan index + show files immediately and run RAM++ tagging in the background so the library isn't gated on ~6s/file.
+- **RAM++ throughput options** (investigate, hardware-gated): batch inference (if single-image underutilizes ANE/GPU), convert RAM++ to a native CoreML .mlpackage (better ANE/GPU than the ONNX CoreML EP, which CPU-partitions Swin), or offer a lighter tagger tier (RAM++ Swin-B / a smaller model) as a speed/quality toggle.
+- **BGETextService + CLIPTextEncoder** could also take MLComputeUnits=All (ANE-included) after their own on-device verification (only SFace/CLIP-image/RAM++ were tuned this pass).
+
 ## 2026-06-20 — `fileid-tui` follow-ons (MVP landed)
 
 The terminal UI MVP (`platforms/tui/`) is read/query + read-only restructure preview, in-process, verified green on the macOS host (clippy `-D warnings`, build, 24 tests incl. a `TestBackend` render assertion). What's deliberately stubbed (labelled in the Settings tab + README), roughly in priority order:

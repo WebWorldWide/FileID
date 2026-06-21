@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — on-hardware test of macOS engine/app + CLI + TUI on real data; RAM++ CRLF bug + EP/CLI fixes
+
+Tested the macOS Swift engine/app and the Rust CLI/TUI against the user's real ~3372-file library (isolated copies; real DB proven untouched). Results:
+
+- macOS: 260/260 swift tests pass; face pipeline healthy (128-d SFace, clustering→persons); restructure BL-01 holds (de-collided folder names, confidence tiers); FTS search + GUI render confirmed.
+- **BUG FIXED — RAM++ tagging was silently broken** by a CRLF parse bug (ram_plus_tags.txt is CRLF; Swift treats \r\n as one grapheme so split on "\n" yielded 1 tag → every inference failed the 4585-count guard → silent CLIP-fallback tagging; also why restructure names were noisy). Fixed all 3 parse sites (tags/threshold/suppress) to split on .isNewline + trim .whitespacesAndNewlines. Verified: 4585 tags parse, real RAM++ tags now written.
+- **CoreML EP tuning**: A/B-tested on-device — MLProgram 2x faster for SFace (kept), but the 926MB RAM++ Swin is ANE-rejected under MLProgram (234s compile) and CLIP fails to build the plan (both reverted); kept MLComputeUnits=All across all three. SFace/CLIP/RAM++ outputs verified intact.
+- **Perf reality**: macOS scan ~1 file/s, inherently bounded by the RAM++ Swin-L forward (~6s/file); even an RTX 2060 does ~6 f/s with RAM++. The ≥140 files/s target predates the RAM++ tagger and is stale.
+- CLI/TUI: both build/clippy/test green; CLI reads the Swift-written DB correctly (407 clusters cross-engine), all apply safety-gating works, TUI renders+navigates+exits cleanly (TerminalGuard). Fixed: macOS CLI now auto-finds the Swift app library; dedupe --similar --apply guarded against transitive-chain over-delete; stale docstrings corrected.
+
 ## 2026-06-20 (website + docs) — static brand landing page (`website/`) + GitHub Pages workflow; README refreshed for every front-end + packaging
 
 Added the project's public front door and wired its deploy. Docs + web assets only — no app/engine/CLI/GTK source touched.
