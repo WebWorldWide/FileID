@@ -8,6 +8,21 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — TUI interaction fix: welcome-screen masked every tab; `D` "downloaded" nothing
+
+User: "TUI still isn't letting me switch into settings or prompting me to download the models… when I click S to scan nothing happening… ensure the logic from top to bottom is fixed." Audited the full key-dispatch path. Key dispatch was actually fine (`Tab::next/prev` is modular over all 5 tabs, `switch_tab` has no guard, `s` opens the browser overlay). **Real root cause: `ui.rs::render_body` short-circuited to the welcome screen for *every* tab whenever the DB didn't exist yet** — and a fresh empty-scratch start has no DB. So Tab/`1-5` moved the header underline but the body never changed → Settings (and its `D` download prompt) was unreachable. Two more defects: `Char('D')` was gated to the (unreachable) Settings tab; and `models.rs` spawned `fileid models download --all` with null stdin + no `--yes`, so the CLI's `confirm()` returned false on non-TTY → `--all` aborted with **exit 0** while the TUI reported "models installed… ready" (downloaded nothing).
+
+**Fixes (all cargo-verified — `build` ok, `clippy -D warnings` clean, `cargo test` 63 pass):**
+- `render_body` welcome screen gated to `Tab::Library` only → Settings + all tabs render on a fresh DB.
+- New `render_model_banner`: standing gold/pink one-line banner on *every* tab when `missing_models()` is non-empty (`⚠ AI models not installed — press D to download (~25 GB)…`) / `⟳ Installing…` with progress while downloading.
+- `Char('D')` → `request_download()` is now **global** (any tab), not Settings-only.
+- `models.rs` spawns `models download --all --yes` so the non-interactive download actually runs.
+- `render_status` shows a distinct pink `⚠` on `status_error` (was a green ✓ next to failures).
+- `main.rs` event loop now accepts `KeyEventKind` Press **and** Repeat (only ignores Release) — defensive against terminals that report non-Press kinds.
+- New tests: Tab-from-last-tab wraps to Library; `D` arms a download from a non-Settings tab.
+
+CLI side ("same for the CLI") was already honest and verified non-interactively: `fileid models list` (marks the 2 scan-gate models), `models download --all --dry-run` (24.9 GB / 9 models), and `scan --models` with no models → clear "AI models not installed → `fileid models download --all`" (graceful exit). Both release binaries rebuilt + reinstalled to `~/.cargo/bin` (fresh inode + ad-hoc codesign to dodge macOS "Killed: 9"). Runtime TUI not drivable in this headless env (alternate-screen teardown wipes the PTY frame); user to verify on Terminal.app.
+
 ## 2026-06-21 — face-clustering QUALITY: junk-cluster suppression (407→285 persons on real data, zero merges)
 
 User repeatedly unhappy: 991 faces over-split into **407 person clusters**. Investigated on the REAL DB (worked on a `/tmp` copy incl. the WAL sidecar; real `fileid.sqlite{,-wal,-shm}` md5-proven untouched before+after).
