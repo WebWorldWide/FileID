@@ -66,7 +66,12 @@ mod linux_util {
                 | b'0'..=b'9'
                 | b'A'..=b'Z'
                 | b'a'..=b'z' => out.push(b as char),
-                _ => out.push_str(&format!("%{b:02X}")),
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    out.push('%');
+                    out.push(HEX[(b >> 4) as usize] as char);
+                    out.push(HEX[(b & 0x0f) as usize] as char);
+                }
             }
         }
         out
