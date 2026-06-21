@@ -102,7 +102,7 @@
 
           meta = with pkgs.lib; {
             description = "On-device AI file organizer — tag, dedupe, restructure, rename, locally";
-            homepage = "https://github.com/fileid/FileID";
+            homepage = "https://github.com/AdamNolle/FileID";
             license = licenses.asl20;
             platforms = platforms.linux;
             mainProgram = "fileid-linux";

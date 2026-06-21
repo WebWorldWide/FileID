@@ -39,6 +39,9 @@ pub fn run(
     yes: bool,
     root: Option<PathBuf>,
 ) -> Result<()> {
+    if plan && apply {
+        anyhow::bail!("--plan and --apply are mutually exclusive; choose one");
+    }
     if !plan && !apply {
         anyhow::bail!(
             "specify --plan (read-only) or --apply (execute). See `fileid restructure --help`."

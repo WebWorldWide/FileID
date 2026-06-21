@@ -31,7 +31,9 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{EngineClient, EngineEvent};
+use crate::engine_client::{
+    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent,
+};
 use fileid_engine::ipc::{CommandPayload, TrashFilesPayload};
 
 /// Files larger than this carry a head+tail+size COMPOSITE `content_hash`, not a
@@ -742,12 +744,15 @@ impl Cleanup {
             let rx = self.engine.borrow().request_thumbnail(member.path.clone());
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                if let Ok(Some(bytes)) = rx.recv().await {
-                    if let (Some(p), Some(tex)) =
-                        (pic_weak.upgrade(), texture_from_bytes(&bytes, TILE_THUMB_PX))
-                    {
-                        p.set_paintable(Some(&tex));
-                    }
+                let Ok(Some(bytes)) = rx.recv().await else { return };
+                // Decode + scale OFF the main loop; only Send pixel data crosses back.
+                let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
+                std::thread::spawn(move || {
+                    let _ = dtx.send_blocking(decode_scaled(&bytes, TILE_THUMB_PX));
+                });
+                let Ok(Some(decoded)) = drx.recv().await else { return };
+                if let Some(p) = pic_weak.upgrade() {
+                    p.set_paintable(Some(&texture_from_decoded(&decoded)));
                 }
             });
         } else {
@@ -1441,20 +1446,6 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
-}
-
-fn texture_from_bytes(bytes: &[u8], max_px: i32) -> Option<gtk::gdk::Texture> {
-    let gbytes = glib::Bytes::from(bytes);
-    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
-    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
-        &stream,
-        max_px,
-        max_px,
-        true,
-        gio::Cancellable::NONE,
-    )
-    .ok()?;
-    Some(gtk::gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 fn icon_paintable(name: &str, size: i32) -> Option<gtk::IconPaintable> {

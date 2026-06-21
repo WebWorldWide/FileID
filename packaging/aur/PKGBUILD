@@ -11,7 +11,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files locally (GTK4)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/fileid/FileID"
+url="https://github.com/AdamNolle/FileID"
 license=('Apache-2.0')
 # onnxruntime provides /usr/lib/libonnxruntime.so — the engine dlopen's it
 # (ort load-dynamic), so the default loader path resolves it at runtime.
@@ -19,7 +19,7 @@ depends=('gtk4' 'libadwaita' 'onnxruntime' 'sqlite' 'glibc' 'glib2')
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=('tesseract: OCR for image/document text extraction'
             'ffmpeg: video keyframe thumbnails')
-source=("git+https://github.com/fileid/FileID.git#tag=v${pkgver}")
+source=("git+https://github.com/AdamNolle/FileID.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 options=('!lto')  # the engine's release profile already sets fat LTO
 
