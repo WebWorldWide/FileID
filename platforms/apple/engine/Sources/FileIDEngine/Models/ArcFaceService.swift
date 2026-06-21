@@ -109,9 +109,13 @@ public final class ArcFaceService: @unchecked Sendable {
                 env = try ORTEnv(loggingLevel: ORTLoggingLevel.warning)
             }
             let opts = try ORTSessionOptions()
-            // CoreML EP — enables ANE/GPU acceleration on Apple Silicon.
-            // MLProgram = post-iOS15/macOS12 program format (faster init,
-            // better op coverage than the legacy NeuralNetwork format).
+            // CoreML EP — ANE/GPU acceleration on Apple Silicon. SFace is small
+            // enough that MLProgram + MLComputeUnits=All roughly HALVES inference
+            // on-hardware (~23 ms → ~11 ms) vs the legacy NeuralNetwork format,
+            // and the ANE accepts the compiled program cleanly — unlike the 926 MB
+            // RAM++ Swin, which it rejects, so RAM++/CLIP stay on NeuralNetwork.
+            // Leaving useCPUAndGPU/useCPUOnly unset keeps MLComputeUnits at the All
+            // default (ANE + GPU + CPU); useCPUAndGPU would EXCLUDE the ANE.
             // Appended in its OWN do/catch: a CoreML bind failure (or an
             // explicit FILEID_FACE_EP=cpu) drops to ORT's implicit CPU EP so
             // session creation — and embedding — still succeed. (hardening)
@@ -124,8 +128,8 @@ public final class ArcFaceService: @unchecked Sendable {
             } else {
                 do {
                     let coremlOpts = ORTCoreMLExecutionProviderOptions()
+                    coremlOpts.createMLProgram = true
                     coremlOpts.enableOnSubgraphs = true
-                    coremlOpts.useCPUAndGPU = true
                     try opts.appendCoreMLExecutionProvider(with: coremlOpts)
                 } catch {
                     ep = "cpu"
