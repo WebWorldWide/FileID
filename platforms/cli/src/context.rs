@@ -15,6 +15,11 @@ pub struct Ctx {
     pub color: bool,
     /// Absolute path to the library SQLite file.
     pub db: PathBuf,
+    /// The caller pinned the library location (`--db`, `$FILEID_DB`, or
+    /// `$CFFIXED_USER_HOME`) rather than falling back to the engine default.
+    /// `scan --models` uses this to warn that the full pipeline writes the
+    /// engine's own library (XDG/`%LOCALAPPDATA%`-located), not an arbitrary db.
+    pub db_explicit: bool,
 }
 
 impl Ctx {
@@ -32,6 +37,9 @@ impl Ctx {
         quiet: bool,
         no_color: bool,
     ) -> Result<Self> {
+        let db_explicit = db_flag.is_some()
+            || std::env::var_os("FILEID_DB").is_some()
+            || std::env::var_os("CFFIXED_USER_HOME").is_some();
         let db = if let Some(p) = db_flag {
             p
         } else if let Ok(s) = std::env::var("FILEID_DB") {
@@ -42,7 +50,28 @@ impl Ctx {
             fileid_engine::paths::db_path().context("resolving default library location")?
         };
         let color = !no_color && std::io::stdout().is_terminal();
-        Ok(Self { json, quiet, color, db })
+        Ok(Self { json, quiet, color, db, db_explicit })
+    }
+
+    /// Interactive yes/no gate for destructive actions. SAFE by construction:
+    /// returns true only on an explicit `--yes` (`assume_yes`) or a typed
+    /// `y`/`yes` at a TTY. A non-interactive stdin (pipe/CI) without `--yes`
+    /// returns false — we never apply on a guess.
+    pub fn confirm(&self, prompt: &str, assume_yes: bool) -> bool {
+        use std::io::Write as _;
+        if assume_yes {
+            return true;
+        }
+        if !std::io::stdin().is_terminal() {
+            return false;
+        }
+        eprint!("{prompt} [y/N] ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            return false;
+        }
+        matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
     }
 
     /// Stream a progress line to stderr unless `--quiet`. Never goes to stdout
@@ -81,6 +110,47 @@ impl Ctx {
             )
         }
     }
+}
+
+/// Resolve a `<path-or-id>` argument to a `files.id`. Mirrors the lookup
+/// order `info` uses (numeric id → exact canonical/raw path → basename suffix)
+/// so the same argument resolves identically across subcommands.
+pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64> {
+    use rusqlite::{params, OptionalExtension};
+    if let Ok(id) = target.parse::<i64>() {
+        if let Ok(Some(id)) = conn
+            .query_row("SELECT id FROM files WHERE id = ?1", params![id], |r| {
+                r.get::<_, i64>(0)
+            })
+            .optional()
+        {
+            return Some(id);
+        }
+    }
+    let canon = std::fs::canonicalize(target)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| target.to_string());
+    for candidate in [canon.as_str(), target] {
+        if let Ok(Some(id)) = conn
+            .query_row(
+                "SELECT id FROM files WHERE path_text = ?1",
+                params![candidate],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+        {
+            return Some(id);
+        }
+    }
+    let like = format!("%/{}", target.trim_start_matches('/'));
+    conn.query_row(
+        "SELECT id FROM files WHERE path_text LIKE ?1 LIMIT 1",
+        params![like],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 /// Print a JSON value to stdout (pretty when on a TTY-less pipe is fine too).

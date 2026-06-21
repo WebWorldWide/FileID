@@ -1,0 +1,9 @@
+[toolchain]
+# Match the engine's pin (platforms/windows/src/engine/rust-toolchain.toml),
+# platforms/cli, and the repo MSRV (1.90) so `cd platforms/tui && cargo …`
+# verifies with the same toolchain the engine + CI use. No platform targets
+# needed — the TUI is portable std + SQLite + a pure-Rust terminal stack and
+# builds for the host triple.
+channel = "1.90"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -1,4 +1,4 @@
-name: Linux (engine + CLI + GTK app)
+name: Linux (engine + CLI + TUI + GTK app)
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
     paths:
       - 'platforms/linux/**'
       - 'platforms/cli/**'
+      - 'platforms/tui/**'
       - 'platforms/windows/src/engine/**'
       - 'shared/ipc-schema/**'
       - '.github/workflows/linux.yml'
@@ -13,6 +14,7 @@ on:
     paths:
       - 'platforms/linux/**'
       - 'platforms/cli/**'
+      - 'platforms/tui/**'
       - 'platforms/windows/src/engine/**'
       - 'shared/ipc-schema/**'
       - '.github/workflows/linux.yml'
@@ -190,6 +192,52 @@ jobs:
         run: cargo build
 
       - name: Test (smoke)
+        run: cargo test
+
+  # ---------------------------------------------------------------------------
+  # TUI — the cross-OS `fileid-tui` terminal front-end (ratatui + crossterm).
+  # Like the CLI it's its own Cargo workspace and links the shared engine as a
+  # library (default-features = false). ratatui + crossterm are pure-Rust with
+  # no system-library dependency, so this job needs no extra apt packages —
+  # same clippy -D warnings + build + headless test gate as the CLI.
+  # ---------------------------------------------------------------------------
+  tui:
+    name: TUI (fileid-tui) — Linux x64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: platforms/tui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Matches platforms/tui/rust-toolchain.toml (1.90, same as the engine).
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/tui/target
+          key: cargo-tui-linux-${{ hashFiles('platforms/tui/Cargo.lock', 'platforms/tui/Cargo.toml') }}
+          restore-keys: |
+            cargo-tui-linux-
+
+      - name: Clippy (-D warnings, full)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Test (headless — state + layout + render)
         run: cargo test
 
   # ---------------------------------------------------------------------------
