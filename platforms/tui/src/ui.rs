@@ -145,7 +145,14 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_body(f: &mut Frame, app: &App, area: Rect) {
-    if !app.data.db_exists && !app.loading {
+    // A standing "models missing" / "installing" banner sits ABOVE every tab's
+    // content so a fresh install can't miss that the AI models need downloading.
+    let area = render_model_banner(f, app, area);
+    // The first-run welcome stands in for the EMPTY Library only. Every other tab
+    // (Settings included) must still render even before the first scan creates the
+    // library DB — otherwise the welcome screen masks the whole UI and Settings /
+    // the model-download prompt become unreachable.
+    if !app.data.db_exists && !app.loading && app.tab == Tab::Library {
         render_welcome(f, app, area);
         return;
     }
@@ -156,6 +163,39 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
         Tab::Restructure => render_restructure(f, app, area),
         Tab::Settings => render_settings(f, app, area),
     }
+}
+
+/// A standing, hard-to-miss banner pinned above every tab's body whenever the AI
+/// models aren't installed (or are downloading). Returns the body area to render
+/// below it: the FULL area when there's nothing to announce, otherwise the area
+/// minus its one banner row. Painted as a gold-tinted band (the same tint as a
+/// selected row) so it reads as a persistent notice — NOT a fleeting status-line
+/// message — until the models are present or a download finishes.
+fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
+    if (app.missing_models.is_empty() && !app.downloading) || area.height < 2 {
+        return area;
+    }
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let pill = Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD);
+    let line = if app.downloading {
+        Line::from(vec![
+            Span::styled(" ⟳ ", pill),
+            Span::styled("  Installing AI models…  ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                truncate(&app.status, rows[0].width.saturating_sub(26) as usize),
+                Style::default().fg(SECONDARY),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" ⚠ ", pill),
+            Span::styled("  AI models not installed — press ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" D ", pill),
+            Span::styled(" to download (~25 GB). Tags, faces & search need them.", Style::default().fg(FG)),
+        ])
+    };
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(SEL_BG)), rows[0]);
+    rows[1]
 }
 
 /// First-run / empty-library welcome. Plain words about what FileID is, three
@@ -491,7 +531,16 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
 /// The status line: a ✓/⏳ prefix + the live status message. The actionable keys
 /// live on their OWN always-visible row (`render_key_bar`).
 fn render_status(f: &mut Frame, app: &App, area: Rect) {
-    let (icon, color) = if app.loading { ("⏳", PINK) } else { ("✓", GREEN) };
+    // A failure must not wear the success ✓: an errored scan/download/load shows
+    // a persistent ⚠ until the next action, so the feedback can't be mistaken for
+    // "done OK".
+    let (icon, color) = if app.status_error {
+        ("⚠", PINK)
+    } else if app.loading {
+        ("⏳", PINK)
+    } else {
+        ("✓", GREEN)
+    };
     let line = Line::from(vec![
         Span::styled(format!("{icon} "), Style::default().fg(color)),
         Span::styled(truncate(&app.status, area.width.saturating_sub(3) as usize), Style::default().fg(DIM)),
@@ -596,7 +645,7 @@ fn render_help(f: &mut Frame, area: Rect) {
         hrow("↑↓  /  j k", "move selection"),
         hrow("g / G", "first / last in list"),
         hrow("s", "browse folders + scan"),
-        hrow("D", "download AI models — Settings tab"),
+        hrow("D", "download AI models (any tab)"),
         hrow("/", "search (Library tab)"),
         hrow("r", "reload from the library DB"),
         hrow("?", "toggle this help"),
@@ -1427,6 +1476,8 @@ mod tests {
             for tab in Tab::ALL {
                 let mut app = App::new("/tmp/x.sqlite".into());
                 app.tab = tab;
+                // Exercise the standing models-missing banner at every size too.
+                app.missing_models = vec!["MobileCLIP".to_string()];
                 // db_exists=true with empty vecs → the per-tab empty branches run
                 // (not the welcome screen), exercising the empty-list renderers.
                 app.apply_load(LoadMsg::Done(Box::new(Snapshot {
@@ -1440,5 +1491,75 @@ mod tests {
                 let _ = frame_text(w, h, &app); // must not panic
             }
         }
+    }
+
+    /// The standing "models missing" banner renders above EVERY tab's body (so a
+    /// fresh install can't miss the prompt to press `D`), and the Settings panel —
+    /// `D`'s on-screen home — is reachable even before the first scan creates the
+    /// library DB. Previously the welcome screen masked every tab on a fresh DB,
+    /// so Settings (and the download prompt) were unreachable.
+    #[test]
+    fn models_missing_banner_and_settings_reachable_on_a_fresh_library() {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+
+        for tab in Tab::ALL {
+            let mut app = App::new("/tmp/x.sqlite".into());
+            app.missing_models = vec!["CLIP image encoder".to_string()];
+            // Resolved-but-not-yet-created library (fresh scratch): db_exists=false.
+            app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+            app.tab = tab;
+            let text = frame_text(100, 30, &app);
+            assert!(
+                text.contains("AI models not installed"),
+                "{tab:?}: the standing models-missing banner must render above the body",
+            );
+        }
+
+        // Settings is reachable on a fresh library: its download action shows even
+        // with db_exists=false, while Library still shows the first-run welcome.
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.tab = Tab::Settings;
+        assert!(
+            frame_text(100, 30, &app).contains("Download all AI models"),
+            "Settings (the D prompt) must be reachable before the first scan",
+        );
+        app.tab = Tab::Library;
+        assert!(
+            frame_text(100, 30, &app).contains("Welcome to FileID"),
+            "Library keeps the first-run welcome screen",
+        );
+    }
+
+    /// While a download is in flight the banner switches to a progress notice
+    /// rather than vanishing, so the user always knows models are being fetched.
+    #[test]
+    fn models_banner_shows_download_progress() {
+        use crate::app::App;
+        use crate::data::{LoadMsg, Snapshot};
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.downloading = true;
+        app.status = "fetching mobileclip…".to_string();
+        assert!(
+            frame_text(100, 30, &app).contains("Installing AI models"),
+            "the banner must show download progress while downloading",
+        );
+    }
+
+    /// A failed action (e.g. the scan pre-flight bailing on missing models) wears
+    /// a distinct ⚠ on the status line, never the success ✓.
+    #[test]
+    fn status_line_marks_errors_distinctly() {
+        use crate::app::App;
+        use crate::data::LoadMsg;
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.apply_load(LoadMsg::Error("scan needs AI models not installed".to_string()));
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("⚠"), "an errored status must show the ⚠ marker");
+        assert!(text.contains("scan needs AI models not installed"), "the error text persists");
     }
 }

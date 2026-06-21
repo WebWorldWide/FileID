@@ -1,6 +1,6 @@
 //! AI-model download driver (the Settings `D` key, FEATURE 3).
 //!
-//! Runs the FileID CLI's `models download --all` on a worker thread and streams
+//! Runs the FileID CLI's `models download --all --yes` on a worker thread and streams
 //! its stdout + stderr into the TUI status line, so the user can fetch the AI
 //! weights that full-ML scanning needs without leaving the terminal. The default
 //! models come from `huggingface.co` — the only network egress the project ever
@@ -66,8 +66,12 @@ fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
         "Downloading AI models — fileid models download --all…".to_string(),
     ));
 
+    // `--yes` is REQUIRED here: the TUI drives this non-interactively with a null
+    // stdin, so the CLI's `--all` confirmation prompt would read EOF, treat it as
+    // "no", and abort (exit 0, nothing downloaded) — which the TUI would misreport
+    // as "models installed". Pre-confirming makes the download actually run.
     let mut child = Command::new(&bin)
-        .args(["models", "download", "--all"])
+        .args(["models", "download", "--all", "--yes"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

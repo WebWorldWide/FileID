@@ -91,6 +91,10 @@ fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
     let ctx = Ctx::resolve(db_flag)?;
     let mut app = App::new(ctx.db_label());
     app.scratch = ctx.scratch();
+    // Seed the standing "models missing" banner before the first frame so a
+    // fresh install sees the prompt to press `D` immediately, not only after the
+    // async load lands.
+    app.missing_models = scan::missing_models_display();
 
     let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
     data::spawn_load(ctx.db.clone(), tx.clone());
@@ -113,14 +117,23 @@ fn event_loop(
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
-        // Drain any pending loader events (non-blocking).
+        // Drain any pending loader events (non-blocking). Re-check the model
+        // install state whenever a load/scan/download settles (loading goes
+        // true→false), so the standing "models missing" banner clears the moment
+        // a download finishes and re-appears if one failed.
+        let was_loading = app.loading;
         while let Ok(msg) = rx.try_recv() {
             app.apply_load(msg);
+        }
+        if was_loading && !app.loading {
+            app.missing_models = scan::missing_models_display();
         }
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+                // Accept Press AND Repeat; only ignore Release. Some terminals/configs
+                // report key kinds other than Press, which silently dropped keys.
+                if key.kind != KeyEventKind::Release {
                     app.on_key(key.code, key.modifiers);
                 }
             }

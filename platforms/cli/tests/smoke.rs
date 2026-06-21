@@ -146,6 +146,79 @@ fn ends_with(path: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `fileid models list` + `models download --all --dry-run` need NO network and
+/// must report the pinned commercial-clean set + installed state + sizes without
+/// fetching anything. Fully isolated via `FILEID_MODELS_DIR` → an empty temp dir
+/// (so nothing is "installed" and the real models dir is never touched).
+#[test]
+fn models_list_and_dry_run_need_no_network() {
+    let models = unique_dir("models");
+    let md = models.to_str().unwrap();
+
+    // ── list (--json): the engine model set, nothing installed in an empty dir ──
+    let out = run_env(&["--no-color", "--json", "models", "list"], &[("FILEID_MODELS_DIR", md)]);
+    assert!(out.status.success(), "models list failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v = json(&out);
+    let arr = v["models"].as_array().expect("models array");
+    assert!(arr.len() >= 6, "expected the engine model set, got {}", arr.len());
+
+    let names: Vec<&str> = arr.iter().filter_map(|m| m["name"].as_str()).collect();
+    assert!(names.contains(&"arcface"), "arcface must be listed: {names:?}");
+    assert!(names.contains(&"mobileclip_s2"), "mobileclip_s2 must be listed: {names:?}");
+    assert!(
+        arr.iter().all(|m| m["installed"].as_bool() == Some(false)),
+        "an empty models dir must report nothing installed"
+    );
+
+    // The scan-gate models are flagged required, sized, pinned to their HF repo.
+    let arcface = arr.iter().find(|m| m["name"] == "arcface").expect("arcface entry");
+    assert_eq!(arcface["required"].as_bool(), Some(true), "arcface is a scan-gate model");
+    assert!(arcface["sizeBytes"].as_u64().unwrap_or(0) > 0, "arcface must carry a size");
+    assert!(
+        arcface["repo"].as_str().unwrap_or("").contains("opencv"),
+        "arcface repo should be the opencv HF mirror: {:?}",
+        arcface["repo"]
+    );
+    // Every artifact carries a SHA256 pin + an HF URL (privacy posture).
+    for f in arcface["files"].as_array().expect("arcface files") {
+        assert_eq!(f["sha256"].as_str().map(|s| s.len()), Some(64), "each file is sha256-pinned");
+        assert!(
+            f["url"].as_str().unwrap_or("").starts_with("https://huggingface.co/"),
+            "model URLs must be on huggingface.co"
+        );
+    }
+
+    // ── download --all --dry-run: lists repos + total, downloads NOTHING ──
+    let out = run_env(
+        &["--no-color", "--json", "models", "download", "--all", "--dry-run"],
+        &[("FILEID_MODELS_DIR", md)],
+    );
+    assert!(out.status.success(), "dry-run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v = json(&out);
+    assert_eq!(v["dryRun"].as_bool(), Some(true), "dry-run must self-identify");
+    assert!(v["totalBytes"].as_u64().unwrap_or(0) > 0, "dry-run must total the pending bytes");
+    assert!(
+        v["models"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        "dry-run must enumerate the models"
+    );
+
+    // No network + no writes: the dry-run created neither sentinels nor weights.
+    assert!(!models.join(".sentinels").exists(), "dry-run must not write install sentinels");
+
+    // ── unknown model name is a clean, actionable error (still no network) ──
+    let out = run_env(
+        &["--no-color", "models", "download", "definitely-not-a-model"],
+        &[("FILEID_MODELS_DIR", md)],
+    );
+    assert!(!out.status.success(), "an unknown model name must error");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unknown model"),
+        "error should name the unknown model"
+    );
+
+    let _ = std::fs::remove_dir_all(&models);
+}
+
 /// Covers the follow-on surfaces WITHOUT any ML models, fully isolated:
 /// `search --similar <file>` with no embeddings; `dedupe --apply --dry-run`
 /// (the no-signal message and a seeded group); `restructure --apply --dry-run`

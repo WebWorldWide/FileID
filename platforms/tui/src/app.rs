@@ -104,9 +104,20 @@ pub struct App {
     /// A `fileid models download --all` is in flight (drives the status line +
     /// blocks a second concurrent download).
     pub downloading: bool,
-    /// Set when the user presses `D` on Settings; `main` consumes it, spawns the
-    /// download worker thread, and clears it (mirrors `scan_requested`).
+    /// Set when the user presses `D`; `main` consumes it, spawns the download
+    /// worker thread, and clears it (mirrors `scan_requested`).
     pub download_requested: bool,
+
+    // ── Persistent model-state banner + error feedback ──────────────────────
+    /// Display names of the required AI models that aren't installed yet (empty
+    /// ⇒ all present). Drives the standing "models missing" banner shown above
+    /// EVERY tab. `main` sets it at startup and re-checks whenever a load/scan/
+    /// download settles, so the banner can't go stale.
+    pub missing_models: Vec<String>,
+    /// The current status line reports a FAILURE (a failed scan/download/load),
+    /// so the status row shows a distinct ⚠ instead of the success ✓ — feedback
+    /// that persists rather than flashing for a frame.
+    pub status_error: bool,
 }
 
 impl App {
@@ -133,6 +144,8 @@ impl App {
             browser: None,
             downloading: false,
             download_requested: false,
+            missing_models: Vec::new(),
+            status_error: false,
         }
     }
 
@@ -205,12 +218,16 @@ impl App {
     /// Fold a loader message into state.
     pub fn apply_load(&mut self, msg: LoadMsg) {
         match msg {
-            LoadMsg::Status(s) => self.status = s,
+            LoadMsg::Status(s) => {
+                self.status = s;
+                self.status_error = false;
+            }
             LoadMsg::Done(snap) => {
                 self.data = *snap;
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
+                self.status_error = false;
                 // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
             }
@@ -219,6 +236,7 @@ impl App {
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
+                self.status_error = true;
             }
         }
     }
@@ -272,13 +290,15 @@ impl App {
                 self.search_active = true;
                 self.show_help = false;
             }
-            // Download the AI models the full-ML scan needs — Settings tab only.
-            KeyCode::Char('D') if self.tab == Tab::Settings => self.request_download(),
+            // Download the AI models the full-ML scan needs — GLOBAL (any tab),
+            // so it's reachable from the first-run welcome screen and every tab's
+            // standing "models missing" banner, not just Settings.
+            KeyCode::Char('D') => self.request_download(),
             _ => {}
         }
     }
 
-    /// Arm a `fileid models download --all` (the Settings `D` key): `main`
+    /// Arm a `fileid models download --all` (the global `D` key): `main`
     /// consumes `download_requested` next tick and spawns the worker thread.
     /// Guarded so a second download — or a download racing a live scan — can't
     /// start. Never blocks: the spawned thread streams progress to the status
@@ -1302,11 +1322,37 @@ mod tests {
         assert!(!app.loading);
     }
 
+    /// `D` is GLOBAL: it arms a model download from a non-Settings tab too, so a
+    /// fresh install can trigger it from the welcome screen / any tab's banner.
     #[test]
-    fn capital_d_is_settings_only() {
-        let mut app = app_with_files(0); // Library tab
-        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
-        assert!(!app.download_requested, "D must do nothing off the Settings tab");
-        assert!(!app.downloading);
+    fn capital_d_requests_download_from_any_tab() {
+        for tab in [Tab::Library, Tab::People, Tab::Cleanup, Tab::Restructure] {
+            let mut app = app_with_files(0);
+            app.switch_tab(tab);
+            app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
+            assert!(app.download_requested, "{tab:?}: D must arm a download from any tab");
+            assert!(app.downloading, "{tab:?}: D must mark a download in flight");
+        }
+    }
+
+    /// The Tab key cycles through ALL five tabs — Settings included — and wraps
+    /// from the last tab back to the first (and BackTab the reverse), so Settings
+    /// is always reachable by tabbing.
+    #[test]
+    fn tab_key_cycles_through_settings_and_wraps() {
+        let mut app = app_with_files(0); // starts on Library
+        let order = [Tab::People, Tab::Cleanup, Tab::Restructure, Tab::Settings, Tab::Library];
+        for expected in order {
+            app.on_key(KeyCode::Tab, KeyModifiers::NONE);
+            assert_eq!(app.tab, expected, "Tab must advance to {expected:?}");
+        }
+        // From Library, BackTab wraps backwards straight to Settings.
+        app.on_key(KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Settings, "BackTab from the first tab must wrap to Settings");
+        // The number key jumps straight to Settings (index 5 → '5').
+        app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Library);
+        app.on_key(KeyCode::Char('5'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Settings, "5 must jump to Settings");
     }
 }

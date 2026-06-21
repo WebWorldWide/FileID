@@ -257,6 +257,14 @@ fn wait_briefly(child: &mut Child) -> std::io::Result<()> {
     }
 }
 
+/// Display names of the required models that aren't installed (empty ⇒ all
+/// present). Thin public wrapper over [`missing_models`] so the UI's standing
+/// "models missing" banner reads the SAME gate the scan pre-flight enforces —
+/// the install check stays defined in exactly one place.
+pub fn missing_models_display() -> Vec<String> {
+    missing_models().into_iter().map(|(_, name)| name).collect()
+}
+
 /// Required models without an install sentinel, as `(kind, display_name)`.
 /// Resolution goes through the engine's own registry so the file layout + the
 /// sentinel rule can't drift from what the engine actually checks.
