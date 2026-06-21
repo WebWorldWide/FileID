@@ -93,6 +93,24 @@ Prereqs:
 
 On-hardware verification (the third TESTING.md layer) runs on an RTX 2060 against the real corpus via `platforms/windows/build/iterate.ps1` and `platforms/apple/scripts/iterate.sh`.
 
+## Linux distribution & packaging
+
+The Linux GTK4 app ships to **every distro** through declarative packaging under `packaging/` — see [`packaging/README.md`](packaging/README.md) for the full matrix and per-channel build commands. One Cargo binary (`fileid-linux`) plus the engine it spawns (`FileIDEngine`); each channel just wraps them and reuses the **single** desktop/metadata/icon source in `platforms/linux/data/` (never a copy).
+
+| Channel | Covers | Native dep on |
+|---|---|---|
+| **Flatpak** (primary) | Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora/openSUSE — anywhere flatpak runs | GNOME 46 runtime (GTK 4.14 + libadwaita 1.5, matching the `gtk4 0.8`/`adw 0.6` bindings) |
+| **AppImage** (secondary) | Most x86_64 distros, no install/sandbox | bundles its own GTK4/libadwaita |
+| **Nix flake** | NixOS / any Nix user | nixpkgs `gtk4`/`libadwaita`/`onnxruntime` |
+| **AUR `PKGBUILD`** | Arch / Manjaro / EndeavourOS | system `gtk4`/`libadwaita`/`onnxruntime` |
+
+Rules when touching packaging:
+
+- **Reuse `platforms/linux/data/`.** The `.desktop`, `metainfo.xml`, and `.svg` icon are the single source for all channels; add new desktop assets there, not in a channel directory.
+- **No telemetry in `finish-args`.** The Flatpak grants `--share=network` for exactly one reason — user-initiated HuggingFace model downloads — and never `--filesystem=host`. Do not add host-wide or background-network permissions.
+- **ONNX Runtime is the sharp edge.** The engine's `ort` crate is locked to `load-dynamic` + `download-binaries` (you may not edit it from packaging): it downloads `libonnxruntime.so` at build time and dlopen's it at runtime. Each manifest documents how it handles that (Flatpak: build-step `--share=network` + staged `.so` + `ORT_DYLIB_PATH`; Nix/AUR: system `onnxruntime` via `ORT_LIB_LOCATION`/`ORT_DYLIB_PATH`). See `shared/docs/DECISIONS.md` (2026-06-20 Linux distribution entry).
+- **The Flatpak CI job is advisory.** `.github/workflows/packaging.yml` runs `flatpak-builder` with `continue-on-error: true` until the ONNX-in-sandbox build is verified green on real Linux. Keep it advisory until then; don't let it red-gate `main`, and don't fake a pass.
+
 ## When to update which doc
 
 - `shared/docs/STATE.md` — every meaningful change. Newest entry on top. One-paragraph summary plus what you ran to verify.

@@ -1,0 +1,122 @@
+# FileID — Flatpak manifest (PRIMARY distribution channel; runs on every distro).
+#
+# Build (from repo root):
+#   flatpak install -y flathub org.gnome.Platform//46 org.gnome.Sdk//46 \
+#       org.freedesktop.Sdk.Extension.rust-stable//23.08   # GNOME 46 base = fd 23.08
+#   flatpak-builder --user --install --force-clean \
+#       build-dir packaging/flatpak/io.github.fileid.FileID.yaml
+#   flatpak run io.github.fileid.FileID
+#
+# Runtime choice: GNOME 46 ships GTK 4.14 + libadwaita 1.5 — an exact match for
+# the app's `gtk4 0.8` (v4_14) / `libadwaita 0.6` (v1_5) bindings. The
+# rust-stable SDK extension supplies the Rust toolchain.
+#
+# ============================ ONNX RUNTIME — RISKIEST PART ====================
+# The engine links ONNX Runtime through the `ort` crate with
+# `load-dynamic` + `download-binaries` (see platforms/windows/src/engine/
+# Cargo.toml, cfg(not(windows)) deps). We do NOT edit that crate config here.
+#
+#   * `download-binaries` => ort-sys' build script DOWNLOADS a prebuilt
+#     libonnxruntime from pyke's CDN at BUILD time. A Flatpak build sandbox has
+#     no network by default, so we grant `--share=network` to the BUILD step
+#     only (build-options.build-args below). This is the path-of-least-surprise
+#     that is most likely to compile green on the first Linux CI run.
+#   * `load-dynamic` => onnxruntime is NOT linked at compile time; it is
+#     dlopen'd at RUNTIME. `copy-dylibs` is OFF (engine uses default-features =
+#     false), so the downloaded .so is NOT auto-placed next to the binary — we
+#     locate it under target/ and install it to /app/lib, then point the loader
+#     at it with `--env=ORT_DYLIB_PATH=/app/lib/libonnxruntime.so`.
+#
+# Build-time network is NOT a telemetry concern (it fetches crates + the ONNX
+# runtime, nothing is sent). The SHIPPED sandbox's only network grant is the
+# user-initiated HuggingFace model download — identical to macOS/Windows.
+#
+# Flathub HARDENING (follow-up, needs Linux-side iteration): Flathub forbids
+# network during build. The compliant path is to (a) generate cargo-sources.json
+# with flatpak-cargo-generator from the committed Cargo.lock and build
+# `--offline`, and (b) add libonnxruntime as an offline `archive` source with a
+# pinned sha256 and set `ORT_LIB_LOCATION` so ort uses it instead of
+# downloading. Until that is verified on a real box, the network-build manifest
+# below is the working version and the CI job that exercises it is ADVISORY.
+# =============================================================================
+
+app-id: io.github.fileid.FileID
+runtime: org.gnome.Platform
+runtime-version: '46'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: fileid-linux
+
+finish-args:
+  # GTK display + GPU. --share=ipc is needed for X11 SHM under fallback-x11.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The user's files are the whole point of the app. --filesystem=home covers
+  # the common case. For NAS-mounted libraries outside $HOME the user grants the
+  # specific mount via `flatpak override --filesystem=/mnt/nas` or Flatseal; the
+  # GTK file chooser also reaches non-home paths through the xdg-desktop-portal
+  # without any extra permission. We deliberately do NOT grant --filesystem=host.
+  - --filesystem=home
+  # SOLE network egress: user-initiated AI model downloads from huggingface.co
+  # (engine downloader.rs). No analytics/telemetry — same single use as the
+  # macOS/Windows builds. CI scans the shipped binaries for telemetry strings.
+  - --share=network
+  # load-dynamic ONNX Runtime resolves the dlopen target from this path.
+  - --env=ORT_DYLIB_PATH=/app/lib/libonnxruntime.so
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /man
+  - '*.a'
+  - '*.la'
+
+modules:
+  - name: fileid
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/fileid/cargo
+        # opt-out of pdfium-render runtime libloading noise; Deep-Analyze PDF
+        # rasterization needs a system libpdfium.so (not bundled on Linux) — it
+        # degrades to "PDF text only" without it. Bundling libpdfium is a
+        # follow-up (add as an offline archive source).
+      # Build-time network ONLY (cargo crate fetch + ort's onnxruntime download).
+      # The shipped app's network grant is the finish-arg above, nothing here.
+      build-args:
+        - --share=network
+    build-commands:
+      # 1. The GTK app (pulls the engine in as a library, default features).
+      - cd platforms/linux && cargo build --release --locked
+      # 2. The engine BINARY the app spawns over stdio (-p selects the path-dep
+      #    package from the same workspace + lockfile + target dir, so the
+      #    onnxruntime download is shared with step 1).
+      - cd platforms/linux && cargo build --release --locked -p fileid-engine --bin FileIDEngine
+      # 3. Install both binaries into /app/bin. The app's locate_engine_binary()
+      #    finds FileIDEngine next to itself (search order #2).
+      - install -Dm755 platforms/linux/target/release/fileid-linux  /app/bin/fileid-linux
+      - install -Dm755 platforms/linux/target/release/FileIDEngine   /app/bin/FileIDEngine
+      # 4. The dlopen'd ONNX Runtime. load-dynamic + copy-dylibs-off means the
+      #    .so sits under target/.../build/ort-sys-*/out — find + stage it.
+      - |
+        set -e
+        so="$(find platforms/linux/target -name 'libonnxruntime.so*' -type f -print -quit || true)"
+        if [ -n "$so" ]; then
+          install -Dm755 "$so" /app/lib/libonnxruntime.so
+          echo "Bundled ONNX Runtime: $so"
+        else
+          echo "::warning:: libonnxruntime.so not found under target/ — ort sourcing needs Linux-side verification (see manifest header)."
+        fi
+      # 5. Desktop integration — reuse platforms/linux/data/ (single source).
+      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop      /app/share/applications/io.github.fileid.FileID.desktop
+      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.metainfo.xml /app/share/metainfo/io.github.fileid.FileID.metainfo.xml
+      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.svg          /app/share/icons/hicolor/scalable/apps/io.github.fileid.FileID.svg
+    sources:
+      # The whole repo (the app path-depends on ../../windows/src/engine). On a
+      # clean CI checkout this is just the source tree (no target/, no .build/).
+      - type: dir
+        path: ../..

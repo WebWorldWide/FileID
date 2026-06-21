@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Canonical AppStream metadata for the Linux app. SINGLE SOURCE — every
+     packaging channel (Flatpak, AppImage, Nix, AUR) installs THIS file to
+     /…/share/metainfo/, never a copy. Keep the <id> in lockstep with the
+     .desktop basename and the Flatpak app-id (io.github.fileid.FileID). -->
+<component type="desktop-application">
+  <id>io.github.fileid.FileID</id>
+
+  <name>FileID</name>
+  <summary>On-device AI file organizer</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+
+  <developer id="io.github.fileid">
+    <name>FileID</name>
+  </developer>
+
+  <description>
+    <p>
+      FileID tags, dedupes, restructures, and renames tens of thousands of files
+      locally — no cloud, no telemetry. Point it at a folder and on-device AI
+      sorts your photos, documents, and media: automatic content tags, face
+      grouping for people, duplicate and near-duplicate cleanup, deep document
+      analysis, and a butler-grade restructure that proposes a tidy folder tree
+      you can preview before applying.
+    </p>
+    <p>Everything runs on your machine:</p>
+    <ul>
+      <li>Library — search by filename, tag, or extracted text; grid preview.</li>
+      <li>People — face clustering into named persons.</li>
+      <li>Cleanup — exact and perceptual near-duplicate detection.</li>
+      <li>Deep Analyze — opt-in vision-language analysis of documents and images.</li>
+      <li>Restructure — preview a proposed folder tree, then move or symlink.</li>
+      <li>Settings — pick models, tune thresholds, manage the local library.</li>
+    </ul>
+    <p>
+      The only network egress is user-initiated AI model downloads from
+      huggingface.co. No analytics, crash reporting, or update pings — ever.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.fileid.FileID.desktop</launchable>
+
+  <categories>
+    <category>Utility</category>
+    <category>FileTools</category>
+  </categories>
+
+  <keywords>
+    <keyword>files</keyword>
+    <keyword>organizer</keyword>
+    <keyword>tags</keyword>
+    <keyword>photos</keyword>
+    <keyword>duplicates</keyword>
+    <keyword>ai</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/fileid/FileID</url>
+  <url type="bugtracker">https://github.com/fileid/FileID/issues</url>
+  <url type="vcs-browser">https://github.com/fileid/FileID</url>
+
+  <!-- Placeholder screenshot URL: Flathub requires at least one reachable
+       screenshot before submission. Swap in a real raw-content URL (or a
+       hosted asset) once the Linux UI is captured on a real box. -->
+  <screenshots>
+    <screenshot type="default">
+      <caption>The Library tab — search and grid preview</caption>
+      <image>https://raw.githubusercontent.com/fileid/FileID/main/shared/docs/assets/linux-library.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <branding>
+    <color type="primary" scheme_preference="dark">#1a1a1f</color>
+    <color type="primary" scheme_preference="light">#ffcc00</color>
+  </branding>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-20">
+      <description>
+        <p>First Linux preview: GTK4 + libadwaita app across all six tabs.</p>
+      </description>
+    </release>
+  </releases>
+</component>

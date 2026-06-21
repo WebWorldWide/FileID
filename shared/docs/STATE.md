@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 (Linux packaging) — full GTK GUI (6 tabs) compiles + CI-green; universal Flatpak + AppImage + Nix + AUR landed
+
+The Linux app is now feature-shaped across all **six tabs** (Library · People · Cleanup · Deep Analyze · Restructure · Settings) and the whole stack — engine + CLI + GTK app — **builds and passes CI on ubuntu** (`.github/workflows/linux.yml`, 3 green jobs; GTK app `cargo build` is the required gate). On top of that compiling base, **packaging landed** so the app can reach every distro:
+
+- **Flatpak (primary, universal).** `packaging/flatpak/io.github.fileid.FileID.yaml` — `org.gnome.Platform//46` + `org.gnome.Sdk//46` (GTK 4.14 + libadwaita 1.5, an exact match for the app's `gtk4 0.8` / `adw 0.6` bindings) + the `rust-stable` SDK extension. Builds the GTK app **and** the `FileIDEngine` binary it spawns from the one workspace/lockfile, installs both to `/app/bin`, and reuses `platforms/linux/data/` for the desktop entry, AppStream metainfo, and icon. `finish-args`: `--share=ipc`, `--socket=wayland`, `--socket=fallback-x11`, `--device=dri`, `--filesystem=home`, and `--share=network` **only** for user-initiated HuggingFace model downloads (the sole network egress — no telemetry). One Flatpak covers Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora/openSUSE.
+- **AppImage (secondary).** `packaging/appimage/build-appimage.sh` — linuxdeploy + linuxdeploy-plugin-gtk bundling GTK4/libadwaita + both binaries + `libonnxruntime.so`; old-glibc baseline documented (GTK 4.14 floor is the open item). README included.
+- **Nix flake.** `packaging/nix/flake.nix` — `rustPlatform.buildRustPackage` with gtk4 + libadwaita + onnxruntime + `wrapGAppsHook4`.
+- **AUR.** `packaging/aur/PKGBUILD` — native Arch build; `depends=(gtk4 libadwaita onnxruntime …)`.
+- **CI.** New `.github/workflows/packaging.yml` runs `flatpak-builder` against the manifest, **advisory (`continue-on-error: true`)** so the ONNX-in-sandbox part can iterate without red-gating `main` (mirrors how the GTK clippy job is advisory).
+- **Data assets created** (were referenced but missing): `platforms/linux/data/io.github.fileid.FileID.metainfo.xml` (AppStream) + `.svg` icon (brand palette). All four channels reuse them — no duplication.
+
+**ONNX-sourcing decision + the honest caveat.** The engine's `ort` crate is locked to `load-dynamic` + `download-binaries` (`cfg(not(windows))`, not editable from packaging). `download-binaries` fetches `libonnxruntime.so` from pyke's CDN **at build time**; `load-dynamic` dlopen's it **at runtime**. Per channel: Flatpak grants `--share=network` to the build step only + stages the `.so` to `/app/lib` + `ORT_DYLIB_PATH`; AppImage bundles the `.so` + `ORT_DYLIB_PATH` hook; Nix/AUR use the system onnxruntime via `ORT_LIB_LOCATION`/`ORT_DYLIB_PATH`. **This is the riskiest part and the reason the Flatpak CI job is advisory** — whether the build downloads vs. uses the staged lib, and the exact `target/` path of the `.so`, need confirming on a real Linux box (none available in this dev env). The packaging files are declarative (no compile here); the GTK app/engine/CLI source was not touched. Docs: new `packaging/README.md` (distro matrix), CONTRIBUTING distro-support section, DECISIONS entry.
+
 ## 2026-06-20 (Linux foundation) — engine + CLI + GTK app all build on Linux (CI-green); CLI MVP; engine Linux restructure fallback
 
 The Linux build foundation is now CI-verified end to end (new `.github/workflows/linux.yml`, 3 jobs on ubuntu-latest, all green):
