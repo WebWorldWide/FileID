@@ -76,7 +76,11 @@ public final class MobileCLIPService: @unchecked Sendable {
             let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
             let opts = try ORTSessionOptions()
             // CoreML EP for ANE acceleration; ORT falls back to CPU if it
-            // can't place a node. Mirrors ArcFaceService's posture.
+            // can't place a node. Bare options = NeuralNetwork format with
+            // MLComputeUnits = All. We deliberately do NOT use MLProgram: on
+            // CLIP ViT-B/32 it fails to build the CoreML plan on-hardware
+            // ("ios17.conv: output size is too small"), which throws at session
+            // creation and would disable CLIP embeddings entirely.
             try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
             let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
             let name = try session.inputNames().first
