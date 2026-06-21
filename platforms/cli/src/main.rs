@@ -38,8 +38,11 @@ use context::Ctx;
 struct Cli {
     #[command(flatten)]
     global: GlobalArgs,
+    // Optional so bare `fileid` prints a friendly getting-started intro (FIX 4)
+    // instead of clap's terse usage error. `--help` / `--version` still work
+    // (clap intercepts them); an *unknown* subcommand still errors.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Args)]
@@ -169,8 +172,30 @@ enum Command {
     },
 }
 
+/// Friendly getting-started shown for a bare `fileid` (no subcommand) — a short
+/// what-it-is line plus the handful of commands worth trying first, with
+/// concrete examples. Replaces clap's terse "USAGE:" error (FIX 4).
+fn intro() -> &'static str {
+    "FileID — search, dedupe, and organize your files locally.\n\
+     \n  \
+     fileid people                     list the people in your library\n  \
+     fileid search \"beach\"             find files by keyword\n  \
+     fileid dedupe --similar           find visually-similar duplicates\n  \
+     fileid restructure --plan         preview a tidy folder layout\n  \
+     fileid scan ~/Pictures --db ~/test.sqlite   index a new folder\n\
+     \n\
+     Add --help to any command for details.  (macOS: with no --db, reads your desktop app's library.)"
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // Bare `fileid`: print the friendly intro to stdout and exit cleanly.
+    let Some(command) = cli.command else {
+        println!("{}", intro());
+        return ExitCode::SUCCESS;
+    };
+
     let ctx = match Ctx::resolve(
         cli.global.db,
         cli.global.json,
@@ -184,7 +209,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = match cli.command {
+    let result = match command {
         Command::Scan { path, rescan, models } => {
             if models {
                 scan_models::run(&ctx, &path, rescan)
