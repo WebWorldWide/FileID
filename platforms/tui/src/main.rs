@@ -58,6 +58,7 @@ fn main() -> ExitCode {
 fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
     let ctx = Ctx::resolve(db_flag)?;
     let mut app = App::new(ctx.db_label());
+    app.scratch = ctx.scratch();
 
     let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
     data::spawn_load(ctx.db.clone(), tx.clone());
@@ -101,7 +102,7 @@ fn event_loop(
         // the UI stays live (q keeps quitting; the TerminalGuard still restores
         // the terminal). The thread streams status + reloads on completion.
         if let Some(root) = app.scan_requested.take() {
-            scan::spawn_scan(ctx.db.clone(), root, tx.clone());
+            scan::spawn_scan(ctx.db.clone(), root, ctx.engine_data_home.clone(), tx.clone());
         }
         if app.should_quit {
             return Ok(());

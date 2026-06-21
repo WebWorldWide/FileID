@@ -38,8 +38,13 @@ const REQUIRED_MODELS: [&str; 2] = ["mobileclip_s2", "arcface"];
 /// Spawn the scan on a worker thread. Non-blocking; the UI keeps drawing and
 /// `q` keeps quitting. On success the thread reloads the DB and sends `Done`;
 /// any failure becomes a single `LoadMsg::Error` (clears `loading`/`scanning`).
-pub fn spawn_scan(db: PathBuf, root: PathBuf, tx: Sender<LoadMsg>) {
-    std::thread::spawn(move || match run_scan(&db, &root, &tx) {
+pub fn spawn_scan(
+    db: PathBuf,
+    root: PathBuf,
+    engine_data_home: Option<PathBuf>,
+    tx: Sender<LoadMsg>,
+) {
+    std::thread::spawn(move || match run_scan(&db, &root, engine_data_home.as_deref(), &tx) {
         Ok(summary) => {
             let _ = tx.send(LoadMsg::Status(format!("{summary} — reloading library…")));
             match data::load(&db, &tx) {
@@ -63,7 +68,12 @@ pub fn spawn_scan(db: PathBuf, root: PathBuf, tx: Sender<LoadMsg>) {
 
 /// Pre-flight, spawn the engine, send `startScan`, and stream events until the
 /// scan completes. Returns a one-line success summary or a descriptive error.
-fn run_scan(db: &Path, root: &Path, tx: &Sender<LoadMsg>) -> Result<String> {
+fn run_scan(
+    db: &Path,
+    root: &Path,
+    engine_data_home: Option<&Path>,
+    tx: &Sender<LoadMsg>,
+) -> Result<String> {
     let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     // ── Pre-flight 1: models installed? Give a clear, actionable message
@@ -93,14 +103,19 @@ fn run_scan(db: &Path, root: &Path, tx: &Sender<LoadMsg>) -> Result<String> {
         );
     };
 
-    // The engine resolves + writes its OWN library location; a pinned --db that
-    // differs won't reflect the scan on reload. Surface that, like the CLI.
-    if let Ok(engine_db) = fileid_engine::paths::db_path() {
-        if engine_db != db {
-            let _ = tx.send(LoadMsg::Status(format!(
-                "note: engine writes its library at {}; your --db differs",
-                short(&engine_db.to_string_lossy())
-            )));
+    // In SCRATCH mode we point the engine at the SAME data home the TUI reads
+    // (below), so the engine's library IS `db` — no mismatch to warn about. With
+    // an explicit `--db`, the engine still writes its OWN canonical location; a
+    // pinned `--db` that differs won't reflect on reload, so surface that (CLI
+    // parity).
+    if engine_data_home.is_none() {
+        if let Ok(engine_db) = fileid_engine::paths::db_path() {
+            if engine_db != db {
+                let _ = tx.send(LoadMsg::Status(format!(
+                    "note: engine writes its library at {}; your --db differs",
+                    short(&engine_db.to_string_lossy())
+                )));
+            }
         }
     }
 
@@ -108,10 +123,23 @@ fn run_scan(db: &Path, root: &Path, tx: &Sender<LoadMsg>) -> Result<String> {
 
     // stderr → null: the TUI owns the alternate screen; inheriting engine logs
     // would corrupt it. stdout carries the newline-JSON event stream.
-    let mut child = Command::new(&engine_bin)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+    let mut command = Command::new(&engine_bin);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+
+    // Scratch mode (FIX 1): hand the engine its data home via the SAME env var
+    // its `paths::root()` honors, so the scan writes `<home>/FileID/fileid.sqlite`
+    // — exactly the scratch library the TUI opened and reloads. `prepare_scratch_dir`
+    // is best-effort layout setup (see its doc).
+    if let Some(home) = engine_data_home {
+        prepare_scratch_dir(home);
+        if cfg!(windows) {
+            command.env("LOCALAPPDATA", home);
+        } else {
+            command.env("XDG_DATA_HOME", home);
+        }
+    }
+
+    let mut child = command
         .spawn()
         .with_context(|| format!("spawning engine binary {}", engine_bin.display()))?;
 
@@ -288,6 +316,41 @@ fn locate_engine_binary() -> Option<PathBuf> {
 fn which_on_path(exe: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(exe)).find(|cand| cand.is_file())
+}
+
+/// Best-effort scratch-state setup before a scratch-mode scan (FIX 1). Ensures
+/// the engine's scratch root (`<data_home>/FileID`) exists, and on Linux/Windows
+/// — where the engine resolves its model dir from that same root — links the
+/// REAL model directory in so a scratch scan can still find weights. Everything
+/// is best-effort: each step swallows its error so this can never block or fail
+/// a scan. macOS resolves models from `~/Library/Application Support/FileID/…`
+/// independent of the data home, so no link is needed (and we make no symlink on
+/// the user's Mac).
+fn prepare_scratch_dir(data_home: &Path) {
+    let root = data_home.join("FileID");
+    let _ = std::fs::create_dir_all(&root);
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let link = root.join("Models");
+        if !link.exists() {
+            if let Ok(real) = fileid_engine::paths::models_dir() {
+                if real.is_dir() && real != link {
+                    let _ = symlink_dir(&real, &link);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(windows)]
+fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(src, dst)
 }
 
 #[cfg(test)]
