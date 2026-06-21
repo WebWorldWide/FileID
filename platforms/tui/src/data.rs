@@ -102,7 +102,7 @@ pub fn spawn_load(db: PathBuf, tx: Sender<LoadMsg>) {
     });
 }
 
-fn load(db: &Path, tx: &Sender<LoadMsg>) -> Result<Snapshot> {
+pub(crate) fn load(db: &Path, tx: &Sender<LoadMsg>) -> Result<Snapshot> {
     if !db.exists() {
         return Ok(Snapshot { db_exists: false, ..Snapshot::default() });
     }

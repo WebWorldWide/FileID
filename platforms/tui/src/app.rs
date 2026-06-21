@@ -1,9 +1,16 @@
 //! Backend-agnostic application state + key handling.
 //!
-//! This module owns NO terminal types — it's a pure state machine over
+//! This module owns NO terminal types — it's a state machine over
 //! [`crossterm::event::KeyCode`], which makes it unit-testable headlessly
 //! (navigation clamps, tab cycling, search filtering, the load-event reducer).
 //! `ui.rs` renders a `&App`; `main.rs` feeds it key codes + load messages.
+//!
+//! The one filesystem touch is the scan-path prompt: confirming the typed path
+//! checks `exists()` / `is_dir()` so a bad path gets an *inline* error instead
+//! of a deferred async one. The `~`-expansion is factored into a pure helper so
+//! it stays unit-testable.
+
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -64,6 +71,22 @@ pub struct App {
     /// the loader, then clears it.
     pub reload_requested: bool,
     pub db_label: String,
+
+    // ── Folder-pick + scan (FIX 2) ──────────────────────────────────────────
+    /// The single-line path-input prompt is open (typing a folder to scan).
+    pub input_active: bool,
+    /// The text typed so far in the path prompt.
+    pub input: String,
+    /// Inline validation error shown in the prompt (bad/!dir path). The prompt
+    /// stays open so the user can fix it — never a panic.
+    pub input_error: Option<String>,
+    /// The folder the user chose to scan (shown in the Library header / status).
+    pub scan_root: Option<String>,
+    /// A scan is in flight (drives the header + blocks a second concurrent scan).
+    pub scanning: bool,
+    /// Set when a scan is confirmed; `main` consumes it, spawns the engine-driven
+    /// scan thread, and clears it (mirrors `reload_requested`).
+    pub scan_requested: Option<PathBuf>,
 }
 
 impl App {
@@ -80,6 +103,12 @@ impl App {
             should_quit: false,
             reload_requested: false,
             db_label,
+            input_active: false,
+            input: String::new(),
+            input_error: None,
+            scan_root: None,
+            scanning: false,
+            scan_requested: None,
         }
     }
 
@@ -156,12 +185,14 @@ impl App {
             LoadMsg::Done(snap) => {
                 self.data = *snap;
                 self.loading = false;
+                self.scanning = false;
                 // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
             }
             LoadMsg::Error(e) => {
                 self.status = e;
                 self.loading = false;
+                self.scanning = false;
             }
         }
     }
@@ -179,6 +210,10 @@ impl App {
     /// Handle one key press. Returns nothing; mutates state (incl. `should_quit`
     /// and `reload_requested`, which `main` acts on).
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if self.input_active {
+            self.on_key_input(code);
+            return;
+        }
         if self.search_active {
             self.on_key_search(code);
             return;
@@ -196,6 +231,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
             KeyCode::Home | KeyCode::Char('g') => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
+            KeyCode::Char('s') => self.open_input(),
             KeyCode::Char('r') => {
                 self.loading = true;
                 self.status = "Reloading…".to_string();
@@ -208,6 +244,68 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Open the single-line folder-path prompt (the `s` key). Ignored while a
+    /// scan is already running so two scans can't race the engine.
+    fn open_input(&mut self) {
+        if self.scanning {
+            self.status = "A scan is already in progress…".to_string();
+            return;
+        }
+        self.input_active = true;
+        self.input.clear();
+        self.input_error = None;
+        self.show_help = false;
+    }
+
+    fn on_key_input(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => {
+                self.input_active = false;
+                self.input.clear();
+                self.input_error = None;
+            }
+            // Tab and Enter both confirm.
+            KeyCode::Enter | KeyCode::Tab => self.confirm_input(),
+            KeyCode::Backspace => {
+                self.input.pop();
+                self.input_error = None;
+            }
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.input_error = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Validate the typed path (with `~` expansion) and, if it's a real folder,
+    /// arm a scan that `main` will drive through the engine. A bad path sets an
+    /// inline error and keeps the prompt open — it never panics or wedges.
+    fn confirm_input(&mut self) {
+        let raw = self.input.trim().to_string();
+        if raw.is_empty() {
+            self.input_error = Some("Enter a folder path.".to_string());
+            return;
+        }
+        let path = expand_tilde_with(&raw, home_dir().as_deref());
+        if !path.exists() {
+            self.input_error = Some(format!("No such path: {}", path.display()));
+            return;
+        }
+        if !path.is_dir() {
+            self.input_error = Some(format!("Not a folder: {}", path.display()));
+            return;
+        }
+        self.input_active = false;
+        self.input_error = None;
+        let display = path.to_string_lossy().into_owned();
+        self.status = format!("Starting scan of {display}…");
+        self.scan_root = Some(display);
+        self.scanning = true;
+        self.loading = true;
+        self.scan_requested = Some(path);
     }
 
     fn on_key_search(&mut self, code: KeyCode) {
@@ -229,6 +327,29 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// `$HOME` (or `%USERPROFILE%` on Windows), if set + non-empty.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Expand a leading `~` / `~/…` (or `~\…`) against `home`. Pure given `home`,
+/// so it's unit-testable without touching the process environment.
+fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
+    if input == "~" {
+        if let Some(h) = home {
+            return h.to_path_buf();
+        }
+    } else if let Some(rest) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")) {
+        if let Some(h) = home {
+            return h.join(rest);
+        }
+    }
+    PathBuf::from(input)
 }
 
 #[cfg(test)]
@@ -355,5 +476,78 @@ mod tests {
         app.apply_load(LoadMsg::Done(Box::new(snap)));
         assert!(!app.loading);
         assert_eq!(app.cursor(), 0);
+    }
+
+    #[test]
+    fn expand_tilde_resolves_home() {
+        let home = Path::new("/home/u");
+        assert_eq!(expand_tilde_with("~", Some(home)), PathBuf::from("/home/u"));
+        assert_eq!(expand_tilde_with("~/Pictures", Some(home)), PathBuf::from("/home/u/Pictures"));
+        // No home → left verbatim (no panic).
+        assert_eq!(expand_tilde_with("~/x", None), PathBuf::from("~/x"));
+        // A literal `~foo` (not `~/`) is not tilde-expansion; left as-is.
+        assert_eq!(expand_tilde_with("~foo", Some(home)), PathBuf::from("~foo"));
+        // Absolute paths pass through untouched.
+        assert_eq!(expand_tilde_with("/var/data", Some(home)), PathBuf::from("/var/data"));
+    }
+
+    #[test]
+    fn s_opens_path_prompt_and_typing_builds_input() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.input_active);
+        for ch in "/tmp".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        assert_eq!(app.input, "/tmp");
+        // Esc cancels without arming a scan.
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.input_active);
+        assert!(app.scan_requested.is_none());
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn confirm_bad_path_errors_inline_and_keeps_prompt_open() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        for ch in "/no/such/dir/here-xyz".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.input_active, "prompt stays open on a bad path");
+        assert!(app.input_error.is_some());
+        assert!(app.scan_requested.is_none());
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn confirm_real_dir_arms_scan() {
+        let mut app = app_with_files(0);
+        // The test process always has an existing working directory.
+        let dir = std::env::current_dir().expect("cwd");
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        for ch in dir.to_string_lossy().chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        // Tab also confirms (not just Enter).
+        app.on_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!app.input_active);
+        assert!(app.scanning);
+        assert!(app.loading);
+        assert!(app.scan_requested.is_some(), "a real dir must arm a scan");
+        assert!(app.scan_root.is_some());
+
+        // A terminal load message (e.g. the post-scan reload) clears `scanning`.
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn s_ignored_while_scanning() {
+        let mut app = app_with_files(0);
+        app.scanning = true;
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(!app.input_active, "must not open a second scan prompt mid-scan");
     }
 }

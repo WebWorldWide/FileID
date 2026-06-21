@@ -33,7 +33,8 @@ Resolved with the **same precedence as the CLI**:
    (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`), i.e. the same file the desktop apps
    read/write.
 
-Populate a library first with the CLI: `fileid --db <db> scan <folder>`, then
+Populate a library from inside the TUI by pressing `s` and entering a folder
+(see Keys), or out-of-band with the CLI: `fileid --db <db> scan <folder>`, then
 point the TUI at the same `--db`.
 
 ## Keys
@@ -45,9 +46,14 @@ point the TUI at the same `--db`.
 | `↑`/`↓` or `k`/`j` | move selection |
 | `g` / `G` | first / last row |
 | `/` | search (Library tab) — type to filter, `Enter` keeps, `Esc` clears |
-| `r` | reload from the DB |
+| `s` | **scan a folder** — opens a path prompt; `~` expands; `Enter`/`Tab` confirm, `Esc` cancel. Drives a real full-pipeline engine scan and live-streams progress to the status line, then auto-reloads. |
+| `r` | reload from the DB (re-reads every view) |
 | `?` | toggle the keys overlay |
-| `q` / `Esc` / `Ctrl-C` | quit |
+| `q` / `Esc` / `Ctrl-C` | quit (works mid-scan; the terminal is always restored) |
+
+The whole UI paints its own brand-dark background, so it stays legible on
+light-background terminals too — it never relies on the terminal's default
+colors.
 
 ## Screens
 
@@ -64,27 +70,42 @@ signature gold/lavender/cyan/pink accent palette.
 | _(People/Cleanup/Restructure are also a single tab strip — no 6th screen; "Deep Analyze" is folded into Settings notes for the MVP)_ | | |
 
 The status line at the bottom is driven by a **live event stream**: a
-background loader thread streams progress messages (`Opening…`, `Reading
-files…`, `Computing restructure plan…`, `Loaded N files · …`) over an `mpsc`
-channel into the render loop — the same architecture an engine-spawn-IPC event
-feed slots into.
+background thread streams progress messages over an `mpsc` channel into the
+render loop. The DB loader feeds it (`Opening…`, `Reading files…`, `Loaded N
+files · …`), and during a scan the **engine's own IPC events** feed the same
+channel (`Scanning [Tagging] 1234/5678 (142 files/s)`, `Scan complete…`).
+
+## Scanning (live, in-TUI)
+
+Press `s`, type a folder, confirm — the TUI spawns the `FileIDEngine` binary and
+speaks newline-delimited JSON over stdio, reusing the engine's own
+`ipc::IpcCommand` / `IpcEvent` types (no contract drift), exactly as the CLI's
+`scan --models` and the desktop apps do. It sends `startScan` and live-streams
+`progress` / `phaseChanged` / `scanComplete` events to the status line, then
+auto-reloads every view. See [`src/scan.rs`](src/scan.rs).
+
+`startScan` runs the **full ML pipeline**, so it requires the AI models
+(`mobileclip_s2` + `arcface`) and the engine binary:
+
+- **Models** — installed once from the desktop app (Settings → Local AI). If
+  they're missing, the status line says exactly which, and how.
+- **Engine binary** — located via `FILEID_ENGINE_BIN`, then beside `fileid-tui`,
+  then the dev-layout `platforms/windows/src/engine/target/{release,debug}/`,
+  then `PATH`. If absent, the status line says how to build/point at it.
+
+`startScan` drives the engine's own library location (`$XDG_DATA_HOME` /
+`%LOCALAPPDATA%`); when you pinned a different `--db`, the TUI notes the mismatch
+(the reload reads your `--db`). The engine's stderr is discarded so its logs
+can't scribble over the terminal UI; `q` quits cleanly even mid-scan.
 
 ## What is stubbed (follow-on)
 
-This is a **compiling MVP**: the read/query surface is fully live; mutating and
-model-dependent operations are intentionally deferred and clearly labelled in
-the Settings tab.
+The read/query surface and folder scanning are live; the remaining mutating /
+model-dependent operations are intentionally deferred and labelled in Settings.
 
-- **Engine-spawn command IPC.** The CLI and TUI currently drive the engine
-  **in-process** (read surface + the pure `restructure::classify`). Spawning the
-  `FileIDEngine` binary and streaming live `scan` / `cluster` progress events
-  over newline-delimited JSON stdio is the next step. The status-line event
-  stream is already wired to consume such a feed; today it carries the DB-load
-  progress instead.
-- **`scan` / `cluster` actions.** No in-app trigger yet — index with the CLI
-  (`fileid scan`) and reload (`r`). People/duplicate signals (faces, perceptual
-  + content hashes) require a full engine scan with ML models, exactly as for
-  the CLI.
+- **Face clustering.** A scan detects + embeds faces, but grouping them into
+  people is a separate `runFaceClustering` engine command — not yet triggerable
+  in-TUI.
 - **Restructure apply.** The plan is a **read-only preview**; nothing is moved.
 - **Semantic search, people merge/rename, Deep Analyze.** App-side / model
   features not in the terminal MVP.

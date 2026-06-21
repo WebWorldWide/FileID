@@ -122,8 +122,9 @@ fn help_text() -> String {
          \n\
          KEYS (in-app):\n    \
          Tab / Shift-Tab   switch tab        1-5   jump to tab\n    \
-         Up/Down or j/k    move selection    r     reload from DB\n    \
-         /                 search (Library)  ?     toggle help    q  quit\n",
+         Up/Down or j/k    move selection    s     scan a folder (engine)\n    \
+         /                 search (Library)  r     reload from DB\n    \
+         ?                 toggle help       q     quit\n",
         ver = env!("CARGO_PKG_VERSION")
     )
 }

@@ -4,8 +4,10 @@
 //! Like `platforms/cli`, this links `fileid-engine` as a library and reuses its
 //! read surface (`db::open_read`), path resolution (`paths`), and restructure
 //! rule cascade (`pipeline::restructure::classify`) IN-PROCESS, so the
-//! DB/IPC contract can never drift. Reads are live; engine-spawn command IPC
-//! (scan/cluster) is a documented follow-on (see README).
+//! DB/IPC contract can never drift. Reads are live; the `s` key drives a real
+//! full-pipeline scan by spawning the `FileIDEngine` binary and speaking the
+//! engine's own `ipc` types over stdio (see `scan.rs`). Face clustering remains
+//! a documented follow-on (see README).
 //!
 //! Cross-OS despite living under `platforms/`: builds + runs identically on
 //! macOS, Linux, and Windows.
@@ -13,6 +15,7 @@
 mod app;
 mod context;
 mod data;
+mod scan;
 mod ui;
 
 use std::io::{self, Stdout};
@@ -93,6 +96,12 @@ fn event_loop(
         if app.reload_requested {
             app.reload_requested = false;
             data::spawn_load(ctx.db.clone(), tx.clone());
+        }
+        // A confirmed folder-pick arms a scan; drive it on a worker thread so
+        // the UI stays live (q keeps quitting; the TerminalGuard still restores
+        // the terminal). The thread streams status + reloads on completion.
+        if let Some(root) = app.scan_requested.take() {
+            scan::spawn_scan(ctx.db.clone(), root, tx.clone());
         }
         if app.should_quit {
             return Ok(());
