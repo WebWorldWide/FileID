@@ -10,13 +10,15 @@ The terminal UI MVP (`platforms/tui/`) is read/query + read-only restructure pre
 - **Telemetry binary scan in the `tui` CI job** — fold the shared forbidden-strings `strings | grep` gate over the `fileid-tui` binary (parity with engine/CLI/GTK), once a release profile artifact is produced in CI.
 - **Engine relocation ripple** — when the engine moves to `shared/engine/`, update `platforms/tui/Cargo.toml`'s `fileid-engine` path dep (`../windows/src/engine` → `../../shared/engine`) in lockstep with the CLI + GTK app.
 
-## 2026-06-20 — Linux GUI + packaging roadmap (foundation done)
+## 2026-06-20 — Linux-side iteration remaining (GUI / packaging / website scaffolding all landed + CI-green)
 
-- **Six GTK4 tabs**, mirroring the macOS reference 1:1 (gold palette via CSS, LavaLamp via Cairo, libadwaita SpringAnimation, GlassCards): Library (grid+search+preview) first, then People, Cleanup, Deep Analyze, Restructure (Sankey via Cairo), Settings. Each compile-gated by linux.yml; behavioral verification needs a Linux box.
-- **Engine shell fallbacks** for Linux parity (`#[cfg(not(windows))]` in platforms/windows/src/engine/src/shell/): OCR (tesseract/none), video keyframes (ffmpeg-next), reveal (DBus org.freedesktop.FileManager1), tags (user.xdg.* xattr), trash (freedesktop), HEIC (libheif). Each cargo-verifiable on the non-windows path.
-- **Universal distro packaging** (so it runs on Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora): Flatpak (primary — bundles a pinned org.gnome.Platform runtime so it never depends on the host GTK; reuse the existing AppStream metainfo+desktop; finish-args: filesystem for library+NAS, network for HF model pulls only, --device=dri; + a flatpak-builder CI job). Then AppImage (old-glibc baseline, single file) + a Nix flake + AUR PKGBUILD for the distro-natives.
-- **CLI follow-ons**: full-pipeline `scan --models` (tags/faces/CLIP/phash, not just FTS), semantic/`--similar` search wiring, apply commands (dedupe/restructure --apply), a CLI CI job.
-- **TUI** (ratatui) over the same engine/CLI command surface — ✅ MVP landed (`platforms/tui/`); see the TUI follow-ons section below.
+The Linux foundation, all six GTK tabs, the engine `shell/*` Linux backends, universal packaging (Flatpak/AppImage/Nix/AUR), the CLI follow-ons, the TUI MVP, and the website all **landed and pass CI on ubuntu** (compile/clippy/test gates; the flatpak-builder job is advisory). What remains needs an actual Linux box, real hardware, or a repo-settings toggle — none doable headlessly here:
+
+- **Packaging that actually builds + launches on a Linux box (the riskiest open item).** The manifests are declarative and no runnable bundle has been produced yet. On real Linux confirm: the **ONNX-in-sandbox** sourcing (whether `ort`'s `load-dynamic`+`download-binaries` downloads vs. uses the staged/vendored `libonnxruntime.so`, and the exact `target/` path), **Flathub no-network** hardening (vendor onnxruntime as a pinned offline `archive` + `cargo-sources.json` via `flatpak-cargo-generator`, build `--offline`, point `ort` at it with `ORT_LIB_LOCATION`), the **AppImage glibc / GTK 4.14 baseline** (the floor deciding how old a distro it runs on), and **GPU EP bundling** (no DirectML on Linux — CUDA/ROCm/OpenVINO `.so`s if shipped). Promote the advisory flatpak-builder CI job to a hard gate once a bundle builds + launches.
+- **Behavioral verification of the GUI / TUI / CLI `--models` on real hardware.** linux.yml only proves they compile. On a Linux box: exercise all six GTK tabs (LavaLamp/springs/glass render; scan/cluster/restructure/cleanup behave); drive the TUI; and run `fileid scan --models` end-to-end — the real engine-spawn → full ML pipeline (tags/faces/CLIP/phash rows matching a desktop scan), which the macOS smoke test can only force down the no-models branch.
+- **Enable GitHub Pages.** `.github/workflows/pages.yml` is committed but Pages is off — flip repo **Settings → Pages → Source = "GitHub Actions"** for the first publish of `website/`.
+- **HEIC engine fallback for Linux.** `shell/heic.rs` is Windows-only (WinRT BitmapDecoder); image-rs ships no HEIC and libheif is GPL/LGPL (rejected per download-and-run). A `.heic`/`.heif` Linux fallback (e.g. an optional `heif-convert`/`heif-dec` subprocess, graceful when absent) is the open parity gap.
+- **TUI** (ratatui, `platforms/tui/`) and the **CLI follow-ons** (`scan --models`, `dedupe`/`restructure --apply`, `search --similar`) have ✅ landed — their own remaining stubs/gaps are in the dedicated sections below.
 
 ## 2026-06-20 — `fileid` CLI follow-ons (MVP landed)
 
@@ -31,7 +33,7 @@ The cross-platform CLI (`platforms/cli/`) is verified green on the macOS host (c
 
 ## 2026-06-20 — follow-ups after the quality-audit loop
 
-- **Windows near-dup parity (LOCKSTEP GAP)**: port the Cleanup "Visually similar" mode to Windows — the Rust engine already computes the same dhash (`phash`, unused); needs the Hamming union-find grouping + a C# Cleanup mode toggle + the no-auto-select safety UX. Mirror macOS `PerceptualGrouping` + `ReadStore.similarImageGroups` + `CleanupView`. CI-verified only (no local C# build).
+- **Windows near-dup parity — ✅ LANDED (`291d3cc`, CI-verified).** The Cleanup "Visually similar" mode shipped on Windows in lockstep with macOS (Hamming union-find over the engine's `phash`, default threshold 8, no-auto-select "review — not identical" safety UX), mirroring macOS `PerceptualGrouping` / `ReadStore.similarImageGroups` / `CleanupView`. **Remaining:** on-hardware behavioral confirmation on the RTX 2060 box (CI only compiles the WinUI runtime — no local C# build verifies it).
 - **Crop-tolerant near-dup tier** (~16 Hamming) as a future opt-in mode (default stays 8).
 - **ANE concurrency**: default 4 kept; if profiling on a specific high-core Mac shows clear gains, consider a Settings slider (per-machine, not a hardcoded default).
 - **User actions for full value**: install BGE in Settings + rescan to (a) cluster docs by content and (b) populate `doc_text` for document keyword search; a rescan also applies RAM++ tags to images scanned before RAM++ was installed.

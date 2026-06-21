@@ -8,6 +8,27 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-20 (website + docs) — static brand landing page (`website/`) + GitHub Pages workflow; README refreshed for every front-end + packaging
+
+Added the project's public front door and wired its deploy. Docs + web assets only — no app/engine/CLI/GTK source touched.
+
+- **`website/`** — a self-contained static brand landing page (`index.html` + `style.css` + `app.js` + `assets/` brand logo SVG + 256 px PNG; own `README.md`). Dark theme on the signature palette, Open Graph / Twitter-card metadata, **no trackers / analytics / external JS** (telemetry-clean, same bar as the apps). Copy leads with the on-device / no-cloud / no-telemetry / Apache-2.0 positioning across macOS, Windows, Linux, CLI and TUI.
+- **`.github/workflows/pages.yml`** — deploys `website/` to GitHub Pages via `actions/configure-pages` + `actions/upload-pages-artifact` + `actions/deploy-pages` on push to `main` (path-filtered to `website/**`), `workflow_dispatch`-able, single non-cancelling `pages` concurrency group. **Owner action still required:** Pages must be enabled (Settings → Pages → Source = "GitHub Actions") for the first publish — tracked in NEXT.
+- **README.md refreshed** — now documents all front-ends (macOS · Windows · Linux GTK · `fileid` CLI · `fileid-tui`) and the universal packaging matrix (Flatpak / AppImage / Nix / AUR), replacing the old macOS/Windows-only framing.
+
+## 2026-06-20 (engine Linux parity) — `shell/*` Linux backends (trash · reveal · tags · OCR · video); std+libc+subprocess only, no new crates, CI-green
+
+The engine's `shell/*` file actions gained real **Linux** implementations behind `#[cfg(target_os = "linux")]` (were non-Windows no-op stubs), reaching macOS/Windows parity for the Linux app + CLI. Built with **std + libc + subprocess only — zero new crates** (libc was already in for `getppid` parent-death detection). macOS keeps the graceful `#[cfg(all(not(windows), not(target_os = "linux")))]` stub (its file actions are app-side). Verified: `cargo clippy --all-targets -D warnings` + `cargo test --lib` green on the macOS host (stub + shared arms); the Linux arms compile/clippy/test on ubuntu via `linux.yml`.
+
+- **trash** — pure `std::fs` against the freedesktop Trash spec (`~/.local/share/Trash/{files,info}` + `.trashinfo`), no `gio`.
+- **reveal** — DBus `org.freedesktop.FileManager1.ShowItems` via `dbus-send`/`gdbus`, falling back to `xdg-open` on the parent dir; graceful no-op when neither is present.
+- **tags** — `user.xdg.tags` xattr via libc `setxattr`/`getxattr`/`listxattr`/`removexattr` (no `xattr-rs`).
+- **OCR** — `tesseract` CLI over a temp P6 PPM we write ourselves (so no PNG/JPEG decoder crate); degrades to empty text when tesseract is absent.
+- **video keyframe** — `ffmpeg`/`ffprobe` CLI extracting a representative keyframe as P6 PPM; degrades gracefully when absent.
+- **Portable restructure move/symlink** is already covered under the Linux-foundation entry below (`std::fs::rename` + EXDEV copy-fallback; `std::os::unix::fs::symlink`).
+
+A follow-up CI fix (`0705cc8`) swapped a percent-encoder helper for manual hex to satisfy the Linux engine clippy. **HEIC has no Linux decoder yet** (image-rs lacks one; libheif is GPL/LGPL — rejected per download-and-run) → tracked in NEXT.
+
 ## 2026-06-20 (CLI follow-ons) — `fileid` gains `scan --models`, `dedupe`/`restructure --apply`, `search --similar <file>`; cargo-verified on macOS
 
 Landed the documented CLI follow-ons in `platforms/cli/`, all reusing the engine's exact code/IPC so nothing can drift. **Verified on this macOS host: `cargo clippy --all-targets -- -D warnings` clean, `cargo build` clean, `cargo test` green (2 integration tests, model-free + isolated).**
