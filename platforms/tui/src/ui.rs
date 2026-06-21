@@ -20,7 +20,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::Frame;
 
-use crate::app::{dir_label, App, BrowseRow, Browser, Tab};
+use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, Tab};
 use crate::data::{human_size, short};
 
 /// Brand near-black background painted under the entire UI so light terminal
@@ -106,21 +106,53 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_no_db(f: &mut Frame, app: &App, area: Rect) {
-    let text = Text::from(vec![
-        Line::from(Span::styled("No library database found.", Style::default().fg(PINK).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(format!("Resolved path: {}", app.db_label)),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press  s  to browse for a folder and scan it with the engine,",
-            Style::default().fg(GOLD),
-        )),
-        Line::from(Span::styled(
-            "or index with the CLI:  fileid scan <path> --models",
-            Style::default().fg(DIM),
-        )),
-        Line::from(Span::styled("…then reload here with  r", Style::default().fg(DIM))),
-    ]);
+    // FIX 1 — scratch is the default (no `--db`): the TUI opens EMPTY here and
+    // stays clean until the user scans a folder of their own. An explicit `--db`
+    // that doesn't exist yet gets the original "resolved path" wording.
+    let text = if app.scratch {
+        Text::from(vec![
+            Line::from(Span::styled(
+                "No files yet.",
+                Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press  s  to browse for a folder and scan it — its files show up here.",
+                Style::default().fg(GOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "This is a private scratch library; it starts empty and only ever holds",
+                Style::default().fg(DIM),
+            )),
+            Line::from(Span::styled(
+                "what you scan in the TUI. To open an existing library instead, relaunch",
+                Style::default().fg(DIM),
+            )),
+            Line::from(Span::styled("with  --db <path>  (e.g. your desktop app's).", Style::default().fg(DIM))),
+            Line::from(""),
+            Line::from(Span::styled(format!("scratch: {}", app.db_label), Style::default().fg(DIM))),
+        ])
+    } else {
+        Text::from(vec![
+            Line::from(Span::styled(
+                "No library database found.",
+                Style::default().fg(PINK).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!("Resolved path: {}", app.db_label)),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press  s  to browse for a folder and scan it with the engine,",
+                Style::default().fg(GOLD),
+            )),
+            Line::from(Span::styled(
+                "or index with the CLI:  fileid scan <path> --models",
+                Style::default().fg(DIM),
+            )),
+            Line::from(Span::styled("…then reload here with  r", Style::default().fg(DIM))),
+        ])
+    };
     let p = Paragraph::new(text)
         .wrap(Wrap { trim: true })
         .block(titled_block("Library", LAVENDER));
@@ -298,14 +330,27 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_settings(f: &mut Frame, app: &App, area: Rect) {
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled("Library", Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
+        kv("mode", if app.scratch { "scratch (opens empty)" } else { "explicit --db / env" }),
         kv("db path", &app.db_label),
         kv("exists", if app.data.db_exists { "yes" } else { "no" }),
         kv("files indexed", &app.data.total_files.to_string()),
         kv("tags", &app.data.total_tags.to_string()),
         kv("people", &app.data.people.len().to_string()),
         kv("duplicate groups", &app.data.dupes.len().to_string()),
+    ];
+    if app.scratch {
+        lines.push(Line::from(Span::styled(
+            "Private scratch library — starts empty, holds only what you scan here.",
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Open a specific library with  --db <path>  (e.g. your desktop app's).",
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.extend(vec![
         Line::from(""),
         Line::from(Span::styled("Engine", Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
         kv("read surface", "fileid_engine::db::open_read (in-process)"),
@@ -315,7 +360,7 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
         Line::from(Span::styled("Stubbed (follow-on)", Style::default().fg(PINK).add_modifier(Modifier::BOLD))),
         Line::from(Span::styled("· face clustering via engine-spawn IPC", Style::default().fg(DIM))),
         Line::from(Span::styled("· semantic search, restructure apply, people merge", Style::default().fg(DIM))),
-    ];
+    ]);
     let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(titled_block("Settings", LAVENDER));
     f.render_widget(p, area);
 }
@@ -439,8 +484,8 @@ fn render_help(f: &mut Frame, area: Rect) {
 /// a title, a scrollable list of its subdirectories (with a leading `..`), an
 /// optional permission notice, and a one-line key hint. Pure read of `&Browser`.
 fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
-    let w = 76.min(area.width.saturating_sub(2)).max(28);
-    let h = 20.min(area.height.saturating_sub(2)).max(8);
+    let w = 78.min(area.width.saturating_sub(2)).max(30);
+    let h = 24.min(area.height.saturating_sub(2)).max(10);
     let popup = centered(area, w, h);
     overlay_bg(f, popup);
 
@@ -455,35 +500,65 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let has_notice = browser.notice.is_some();
-    let mut constraints = vec![Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)];
-    if has_notice {
-        constraints.insert(2, Constraint::Length(1));
+    // Layout: a fixed gold "scan this folder" button, the title (path + the
+    // folder's OWN counts), the subdir list (with per-row counts), an optional
+    // dimmed file preview, an optional notice, and the key hint.
+    let files_h: u16 = if browser.files.is_empty() {
+        0
+    } else {
+        (browser.files.len() as u16 + 1).min(7)
+    };
+    let mut constraints = vec![Constraint::Length(1), Constraint::Length(2), Constraint::Min(3)];
+    if files_h > 0 {
+        constraints.push(Constraint::Length(files_h));
     }
+    if browser.notice.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1));
     let rows = Layout::vertical(constraints).split(inner);
 
-    // Title: the current folder (home-collapsed, tail-truncated) + a count.
-    let dir_count = browser.rows.iter().filter(|r| matches!(r, BrowseRow::Dir(_))).count();
-    let here = truncate(&short(&browser.cwd.to_string_lossy()), inner.width as usize);
-    let title = Paragraph::new(Text::from(vec![
-        Line::from(Span::styled(here, Style::default().fg(CYAN).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled(
-            format!("{dir_count} subfolder{}", if dir_count == 1 { "" } else { "s" }),
-            Style::default().fg(DIM),
-        )),
-    ]));
-    f.render_widget(title, rows[0]);
+    // (0) The headline affordance — a black-on-gold button so "scan THIS folder"
+    // is unmissable, plus the `s` shortcut.
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " [ → Scan this folder ] ",
+                Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  press ", Style::default().fg(DIM)),
+            Span::styled("s", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        ])),
+        rows[0],
+    );
 
-    // The subdirectory list (dirs only; `..` first when a parent exists).
-    let items: Vec<ListItem> = browser
-        .rows
+    // (1) Title: the current folder (home-collapsed, tail-truncated) + its own
+    // shallow counts, so the user sees what a scan here would pick up.
+    let here = truncate(&short(&browser.cwd.to_string_lossy()), inner.width as usize);
+    f.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(Span::styled(here, Style::default().fg(CYAN).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(count_summary(&browser.here), Style::default().fg(DIM))),
+        ])),
+        rows[1],
+    );
+
+    // (2) The subdirectory list, WINDOWED to the visible rows so counts are
+    // computed lazily (one shallow read_dir per on-screen row, cached).
+    let list_area = rows[2];
+    let total = browser.rows.len();
+    let vh = (list_area.height as usize).max(1);
+    let offset = if total <= vh { 0 } else { browser.selected.saturating_sub(vh / 2).min(total - vh) };
+    let end = (offset + vh).min(total);
+    let items: Vec<ListItem> = browser.rows[offset..end]
         .iter()
         .map(|row| match row {
             BrowseRow::Parent => {
                 ListItem::new(Line::from(Span::styled("..   (up a level)", Style::default().fg(LAVENDER))))
             }
             BrowseRow::Dir(p) => {
-                ListItem::new(Line::from(Span::styled(format!("{}/", dir_label(p)), Style::default().fg(FG))))
+                let counts = browser.count_for(p).map(|c| count_summary(&c));
+                dir_row(&format!("{}/", dir_label(p)), counts.as_deref(), list_area.width)
             }
         })
         .collect();
@@ -491,29 +566,105 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         .highlight_style(Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    if !browser.rows.is_empty() {
-        state.select(Some(browser.selected.min(browser.rows.len() - 1)));
+    if total > 0 {
+        state.select(Some(browser.selected.saturating_sub(offset)));
     }
-    f.render_stateful_widget(list, rows[1], &mut state);
+    f.render_stateful_widget(list, list_area, &mut state);
 
-    let mut idx = 2;
+    let mut idx = 3;
+
+    // (3) Dimmed preview of the files a scan here would touch (images flagged).
+    if files_h > 0 {
+        render_file_preview(f, browser, rows[idx]);
+        idx += 1;
+    }
+
+    // (4) Permission/notice line.
     if let Some(notice) = &browser.notice {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                truncate(notice, inner.width as usize),
-                Style::default().fg(PINK),
-            )),
+            Paragraph::new(Span::styled(truncate(notice, inner.width as usize), Style::default().fg(PINK))),
             rows[idx],
         );
         idx += 1;
     }
+
+    // (5) Key hint.
     f.render_widget(
         Paragraph::new(Span::styled(
-            "↑↓ move · Enter open · Backspace up · s scan this folder · Esc cancel",
+            "↑↓ move · Enter open · Bksp up · s scan this folder · t type · Esc cancel",
             Style::default().fg(DIM),
         )),
         rows[idx],
     );
+}
+
+/// The dimmed "files here" preview inside the browser (FIX 2): a header with the
+/// total, then the file names (image files cyan-flagged), collapsing the
+/// overflow into a `+N more` line.
+fn render_file_preview(f: &mut Frame, browser: &Browser, area: Rect) {
+    let width = area.width as usize;
+    let header = format!(
+        "Files here ({}{}):",
+        browser.files_total,
+        if browser.here.capped { "+" } else { "" }
+    );
+    let mut lines = vec![Line::from(Span::styled(header, Style::default().fg(DIM).add_modifier(Modifier::BOLD)))];
+
+    let body_cap = (area.height as usize).saturating_sub(1);
+    let kept = browser.files.len();
+    let need_more = kept > body_cap || browser.files_total > kept || browser.here.capped;
+    let show = if need_more { body_cap.saturating_sub(1) } else { body_cap };
+
+    for fe in browser.files.iter().take(show) {
+        let (marker, color) = if fe.is_image { ("▪ ", CYAN) } else { ("· ", DIM) };
+        lines.push(Line::from(vec![
+            Span::styled(marker, Style::default().fg(color)),
+            Span::styled(truncate(&fe.name, width.saturating_sub(2)), Style::default().fg(DIM)),
+        ]));
+    }
+    if need_more {
+        let remaining = browser.files_total.saturating_sub(show);
+        let plus = if browser.here.capped { "+" } else { "" };
+        lines.push(Line::from(Span::styled(
+            format!("  … and {remaining}{plus} more"),
+            Style::default().fg(DIM),
+        )));
+    }
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+/// One subdirectory row: `Name/` on the left (FG), its shallow counts dim and
+/// right-aligned. `counts == None` means the folder was unreadable.
+fn dir_row(name: &str, counts: Option<&str>, width: u16) -> ListItem<'static> {
+    let usable = (width as usize).saturating_sub(2); // the "▶ " highlight gutter
+    let counts = counts.unwrap_or("· unreadable");
+    let cw = counts.chars().count();
+    let name_room = usable.saturating_sub(cw + 1).max(4);
+    let name_t = truncate(name, name_room);
+    let used = name_t.chars().count() + cw;
+    let pad = usable.saturating_sub(used).max(1);
+    ListItem::new(Line::from(vec![
+        Span::styled(name_t, Style::default().fg(FG)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(counts.to_string(), Style::default().fg(DIM)),
+    ]))
+}
+
+/// Compact one-line tally for a folder: `143 images · 27 files · 12 folders`
+/// (FIX 2). A `+` suffix marks a count that hit the shallow walk cap.
+fn count_summary(c: &DirCounts) -> String {
+    format!(
+        "{} · {} · {}",
+        count_part(c.images, c.capped, "image", "images"),
+        count_part(c.files, c.capped, "file", "files"),
+        count_part(c.dirs, c.capped, "folder", "folders"),
+    )
+}
+
+fn count_part(n: usize, capped: bool, singular: &str, plural: &str) -> String {
+    let word = if n == 1 && !capped { singular } else { plural };
+    let suffix = if capped { "+" } else { "" };
+    format!("{n}{suffix} {word}")
 }
 
 /// Single-line folder-path prompt (the `s` key): type a path, `Enter`/`Tab`
@@ -860,20 +1011,28 @@ mod tests {
     /// FIX 2 — the folder browser overlay paints the current folder, its
     /// subdirectories (with a `..` row), and the one-line key hint.
     #[test]
-    fn browser_overlay_renders_cwd_subdirs_and_hint() {
+    fn browser_overlay_renders_cwd_subdirs_counts_files_and_affordance() {
         use crate::app::{App, Browser};
 
         let base = std::env::temp_dir().join(format!("fileid-ui-browse-{}", std::process::id()));
         std::fs::create_dir_all(base.join("Pictures")).unwrap();
         std::fs::create_dir_all(base.join("Documents")).unwrap();
+        std::fs::write(base.join("photo.png"), "img").unwrap();
+        std::fs::write(base.join("notes.txt"), "txt").unwrap();
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.browser = Some(Browser::open(base.clone()));
         let text = frame_text(100, 30, &app);
 
         assert!(text.contains("Pick a folder to scan"), "browser title missing");
+        // FIX 2 — the unmissable scan affordance + subdir rows + counts.
+        assert!(text.contains("Scan this folder"), "scan affordance missing");
         assert!(text.contains("Pictures/"), "subdir Pictures not listed");
         assert!(text.contains("Documents/"), "subdir Documents not listed");
+        assert!(text.contains("folders"), "per-folder/own counts missing");
+        // FIX 2 — the dimmed preview lists the actual files a scan would touch.
+        assert!(text.contains("Files here"), "file preview header missing");
+        assert!(text.contains("photo.png"), "preview file not listed");
         assert!(text.contains(".."), "the up-a-level row is missing");
         assert!(text.contains("scan this folder"), "browser key hint missing");
 

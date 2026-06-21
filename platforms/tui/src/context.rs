@@ -8,30 +8,42 @@ use anyhow::{Context as _, Result};
 
 /// Resolved run context threaded into the app.
 pub struct Ctx {
-    /// Absolute path to the library SQLite file.
+    /// Absolute path to the library SQLite file the TUI reads.
     pub db: PathBuf,
+    /// SCRATCH mode (no `--db` / env override): the directory handed to the
+    /// spawned engine as `XDG_DATA_HOME` / `%LOCALAPPDATA%` so a scan writes the
+    /// SAME library the TUI reads (its `<dir>/FileID/fileid.sqlite`). `None` for
+    /// an explicit `--db` / env library, where the engine uses its own
+    /// canonical root (today's behavior).
+    pub engine_data_home: Option<PathBuf>,
 }
 
 impl Ctx {
-    /// Resolve the database path. Precedence is byte-identical to the CLI
-    /// (`platforms/cli/src/context.rs`) so both front-ends point at the same
-    /// library by default:
+    /// Resolve the library the TUI opens. Precedence:
     ///   1. `--db <path>`
     ///   2. `$FILEID_DB`
     ///   3. `$CFFIXED_USER_HOME/fileid.sqlite` (parity with the macOS app's
     ///      sandbox-root env var; convenient for isolating a test library)
-    ///   4. `fileid_engine::paths::db_path()` — the engine's canonical location
-    ///      (honors `$XDG_DATA_HOME` / `%LOCALAPPDATA%`), i.e. the same file the
-    ///      desktop apps read/write.
+    ///   4. **default: a persistent SCRATCH library** so the TUI opens EMPTY —
+    ///      `<scratch_base>/FileID/fileid.sqlite`, never the desktop app's
+    ///      library at the engine's canonical `…/FileID/fileid.sqlite`.
+    ///
+    /// 1–3 set `engine_data_home = None` (explicit library; the spawned engine
+    /// uses its own canonical root, as before). Only the default arm is scratch.
     pub fn resolve(db_flag: Option<PathBuf>) -> Result<Self> {
-        let default = fileid_engine::paths::db_path;
-        let db = resolve_db(
+        let t = resolve_target(
             db_flag,
             std::env::var("FILEID_DB").ok(),
             std::env::var("CFFIXED_USER_HOME").ok(),
-            default,
+            default_scratch_home,
         )?;
-        Ok(Self { db })
+        Ok(Self { db: t.db, engine_data_home: t.engine_data_home })
+    }
+
+    /// True when running against the default scratch library (no explicit `--db`
+    /// / env). Drives the friendly empty-screen + Settings copy.
+    pub fn scratch(&self) -> bool {
+        self.engine_data_home.is_some()
     }
 
     /// Collapse `$HOME` to `~` for compact display in the Settings/status line.
@@ -40,24 +52,52 @@ impl Ctx {
     }
 }
 
-/// Pure precedence resolver (env values injected) so it can be unit-tested
-/// without touching the process environment.
-fn resolve_db(
+/// Resolution outcome: the library path the TUI reads, plus (scratch mode only)
+/// the data-dir base to hand the spawned engine so scans land in that same file.
+struct Target {
+    db: PathBuf,
+    engine_data_home: Option<PathBuf>,
+}
+
+/// Pure precedence resolver (env + scratch base injected) so it can be
+/// unit-tested without touching the process environment.
+fn resolve_target(
     db_flag: Option<PathBuf>,
     fileid_db: Option<String>,
     cffixed_home: Option<String>,
-    default: impl FnOnce() -> Result<PathBuf>,
-) -> Result<PathBuf> {
+    scratch_home: impl FnOnce() -> Result<PathBuf>,
+) -> Result<Target> {
     if let Some(p) = db_flag {
-        return Ok(p);
+        return Ok(Target { db: p, engine_data_home: None });
     }
     if let Some(s) = fileid_db {
-        return Ok(PathBuf::from(s));
+        return Ok(Target { db: PathBuf::from(s), engine_data_home: None });
     }
     if let Some(home) = cffixed_home {
-        return Ok(PathBuf::from(home).join("fileid.sqlite"));
+        return Ok(Target { db: PathBuf::from(home).join("fileid.sqlite"), engine_data_home: None });
     }
-    default().context("resolving default library location")
+    // No explicit library → SCRATCH. The engine appends `FileID/` to whatever
+    // we hand it as its data home, so the scratch library is at
+    // `<base>/FileID/fileid.sqlite`; pointing the engine at the same `<base>`
+    // makes a scan write exactly the file the TUI reads.
+    let base = scratch_home().context("resolving scratch library location")?;
+    let db = base.join("FileID").join("fileid.sqlite");
+    Ok(Target { db, engine_data_home: Some(base) })
+}
+
+/// The persistent scratch data-dir base used when no `--db`/env is given. Placed
+/// as a *sibling* of the real FileID data dir (clearly named, easy to find or
+/// delete) so the scratch library never collides with the desktop library at
+/// `<data>/FileID/fileid.sqlite` — this base is `<data>/FileID-TUI-Scratch`.
+/// Falls back to a temp dir when the platform data dir can't be resolved.
+fn default_scratch_home() -> Result<PathBuf> {
+    if let Ok(root) = fileid_engine::paths::root() {
+        if let Some(parent) = root.parent() {
+            return Ok(parent.join("FileID-TUI-Scratch"));
+        }
+        return Ok(root.join("tui-scratch"));
+    }
+    Ok(std::env::temp_dir().join("FileID-TUI-Scratch"))
 }
 
 /// Replace a leading `$HOME` with `~`.
@@ -114,9 +154,14 @@ fn help_text() -> String {
          \n\
          USAGE:\n    fileid-tui [--db <PATH>]\n\
          \n\
+         By default the TUI opens an EMPTY scratch library; press s to scan a\n\
+         folder and its files accumulate there. Pass --db to open an existing\n\
+         library instead (e.g. your desktop app's).\n\
+         \n\
          OPTIONS:\n    \
-         --db <PATH>    Library SQLite path. Overrides $FILEID_DB /\n                   \
-         $CFFIXED_USER_HOME / the engine default.\n    \
+         --db <PATH>    Open a specific library (SQLite path) instead of the\n                   \
+         empty scratch default. Also honors $FILEID_DB /\n                   \
+         $CFFIXED_USER_HOME.\n    \
          -h, --help     Print this help.\n    \
          -V, --version  Print version.\n\
          \n\
@@ -135,42 +180,47 @@ mod tests {
 
     #[test]
     fn db_flag_wins() {
-        let got = resolve_db(
+        let got = resolve_target(
             Some(PathBuf::from("/tmp/explicit.sqlite")),
             Some("/env/fileid.sqlite".into()),
             Some("/sandbox".into()),
-            || Ok(PathBuf::from("/default/fileid.sqlite")),
+            || Ok(PathBuf::from("/scratch")),
         )
         .unwrap();
-        assert_eq!(got, PathBuf::from("/tmp/explicit.sqlite"));
+        assert_eq!(got.db, PathBuf::from("/tmp/explicit.sqlite"));
+        assert_eq!(got.engine_data_home, None, "explicit --db is not scratch");
     }
 
     #[test]
-    fn fileid_db_env_beats_cffixed_and_default() {
-        let got = resolve_db(
+    fn fileid_db_env_beats_cffixed_and_scratch() {
+        let got = resolve_target(
             None,
             Some("/env/fileid.sqlite".into()),
             Some("/sandbox".into()),
-            || Ok(PathBuf::from("/default/fileid.sqlite")),
+            || Ok(PathBuf::from("/scratch")),
         )
         .unwrap();
-        assert_eq!(got, PathBuf::from("/env/fileid.sqlite"));
+        assert_eq!(got.db, PathBuf::from("/env/fileid.sqlite"));
+        assert_eq!(got.engine_data_home, None);
     }
 
     #[test]
     fn cffixed_home_joins_fileid_sqlite() {
-        let got = resolve_db(None, None, Some("/sandbox/home".into()), || {
-            Ok(PathBuf::from("/default/fileid.sqlite"))
-        })
-        .unwrap();
-        assert_eq!(got, PathBuf::from("/sandbox/home/fileid.sqlite"));
+        let got =
+            resolve_target(None, None, Some("/sandbox/home".into()), || Ok(PathBuf::from("/scratch")))
+                .unwrap();
+        assert_eq!(got.db, PathBuf::from("/sandbox/home/fileid.sqlite"));
+        assert_eq!(got.engine_data_home, None);
     }
 
+    /// FIX 1 — with no `--db`/env, the default is a SCRATCH library (the TUI
+    /// opens EMPTY), and the engine is pointed at the same base so a scan writes
+    /// the exact file the TUI reads: `<base>/FileID/fileid.sqlite`.
     #[test]
-    fn falls_through_to_engine_default() {
-        let got = resolve_db(None, None, None, || Ok(PathBuf::from("/default/fileid.sqlite")))
-            .unwrap();
-        assert_eq!(got, PathBuf::from("/default/fileid.sqlite"));
+    fn defaults_to_empty_scratch_not_the_app_library() {
+        let got = resolve_target(None, None, None, || Ok(PathBuf::from("/scratch"))).unwrap();
+        assert_eq!(got.db, PathBuf::from("/scratch/FileID/fileid.sqlite"));
+        assert_eq!(got.engine_data_home, Some(PathBuf::from("/scratch")));
     }
 
     #[test]

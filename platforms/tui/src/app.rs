@@ -10,9 +10,14 @@
 //! of a deferred async one. The `~`-expansion is factored into a pure helper so
 //! it stays unit-testable.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
+
+use fileid_engine::pipeline::discovery::FileKind;
 
 use crate::data::{FileRow, LoadMsg, Snapshot};
 
@@ -71,6 +76,10 @@ pub struct App {
     /// the loader, then clears it.
     pub reload_requested: bool,
     pub db_label: String,
+    /// True when running against the default SCRATCH library (no `--db`): the
+    /// TUI opens EMPTY and only accumulates what the user scans here, never the
+    /// desktop app's library. Drives the friendly empty-screen + Settings copy.
+    pub scratch: bool,
 
     // ── Folder-pick + scan (FIX 2) ──────────────────────────────────────────
     /// The single-line path-input prompt is open (typing a folder to scan).
@@ -106,6 +115,7 @@ impl App {
             should_quit: false,
             reload_requested: false,
             db_label,
+            scratch: false,
             input_active: false,
             input: String::new(),
             input_error: None,
@@ -406,6 +416,33 @@ impl App {
     }
 }
 
+/// Max directory entries any single `read_dir` count walks before it stops and
+/// reports a `capped` (≥) result — bounds the work on enormous folders so a
+/// count can never hang the UI (shown as e.g. `500+`).
+const COUNT_CAP: usize = 500;
+/// Max files listed in the browser's dimmed "files here" preview; the rest
+/// collapse into a `+N more` line.
+const FILE_LIST_CAP: usize = 64;
+
+/// A cheap, shallow tally of a directory's immediate contents (FIX 2): how many
+/// images, total files, and subfolders it holds. `capped` means the walk hit
+/// [`COUNT_CAP`] and the real totals are at least these — rendered with a `+`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct DirCounts {
+    pub images: usize,
+    pub files: usize,
+    pub dirs: usize,
+    pub capped: bool,
+}
+
+/// One file in the current folder's dimmed preview list (FIX 2): its display
+/// name plus whether it's an image, so a scan's actual targets are visible.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FileEntry {
+    pub name: String,
+    pub is_image: bool,
+}
+
 /// A row in the folder browser's list: either the "go up" affordance or one of
 /// the current folder's subdirectories.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -433,33 +470,77 @@ pub struct Browser {
     pub selected: usize,
     /// A transient one-line notice (e.g. a permission-denied skip).
     pub notice: Option<String>,
+    /// `cwd`'s OWN shallow counts (FIX 2) — shown in the browser title so the
+    /// user sees what a "scan this folder" would pick up at a glance.
+    pub here: DirCounts,
+    /// `cwd`'s immediate files (FIX 2), capped at [`FILE_LIST_CAP`] for the
+    /// dimmed preview; `files_total` is how many there really are.
+    pub files: Vec<FileEntry>,
+    /// Total files in `cwd` (≥ `files.len()`), for the `+N more` line.
+    pub files_total: usize,
+    /// Lazy per-subdir count cache (FIX 2), filled DURING RENDER for the rows
+    /// actually on screen so opening a folder never eagerly walks every child.
+    /// `None` caches an unreadable subdir so it isn't retried each frame.
+    /// `RefCell` because rendering takes `&Browser`; the cache is per-`cwd` and
+    /// cleared on navigation, so it stays bounded.
+    counts: RefCell<HashMap<PathBuf, Option<DirCounts>>>,
 }
 
 impl Browser {
     /// Open a browser rooted at `start`. Never panics — an unreadable root just
     /// shows an empty list with a notice.
     pub fn open(start: PathBuf) -> Browser {
-        let mut b = Browser { cwd: start, rows: Vec::new(), selected: 0, notice: None };
+        let mut b = Browser {
+            cwd: start,
+            rows: Vec::new(),
+            selected: 0,
+            notice: None,
+            here: DirCounts::default(),
+            files: Vec::new(),
+            files_total: 0,
+            counts: RefCell::new(HashMap::new()),
+        };
         b.refresh();
         b
     }
 
-    /// Re-read `cwd`'s immediate subdirectories into `rows` (dirs only, sorted
-    /// case-insensitively), prefixed by `..` when `cwd` has a parent. An
-    /// unreadable directory leaves the list empty and sets `notice`; never
-    /// panics. `file_type()` is preferred so we don't follow symlinks into
-    /// loops; unreadable individual entries are simply skipped.
+    /// Re-read `cwd` in ONE shallow pass (FIX 2): split it into subdirectories
+    /// (→ `rows`, sorted case-insensitively, prefixed by `..`), a dimmed file
+    /// preview (→ `files`, capped), and `cwd`'s own [`DirCounts`] (→ `here`,
+    /// for the title). Bounded by [`COUNT_CAP`] so an enormous folder can't
+    /// stall the UI. An unreadable directory yields empty lists + a `notice`;
+    /// never panics. `file_type()` is preferred so symlink loops aren't
+    /// followed; unreadable individual entries are simply skipped. Clears the
+    /// per-subdir count cache since we've navigated to a new `cwd`.
     fn refresh(&mut self) {
+        self.counts.borrow_mut().clear();
         let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut files: Vec<FileEntry> = Vec::new();
+        let mut here = DirCounts::default();
         match std::fs::read_dir(&self.cwd) {
             Ok(entries) => {
                 for entry in entries.flatten() {
+                    if here.dirs + here.files >= COUNT_CAP {
+                        here.capped = true;
+                        break;
+                    }
+                    let path = entry.path();
                     let is_dir = entry
                         .file_type()
                         .map(|t| t.is_dir())
-                        .unwrap_or_else(|_| entry.path().is_dir());
+                        .unwrap_or_else(|_| path.is_dir());
                     if is_dir {
-                        dirs.push(entry.path());
+                        here.dirs += 1;
+                        dirs.push(path);
+                    } else {
+                        here.files += 1;
+                        let is_image = is_image_path(&path);
+                        if is_image {
+                            here.images += 1;
+                        }
+                        if files.len() < FILE_LIST_CAP {
+                            files.push(FileEntry { name: dir_label(&path), is_image });
+                        }
                     }
                 }
                 self.notice = None;
@@ -470,6 +551,7 @@ impl Browser {
             }
         }
         dirs.sort_by_key(|a| dir_key(a));
+        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
         let mut rows = Vec::with_capacity(dirs.len() + 1);
         if self.cwd.parent().is_some() {
@@ -477,9 +559,26 @@ impl Browser {
         }
         rows.extend(dirs.into_iter().map(BrowseRow::Dir));
         self.rows = rows;
+        self.here = here;
+        self.files_total = here.files;
+        self.files = files;
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
         }
+    }
+
+    /// Shallow counts for a subdirectory `path` (FIX 2), memoized. Called from
+    /// the renderer for the rows currently ON SCREEN, so scrolling computes at
+    /// most one `read_dir` per newly-visible row and never re-walks a folder.
+    /// `None` = unreadable (rendered without counts); cached so it isn't retried
+    /// every frame. Bounded by [`COUNT_CAP`]; never panics.
+    pub fn count_for(&self, path: &Path) -> Option<DirCounts> {
+        if let Some(&cached) = self.counts.borrow().get(path) {
+            return cached;
+        }
+        let computed = count_dir_shallow(path);
+        self.counts.borrow_mut().insert(path.to_path_buf(), computed);
+        computed
     }
 
     fn move_down(&mut self) {
@@ -529,6 +628,42 @@ fn dir_key(p: &Path) -> String {
 /// The directory's display label (final segment, or the whole path if none).
 pub fn dir_label(p: &Path) -> String {
     p.file_name().map_or_else(|| p.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
+}
+
+/// Is `path` an image, by extension? Uses the engine's OWN `FileKind` table so
+/// the browser's "N images" tally matches exactly what a scan would classify.
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .map(|ext| FileKind::from_extension(ext) == FileKind::Image)
+        .unwrap_or(false)
+}
+
+/// One shallow, bounded `read_dir` tally of `path`'s immediate children (FIX 2):
+/// images / total files / subfolders. Stops at [`COUNT_CAP`] entries (sets
+/// `capped`) so a folder with a million files can't hang the count. Returns
+/// `None` on a read error (permission denied / unavailable) so the caller can
+/// render the row without counts. Never recurses; never panics.
+fn count_dir_shallow(path: &Path) -> Option<DirCounts> {
+    let entries = std::fs::read_dir(path).ok()?;
+    let mut c = DirCounts::default();
+    for entry in entries.flatten() {
+        if c.dirs + c.files >= COUNT_CAP {
+            c.capped = true;
+            break;
+        }
+        let p = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or_else(|_| p.is_dir());
+        if is_dir {
+            c.dirs += 1;
+        } else {
+            c.files += 1;
+            if is_image_path(&p) {
+                c.images += 1;
+            }
+        }
+    }
+    Some(c)
 }
 
 /// `$HOME` (or `%USERPROFILE%` on Windows), if set + non-empty.
@@ -822,5 +957,82 @@ mod tests {
         app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
         assert!(app.browser.is_none(), "must not open the browser mid-scan");
         assert!(!app.input_active);
+    }
+
+    /// A throwaway tree with KNOWN contents so the FIX-2 counts are exact:
+    /// `base/{photo.jpg, notes.txt, docs/, sub/{a.jpg,b.png,c.txt,nested/}}`.
+    fn count_tree(tag: &str) -> PathBuf {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("fileid-tui-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("sub").join("nested")).unwrap();
+        std::fs::write(base.join("photo.jpg"), "img").unwrap();
+        std::fs::write(base.join("notes.txt"), "txt").unwrap();
+        std::fs::write(base.join("sub").join("a.jpg"), "img").unwrap();
+        std::fs::write(base.join("sub").join("b.png"), "img").unwrap();
+        std::fs::write(base.join("sub").join("c.txt"), "txt").unwrap();
+        base
+    }
+
+    #[test]
+    fn browser_counts_cwd_and_subdirs_and_lists_files() {
+        let base = count_tree("counts");
+        let b = Browser::open(base.clone());
+
+        // cwd's own counts (browser title): 1 image, 2 files, 2 dirs.
+        assert_eq!(b.here, DirCounts { images: 1, files: 2, dirs: 2, capped: false });
+        assert_eq!(b.files_total, 2);
+
+        // The dimmed file preview lists the actual files a scan would pick up,
+        // sorted, with the image flagged.
+        let names: Vec<&str> = b.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["notes.txt", "photo.jpg"]);
+        let photo = b.files.iter().find(|f| f.name == "photo.jpg").unwrap();
+        assert!(photo.is_image, "photo.jpg must be flagged an image");
+        assert!(!b.files.iter().find(|f| f.name == "notes.txt").unwrap().is_image);
+
+        // Lazy per-subdir count: sub/ has 2 images, 3 files, 1 subfolder.
+        let sub = base.join("sub");
+        assert_eq!(
+            b.count_for(&sub),
+            Some(DirCounts { images: 2, files: 3, dirs: 1, capped: false })
+        );
+        // docs/ is empty.
+        assert_eq!(
+            b.count_for(&base.join("docs")),
+            Some(DirCounts::default())
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_count_is_cached_and_bounded_on_huge_dirs() {
+        let mut base = std::env::temp_dir();
+        base.push(format!("fileid-tui-huge-{}", std::process::id()));
+        let huge = base.join("huge");
+        std::fs::create_dir_all(&huge).unwrap();
+        for i in 0..(COUNT_CAP + 5) {
+            std::fs::write(huge.join(format!("f{i}.bin")), "x").unwrap();
+        }
+        let b = Browser::open(base.clone());
+        let counts = b.count_for(&huge).expect("readable dir counts");
+        assert!(counts.capped, "a >COUNT_CAP folder must report capped");
+        assert_eq!(counts.dirs + counts.files, COUNT_CAP, "walk stops at the cap");
+        // Second call is served from cache (same result, no re-walk).
+        assert_eq!(b.count_for(&huge), Some(counts));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_count_of_unreadable_dir_is_none_not_a_panic() {
+        let b = Browser::open(std::env::temp_dir());
+        // A path that does not exist counts to None (rendered without counts),
+        // and the miss is cached.
+        assert_eq!(b.count_for(Path::new("/no/such/dir-xyz-98765")), None);
+        assert_eq!(b.count_for(Path::new("/no/such/dir-xyz-98765")), None);
     }
 }
