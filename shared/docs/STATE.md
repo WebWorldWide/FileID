@@ -8,6 +8,18 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — face-clustering QUALITY: junk-cluster suppression (407→285 persons on real data, zero merges)
+
+User repeatedly unhappy: 991 faces over-split into **407 person clusters**. Investigated on the REAL DB (worked on a `/tmp` copy incl. the WAL sidecar; real `fileid.sqlite{,-wal,-shm}` md5-proven untouched before+after).
+
+**Data analysis (991 faces / 407 clusters):** 268 clusters (66%) are singletons, 372 (91%) are 1–2 faces; the 12 biggest (≥10) hold 412 faces. Tiny clusters are LOW quality (Apple Vision `faceCaptureQuality` avg 0.15–0.19) vs big clusters (0.33). Multi-face clusters are tight (mean intra-cohesion **0.94**). **Cross-cluster face cosines top out at 0.585** (genuine same-person sits 0.88–0.95) — the 407 are genuinely well-separated, so there are essentially no high-cosine fragments to merge.
+
+**Decision:** centroid/per-pair *consolidation is UNSAFE here* — the only candidate merges sit at 0.55–0.57, dead in the age-progression/family overlap zone the floor forbids; `frac≥0.60`=0 for every pair, so no high-threshold fraction guard merges anything. The safe, high-impact lever is **quality gating**: junk faces form spurious singletons, so don't let them.
+
+**Change (mirrored macOS↔Windows, byte-faithful):** after clustering, a cluster is persisted as a person iff `size ≥ minClusterSize(3)` **OR** `max member quality ≥ soloQualityFloor(0.12)`; else its faces are left unclustered (`person_id NULL`, still candidates — never deleted, never merged). Env-tunable `FILEID_FACE_MIN_CLUSTER_SIZE` / `FILEID_FACE_SOLO_QUALITY` (=0 disables). Eyeball-validated on the crops: <0.12 singletons/doubletons are unrecognizable blur/profile/burst-frames; ≥0.25 singletons are real distinct people (sunglasses/face-paint/one-offs) and are kept; size≥3 protects real low-light recurring people (e.g. a 20-shot cluster).
+
+**Offline result on real embeddings (faithful pipeline order):** floor=0 reproduces 407 exactly (no-op proof); **default 0.12 → 285 persons** (127 junk micro-clusters suppressed, 216 faces unclustered, 775 still clustered), **zero identity merges**. Files: `platforms/apple/.../FaceClustering.swift` (`suppressLowQualityClusters` + Phase-3 wire), `platforms/windows/.../pipeline/face_clustering.rs` (`suppress_low_quality_micro_clusters` + `min_cluster_size`/`solo_quality_floor`) wired in `commands/face_clustering.rs` after `consolidate()`. Tests: 4 Swift (`FaceQualitySuppressionTests`) + 4 Rust, all green. **Verified:** `swift build` + `swift test --filter FaceClustering` green (16 tests/3 suites); `cargo clippy -D warnings` + `cargo test face_clustering` green (22 tests).
+
 ## 2026-06-21 — on-hardware test of macOS engine/app + CLI + TUI on real data; RAM++ CRLF bug + EP/CLI fixes
 
 Tested the macOS Swift engine/app and the Rust CLI/TUI against the user's real ~3372-file library (isolated copies; real DB proven untouched). Results:

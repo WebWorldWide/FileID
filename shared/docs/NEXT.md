@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-06-21 — face junk-cluster suppression: confirm on the user's Mac + calibrate Windows
+
+Landed: a corroboration gate suppresses junk 1–2 face clusters (`size ≥ FILEID_FACE_MIN_CLUSTER_SIZE`=3 OR `max quality ≥ FILEID_FACE_SOLO_QUALITY`=0.12), offline-validated 407→285 persons on the real library with zero merges (see STATE/DECISIONS 2026-06-21).
+
+- **Confirm in-app (macOS):** re-run People-tab clustering on the user's library and verify person count drops ~407→~285 and the long tail of blurry one-off "people" is gone, with no real person missing. Acceptance: user eyeballs People tab and agrees the over-split is fixed; spot-check that a suppressed face still appears as an unassigned candidate (not deleted) and can be attached manually.
+- **Tune if needed:** if still too many junk singletons, push `FILEID_FACE_SOLO_QUALITY` toward 0.15 (→~230); if a wanted rare person is hidden, lower toward 0.10 (→~336) — no rebuild needed, it's an env knob.
+- **Windows calibration (on-hardware):** the 0.12 default is Apple-`faceCaptureQuality`-calibrated; SCRFD quality (`score × geometry`) differs. Run `build\iterate.ps1` against `G:\TrueNAS`, inspect the SCRFD `face_quality` distribution + suppressed-cluster crops, and set the Windows default accordingly (size≥3 half is already scale-safe).
+
 ## 2026-06-21 — performance follow-ups (RAM++ is the scan bottleneck)
 
 - **Revise the throughput target**: ≥140 files/s predates RAM++ and is unreachable with a 926MB Swin-L tagger (RTX 2060 ≈6 f/s, M1 ≈1 f/s). Set a realistic RAM++-on target + keep the old number only for the no-heavy-tagger path.

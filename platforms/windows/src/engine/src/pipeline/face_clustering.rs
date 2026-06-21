@@ -456,6 +456,84 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     (new_assignments, new_anchors)
 }
 
+/// Minimum CORROBORATED cluster size kept regardless of per-face quality:
+/// ≥ this many mutually-similar faces is a real recurring identity even when
+/// every frame is mediocre. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000];
+/// default 3).
+pub fn min_cluster_size() -> u32 {
+    std::env::var("FILEID_FACE_MIN_CLUSTER_SIZE")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(1, 10_000))
+        .unwrap_or(3)
+}
+
+/// A 1–2 face cluster must contain a face at/above this quality to be persisted
+/// as a person; otherwise it is left UNCLUSTERED (no spurious singleton).
+/// `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.12). The default is
+/// calibrated on the macOS reference library (Apple Vision faceCaptureQuality);
+/// Windows quality is SCRFD score×geometry on a similar 0..~0.95 range, so 0.12
+/// is a conservative starting point — recalibrate on-hardware against
+/// `G:\TrueNAS`. 0 disables suppression entirely (pure over-split behavior).
+pub fn solo_quality_floor() -> f32 {
+    std::env::var("FILEID_FACE_SOLO_QUALITY")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(0.12)
+}
+
+/// Drop "junk" micro-clusters so the People tab isn't flooded with spurious
+/// singleton/doubleton persons built from unrecognizable faces (blurry / motion
+/// / tiny / heavy-profile). A cluster is KEPT iff it has ≥ `min_cluster_size`
+/// members OR its best member quality ≥ `solo_quality_floor`; otherwise its
+/// faces are removed from the assignment (the caller's persist NULLs every
+/// unassigned face, so they land unclustered — still a candidate, never deleted).
+///
+/// This is the SAFE, high-impact fragmentation fix: it NEVER merges two clusters,
+/// so it cannot bridge distinct identities — it only suppresses low-confidence
+/// lone faces. On the macOS reference library it takes 407→~285 persons by
+/// dropping 127 junk micro-clusters with zero identity merges. `solo_quality_floor
+/// <= 0` is a no-op (every cluster kept). Mirrors `FaceClustering.swift`'s
+/// `suppressLowQualityClusters`.
+pub fn suppress_low_quality_micro_clusters(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    anchors: Vec<ClusterAnchor>,
+    min_cluster_size: u32,
+    solo_quality_floor: f32,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
+    if solo_quality_floor <= 0.0 {
+        return (assignments, anchors);
+    }
+    let quality_of: HashMap<i64, f32> = faces.iter().map(|f| (f.face_id, f.quality)).collect();
+    // Per-cluster size + best (max) member quality, taken from the FINAL
+    // assignments (post-consolidation cluster ids) — the source of truth for
+    // what would be persisted.
+    let mut size: HashMap<i32, u32> = HashMap::new();
+    let mut max_q: HashMap<i32, f32> = HashMap::new();
+    for a in &assignments {
+        *size.entry(a.cluster_id).or_insert(0) += 1;
+        let q = quality_of
+            .get(&a.face_id)
+            .copied()
+            .unwrap_or(f32::NEG_INFINITY);
+        let e = max_q.entry(a.cluster_id).or_insert(f32::NEG_INFINITY);
+        if q > *e {
+            *e = q;
+        }
+    }
+    let keep = |cid: i32| -> bool {
+        size.get(&cid).copied().unwrap_or(0) >= min_cluster_size
+            || max_q.get(&cid).copied().unwrap_or(f32::NEG_INFINITY) >= solo_quality_floor
+    };
+    let new_assignments: Vec<ClusterAssignment> =
+        assignments.into_iter().filter(|a| keep(a.cluster_id)).collect();
+    let new_anchors: Vec<ClusterAnchor> =
+        anchors.into_iter().filter(|an| keep(an.cluster_id)).collect();
+    (new_assignments, new_anchors)
+}
+
 /// Derive the name-based auto-merge blocked pairs from a face→name snapshot.
 ///
 /// `face_name` maps each named face's id to the user-assigned name of the person
@@ -956,6 +1034,79 @@ mod tests {
         // avoid process-global env races with parallel tests.)
         std::env::remove_var("FILEID_FACE_AUTOMERGE_COS");
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
+    }
+
+    #[test]
+    fn suppression_drops_low_quality_micro_clusters() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        // c1: junk pair (q .05/.06) -> drop; c2: good singleton (.40) -> keep;
+        // c3: junk singleton (.05) -> drop; c4: size-3 all-low -> keep (size wins).
+        let faces = vec![
+            row(1, 1, v.clone(), 0.05),
+            row(2, 2, v.clone(), 0.06),
+            row(3, 3, v.clone(), 0.40),
+            row(4, 4, v.clone(), 0.05),
+            row(5, 5, v.clone(), 0.04),
+            row(6, 6, v.clone(), 0.03),
+            row(7, 7, v.clone(), 0.02),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 1 },
+            ClusterAssignment { face_id: 3, cluster_id: 2 },
+            ClusterAssignment { face_id: 4, cluster_id: 3 },
+            ClusterAssignment { face_id: 5, cluster_id: 4 },
+            ClusterAssignment { face_id: 6, cluster_id: 4 },
+            ClusterAssignment { face_id: 7, cluster_id: 4 },
+        ];
+        let anchors = vec![
+            anchor(1, 1, v.clone(), 2),
+            anchor(2, 3, v.clone(), 1),
+            anchor(3, 4, v.clone(), 1),
+            anchor(4, 5, v.clone(), 3),
+        ];
+        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.12);
+        let kept: std::collections::HashSet<i32> = an.iter().map(|x| x.cluster_id).collect();
+        assert_eq!(kept, [2, 4].into_iter().collect());
+        let assigned: std::collections::HashSet<i64> = a.iter().map(|x| x.face_id).collect();
+        assert_eq!(
+            assigned,
+            [3, 5, 6, 7].into_iter().collect(),
+            "suppressed faces are unassigned (persist NULLs them)"
+        );
+    }
+
+    #[test]
+    fn suppression_keeps_pair_with_one_good_face() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![row(1, 1, v.clone(), 0.05), row(2, 2, v.clone(), 0.40)];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 9 },
+            ClusterAssignment { face_id: 2, cluster_id: 9 },
+        ];
+        let anchors = vec![anchor(9, 2, v.clone(), 2)];
+        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.12);
+        assert_eq!(an.len(), 1, "the best face (0.40) rescues the pair");
+        assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn suppression_floor_zero_is_noop() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![row(1, 1, v.clone(), 0.01)];
+        let assignments = vec![ClusterAssignment { face_id: 1, cluster_id: 1 }];
+        let anchors = vec![anchor(1, 1, v.clone(), 1)];
+        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.0);
+        assert_eq!(an.len(), 1, "floor 0 disables suppression");
+        assert_eq!(a.len(), 1);
+    }
+
+    #[test]
+    fn suppression_env_defaults() {
+        std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE");
+        std::env::remove_var("FILEID_FACE_SOLO_QUALITY");
+        assert_eq!(min_cluster_size(), 3);
+        assert!((solo_quality_floor() - 0.12).abs() < 1e-6);
     }
 
     // Collapse a set of merge edges into a canonical per-centroid grouping via

@@ -324,6 +324,27 @@ pub(crate) async fn handle_run_face_clustering(
                     "[CLUSTER] auto-consolidated near-duplicate clusters"
                 );
             }
+            // Junk-cluster suppression — drop 1–2 face clusters built only from
+            // low-quality faces so they don't become spurious singleton persons
+            // (the over-split the People tab shows). Pure removal: never merges
+            // identities; suppressed faces fall through to person_id = NULL and
+            // stay candidates. Mirrors FaceClustering.swift. (face-quality gate)
+            let min_size = crate::pipeline::face_clustering::min_cluster_size();
+            let q_floor = crate::pipeline::face_clustering::solo_quality_floor();
+            let before_supp = an.len();
+            let (a, an) = crate::pipeline::face_clustering::suppress_low_quality_micro_clusters(
+                &faces, a, an, min_size, q_floor,
+            );
+            if an.len() != before_supp {
+                tracing::info!(
+                    before = before_supp,
+                    after = an.len(),
+                    suppressed = before_supp - an.len(),
+                    min_size,
+                    q_floor,
+                    "[CLUSTER] suppressed low-quality micro-clusters"
+                );
+            }
             (a, an)
         };
 

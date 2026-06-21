@@ -235,3 +235,62 @@ struct FaceClusteringMergeTests {
                 "a later success rehabilitates the row")
     }
 }
+
+// Junk-cluster suppression: a 1–2 face cluster of only low-quality faces is
+// dropped (left unclustered) so it can't spawn a spurious singleton person,
+// while size≥minSize clusters and any cluster with a good face survive. Pure
+// function — no DB needed. (face-quality gate; calibrated 407→~285 on the
+// 991-face reference library)
+@Suite("Face clustering low-quality suppression")
+struct FaceQualitySuppressionTests {
+    // dense idx → face id; face id → quality
+    private static let denseToFaceID: [Int64] = [10, 11, 12, 13, 14, 15, 16]
+    private static let quality: [Int64: Double] = [
+        10: 0.05, 11: 0.06,   // junk pair
+        12: 0.40,             // good singleton
+        13: 0.05,             // junk singleton
+        14: 0.04, 15: 0.03, 16: 0.02,  // junk TRIPLE (corroborated by size)
+    ]
+    private static let byCluster: [Int: [Int]] = [
+        100: [0, 1],     // doubleton, maxQ 0.06 → suppress
+        101: [2],        // singleton, q 0.40 → keep
+        102: [3],        // singleton, q 0.05 → suppress
+        103: [4, 5, 6],  // size 3, all low → keep (size wins)
+    ]
+
+    @Test("low-quality 1–2 face clusters are suppressed; size≥3 and good faces survive")
+    func suppressesJunkMicroClusters() {
+        let r = FaceClustering.suppressLowQualityClusters(
+            Self.byCluster, denseToFaceID: Self.denseToFaceID,
+            faceQualityByID: Self.quality, minSize: 3, qualityFloor: 0.12)
+        #expect(Set(r.kept.keys) == [101, 103], "kept the good singleton + the size-3 cluster")
+        #expect(r.suppressedClusters == 2, "the junk pair + junk singleton are dropped")
+        #expect(r.suppressedFaces == 3, "2 faces from the pair + 1 from the singleton")
+    }
+
+    @Test("a doubleton keeps the cluster when its BEST face clears the floor")
+    func maxQualityRuleKeepsMixedPair() {
+        let r = FaceClustering.suppressLowQualityClusters(
+            [7: [0, 2]],  // faces 10 (0.05) + 12 (0.40) → maxQ 0.40
+            denseToFaceID: Self.denseToFaceID, faceQualityByID: Self.quality,
+            minSize: 3, qualityFloor: 0.12)
+        #expect(r.kept.keys.contains(7), "one good face rescues the pair")
+        #expect(r.suppressedClusters == 0)
+    }
+
+    @Test("qualityFloor <= 0 disables suppression (keeps every cluster)")
+    func floorZeroIsNoOp() {
+        let r = FaceClustering.suppressLowQualityClusters(
+            Self.byCluster, denseToFaceID: Self.denseToFaceID,
+            faceQualityByID: Self.quality, minSize: 3, qualityFloor: 0.0)
+        #expect(r.kept.count == Self.byCluster.count, "no-op keeps all 4 clusters")
+        #expect(r.suppressedClusters == 0 && r.suppressedFaces == 0)
+    }
+
+    @Test("env overrides parse + clamp")
+    func envKnobsClampAndDefault() {
+        // Defaults when unset (the validated 407→~285 operating point).
+        #expect(FaceClustering.minClusterSizeToKeep == 3)
+        #expect(abs(FaceClustering.soloQualityFloor - 0.12) < 1e-9)
+    }
+}
