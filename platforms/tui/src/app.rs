@@ -99,6 +99,14 @@ pub struct App {
     /// The folder-browser overlay (the PRIMARY `s` UX, FIX 2). `Some` while the
     /// user is navigating directories to pick one to scan; `None` otherwise.
     pub browser: Option<Browser>,
+
+    // ── AI-model download (Settings `D`) ────────────────────────────────────
+    /// A `fileid models download --all` is in flight (drives the status line +
+    /// blocks a second concurrent download).
+    pub downloading: bool,
+    /// Set when the user presses `D` on Settings; `main` consumes it, spawns the
+    /// download worker thread, and clears it (mirrors `scan_requested`).
+    pub download_requested: bool,
 }
 
 impl App {
@@ -123,6 +131,8 @@ impl App {
             scanning: false,
             scan_requested: None,
             browser: None,
+            downloading: false,
+            download_requested: false,
         }
     }
 
@@ -200,6 +210,7 @@ impl App {
                 self.data = *snap;
                 self.loading = false;
                 self.scanning = false;
+                self.downloading = false;
                 // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
             }
@@ -207,6 +218,7 @@ impl App {
                 self.status = e;
                 self.loading = false;
                 self.scanning = false;
+                self.downloading = false;
             }
         }
     }
@@ -260,8 +272,31 @@ impl App {
                 self.search_active = true;
                 self.show_help = false;
             }
+            // Download the AI models the full-ML scan needs — Settings tab only.
+            KeyCode::Char('D') if self.tab == Tab::Settings => self.request_download(),
             _ => {}
         }
+    }
+
+    /// Arm a `fileid models download --all` (the Settings `D` key): `main`
+    /// consumes `download_requested` next tick and spawns the worker thread.
+    /// Guarded so a second download — or a download racing a live scan — can't
+    /// start. Never blocks: the spawned thread streams progress to the status
+    /// line and `q` keeps quitting.
+    fn request_download(&mut self) {
+        if self.downloading {
+            self.status = "A model download is already running…".to_string();
+            return;
+        }
+        if self.scanning {
+            self.status = "Finish the current scan before downloading models…".to_string();
+            return;
+        }
+        self.downloading = true;
+        self.loading = true;
+        self.status = "Starting AI model download…".to_string();
+        self.download_requested = true;
+        self.show_help = false;
     }
 
     /// Open the folder BROWSER (the primary `s` UX, FIX 2). Starts at `$HOME`
@@ -313,6 +348,19 @@ impl App {
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 if let Some(b) = self.browser.take() {
                     self.arm_scan(b.cwd);
+                }
+            }
+            // Jump straight to where external/removable drives mount (FEATURE 1).
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.go_to_drives();
+                }
+            }
+            // Toggle showing dot-prefixed (hidden) entries — hidden by default
+            // (FEATURE 2).
+            KeyCode::Char('.') => {
+                if let Some(b) = self.browser.as_mut() {
+                    b.toggle_hidden();
                 }
             }
             // Typed-path fallback (kept trivial; the browser is primary).
@@ -478,6 +526,10 @@ pub struct Browser {
     pub files: Vec<FileEntry>,
     /// Total files in `cwd` (≥ `files.len()`), for the `+N more` line.
     pub files_total: usize,
+    /// Show dot-prefixed (hidden) entries. Hidden by DEFAULT (FEATURE 2);
+    /// toggled with `.`. Applies to the subdir list, the file preview, AND every
+    /// count so what's shown and what's tallied always agree.
+    pub show_hidden: bool,
     /// Lazy per-subdir count cache (FIX 2), filled DURING RENDER for the rows
     /// actually on screen so opening a folder never eagerly walks every child.
     /// `None` caches an unreadable subdir so it isn't retried each frame.
@@ -498,6 +550,7 @@ impl Browser {
             here: DirCounts::default(),
             files: Vec::new(),
             files_total: 0,
+            show_hidden: false,
             counts: RefCell::new(HashMap::new()),
         };
         b.refresh();
@@ -525,6 +578,13 @@ impl Browser {
                         break;
                     }
                     let path = entry.path();
+                    let name = dir_label(&path);
+                    // Hidden-by-default: skip dot-entries unless toggled on, so the
+                    // subdir list, the file preview, and the counts below all
+                    // agree (FEATURE 2).
+                    if !self.show_hidden && name.starts_with('.') {
+                        continue;
+                    }
                     let is_dir = entry
                         .file_type()
                         .map(|t| t.is_dir())
@@ -539,7 +599,7 @@ impl Browser {
                             here.images += 1;
                         }
                         if files.len() < FILE_LIST_CAP {
-                            files.push(FileEntry { name: dir_label(&path), is_image });
+                            files.push(FileEntry { name, is_image });
                         }
                     }
                 }
@@ -576,7 +636,7 @@ impl Browser {
         if let Some(&cached) = self.counts.borrow().get(path) {
             return cached;
         }
-        let computed = count_dir_shallow(path);
+        let computed = count_dir_shallow(path, self.show_hidden);
         self.counts.borrow_mut().insert(path.to_path_buf(), computed);
         computed
     }
@@ -610,13 +670,33 @@ impl Browser {
         }
     }
 
-    /// Go up to the parent directory (no-op at the filesystem root).
+    /// Go up to the parent directory. Walks all the way to the filesystem root
+    /// `/` (the root has no parent, so it's a no-op there) — so the user can
+    /// always climb out to reach any drive.
     fn go_up(&mut self) {
         if let Some(parent) = self.cwd.parent().map(Path::to_path_buf) {
             self.cwd = parent;
             self.selected = 0;
             self.refresh();
         }
+    }
+
+    /// Jump straight to where external/removable drives mount (the `d` key,
+    /// FEATURE 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt`;
+    /// else the filesystem root `/`. Re-reads the listing so the user can step
+    /// into a drive. Panic-free (an unreadable target just shows a notice).
+    fn go_to_drives(&mut self) {
+        self.cwd = drives_root();
+        self.selected = 0;
+        self.refresh();
+    }
+
+    /// Toggle showing dot-prefixed (hidden) entries (the `.` key, FEATURE 2).
+    /// Re-reads `cwd` — which also clears the per-subdir count cache — so the
+    /// subdir list, file preview, and counts all reflect the new state at once.
+    fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.refresh();
     }
 }
 
@@ -644,7 +724,7 @@ fn is_image_path(path: &Path) -> bool {
 /// `capped`) so a folder with a million files can't hang the count. Returns
 /// `None` on a read error (permission denied / unavailable) so the caller can
 /// render the row without counts. Never recurses; never panics.
-fn count_dir_shallow(path: &Path) -> Option<DirCounts> {
+fn count_dir_shallow(path: &Path, show_hidden: bool) -> Option<DirCounts> {
     let entries = std::fs::read_dir(path).ok()?;
     let mut c = DirCounts::default();
     for entry in entries.flatten() {
@@ -653,6 +733,11 @@ fn count_dir_shallow(path: &Path) -> Option<DirCounts> {
             break;
         }
         let p = entry.path();
+        // Honor the same hidden-by-default policy as the visible listing so a
+        // folder's preview count matches what a scan-here would show (FEATURE 2).
+        if !show_hidden && dir_label(&p).starts_with('.') {
+            continue;
+        }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or_else(|_| p.is_dir());
         if is_dir {
             c.dirs += 1;
@@ -687,6 +772,45 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
         }
     }
     PathBuf::from(input)
+}
+
+/// Where external / removable drives mount, for the browser's `d` jump (FEATURE
+/// 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
+/// exists); else the filesystem root `/`. Never panics.
+fn drives_root() -> PathBuf {
+    first_existing_or_root(&drives_candidates(), |p| p.is_dir())
+}
+
+/// Ordered candidate mount locations for the current OS (see [`drives_root`]).
+/// Pure (no filesystem touch), so the platform branch is obvious and testable.
+fn drives_candidates() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec![PathBuf::from("/Volumes")]
+    } else if cfg!(target_os = "windows") {
+        // No single mount root on Windows; fall through to `/` (the root of the
+        // current drive), from which the user can navigate to any drive.
+        Vec::new()
+    } else {
+        let mut v = Vec::with_capacity(3);
+        if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
+            v.push(Path::new("/media").join(user));
+        }
+        v.push(PathBuf::from("/media"));
+        v.push(PathBuf::from("/mnt"));
+        v
+    }
+}
+
+/// First candidate satisfying `exists`, else the filesystem root `/`. The
+/// existence check is injected so the resolution logic is unit-testable on any
+/// OS without depending on what's actually mounted. Never panics.
+fn first_existing_or_root(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) -> PathBuf {
+    for p in candidates {
+        if exists(p) {
+            return p.clone();
+        }
+    }
+    PathBuf::from("/")
 }
 
 #[cfg(test)]
@@ -1034,5 +1158,135 @@ mod tests {
         // and the miss is cached.
         assert_eq!(b.count_for(Path::new("/no/such/dir-xyz-98765")), None);
         assert_eq!(b.count_for(Path::new("/no/such/dir-xyz-98765")), None);
+    }
+
+    /// A tree with one visible + one hidden subdir AND one visible + one hidden
+    /// file, so the default-hidden filter (FEATURE 2) has something to drop.
+    fn dotfile_tree(tag: &str) -> PathBuf {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("fileid-tui-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(base.join("Shown")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden_dir")).unwrap();
+        std::fs::write(base.join("shown.txt"), "x").unwrap();
+        std::fs::write(base.join(".secret"), "x").unwrap();
+        base
+    }
+
+    #[test]
+    fn browser_hides_dotfiles_by_default_with_consistent_counts() {
+        let base = dotfile_tree("dot-default");
+        let b = Browser::open(base.clone());
+        assert!(!b.show_hidden, "hidden entries are off by default");
+        // No dot-prefixed subdir in the rows.
+        let has_hidden_dir = b
+            .rows
+            .iter()
+            .any(|r| matches!(r, BrowseRow::Dir(p) if dir_label(p).starts_with('.')));
+        assert!(!has_hidden_dir, "hidden subdir must be filtered by default");
+        // No dot-prefixed file in the preview.
+        assert!(b.files.iter().all(|f| !f.name.starts_with('.')), "hidden file must be filtered");
+        // Counts AGREE with what's shown: the hidden pair is dropped → 1 file, 1 dir.
+        assert_eq!(b.here, DirCounts { images: 0, files: 1, dirs: 1, capped: false });
+        assert_eq!(b.files_total, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_dot_key_toggles_hidden_and_counts_follow() {
+        let base = dotfile_tree("dot-toggle");
+        let mut app = app_with_files(0);
+        app.browser = Some(Browser::open(base.clone()));
+        // Press `.` to reveal hidden entries.
+        app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        let b = app.browser.as_ref().unwrap();
+        assert!(b.show_hidden, ". must toggle hidden on");
+        let has_hidden_dir = b
+            .rows
+            .iter()
+            .any(|r| matches!(r, BrowseRow::Dir(p) if dir_label(p) == ".hidden_dir"));
+        assert!(has_hidden_dir, "hidden subdir appears once toggled on");
+        assert!(b.files.iter().any(|f| f.name == ".secret"), "hidden file appears once toggled on");
+        // Counts now include the hidden pair: 2 files, 2 dirs.
+        assert_eq!(b.here, DirCounts { images: 0, files: 2, dirs: 2, capped: false });
+        assert_eq!(b.files_total, 2);
+        // Press `.` again to hide them — counts revert.
+        app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        let b = app.browser.as_ref().unwrap();
+        assert!(!b.show_hidden);
+        assert_eq!(b.here, DirCounts { images: 0, files: 1, dirs: 1, capped: false });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_per_subdir_count_respects_hidden_filter() {
+        // A subdir holding a visible file and a hidden file: its shallow count
+        // must match the default hidden-off state (counts consistent w/ shown).
+        let base = dotfile_tree("dot-subcount");
+        let sub = base.join("Shown");
+        std::fs::write(sub.join("visible.txt"), "x").unwrap();
+        std::fs::write(sub.join(".dot"), "x").unwrap();
+        let b = Browser::open(base.clone());
+        assert_eq!(
+            b.count_for(&sub),
+            Some(DirCounts { images: 0, files: 1, dirs: 0, capped: false }),
+            "the hidden .dot file must not be counted by default",
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn drives_root_resolves_without_panicking() {
+        let root = drives_root();
+        assert!(root.is_absolute(), "drives root must be an absolute path");
+        // Always either a real mount dir or the `/` fallback — never a panic.
+        assert!(root.is_dir() || root == Path::new("/"));
+    }
+
+    #[test]
+    fn first_existing_or_root_picks_first_then_falls_back() {
+        let a = PathBuf::from("/aaa-xyz");
+        let b = PathBuf::from("/bbb-xyz");
+        // Picks the first candidate the predicate accepts.
+        assert_eq!(first_existing_or_root(&[a.clone(), b.clone()], |p| p == b.as_path()), b);
+        // None accepted → the `/` fallback.
+        assert_eq!(first_existing_or_root(std::slice::from_ref(&a), |_| false), PathBuf::from("/"));
+        // Empty candidate list → the `/` fallback (the Windows path).
+        assert_eq!(first_existing_or_root(&[], |_| false), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn browser_d_key_jumps_to_drives_panic_free() {
+        let mut app = app_with_files(0);
+        app.browser = Some(Browser::open(std::env::temp_dir()));
+        app.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        let b = app.browser.as_ref().unwrap();
+        assert_eq!(b.cwd, drives_root(), "d jumps the browser to the drives root");
+    }
+
+    #[test]
+    fn settings_capital_d_requests_model_download() {
+        let mut app = app_with_files(0);
+        app.tab = Tab::Settings;
+        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert!(app.download_requested, "D on Settings arms a model download");
+        assert!(app.downloading);
+        assert!(app.loading);
+        // A terminal load message (e.g. a `fileid`-not-found error) clears
+        // `downloading` — no panic, q still quits.
+        app.apply_load(LoadMsg::Error("`fileid` not found".into()));
+        assert!(!app.downloading);
+        assert!(!app.loading);
+    }
+
+    #[test]
+    fn capital_d_is_settings_only() {
+        let mut app = app_with_files(0); // Library tab
+        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        assert!(!app.download_requested, "D must do nothing off the Settings tab");
+        assert!(!app.downloading);
     }
 }
