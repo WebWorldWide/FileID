@@ -1,306 +1,362 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FileID — On-device AI file organizer</title>
-  <meta name="description" content="FileID tags, dedupes, restructures, and renames tens of thousands of files locally with on-device AI. No cloud. No telemetry, ever. Apache-2.0. macOS, Windows, Linux, CLI and TUI." />
-  <meta name="color-scheme" content="dark" />
-  <meta name="theme-color" content="#0c0c11" />
-
-  <!-- Open Graph -->
-  <meta property="og:type" content="website" />
-  <meta property="og:title" content="FileID — On-device AI file organizer" />
-  <meta property="og:description" content="Tag, dedupe, restructure, and rename tens of thousands of files locally. No cloud, no telemetry, ever. Apache-2.0." />
-  <meta property="og:image" content="assets/fileid-256.png" />
-  <meta name="twitter:card" content="summary" />
-
-  <link rel="icon" type="image/svg+xml" href="assets/fileid-logo.svg" />
-  <link rel="icon" type="image/png" href="assets/fileid-256.png" />
-  <link rel="apple-touch-icon" href="assets/fileid-256.png" />
-  <link rel="preconnect" href="https://github.com" />
-  <link rel="stylesheet" href="style.css" />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FileID — On-device AI file organization</title>
+<meta name="description" content="Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own. macOS today, Windows next, Linux soon." />
+<meta property="og:title" content="FileID — On-device AI file organization" />
+<meta property="og:description" content="Point FileID at a folder. It reads every file inside and builds one searchable library. 100% on-device. Zero telemetry." />
+<link rel="icon" type="image/png" href="assets/app-icon.png" />
+<link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to content</a>
 
-  <!-- Animated LavaLamp gradient background (decorative) -->
+<!-- ────────── NAV ────────── -->
+<header class="nav">
+  <a class="nav-brand" href="#top" aria-label="FileID home">
+    <img src="assets/app-icon.png" alt="" class="nav-icon" />
+    <span>FileID</span>
+  </a>
+  <nav class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#privacy">Privacy</a>
+    <a href="#download">Download</a>
+    <a class="nav-cta" href="https://github.com/AdamNolle/FileID" target="_blank" rel="noopener">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+      Star on GitHub
+    </a>
+  </nav>
+</header>
+
+<!-- ────────── HERO ────────── -->
+<section id="top" class="hero">
+  <!-- LavaLamp canvas + dim overlay -->
   <canvas id="lavalamp" aria-hidden="true"></canvas>
-  <div class="scrim" aria-hidden="true"></div>
+  <div class="hero-tint" aria-hidden="true"></div>
+  <div class="hero-grain" aria-hidden="true"></div>
 
-  <header class="site-header">
-    <nav class="nav" aria-label="Primary">
-      <a class="brand" href="#top">
-        <img src="assets/fileid-logo.svg" width="32" height="32" alt="" class="brand-mark" />
-        <span class="brand-name">FileID</span>
+  <!-- 3D spinning logo -->
+  <div class="logo-stage" id="logoStage">
+    <div class="logo-halo" aria-hidden="true"></div>
+    <div class="logo-sparkles" id="logoSparkles" aria-hidden="true"></div>
+    <div class="logo-bob">
+      <div class="logo-3d" id="logo3d" role="img" aria-label="FileID app icon">
+        <!-- layers injected by JS -->
+      </div>
+      <div class="logo-shadow" aria-hidden="true"></div>
+    </div>
+    <div class="logo-hint" id="logoHint">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+      <span>Drag to spin</span>
+    </div>
+  </div>
+
+  <!-- Hero copy -->
+  <div class="hero-copy">
+    <div class="hero-eyebrow">
+      <span class="dot"></span>
+      On-device AI file organization
+    </div>
+    <h1 class="hero-title">
+      <span>FileID</span>
+    </h1>
+    <p class="hero-tagline">
+      Tag, dedupe, restructure, and rename<br />
+      tens of thousands of files — <em>privately</em>,<br />
+      on hardware you own.
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-gold" href="#download">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Download
       </a>
-      <ul class="nav-links">
-        <li><a href="#features">Features</a></li>
-        <li><a href="#platforms">Platforms</a></li>
-        <li><a href="#privacy">Privacy</a></li>
-        <li>
-          <a class="nav-cta" href="https://github.com/AdamNolle/FileID" rel="noopener">
-            GitHub
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 17 17 7M9 7h8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </a>
-        </li>
-      </ul>
-    </nav>
-  </header>
+      <a class="btn btn-ghost" href="https://github.com/AdamNolle/FileID" target="_blank" rel="noopener">
+        View source
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>
+      </a>
+    </div>
+    <ul class="hero-pills" aria-label="Platform support">
+      <li><span class="pill-dot pill-dot-on"></span>macOS&nbsp;15+</li>
+      <li><span class="pill-dot pill-dot-on"></span>Windows&nbsp;10/11 + WoA</li>
+      <li><span class="pill-dot pill-dot-soon"></span>Linux&nbsp;(Phase 5)</li>
+    </ul>
+  </div>
 
-  <main id="main">
-    <!-- HERO -->
-    <section class="hero" id="top">
-      <div class="hero-inner reveal">
-        <div class="hero-logo">
-          <img src="assets/fileid-logo.svg" width="104" height="104" alt="FileID app icon" />
+  <a class="hero-scroll" href="#what" aria-label="Scroll for more">
+    <span></span>
+  </a>
+</section>
+
+<!-- ────────── FEATURES ────────── -->
+<section id="features" class="band band-canvas">
+  <div class="band-inner">
+    <div class="section-head reveal">
+      <div class="kicker"><span class="kicker-dot"></span>The six tabs</div>
+      <h2>Every workflow in one window.</h2>
+    </div>
+    <div class="features-grid reveal-stagger">
+      <article class="feature">
+        <div class="feature-glyph" data-glyph="library"></div>
+        <h3>Library</h3>
+        <p>FTS5 search over filenames + OCR. Semantic CLIP search — type "a dog at the beach" and get the photo. Thumbnail grid + preview sheet.</p>
+        <div class="feature-tag">CLIP · FTS5 · OCR</div>
+      </article>
+      <article class="feature">
+        <div class="feature-glyph" data-glyph="people"></div>
+        <h3>People</h3>
+        <p>Face clusters from ArcFace embeddings. Drag to merge. Name a cluster once — every AI caption uses real names from then on.</p>
+        <div class="feature-tag">ArcFace · SCRFD</div>
+      </article>
+      <article class="feature">
+        <div class="feature-glyph" data-glyph="cleanup"></div>
+        <h3>Cleanup</h3>
+        <p>Duplicate groups by perceptual hash. Trashed files stay recoverable until you say otherwise. No surprises.</p>
+        <div class="feature-tag">dHash · pHash</div>
+      </article>
+      <article class="feature feature-accent">
+        <div class="feature-glyph" data-glyph="deep"></div>
+        <h3>Deep Analyze</h3>
+        <p>On-device vision-language model writes a caption and proposes a smart filename — for images, PDFs, video keyframes, doc thumbnails.</p>
+        <div class="feature-tag">Qwen 2.5-VL · MLX / llama.cpp</div>
+      </article>
+      <article class="feature">
+        <div class="feature-glyph" data-glyph="restructure"></div>
+        <h3>Restructure</h3>
+        <p>Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy.</p>
+        <div class="feature-tag">Reversible · Sankey</div>
+      </article>
+      <article class="feature">
+        <div class="feature-glyph" data-glyph="settings"></div>
+        <h3>Settings</h3>
+        <p>Model downloads, GPU acceleration picker, engine info, logs, privacy controls. Hardware diagnostics for the curious.</p>
+        <div class="feature-tag">DirectML · CUDA · CoreML · QNN</div>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ────────── PRIVACY ────────── -->
+<section id="privacy" class="band band-stripes">
+  <div class="band-inner privacy-grid">
+    <div class="privacy-copy reveal">
+      <div class="kicker"><span class="kicker-dot"></span>Privacy posture</div>
+      <h2>100% on-device.<br /><em>Zero</em> telemetry.</h2>
+      <p class="privacy-lede">
+        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. The only outbound traffic is downloading models from upstream HuggingFace repos when you ask for them.
+      </p>
+      <ul class="privacy-list">
+        <li><strong>Local SQLite WAL database</strong> in your app-support directory.</li>
+        <li><strong>Models download directly from HuggingFace</strong> — FileID never redistributes weights.</li>
+        <li><strong>Outbound allowlist:</strong> 6 hosts, hardcoded. Anything else fails CI.</li>
+        <li><strong>Privacy gate</strong> scans every shipped binary against a 22-string deny-list before release.</li>
+      </ul>
+    </div>
+    <div class="privacy-card glass reveal">
+      <div class="privacy-card-head">
+        <span class="status-dot"></span>
+        <span>CI privacy gate</span>
+      </div>
+      <div class="privacy-stats">
+        <div class="stat">
+          <div class="stat-val">0</div>
+          <div class="stat-label">telemetry strings detected across 513 published binaries</div>
         </div>
-        <p class="eyebrow">On-device AI file organizer</p>
-        <h1 class="hero-title">
-          Make sense of <span class="grad">tens of thousands</span> of files —
-          tagged, deduped, and renamed, all on your machine.
-        </h1>
-        <p class="hero-sub">
-          FileID tags, dedupes, restructures, and renames your local libraries with on-device AI.
-          <strong>No cloud. No telemetry, ever.</strong> The only thing that ever leaves your machine
-          is a model download you start yourself.
-        </p>
-        <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/AdamNolle/FileID" rel="noopener">
-            View on GitHub
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05a9.3 9.3 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.79-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.48-.01 2.82 0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2Z"/></svg>
+        <div class="stat">
+          <div class="stat-val">22</div>
+          <div class="stat-label">deny-listed SDK substrings (Sentry, Datadog, Firebase, …)</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">6</div>
+          <div class="stat-label">allowlisted outbound hosts (HF, GitHub, NVIDIA)</div>
+        </div>
+      </div>
+      <div class="privacy-gate">
+        <pre><code><span class="c-key">$</span> <span class="c-cmd">privacy_scan</span> --binary FileIDEngine.exe
+<span class="c-ok">✓</span> 0 telemetry strings
+<span class="c-ok">✓</span> 0 unauthorized hosts
+<span class="c-ok">✓</span> Authenticode signature valid
+<span class="c-ok">→</span> gate passed</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ────────── DOWNLOAD ────────── -->
+<section id="download" class="band band-dark">
+  <div class="band-inner">
+    <div class="section-head reveal">
+      <div class="kicker"><span class="kicker-dot"></span>Releases</div>
+      <h2>Download for your platform.</h2>
+      <p class="section-sub">Auto-detects your CPU on Windows (x64 vs ARM64). Apple Silicon DMG for macOS. Linux engine builds standalone today; UI lands in Phase 5.</p>
+    </div>
+
+    <div id="releaseStatus" class="release-status" hidden></div>
+
+    <div class="downloads reveal-stagger">
+
+      <!-- Windows -->
+      <article class="dl-card dl-card-primary">
+        <div class="dl-head">
+          <div class="dl-platform">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M0 0h11.377v11.372H0zm12.623 0H24v11.372H12.623zM0 12.623h11.377V24H0zm12.623 0H24V24H12.623z"></path></svg>
+            <h3>Windows</h3>
+          </div>
+          <span class="dl-badge">10 22H2+ · 11</span>
+        </div>
+        <p class="dl-blurb">Standard MSI install under <code>Program Files\FileID\</code>. Start menu shortcut. WinUI 3 app + Rust engine. Auto-detects x64 vs ARM64 (Snapdragon X Elite).</p>
+        <div class="dl-actions" data-platform="windows">
+          <a class="btn btn-gold btn-block" data-asset="setup-exe" href="https://github.com/AdamNolle/FileID/releases/latest" target="_blank" rel="noopener">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span>
+              <span class="btn-pri">FileIDSetup.exe</span>
+              <span class="btn-sec">one download, auto-picks x64 / ARM64</span>
+            </span>
           </a>
-          <a class="btn btn-ghost" href="https://github.com/AdamNolle/FileID/blob/main/shared/docs/CONTRIBUTING.md" rel="noopener">
-            Build &amp; install
+          <div class="dl-sub">
+            <a class="btn-link" data-asset="x64-msi" href="https://github.com/AdamNolle/FileID/releases/latest">FileID-x64.msi</a>
+            <a class="btn-link" data-asset="arm64-msi" href="https://github.com/AdamNolle/FileID/releases/latest">FileID-arm64.msi</a>
+          </div>
+        </div>
+      </article>
+
+      <!-- macOS -->
+      <article class="dl-card">
+        <div class="dl-head">
+          <div class="dl-platform">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701z"></path></svg>
+            <h3>macOS</h3>
+          </div>
+          <span class="dl-badge">15+ · Apple Silicon</span>
+        </div>
+        <p class="dl-blurb">Drag to Applications. SwiftUI app + Swift engine on MLX / CoreML / Neural Engine. The canonical reference port — every tab ships end-to-end.</p>
+        <div class="dl-actions" data-platform="macos">
+          <a class="btn btn-gold btn-block" data-asset="dmg" href="https://github.com/AdamNolle/FileID/releases/latest" target="_blank" rel="noopener">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            <span>
+              <span class="btn-pri">FileID.dmg</span>
+              <span class="btn-sec">Apple Silicon (arm64)</span>
+            </span>
           </a>
         </div>
-        <ul class="badge-row" aria-label="At a glance">
-          <li><span class="dot dot-gold"></span> Apache-2.0</li>
-          <li><span class="dot dot-cyan"></span> 100% on-device</li>
-          <li><span class="dot dot-pink"></span> No telemetry</li>
-          <li><span class="dot dot-lav"></span> macOS · Windows · Linux</li>
+      </article>
+
+      <!-- Linux -->
+      <article class="dl-card dl-card-deferred">
+        <div class="dl-head">
+          <div class="dl-platform">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14.62 8.35c-.42.28-1.75 1.04-1.95 1.19-.3.24-.69.24-1.04 0-.21-.15-1.53-.91-1.95-1.19-.45-.31-1.34-.97-1.34-1.84 0-.96.69-1.69 1.39-2.24.39-.31.84-.55 1.29-.55h1.21c.45 0 .9.24 1.29.55.7.55 1.39 1.28 1.39 2.24 0 .87-.89 1.53-1.29 1.84zm-1.27-5.36c0-.36.29-.65.65-.65s.65.29.65.65-.29.65-.65.65-.65-.29-.65-.65zm-2.7 0c0-.36.29-.65.65-.65s.65.29.65.65-.29.65-.65.65-.65-.29-.65-.65zM12 0C6.48 0 2 4.48 2 10c0 2.45.88 4.69 2.34 6.43-.18.62-.6 1.6-1.34 2.27-.24.21-.13.6.18.66 1.27.24 2.62-.31 3.5-.78C9.99 19.48 10.98 20 12 20s2.01-.52 3.32-1.42c.88.47 2.23 1.02 3.5.78.31-.06.42-.45.18-.66-.74-.67-1.16-1.65-1.34-2.27C21.12 14.69 22 12.45 22 10 22 4.48 17.52 0 12 0z"></path></svg>
+            <h3>Linux</h3>
+          </div>
+          <span class="dl-badge dl-badge-soon">Phase 5</span>
+        </div>
+        <p class="dl-blurb">Engine builds standalone today — UI port (Avalonia or GTK4) hasn't started. The Rust engine binary is fully functional headless.</p>
+        <div class="dl-actions">
+          <a class="btn btn-ghost btn-block" href="https://github.com/AdamNolle/FileID#build--linux" target="_blank" rel="noopener">
+            <span>
+              <span class="btn-pri">Build engine from source</span>
+              <span class="btn-sec">cargo build --release</span>
+            </span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>
+          </a>
+        </div>
+      </article>
+    </div>
+
+    <div class="dl-foot reveal">
+      <p>Or build from source — one command, every platform:</p>
+      <pre class="code-block"><code><span class="c-cmd">./build.sh</span> <span class="c-flag">-windows</span>         <span class="c-cmt"># Windows: full fresh-install build + run</span>
+<span class="c-cmd">./build.sh</span> <span class="c-flag">-mac</span>             <span class="c-cmt"># macOS:   build + launch</span>
+<span class="c-cmd">./build.sh</span> <span class="c-flag">-linux</span>           <span class="c-cmt"># Linux:   Phase 5 (engine-only today)</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ────────── ARCHITECTURE ────────── -->
+<section class="band band-canvas arch-band">
+  <div class="band-inner">
+    <div class="section-head reveal">
+      <div class="kicker"><span class="kicker-dot"></span>How it's built</div>
+      <h2>Two binaries. One IPC contract.<br />Crash isolation by design.</h2>
+      <p class="section-sub">Same architecture as VS Code's renderer / extension-host split. A panic in ML doesn't kill the UI — the engine respawns with bounded backoff.</p>
+    </div>
+
+    <div class="arch-diagram reveal">
+      <div class="arch-node arch-app">
+        <div class="arch-tag">APP</div>
+        <div class="arch-name">FileID.exe / FileID.app</div>
+        <ul>
+          <li>SwiftUI (macOS) · WinUI 3 (Windows)</li>
+          <li>Verifies engine signature before spawn</li>
+          <li>Auto-respawns on crash (1s · 4s · 16s)</li>
         </ul>
       </div>
-    </section>
 
-    <!-- PLATFORMS -->
-    <section class="platforms" id="platforms">
-      <div class="section-head reveal">
-        <h2>Native everywhere you work</h2>
-        <p>Four real front-ends — built with each platform's own toolkit, never web tech — plus a scriptable CLI and a terminal UI for servers and NAS boxes.</p>
-      </div>
-
-      <div class="platform-grid">
-        <article class="glass-card platform reveal">
-          <div class="platform-ico" style="--accent: var(--cyan)">
-            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M16.4 1.4c.1 1-.3 2-1 2.8-.7.8-1.8 1.4-2.8 1.3-.1-1 .4-2 1-2.7.8-.8 2-1.4 2.8-1.4ZM19 17.3c-.5 1.2-.8 1.7-1.5 2.8-1 1.5-2.3 3.3-4 3.3-1.5 0-1.9-1-3.9-1-2 0-2.4 1-3.9 1-1.7 0-3-1.7-3.9-3.1C-.7 16.8-1 11.2 1.4 8.3 2.6 6.9 4.3 6 6 6c1.6 0 2.6 1 3.9 1 1.3 0 2-1 3.9-1 1.4 0 2.9.8 4 2.1-3.5 1.9-2.9 6.9.2 8.2Z"/></svg>
-          </div>
-          <h3>macOS</h3>
-          <p>SwiftUI app on the Apple Neural Engine. Ships as a native <code>.app</code>.</p>
-        </article>
-
-        <article class="glass-card platform reveal">
-          <div class="platform-ico" style="--accent: var(--lav)">
-            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M3 5.2 10.4 4v7.4H3V5.2ZM11.4 3.9 21 2.5v8.9h-9.6V3.9ZM3 12.6h7.4V20L3 18.8v-6.2ZM11.4 12.6H21v8.9l-9.6-1.4v-7.5Z"/></svg>
-          </div>
-          <h3>Windows</h3>
-          <p>WinUI&nbsp;3 / .NET, accelerated by ONNX Runtime. Ships as an <code>.msi</code> (x64 + ARM64).</p>
-        </article>
-
-        <article class="glass-card platform reveal">
-          <div class="platform-ico" style="--accent: var(--gold)">
-            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M12 2c-2.2 0-3.6 1.7-3.6 4 0 1 .2 1.7.2 2.4-.5.5-1.2 1.4-2.3 3.2-1 1.7-2.4 4-2.4 6 0 1.7 1.3 2.6 2.7 2.9.3.7.9 1.4 1.9 1.4h7c1 0 1.6-.7 1.9-1.4 1.4-.3 2.7-1.2 2.7-2.9 0-2-1.4-4.3-2.4-6-1.1-1.8-1.8-2.7-2.3-3.2.1-.7.2-1.4.2-2.4 0-2.3-1.4-4-3.6-4Zm-1.5 5.2a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm3 0a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8ZM12 10.6c.9 0 1.8.6 2.4 1.3-.7.5-1.5.8-2.4.8s-1.7-.3-2.4-.8c.6-.7 1.5-1.3 2.4-1.3Z"/></svg>
-          </div>
-          <h3>Linux</h3>
-          <p>GTK4 + libadwaita, native dark mode. Flatpak (primary), AppImage, Nix flake, AUR.</p>
-        </article>
-
-        <article class="glass-card platform reveal">
-          <div class="platform-ico" style="--accent: var(--pink)">
-            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="m6 9 3 2.8L6 14.6M11 15h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          </div>
-          <h3>CLI</h3>
-          <p>A scriptable <code>fileid</code> binary for headless servers, automation, and NAS pipelines.</p>
-        </article>
-
-        <article class="glass-card platform reveal">
-          <div class="platform-ico" style="--accent: var(--cyan)">
-            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" aria-hidden="true"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M6 8.5h12M6 12h7M6 15.2h4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>TUI</h3>
-          <p>A full <span class="nowrap">ratatui</span> terminal UI — drive the same engine over SSH.</p>
-        </article>
-      </div>
-
-      <div class="install glass-card reveal">
-        <div class="install-head">
-          <h3>Install on Linux</h3>
-          <p>Every distro is covered. Build straight from the repo — see the
-            <a href="https://github.com/AdamNolle/FileID/blob/main/packaging/README.md" rel="noopener">packaging guide</a>.</p>
+      <div class="arch-link">
+        <div class="arch-link-label">
+          <code>stdin / stdout</code>
+          <span>newline-delimited JSON</span>
         </div>
-        <div class="install-grid">
-          <figure class="snippet">
-            <figcaption>Flatpak — works on Debian, Ubuntu, Arch, Fedora, NixOS…</figcaption>
-            <pre><code>flatpak-builder --user --install --force-clean build-dir \
-  packaging/flatpak/io.github.fileid.FileID.yaml</code></pre>
-          </figure>
-          <figure class="snippet">
-            <figcaption>AUR — Arch / Manjaro / EndeavourOS</figcaption>
-            <pre><code>cd packaging/aur &amp;&amp; makepkg -si</code></pre>
-          </figure>
-          <figure class="snippet">
-            <figcaption>Nix flake — NixOS / any Nix user</figcaption>
-            <pre><code>nix run ./packaging/nix#fileid</code></pre>
-          </figure>
-          <figure class="snippet">
-            <figcaption>AppImage — most x86_64 distros</figcaption>
-            <pre><code>./packaging/appimage/build-appimage.sh</code></pre>
-          </figure>
-        </div>
-      </div>
-    </section>
-
-    <!-- FEATURES -->
-    <section class="features" id="features">
-      <div class="section-head reveal">
-        <h2>Six tools, one local library</h2>
-        <p>Each tab is a focused job. They share one fast on-device engine — and one database that round-trips byte-for-byte across every platform.</p>
+        <svg class="arch-arrow" viewBox="0 0 100 40" aria-hidden="true" preserveAspectRatio="none">
+          <circle cx="4" cy="20" r="3" fill="#FFCC00"></circle>
+          <line x1="8" y1="20" x2="86" y2="20" stroke="#FFCC00" stroke-width="2" stroke-dasharray="2 6" stroke-linecap="round"></line>
+          <path d="M84 13l10 7-10 7" fill="none" stroke="#FFCC00" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+        </svg>
       </div>
 
-      <div class="feature-grid">
-        <article class="glass-card feature reveal" style="--accent: var(--cyan)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/><path d="m20 20-3.6-3.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>Library</h3>
-          <p>Full-text search and semantic CLIP search across your whole collection, with a fast thumbnail grid and instant preview.</p>
-        </article>
-
-        <article class="glass-card feature reveal" style="--accent: var(--lav)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><circle cx="9" cy="8" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M16 5.5a3 3 0 0 1 0 5.4M17.5 19c0-2-.7-3.6-2-4.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>People</h3>
-          <p>On-device face clustering groups every photo by who's in it. You just put a name to each face — no faces ever leave the device.</p>
-        </article>
-
-        <article class="glass-card feature reveal" style="--accent: var(--pink)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2.2" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 15.5H4.8A1.3 1.3 0 0 1 3.5 14.2V4.8A1.3 1.3 0 0 1 4.8 3.5h9.4a1.3 1.3 0 0 1 1.3 1.3v.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>Cleanup</h3>
-          <p>Finds exact duplicates and perceptual near-duplicates — resizes, re-encodes, light edits — so you can reclaim space without guesswork.</p>
-        </article>
-
-        <article class="glass-card feature reveal" style="--accent: var(--gold)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M12 3.5 14 9l5.5 2-5.5 2-2 5.5L10 13l-5.5-2L10 9l2-5.5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
-          </div>
-          <h3>Deep Analyze</h3>
-          <p>On-device vision-language models write captions and propose smart renames. The picture is described locally — it never touches a server.</p>
-        </article>
-
-        <article class="glass-card feature reveal" style="--accent: var(--lav)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><path d="M4 6h5l2 2.5M4 6v12M4 18h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 7.5h-7M20 12h-9M20 16.5h-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>Restructure</h3>
-          <p>Butler-grade folder reorganization with a Sankey preview of every move — review the whole plan before a single file is touched.</p>
-        </article>
-
-        <article class="glass-card feature reveal" style="--accent: var(--cyan)">
-          <div class="feature-ico">
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.7M12 18.8v2.7M21.5 12h-2.7M5.2 12H2.5M18.7 5.3l-1.9 1.9M7.2 16.8l-1.9 1.9M18.7 18.7l-1.9-1.9M7.2 7.2 5.3 5.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </div>
-          <h3>Settings</h3>
-          <p>Manage AI models, pick your compute backend, inspect the engine and logs, and read exactly what the app does — and doesn't — do.</p>
-        </article>
+      <div class="arch-node arch-engine">
+        <div class="arch-tag arch-tag-ai">ENGINE</div>
+        <div class="arch-name">FileIDEngine</div>
+        <ul>
+          <li>Rust (Windows) · Swift (macOS)</li>
+          <li>SQLite WAL · single writer</li>
+          <li>Scan pipeline · ML inference</li>
+        </ul>
       </div>
-    </section>
-
-    <!-- PRIVACY -->
-    <section class="privacy" id="privacy">
-      <div class="privacy-inner glass-card reveal">
-        <div class="privacy-copy">
-          <p class="eyebrow">Privacy is the architecture</p>
-          <h2>Your files never leave your machine.</h2>
-          <p class="lead">
-            FileID has no servers, no accounts, and no analytics. Everything — search, faces,
-            captions, renames — is computed on your own CPU, GPU, or NPU. The single network
-            request the app can make is a model download <em>you</em> initiate, straight from
-            <code>huggingface.co</code>. CI scans every shipped binary for telemetry strings as a
-            release blocker.
-          </p>
-          <ul class="privacy-list">
-            <li>
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="m5 12.5 4 4 10-10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <span><strong>No cloud.</strong> Every model runs locally, with no round trip.</span>
-            </li>
-            <li>
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="m5 12.5 4 4 10-10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <span><strong>No telemetry, ever.</strong> No analytics, crash reporting, or update pings.</span>
-            </li>
-            <li>
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="m5 12.5 4 4 10-10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <span><strong>One egress, on your terms.</strong> Only a model pull you start, from Hugging&nbsp;Face.</span>
-            </li>
-            <li>
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" aria-hidden="true"><path d="m5 12.5 4 4 10-10" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              <span><strong>Apache-2.0 &amp; commercial-clean.</strong> Every default weight is Apache- or MIT-licensed.</span>
-            </li>
-          </ul>
-        </div>
-
-        <aside class="privacy-aside" aria-label="Engine specifications">
-          <div class="spec">
-            <span class="spec-num">≥140<span class="spec-unit">files/s</span></span>
-            <span class="spec-label">target throughput on mid-tier hardware</span>
-          </div>
-          <div class="spec-divider"></div>
-          <p class="spec-text">
-            A fast on-device pipeline that uses the GPU or NPU when present —
-            Apple Neural Engine, ONNX Runtime (DirectML / CUDA / CoreML), MLX and
-            llama.cpp — and degrades gracefully to CPU.
-          </p>
-          <ul class="model-chips">
-            <li>SFace · faces</li>
-            <li>OpenCLIP · search</li>
-            <li>RAM++ · tagging</li>
-            <li>BGE · doc embeddings</li>
-            <li>MLX / llama.cpp · VLMs</li>
-          </ul>
-        </aside>
-      </div>
-    </section>
-
-    <!-- CLOSING CTA -->
-    <section class="closing reveal">
-      <h2>Open source. Built to be owned.</h2>
-      <p>Read the code, build it yourself, and run it offline forever. FileID is Apache-2.0 and free to use, modify, and ship.</p>
-      <div class="cta-row cta-center">
-        <a class="btn btn-primary" href="https://github.com/AdamNolle/FileID" rel="noopener">Star on GitHub</a>
-        <a class="btn btn-ghost" href="https://github.com/AdamNolle/FileID/blob/main/packaging/README.md" rel="noopener">Packaging guide</a>
-      </div>
-    </section>
-  </main>
-
-  <footer class="site-footer">
-    <div class="footer-inner">
-      <div class="footer-brand">
-        <img src="assets/fileid-logo.svg" width="28" height="28" alt="" />
-        <span>FileID</span>
-      </div>
-      <p class="footer-tag">On-device AI file organizer. No cloud, no telemetry, ever.</p>
-      <nav class="footer-links" aria-label="Footer">
-        <a href="https://github.com/AdamNolle/FileID" rel="noopener">GitHub</a>
-        <a href="https://github.com/AdamNolle/FileID/blob/main/LICENSE" rel="noopener">Apache-2.0 License</a>
-        <a href="https://github.com/AdamNolle/FileID/blob/main/shared/docs/CONTRIBUTING.md" rel="noopener">Contributing</a>
-        <a href="#top">Back to top</a>
-      </nav>
-      <p class="footer-fine">© 2026 FileID contributors · Licensed under Apache-2.0 · Not affiliated with Hugging&nbsp;Face, Apple, Microsoft, or the GNOME Foundation.</p>
     </div>
-  </footer>
 
-  <script src="app.js" defer></script>
+  </div>
+</section>
+
+<!-- ────────── FOOTER ────────── -->
+<footer class="footer">
+  <div class="band-inner footer-inner">
+    <div class="footer-brand">
+      <img src="assets/app-icon.png" alt="" class="footer-icon" />
+      <div>
+        <div class="footer-name">FileID</div>
+        <div class="footer-tag">On-device AI file organization.</div>
+      </div>
+    </div>
+    <div class="footer-cols">
+      <div class="footer-col">
+        <h5>Source</h5>
+        <a href="https://github.com/AdamNolle/FileID" target="_blank" rel="noopener">Repository</a>
+        <a href="https://github.com/AdamNolle/FileID/releases" target="_blank" rel="noopener">Releases</a>
+        <a href="https://github.com/AdamNolle/FileID/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
+        <a href="https://github.com/AdamNolle/FileID/issues" target="_blank" rel="noopener">Issues</a>
+      </div>
+      <div class="footer-col">
+        <h5>Docs</h5>
+        <a href="https://github.com/AdamNolle/FileID/blob/main/README.md" target="_blank" rel="noopener">README</a>
+        <a href="https://github.com/AdamNolle/FileID/blob/main/shared/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+        <a href="https://github.com/AdamNolle/FileID/blob/main/shared/docs/PRIVACY.md" target="_blank" rel="noopener">Privacy</a>
+        <a href="https://github.com/AdamNolle/FileID/blob/main/shared/docs/MODELS.md" target="_blank" rel="noopener">Models</a>
+      </div>
+      <div class="footer-col">
+        <h5>Build</h5>
+        <a href="https://github.com/AdamNolle/FileID#build--windows" target="_blank" rel="noopener">Windows</a>
+        <a href="https://github.com/AdamNolle/FileID#build--macos" target="_blank" rel="noopener">macOS</a>
+        <a href="https://github.com/AdamNolle/FileID#build--linux" target="_blank" rel="noopener">Linux</a>
+      </div>
+    </div>
+    <div class="footer-fine">
+      <span>© 2026 FileID. App code is yours to keep / re-license.</span>
+      <span>Model weights remain governed by their upstream licenses.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="app.js"></script>
 </body>
 </html>
