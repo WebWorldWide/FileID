@@ -75,10 +75,13 @@ fn run_scan(db: &Path, root: &Path, tx: &Sender<LoadMsg>) -> Result<String> {
             .map(|(k, n)| format!("{n} ({k})"))
             .collect::<Vec<_>>()
             .join(", ");
-        anyhow::bail!(
-            "scan needs AI models not installed: {names}. Install them in the desktop app \
-             (Settings → Local AI), then press s again."
-        );
+        let hint = if cfg!(target_os = "macos") {
+            "On macOS, scan a folder with full AI in the FileID desktop app (it has the models); \
+             here the TUI does model-free indexing only — or run `fileid scan <folder>` then press r."
+        } else {
+            "Install them in the desktop app (Settings → Local AI), then press s again."
+        };
+        anyhow::bail!("scan needs AI models not installed: {names}. {hint}");
     }
 
     // ── Pre-flight 2: engine binary located? ──

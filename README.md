@@ -11,6 +11,7 @@
   <a href="https://adamnolle.github.io/FileID/">Website</a> ·
   <a href="#features">Features</a> ·
   <a href="#front-ends">Front-ends</a> ·
+  <a href="#using-the-cli-and-tui">CLI &amp; TUI</a> ·
   <a href="#install">Install</a> ·
   <a href="shared/docs/CONTRIBUTING.md">Build from source</a>
 </p>
@@ -78,18 +79,54 @@ One engine, five clients — three native desktop GUIs and two headless front-en
 | **`fileid` CLI** | Rust (links the engine) | scripting, headless servers, NAS boxes |
 | **TUI** | Rust · ratatui | a terminal dashboard over the same library |
 
-The `fileid` CLI reads and writes the *same* library as the desktop apps:
-
-```bash
-fileid scan ~/Pictures --models         # full ML pipeline: tags, CLIP, faces, hashes
-fileid search "a dog at the beach"      # FTS5 keyword search over text + OCR
-fileid dedupe --apply --yes             # keep one per group, trash the rest (recoverable)
-fileid restructure --plan ~/Downloads   # preview a butler-grade reorg (read-only)
-```
-
-Add `--json` to any command for machine-readable output. References: [`platforms/cli/README.md`](platforms/cli/README.md) · [`platforms/tui/README.md`](platforms/tui/README.md).
+The `fileid` CLI and `fileid-tui` read and write the *same* library as the desktop apps — no app required. See [**Using the CLI and TUI**](#using-the-cli-and-tui) for build, scan, and explore steps.
 
 macOS is the canonical visual + behavioral reference and ships every tab end-to-end; the Windows and Linux apps are feature-complete on the same six tabs and CI-green, with on-hardware polish ongoing. A library scanned on one platform opens on another (migrations are byte-faithful across engines). Per-phase status: [`shared/docs/SHIP.md`](shared/docs/SHIP.md).
+
+---
+
+## Using the CLI and TUI
+
+`fileid` (CLI) and `fileid-tui` link the engine in-process and read/write the **same library** as the desktop apps — handy for scripting, headless servers, or a quick scan straight from a terminal.
+
+**Build &amp; install.** One command from the repo root builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin` (make sure that's on your `PATH`):
+
+```bash
+bash scripts/build-tools.sh
+```
+
+**Scan a folder, then explore it — CLI.** The model-free scan indexes files + text (filenames, OCR, document text) into a searchable library — the working flow on every platform:
+
+```bash
+fileid scan ~/Pictures --db ~/fileid-test.sqlite   # index files + text (FTS) — searchable now
+```
+
+Then explore that library:
+
+```bash
+fileid people     --db ~/fileid-test.sqlite
+fileid search "beach" --db ~/fileid-test.sqlite
+fileid dedupe --similar --db ~/fileid-test.sqlite
+fileid restructure --plan --db ~/fileid-test.sqlite
+```
+
+> **Full ML scanning** (tags + faces + CLIP) via `--models` runs on **Linux and Windows** (native Rust engine). On **macOS the CLI does model-free indexing only — scan a folder with full ML in the FileID desktop app** (it owns the macOS models), then explore that library here.
+
+On macOS, omit `--db` to browse your desktop app's library automatically — the primary CLI use there. Add `--json` for machine-readable output or `--quiet` to silence progress.
+
+**Browse and scan — TUI.** A terminal dashboard over the same library:
+
+```bash
+fileid-tui --db ~/fileid-test.sqlite
+```
+
+Keys: **s** scan a folder (type the path, `Enter`) · **r** reload after a scan · **Tab** switch tabs · **/** search · **↑↓**/**jk** navigate · **q** quit. The TUI paints its own dark theme, so it stays readable on light terminals.
+
+The **s** scan drives the same full-ML engine as the CLI's `--models`, so it shares the macOS limitation: it runs full ML on **Linux/Windows**, but on **macOS** scan with full ML in the desktop app instead — or index model-free with `fileid scan <folder>` (CLI) and reload here with **r**. Browsing your existing library stays the primary macOS use.
+
+**Safety.** Read-only by default. Destructive actions are gated behind explicit flags: `dedupe --apply` and `restructure --apply` only touch disk with that flag (add `--dry-run` to preview), and `dedupe --similar --apply` additionally requires `--yes`.
+
+Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`platforms/tui/README.md`](platforms/tui/README.md).
 
 ---
 

@@ -47,7 +47,34 @@ pub fn root() -> Result<PathBuf> {
 
 pub fn db_path()      -> Result<PathBuf> { Ok(root()?.join("fileid.sqlite")) }
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
+// `models_dir` is the single resolution point for every model artifact — the
+// registry download dests, the install sentinels, and the per-model loaders all
+// go through it — so it's the one place that has to know where weights live.
+#[cfg(not(target_os = "macos"))]
 pub fn models_dir()   -> Result<PathBuf> { Ok(root()?.join("Models")) }
+
+/// macOS: prefer the desktop (SwiftUI) app's model directory
+/// `~/Library/Application Support/FileID/Models` when it exists — that's where
+/// the Swift front-end installs weights. The cross-platform engine/CLI/TUI
+/// otherwise follow the XDG default (`~/.local/share/FileID/Models`), which is
+/// empty on a Mac that only ever ran the desktop app, so `scan --models` could
+/// not find the already-downloaded models. Falls back to the XDG default when
+/// the app dir is absent (engine-only install). READ-only by construction:
+/// scanning reads weights from here; downloads + sentinels are a desktop-app
+/// concern, so returning this path never writes into it. Windows/Linux are
+/// unaffected — the `cfg(not(macos))` definition above is the byte-for-byte
+/// original.
+#[cfg(target_os = "macos")]
+pub fn models_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let app_models =
+            PathBuf::from(home).join("Library/Application Support/FileID/Models");
+        if app_models.is_dir() {
+            return Ok(app_models);
+        }
+    }
+    Ok(root()?.join("Models"))
+}
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }

@@ -15,6 +15,11 @@ apps.
 
 ## Build & run
 
+Quickest path — from the repo root, `bash scripts/build-tools.sh` builds the
+engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the
+engine binary to `~/.cargo/bin` (make sure that's on your `PATH`). To build
+just this crate:
+
 ```sh
 cd platforms/tui
 cargo build --release
@@ -33,9 +38,11 @@ Resolved with the **same precedence as the CLI**:
    (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`), i.e. the same file the desktop apps
    read/write.
 
-Populate a library from inside the TUI by pressing `s` and entering a folder
-(see Keys), or out-of-band with the CLI: `fileid --db <db> scan <folder>`, then
-point the TUI at the same `--db`.
+Populate a library out-of-band with the CLI's model-free scan — `fileid --db
+<db> scan <folder>` (filenames + OCR/doc text → FTS; works on every platform) —
+then point the TUI at the same `--db`. You can also press `s` to scan from
+inside the TUI (see Keys); that drives the engine's **full ML pipeline**, which
+runs on Linux/Windows. On macOS, scan with full ML in the desktop app instead.
 
 ## Keys
 
@@ -46,7 +53,7 @@ point the TUI at the same `--db`.
 | `↑`/`↓` or `k`/`j` | move selection |
 | `g` / `G` | first / last row |
 | `/` | search (Library tab) — type to filter, `Enter` keeps, `Esc` clears |
-| `s` | **scan a folder** — opens a path prompt; `~` expands; `Enter`/`Tab` confirm, `Esc` cancel. Drives a real full-pipeline engine scan and live-streams progress to the status line, then auto-reloads. |
+| `s` | **scan a folder** — opens a path prompt; `~` expands; `Enter`/`Tab` confirm, `Esc` cancel. Drives the engine's full-ML scan (Linux/Windows; on **macOS** use the desktop app for full ML) and live-streams progress to the status line, then auto-reloads. |
 | `r` | reload from the DB (re-reads every view) |
 | `?` | toggle the keys overlay |
 | `q` / `Esc` / `Ctrl-C` | quit (works mid-scan; the terminal is always restored) |
@@ -87,8 +94,16 @@ auto-reloads every view. See [`src/scan.rs`](src/scan.rs).
 `startScan` runs the **full ML pipeline**, so it requires the AI models
 (`mobileclip_s2` + `arcface`) and the engine binary:
 
-- **Models** — installed once from the desktop app (Settings → Local AI). If
-  they're missing, the status line says exactly which, and how.
+> **macOS:** this in-TUI `s` scan can't run full ML — the Rust engine needs its
+> own model layout, which the macOS app's Swift models don't satisfy, so it
+> reports "models not installed". Scan a folder with full ML in the **FileID
+> desktop app** instead and reload here with `r`; for model-free indexing, run
+> `fileid scan <folder>` (CLI). Full-ML `s` scanning is for **Linux/Windows**,
+> where the engine is native.
+
+- **Models** — on Linux/Windows, installed once from the desktop app
+  (Settings → Local AI). If they're missing, the status line says exactly which,
+  and how.
 - **Engine binary** — located via `FILEID_ENGINE_BIN`, then beside `fileid-tui`,
   then the dev-layout `platforms/windows/src/engine/target/{release,debug}/`,
   then `PATH`. If absent, the status line says how to build/point at it.

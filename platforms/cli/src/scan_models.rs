@@ -14,7 +14,10 @@
 //! Two pre-flights before we ever spawn:
 //!   1. Models installed? We mirror the engine's exact `startScan` gate
 //!      (`mobileclip_s2` + `arcface` sentinels) and, if anything is missing,
-//!      print a clear, actionable message (which models, where, how) and stop.
+//!      print a clear, actionable message and stop. On macOS that message leads
+//!      with the desktop app: the Rust engine can't reuse the macOS app's Swift
+//!      models, so "install these models" would be a dead end — full-ML scanning
+//!      there is the app's job, and the CLI/TUI do model-free FTS + browsing.
 //!   2. Engine binary located? If not, we say how to point at it.
 //!
 //! The full pipeline writes the *engine's* library (XDG / `%LOCALAPPDATA%`),
@@ -46,6 +49,16 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let models_dir = fileid_engine::paths::models_dir().ok();
     let engine_db = fileid_engine::paths::db_path().ok();
 
+    // ── Pre-flight 1: models installed? ──────────────────────────────────
+    // Runs before the --db caveat: on macOS this reports that full-ML scanning
+    // is the desktop app's job (the Rust engine can't reuse the app's Swift
+    // models), so that recommendation shouldn't trail a now-moot --db note.
+    let missing = missing_models();
+    if !missing.is_empty() {
+        report_missing_models(ctx, &missing, models_dir.as_deref());
+        return Ok(());
+    }
+
     // Pinned --db doesn't apply to the full pipeline: the engine binary
     // resolves its own library location. Surface that rather than silently
     // writing somewhere the user didn't expect.
@@ -62,13 +75,6 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                 ctx.db.display()
             ))
         ));
-    }
-
-    // ── Pre-flight 1: models installed? ──────────────────────────────────
-    let missing = missing_models();
-    if !missing.is_empty() {
-        report_missing_models(ctx, &missing, models_dir.as_deref());
-        return Ok(());
     }
 
     // ── Pre-flight 2: engine binary located? ─────────────────────────────
@@ -97,19 +103,56 @@ fn missing_models() -> Vec<(&'static str, String)> {
 }
 
 fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_dir: Option<&Path>) {
+    // On macOS the Rust engine can't reuse the desktop app's Swift models, so
+    // "install these models" is a dead end — full-ML scanning there is the app's
+    // job. Lead with that; elsewhere, installing the engine's models is correct.
+    let on_macos = cfg!(target_os = "macos");
+
     if ctx.json {
+        let (message, hint) = if on_macos {
+            (
+                "full-ML scanning isn't available from the CLI on macOS",
+                "on macOS, scan a folder with full ML in the FileID desktop app (it owns the macOS models); the CLI/TUI here do model-free FTS scanning (`fileid scan <folder>`) and browse your existing library",
+            )
+        } else {
+            (
+                "the full ML pipeline requires installed AI models",
+                "install the models from the desktop app (Welcome screen, or Settings → Local AI); see shared/docs/MODELS.md",
+            )
+        };
         print_json(&serde_json::json!({
             "command": "scan",
             "mode": "models",
             "error": "models_not_installed",
-            "message": "the full ML pipeline requires installed AI models",
+            "message": message,
             "missing": missing.iter().map(|(k, n)| serde_json::json!({"kind": k, "name": n}))
                 .collect::<Vec<_>>(),
             "modelsDir": models_dir.map(|p| p.display().to_string()),
-            "hint": "install the models from the desktop app (Welcome screen, or Settings → Local AI); see shared/docs/MODELS.md",
+            "hint": hint,
         }));
         return;
     }
+
+    if on_macos {
+        println!("{}", ctx.bold("Full-ML scanning isn't available from the CLI on macOS."));
+        println!(
+            "  On macOS, full-ML scanning (tags + faces + CLIP) is the {}'s job —",
+            ctx.bold("FileID desktop app")
+        );
+        println!("  it owns the macOS models. Scan a folder there with full ML, then explore");
+        println!("  it from here. The CLI/TUI on macOS do:");
+        println!(
+            "    • model-free indexing — {} (filenames + OCR/doc text → FTS search)",
+            ctx.bold("fileid scan <folder>")
+        );
+        println!("    • browsing your existing library — people · search · dedupe · restructure");
+        println!(
+            "  {}",
+            ctx.dim("(omit --db on macOS to open the desktop app's library automatically)")
+        );
+        return;
+    }
+
     println!("{}", ctx.bold("Full-pipeline scan unavailable — AI models not installed."));
     println!("  Missing:");
     for (kind, name) in missing {
