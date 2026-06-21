@@ -32,6 +32,10 @@ row through JSON over a pipe (slower than an in-process read), and it touches th
 (2) Open SQLite with a different crate — rejected: a second SQLite in the binary + schema-parity
 risk. Reading the engine's own DB through the engine's own `open_read` is the lowest-drift option.
 
+## 2026-06-20 — Linux GTK app pins the single `gtk4 0.8` binding train (was `0.7`, conflicted with `libadwaita 0.6`)
+
+The Phase-0 GTK scaffold declared `gtk4 0.7` alongside `libadwaita 0.6`. libadwaita 0.6 transitively depends on `gtk4 0.8`, so Cargo tried to link **two** gtk4 majors against the one native `gtk-4` library — a hard build conflict (duplicate native symbols, two incompatible `gdk::` types). Decision: align the whole graph to the **single `gtk4 0.8 / libadwaita 0.6 / glib + gio 0.19` train**, which targets GTK 4.14 + libadwaita 1.5 — exactly what ubuntu-24.04 / Fedora 40 / Arch ship and what the Flatpak GNOME 46 runtime provides. The resolved `Cargo.lock` is committed so CI and every packaging channel build the identical graph. Rejected: keeping `gtk4 0.7` and downgrading libadwaita to a 0.5 that wants gtk4 0.7 — that pins an older GTK/libadwaita and loses adwaita widgets the UI relies on. Moving up to one newer train is the lower-risk, forward-looking fix and the reason the Flatpak/AppImage runtime floor is GTK 4.14.
+
 ## 2026-06-19 — Accept GHSA-2m69-gcr7-jv3q in vulnerability scan (SQLitePCLRaw.lib.e_sqlite3 2.1.10)
 
 SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive from Microsoft.Data.Sqlite 9.0.0) is flagged High
