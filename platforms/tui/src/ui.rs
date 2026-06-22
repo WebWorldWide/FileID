@@ -192,7 +192,7 @@ fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
         Span::styled(" ⚠ ", pill),
         Span::styled("  AI models not installed — press ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
         Span::styled(" D ", pill),
-        Span::styled(" to download (~25 GB). Tags, faces & search need them.", Style::default().fg(FG)),
+        Span::styled(" to download (~1.6 GB). Tags, faces & search need them.", Style::default().fg(FG)),
     ]);
     f.render_widget(Paragraph::new(line).style(Style::default().bg(SEL_BG)), rows[0]);
     rows[1]
@@ -775,8 +775,8 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     v
 }
 
-/// The `?` help overlay: every key, the folder-browser keys, and the macOS
-/// model-free-scan note. Kept compact enough to fit a 24-row terminal.
+/// The `?` help overlay: every key, the folder-browser keys, and the model /
+/// runtime download notes. Kept compact enough to fit a 24-row terminal.
 fn render_help(f: &mut Frame, area: Rect) {
     let header = |s: &'static str| {
         Line::from(Span::styled(s, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
@@ -801,8 +801,8 @@ fn render_help(f: &mut Frame, area: Rect) {
         hrow("t", "type a path instead · Esc cancel"),
         hrow("d  ·  .", "external drives · show hidden"),
         Line::from(""),
-        note("macOS: full-AI scan needs the desktop app's models."),
-        note("Without them: fileid scan <folder> (model-free), then r."),
+        note("Press D to download AI models (~1.6 GB) for a full-AI scan."),
+        note("macOS only: one-time `fileid runtime install` for ONNX Runtime."),
     ];
     let w = 64.min(area.width.saturating_sub(4)).max(34);
     let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
@@ -1678,6 +1678,10 @@ mod tests {
                 text.contains("AI models not installed"),
                 "{tab:?}: the standing models-missing banner must render above the body",
             );
+            // The banner states the REAL size of the TUI's (non-VLM) model set,
+            // never the false ~25 GB that included the Deep-Analyze VLMs.
+            assert!(text.contains("~1.6 GB"), "{tab:?}: banner must state the real ~1.6 GB size");
+            assert!(!text.contains("25 GB"), "{tab:?}: banner must not claim the VLM ~25 GB total");
         }
 
         // Settings is reachable on a fresh library: its download action shows even

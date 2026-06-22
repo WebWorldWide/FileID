@@ -292,6 +292,14 @@ impl App {
             self.on_key_search(code);
             return;
         }
+        // The `?` help overlay is modal for quit keys: Esc/q dismiss it instead of
+        // quitting the app, so a user reading the keys can back out safely.
+        if self.show_help {
+            if let KeyCode::Esc | KeyCode::Char('q') = code {
+                self.show_help = false;
+                return;
+            }
+        }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.should_quit = true,
@@ -306,11 +314,7 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
             KeyCode::Char('s') => self.open_browser(),
-            KeyCode::Char('r') => {
-                self.loading = true;
-                self.status = "Reloading…".to_string();
-                self.reload_requested = true;
-            }
+            KeyCode::Char('r') => self.request_reload(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
             KeyCode::Char('/') if self.tab == Tab::Library => {
                 self.search_active = true;
@@ -324,7 +328,22 @@ impl App {
         }
     }
 
-    /// Arm a `fileid models download --all` (the global `D` key): `main`
+    /// Arm a library reload (the `r` key): `main` consumes `reload_requested`
+    /// next tick and re-spawns the DB loader. Guarded against a live download —
+    /// `data::load` sends a terminal `Done` that `apply_load` folds in, clearing
+    /// the `downloading` gauge mid-install (and inviting a second `D` that would
+    /// double-spawn the same download). Ignored while one runs.
+    fn request_reload(&mut self) {
+        if self.downloading {
+            self.status = "A model download is running — wait for it to finish before reloading…".to_string();
+            return;
+        }
+        self.loading = true;
+        self.status = "Reloading…".to_string();
+        self.reload_requested = true;
+    }
+
+    /// Arm a `fileid models download` (the global `D` key): `main`
     /// consumes `download_requested` next tick and spawns the worker thread.
     /// Guarded so a second download — or a download racing a live scan — can't
     /// start. Never blocks: the spawned thread streams progress to the status
@@ -359,6 +378,10 @@ impl App {
     fn open_browser(&mut self) {
         if self.scanning {
             self.status = "A scan is already in progress…".to_string();
+            return;
+        }
+        if self.downloading {
+            self.status = "Finish the model download before scanning…".to_string();
             return;
         }
         let start = home_dir()
@@ -431,6 +454,10 @@ impl App {
     fn open_input(&mut self) {
         if self.scanning {
             self.status = "A scan is already in progress…".to_string();
+            return;
+        }
+        if self.downloading {
+            self.status = "Finish the model download before scanning…".to_string();
             return;
         }
         self.input_active = true;
@@ -998,6 +1025,51 @@ mod tests {
         app.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
         assert!(app.reload_requested);
         assert!(app.loading);
+    }
+
+    /// A reload, scan-browser, or typed-path request must be IGNORED while a model
+    /// download is in flight. Otherwise `data::load` would send a terminal `Done`
+    /// that `apply_load` folds in — clearing the `downloading` gauge mid-install
+    /// and inviting a second `D` that double-spawns the same download (writing the
+    /// same model files concurrently).
+    #[test]
+    fn reload_and_scan_are_ignored_while_downloading() {
+        let mut app = app_with_files(0);
+        app.downloading = true;
+
+        app.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(!app.reload_requested, "reload must be ignored mid-download");
+
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.browser.is_none(), "scan browser must not open mid-download");
+
+        app.on_key(KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(!app.input_active, "typed-path prompt must not open mid-download");
+
+        // The download is left intact for the worker to finish.
+        assert!(app.downloading);
+    }
+
+    /// While the `?` help overlay is open, Esc and q dismiss it instead of quitting
+    /// the app — a user reading the keys can back out without losing their session.
+    #[test]
+    fn esc_and_q_close_help_without_quitting() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(app.show_help);
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!app.show_help, "Esc closes the help overlay");
+        assert!(!app.should_quit, "Esc must NOT quit while help is open");
+
+        app.on_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(app.show_help);
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!app.show_help, "q closes the help overlay");
+        assert!(!app.should_quit, "q must NOT quit while help is open");
+
+        // With help closed, q quits as normal.
+        app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.should_quit);
     }
 
     #[test]

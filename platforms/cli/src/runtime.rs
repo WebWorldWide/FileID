@@ -242,15 +242,29 @@ fn local_source(target: &std::path::Path) -> Option<std::path::PathBuf> {
         .find(|p| p != target && p.is_file())
 }
 
+/// Install `src` as `target` atomically: copy to a unique temp file IN THE
+/// TARGET'S OWN DIRECTORY (so the final `rename` is same-filesystem and can't
+/// EXDEV-fail), then `rename` it into place — an atomic same-FS replace that a
+/// concurrent `resolve_dylib()` either misses or sees whole, never truncated.
+/// On any failure the temp file is removed, so a mid-copy abort (disk-full,
+/// I/O error, SIGINT) never leaves a partial dylib at the resolvable `target`.
 #[cfg(target_os = "macos")]
 fn copy_into_place(src: &std::path::Path, target: &std::path::Path) -> Result<()> {
     use anyhow::Context as _;
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("install target {} has no parent", target.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating {}", parent.display()))?;
+
+    let tmp = unique_temp_file(parent);
+    std::fs::copy(src, &tmp)
+        .with_context(|| format!("copying {} -> {}", src.display(), tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("installing {} -> {}", tmp.display(), target.display()));
     }
-    std::fs::copy(src, target)
-        .with_context(|| format!("copying {} -> {}", src.display(), target.display()))?;
     Ok(())
 }
 
@@ -446,6 +460,25 @@ fn unique_temp_dir() -> std::path::PathBuf {
     ))
 }
 
+/// A process-unique temp file path inside `dir` (so a later `rename` onto a
+/// target in the same `dir` is same-filesystem and atomic). Hidden + suffixed
+/// so a partial copy is obviously not the real dylib.
+#[cfg(target_os = "macos")]
+fn unique_temp_file(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(
+        ".libonnxruntime.dylib.tmp-{}-{nanos}-{seq}",
+        std::process::id()
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn report_installed(ctx: &Ctx, target: &std::path::Path, how: &str) -> Result<()> {
     if ctx.json {
@@ -613,6 +646,53 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("readme.txt"), b"no dylib here").unwrap();
         assert!(locate_extracted_dylib(&dir).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_into_place_installs_atomically_replacing_old() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.dylib");
+        std::fs::write(&src, b"new-runtime-bytes").unwrap();
+        let target = dir.join("libonnxruntime.dylib");
+        std::fs::write(&target, b"old").unwrap();
+
+        copy_into_place(&src, &target).expect("install must succeed");
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-runtime-bytes");
+        // Only `src` + `target` remain — the temp file was renamed, not left behind.
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 2, "a successful install must leave no temp file: {names:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn copy_into_place_failed_copy_leaves_no_resolvable_target() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("libonnxruntime.dylib");
+        let missing_src = dir.join("does-not-exist.dylib");
+
+        assert!(
+            copy_into_place(&missing_src, &target).is_err(),
+            "copying a missing source must fail"
+        );
+        assert!(
+            !target.exists(),
+            "a failed install must never leave a (truncated) dylib at the resolvable target"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "a failed install must clean up its temp file: {leftovers:?}");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

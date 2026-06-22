@@ -62,7 +62,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let missing = missing_models();
     if !missing.is_empty() {
         report_missing_models(ctx, &missing, models_dir.as_deref());
-        return Ok(());
+        anyhow::bail!("full-pipeline scan did not run: AI models not installed");
     }
 
     // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? ──────────────────
@@ -74,7 +74,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     if !fileid_engine::ort_runtime::is_available() {
         report_runtime_missing(ctx);
-        return Ok(());
+        anyhow::bail!("full-pipeline scan did not run: ONNX Runtime not installed");
     }
 
     // Pinned --db doesn't apply to the full pipeline: the engine binary
@@ -98,7 +98,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     // ── Pre-flight 2: engine binary located? ─────────────────────────────
     let Some(engine_bin) = locate_engine_binary() else {
         report_no_engine(ctx);
-        return Ok(());
+        anyhow::bail!("full-pipeline scan did not run: engine binary not found");
     };
 
     drive_scan(ctx, &engine_bin, &root_abs, rescan)
@@ -322,6 +322,9 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
             Ok(())
         }
         ScanOutcome::Error { kind, message } => {
+            // The engine reported an error → it did NOT scan. Surface the right
+            // output (JSON payload / clean install guidance / raw error) but
+            // ALWAYS exit non-zero so `scan --models && next` can't proceed.
             if ctx.json {
                 print_json(&serde_json::json!({
                     "command": "scan",
@@ -329,16 +332,13 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                     "error": kind,
                     "message": message,
                 }));
-                Ok(())
             } else if kind == "runtime_not_installed" {
                 // The pre-flight normally catches this; if the engine still
                 // reports it (e.g. the dylib vanished after pre-flight), surface
                 // the same clean install guidance rather than a raw engine error.
                 report_runtime_missing(ctx);
-                Ok(())
-            } else {
-                anyhow::bail!("engine scan failed [{kind}]: {message}")
             }
+            anyhow::bail!("engine scan failed [{kind}]: {message}")
         }
         ScanOutcome::Aborted => {
             anyhow::bail!("engine exited before the scan completed (no scanComplete event)")
