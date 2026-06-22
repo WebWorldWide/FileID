@@ -29,12 +29,24 @@ use clap::{Args, Parser, Subcommand};
 
 use context::Ctx;
 
+/// Shown at the foot of `fileid --help`: a few copy-pasteable starting points.
+const HELP_FOOTER: &str = "\
+Examples:
+  fileid scan ~/Pictures              fast index — names + text, no models needed
+  fileid search \"invoice 2023\"        keyword-search the library
+  fileid models download --all        install the AI models (from huggingface.co)
+  fileid scan ~/Pictures --models     full AI scan — tags · faces · visual search
+
+AI scans need two models (mobileclip_s2 + arcface); see `fileid models list`.
+Everything runs on-device — no cloud, no telemetry. Run a bare `fileid` for a tour.";
+
 #[derive(Parser)]
 #[command(
     name = "fileid",
     version,
     about = "FileID — on-device AI file organizer (CLI front-end over the Rust engine)",
     long_about = None,
+    after_help = HELP_FOOTER,
 )]
 struct Cli {
     #[command(flatten)]
@@ -74,6 +86,8 @@ enum Command {
     /// `--models`: drives the engine's FULL pipeline (image tags, CLIP
     /// embeddings, faces, perceptual + content hashes) by spawning the engine
     /// binary — requires the AI models to be installed.
+    ///
+    /// Example: fileid scan ~/Pictures --models
     Scan {
         /// Directory to scan.
         #[arg(value_name = "PATH")]
@@ -92,6 +106,8 @@ enum Command {
     /// <path-or-id>`: visual / semantic nearest-neighbor over stored CLIP
     /// embeddings (needs a `scan --models` / desktop scan to have populated
     /// them).
+    ///
+    /// Example: fileid search "vacation 2023"   ·   fileid search --similar 1234
     Search {
         /// Search terms (FTS keyword search). Omit when using `--similar`.
         #[arg(value_name = "QUERY", num_args = 0..)]
@@ -106,6 +122,8 @@ enum Command {
     },
 
     /// Show a file's metadata, tags, people, and a text snippet.
+    ///
+    /// Example: fileid info ~/Pictures/IMG_1234.jpg   (or a numeric file id)
     Info {
         /// A file path or numeric file id.
         #[arg(value_name = "PATH-OR-ID")]
@@ -113,6 +131,8 @@ enum Command {
     },
 
     /// List person clusters (id, name, face count).
+    ///
+    /// Example: fileid people
     People,
 
     /// List (or, with `--apply`, remove) duplicate / near-duplicate groups.
@@ -121,6 +141,9 @@ enum Command {
     /// removes the rest — to the Recycle Bin / Trash by default (recoverable;
     /// Windows + Linux), or permanently with `--delete`. SAFE: nothing is
     /// removed without `--apply`, and `--apply` prompts unless `--yes`.
+    ///
+    /// Example: fileid dedupe --exact            (list byte-identical groups)
+    ///          fileid dedupe --exact --apply    (trash all but one per group)
     Dedupe {
         /// Group byte-identical files (BLAKE3 content hash). Default.
         #[arg(long)]
@@ -150,6 +173,9 @@ enum Command {
     /// Without `--apply` this prints a read-only plan. `--apply` moves files
     /// into the proposed layout via the engine's exact apply path; SAFE —
     /// it prompts unless `--yes`, and `--dry-run` previews without moving.
+    ///
+    /// Example: fileid restructure --plan            (preview only)
+    ///          fileid restructure --apply --dry-run (preview the moves)
     Restructure {
         /// Produce the read-only plan (default when neither flag is given).
         #[arg(long)]
@@ -179,6 +205,8 @@ enum Command {
     /// installs them into the engine's own models dir so `scan --models` can
     /// use them — user-initiated downloads from huggingface.co (the only
     /// network egress).
+    ///
+    /// Example: fileid models list   ·   fileid models download --all
     Models {
         #[command(subcommand)]
         cmd: ModelsCmd,
@@ -188,6 +216,8 @@ enum Command {
 #[derive(Subcommand)]
 enum ModelsCmd {
     /// List the engine's AI models: installed state, size, license, HF repo.
+    ///
+    /// Example: fileid models list
     List,
 
     /// Download + install models into the engine's models dir.
@@ -196,6 +226,8 @@ enum ModelsCmd {
     /// the repos + total size without fetching anything (the set is tens of GB
     /// with the Deep Analyze VLMs). A large or `--all` download prompts for
     /// confirmation unless `--yes`.
+    ///
+    /// Example: fileid models download arcface mobileclip_s2   (the two required)
     Download {
         /// Download the entire commercial-clean model set.
         #[arg(long)]
@@ -206,26 +238,42 @@ enum ModelsCmd {
         /// Skip the confirmation prompt for a large / `--all` download.
         #[arg(long)]
         yes: bool,
+        /// Machine-readable progress on stdout (`PROGRESS\t<pct>\t<label>`) for
+        /// the TUI installer; suppresses the human bar. Hidden from `--help`.
+        #[arg(long = "porcelain-progress", hide = true)]
+        porcelain_progress: bool,
         /// Model names to download (e.g. `arcface mobileclip_s2 ram_plus`).
         #[arg(value_name = "NAME", num_args = 0..)]
         names: Vec<String>,
     },
 }
 
-/// Friendly getting-started shown for a bare `fileid` (no subcommand) — a short
-/// what-it-is line plus the handful of commands worth trying first, with
-/// concrete examples. Replaces clap's terse "USAGE:" error (FIX 4).
+/// Friendly getting-started shown for a bare `fileid` (no subcommand) — what it
+/// is, the handful of commands worth trying first (copy-pasteable), and the
+/// model story. Replaces clap's terse "USAGE:" error.
 fn intro() -> &'static str {
-    "FileID — search, dedupe, and organize your files locally.\n\
-     \n  \
-     fileid people                     list the people in your library\n  \
-     fileid search \"beach\"             find files by keyword\n  \
+    "FileID — on-device AI file organizer.\n\
+     Tag, search, dedupe, and tidy your files locally — no cloud, no telemetry.\n\
+     \n\
+     Get started\n  \
+     fileid scan ~/Pictures            index a folder fast (names + text; no models)\n  \
+     fileid search \"invoice 2023\"       keyword-search what you indexed\n  \
+     fileid models list                see the AI models and what's installed\n  \
+     fileid models download --all      install them once (from huggingface.co)\n  \
+     fileid scan ~/Pictures --models   full AI scan: image tags, faces, visual search\n\
+     \n\
+     More\n  \
+     fileid search --similar 1234      files that look like file #1234   (needs an AI scan)\n  \
+     fileid people                     people found by face clustering   (needs an AI scan)\n  \
      fileid dedupe --similar           find visually-similar duplicates\n  \
      fileid restructure --plan         preview a tidy folder layout\n  \
-     fileid models list                see the AI models + install state\n  \
-     fileid scan ~/Pictures --db ~/test.sqlite   index a new folder\n\
+     fileid info <path-or-id>          everything indexed about one file\n\
      \n\
-     Add --help to any command for details.  (macOS: with no --db, reads your desktop app's library.)"
+     The AI scan needs two models — mobileclip_s2 and arcface; `fileid models download`\n\
+     fetches them. Without models, `fileid scan` still does a fast names + plain-text index.\n\
+     \n\
+     Run `fileid <command> --help` for details and an example.\n\
+     (macOS: with no --db, commands read your FileID desktop app's library.)"
 }
 
 /// Point the engine at its OWN writable models dir for this process (and any
@@ -288,8 +336,8 @@ fn main() -> ExitCode {
         }
         Command::Models { cmd } => match cmd {
             ModelsCmd::List => models::list(&ctx),
-            ModelsCmd::Download { all, dry_run, yes, names } => {
-                models::download(&ctx, all, dry_run, yes, &names)
+            ModelsCmd::Download { all, dry_run, yes, porcelain_progress, names } => {
+                models::download(&ctx, all, dry_run, yes, porcelain_progress, &names)
             }
         },
     };

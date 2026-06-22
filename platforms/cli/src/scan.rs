@@ -12,6 +12,7 @@
 //! non-destructive to those columns — it UPSERTs and preserves any ML data a
 //! prior full engine scan wrote.
 
+use std::io::{IsTerminal, Write as _};
 use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,6 +50,13 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         .with_context(|| format!("opening library db at {}", ctx.db.display()))?;
     let now = now_unix();
     let started = Instant::now();
+
+    // Live carriage-return progress only when stderr is a TTY (and not
+    // --quiet/--json); otherwise fall back to coarse, non-spammy lines.
+    let live = !ctx.quiet && !ctx.json && std::io::stderr().is_terminal();
+    if !ctx.quiet && !ctx.json {
+        ctx.progress(&format!("{} {}", ctx.bold("Scanning"), root_abs.display()));
+    }
 
     let mut discovered: u64 = 0;
     let mut indexed: u64 = 0;
@@ -139,10 +147,22 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             }
             indexed += 1;
 
-            if !ctx.quiet && indexed.is_multiple_of(200) {
+            if live && indexed.is_multiple_of(32) {
+                let mut err = std::io::stderr();
+                let _ = write!(
+                    err,
+                    "\r  {} {indexed} indexed · {text_indexed} text · {skipped} unchanged\x1b[K",
+                    ctx.dim("scanning…")
+                );
+                let _ = err.flush();
+            } else if !live && !ctx.quiet && !ctx.json && indexed.is_multiple_of(2000) {
                 ctx.progress(&format!("  indexed {indexed} files…"));
             }
         }
+    }
+    if live {
+        let _ = write!(std::io::stderr(), "\r\x1b[K");
+        let _ = std::io::stderr().flush();
     }
     tx.commit().context("commit scan transaction")?;
 
@@ -158,18 +178,35 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             "durationMs": elapsed.as_millis() as u64,
         }));
     } else {
+        let secs = elapsed.as_secs_f64();
+        let rate = if secs > 0.0 {
+            format!("  ·  {:.0} files/s", indexed as f64 / secs)
+        } else {
+            String::new()
+        };
         println!("{}", ctx.bold("Scan complete."));
-        println!("  Root:          {}", root_abs.display());
-        println!("  Discovered:    {discovered} files");
-        println!("  Indexed:       {indexed}");
-        println!("  Skipped:       {skipped} {}", ctx.dim("(unchanged)"));
-        println!("  Text-indexed:  {text_indexed} {}", ctx.dim("(FTS)"));
-        println!("  Duration:      {:.2}s", elapsed.as_secs_f64());
+        println!("  Root:         {}", root_abs.display());
+        println!(
+            "  Indexed:      {indexed}  {}",
+            ctx.dim(&format!("({discovered} found, {skipped} unchanged)"))
+        );
+        println!("  Text-indexed: {text_indexed} {}", ctx.dim("(full-text search)"));
+        println!("  Duration:     {secs:.2}s{rate}");
+        if indexed > 0 {
+            println!(
+                "  Search it:    {}",
+                ctx.bold("fileid search \"<words>\"")
+            );
+        }
+        println!(
+            "  Add AI tags · faces · visual search: {}",
+            ctx.bold("fileid scan --models")
+        );
         if text_indexed == 0 {
-            ctx.progress(&format!(
+            println!(
                 "  {}",
-                ctx.dim("note: no plain-text files indexed; image tags/faces need a full engine scan with models")
-            ));
+                ctx.dim("note: no plain-text files here; image tags/faces need an AI scan (`--models`)")
+            );
         }
     }
     Ok(())

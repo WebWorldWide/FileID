@@ -24,7 +24,7 @@
 //! which the engine binary resolves itself — so a pinned `--db` that differs is
 //! reported as not-applicable here (unlike the read/model-free paths).
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -244,12 +244,35 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                     "durationSeconds": seconds,
                 }));
             } else {
-                println!("{}", ctx.bold("Full-pipeline scan complete."));
+                let rate = if seconds > 0.0 {
+                    format!("  ·  {:.0} files/s", processed as f64 / seconds)
+                } else {
+                    String::new()
+                };
+                println!("{}", ctx.bold("AI scan complete."));
                 println!("  Root:       {}", root.display());
-                println!("  Total:      {total}");
-                println!("  Processed:  {processed}");
-                println!("  Failed:     {failed}");
-                println!("  Duration:   {seconds:.2}s");
+                println!(
+                    "  Processed:  {processed} / {total}{}",
+                    if failed > 0 {
+                        ctx.dim(&format!("  ({failed} failed)"))
+                    } else {
+                        String::new()
+                    }
+                );
+                if let Some((tags, faces, people)) =
+                    fileid_engine::paths::db_path().ok().as_deref().and_then(count_results)
+                {
+                    println!(
+                        "  Results:    {tags} tags · {faces} files with faces · {people} people"
+                    );
+                }
+                println!("  Duration:   {seconds:.2}s{rate}");
+                println!(
+                    "  Explore:    {}  ·  {}  ·  {}",
+                    ctx.bold("fileid search \"...\""),
+                    ctx.bold("fileid people"),
+                    ctx.bold("fileid dedupe --similar"),
+                );
             }
             Ok(())
         }
@@ -279,6 +302,15 @@ enum ScanOutcome {
 }
 
 fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
+    // Live carriage-return progress only at a TTY; clear it before any milestone
+    // (phase change) or terminal outcome so nothing is glued to the bar.
+    let live = !ctx.quiet && !ctx.json && std::io::stderr().is_terminal();
+    let clear = || {
+        if live {
+            let _ = write!(std::io::stderr(), "\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        }
+    };
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let Ok(line) = line else { break };
@@ -294,24 +326,45 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
             EventPayload::Progress(w) => {
                 let p = w.inner;
                 if p.total > 0 {
-                    let failed = if p.failed > 0 {
-                        format!(", {} failed", p.failed)
+                    let pct = (p.processed as f64 / p.total as f64 * 100.0).min(100.0);
+                    if live {
+                        let failed = if p.failed > 0 {
+                            format!(" · {} failed", p.failed)
+                        } else {
+                            String::new()
+                        };
+                        let mut err = std::io::stderr();
+                        let _ = write!(
+                            err,
+                            "\r  {} {}/{} ({pct:.0}%) · {:.0} files/s{failed}\x1b[K",
+                            ctx.dim(&format!("{:?}", p.phase)),
+                            p.processed,
+                            p.total,
+                            p.files_per_second,
+                        );
+                        let _ = err.flush();
                     } else {
-                        String::new()
-                    };
-                    ctx.progress(&format!(
-                        "  {} {}/{} files ({:.0} files/s){failed}",
-                        ctx.dim(&format!("{:?}", p.phase)),
-                        p.processed,
-                        p.total,
-                        p.files_per_second,
-                    ));
+                        let failed = if p.failed > 0 {
+                            format!(", {} failed", p.failed)
+                        } else {
+                            String::new()
+                        };
+                        ctx.progress(&format!(
+                            "  {} {}/{} files ({:.0} files/s){failed}",
+                            ctx.dim(&format!("{:?}", p.phase)),
+                            p.processed,
+                            p.total,
+                            p.files_per_second,
+                        ));
+                    }
                 }
             }
             EventPayload::PhaseChanged(w) => {
+                clear();
                 ctx.progress(&format!("  {}", ctx.dim(&format!("phase: {:?}", w.inner))));
             }
             EventPayload::ScanComplete(w) => {
+                clear();
                 let c = w.inner;
                 return ScanOutcome::Complete {
                     total: c.total_files,
@@ -321,6 +374,7 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
                 };
             }
             EventPayload::Error(w) => {
+                clear();
                 let e = w.inner;
                 // A transient phase=Failed often precedes the real error; the
                 // error event carries the actionable kind/message.
@@ -329,7 +383,22 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
             _ => {}
         }
     }
+    clear();
     ScanOutcome::Aborted
+}
+
+/// Best-effort `(tags, files-with-faces, people)` for the completion summary.
+/// Read-only, never fatal — the engine has already exited and freed the DB by
+/// the time we call this (the scan is done).
+fn count_results(db: &Path) -> Option<(i64, i64, i64)> {
+    let conn = fileid_engine::db::open_read(db).ok()?;
+    let tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).ok()?;
+    let faces: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE has_faces = 1", [], |r| r.get(0))
+        .unwrap_or(0);
+    let people: i64 =
+        conn.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0)).unwrap_or(0);
+    Some((tags, faces, people))
 }
 
 /// Wait for the engine to exit, but don't hang forever if it ignores EOF.

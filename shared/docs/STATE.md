@@ -8,6 +8,23 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — Model-install progress bar (CLI bar + TUI gauge) + interface polish pass
+
+User: "make a progress bar for installing all the models … and again try to fix up the interfaces more, there is still a lot left to do." (Context: the user had already run `fileid models download --all` in the CLI window from the prior turn — all 9 models / 24.9 GB now installed — so this is the install *experience*, not a blocker.)
+
+**Architecture:** the engine downloader already exposes `install_model_blocking(model, cancel, progress: Arc<dyn Fn(InstallFileProgress)>)` (fields: file_index/file_count/file_name/bytes_done/bytes_total/bytes_per_second, throttled ~20 Hz). The CLI already drove it with a plain text line; the TUI shelled out to the CLI and streamed raw lines. Kept the CLI as the single source of truth for the model catalog and added a machine contract between them:
+- **SHARED CONTRACT:** `fileid models download --porcelain-progress` (hidden flag) writes `PROGRESS\t{percent 0-100}\t{label}` lines to stdout (overall, monotonic, byte-weighted by catalog size; label e.g. `arcface · 182/271 MB · 3.4 MB/s · model 2/9`), milestones/summary as plain non-`PROGRESS` stdout lines, final `PROGRESS\t100\tdone`. `--json` wins if both set; fancy stderr bar suppressed in porcelain mode.
+- **CLI (`models.rs`):** real carriage-return overall bar to stderr on a TTY (gold fill, name/size/speed/ETA/`model X/N`), `Plainish` (json/quiet) + `NonTty` (piped — milestones only) modes. Unit tests pin the exact porcelain line + monotonic-reaches-100 + size units.
+- **TUI (`models.rs`/`app.rs`/`ui.rs`):** spawns `--all --yes --porcelain-progress`, `parse_porcelain_line` → `LoadMsg::DownloadProgress{percent,label}` → `App.download: Option<DownloadState>` → `render_download_gauge` paints a ratatui `Gauge` (gold on dark track) in the banner slot, green "✓ installed — press s to scan" on done, cleared + missing-models re-checked on worker exit. Malformed line → status, never panic.
+
+**Verified with REAL data:** `FILEID_MODELS_DIR=/tmp/probe fileid models download arcface --porcelain-progress` streamed real `PROGRESS` lines with overall percent 50→…→100, final `PROGRESS 100 done`, quiet stderr (throwaway dir; user's installed models untouched). CLI `cargo build`/`clippy -D`/`test` clean; TUI same, **75 tests** (+12: porcelain parse, gauge lifecycle, TestBackend gauge/empty-state frames).
+
+**Interface polish (same pass):**
+- CLI: bare-`fileid` first-run tour (what it is + copy-paste Get-started block, names the 2 gate models + model-free fallback); `models list` aligned table with `★` required / `✓ installed` / totals / dir / exact install commands; `scan` + `scan --models` get start line + live CR progress + richer summaries with next-step hints; one-line `Example:` on every subcommand `--help` + top-level `after_help`; honors `$NO_COLOR` + non-TTY.
+- TUI: real empty/summary states on every tab (Library "press s to scan" + no-match, People "scan to detect & group faces", Cleanup dedupe explainer, Restructure preview explainer, Settings live model-status line + folder-browser key docs); shared gold-keycap `cta()` so every empty screen answers "how do I do something" (the user's #1 complaint). Redesign palette/banner/dark-bg preserved.
+
+Both release binaries rebuilt + reinstalled (fresh inode + ad-hoc sign). All models installed, so the TUI shows the ready state (no banner); the gauge appears during an actual download.
+
 ## 2026-06-21 — TUI interaction fix: welcome-screen masked every tab; `D` "downloaded" nothing
 
 User: "TUI still isn't letting me switch into settings or prompting me to download the models… when I click S to scan nothing happening… ensure the logic from top to bottom is fixed." Audited the full key-dispatch path. Key dispatch was actually fine (`Tab::next/prev` is modular over all 5 tabs, `switch_tab` has no guard, `s` opens the browser overlay). **Real root cause: `ui.rs::render_body` short-circuited to the welcome screen for *every* tab whenever the DB didn't exist yet** — and a fresh empty-scratch start has no DB. So Tab/`1-5` moved the header underline but the body never changed → Settings (and its `D` download prompt) was unreachable. Two more defects: `Char('D')` was gated to the (unreachable) Settings tab; and `models.rs` spawned `fileid models download --all` with null stdin + no `--yes`, so the CLI's `confirm()` returned false on non-TTY → `--all` aborted with **exit 0** while the TUI reported "models installed… ready" (downloaded nothing).

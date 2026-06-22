@@ -475,12 +475,15 @@ fn no_subcommand_prints_friendly_intro() {
     assert!(out.status.success(), "bare `fileid` should exit 0, got {:?}", out.status);
     let s = stdout(&out);
     assert!(
-        s.contains("FileID — search, dedupe, and organize"),
+        s.contains("FileID — on-device AI file organizer"),
         "intro headline missing: {s}"
     );
-    assert!(s.contains("fileid people"), "intro should list the people example: {s}");
+    // The primary getting-started actions: scan, search, install models.
+    assert!(s.contains("fileid scan ~/Pictures"), "intro should lead with a scan example: {s}");
     assert!(s.contains("fileid search"), "intro should list the search example: {s}");
-    assert!(s.contains("fileid dedupe --similar"), "intro should list the dedupe example: {s}");
+    assert!(s.contains("fileid models download"), "intro should list the model install: {s}");
+    // The two scan-gate models are named, and the model-free fallback is explained.
+    assert!(s.contains("mobileclip_s2") && s.contains("arcface"), "intro should name the gate models: {s}");
     assert!(s.contains("fileid restructure --plan"), "intro should list the restructure example: {s}");
     assert!(s.contains("--help"), "intro should point at --help: {s}");
 

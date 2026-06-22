@@ -11,8 +11,12 @@ pub struct Ctx {
     pub json: bool,
     /// Suppress progress + non-essential chrome.
     pub quiet: bool,
-    /// ANSI color is allowed (TTY + not `--no-color`).
+    /// ANSI color is allowed on stdout (color permitted AND stdout is a TTY).
     pub color: bool,
+    /// Color is permitted at all: neither `--no-color` nor `$NO_COLOR` set.
+    /// Independent of which stream is a TTY — the stderr progress bar consults
+    /// this with its own `stderr().is_terminal()` check.
+    pub color_allowed: bool,
     /// Absolute path to the library SQLite file.
     pub db: PathBuf,
     /// The caller pinned the library location (`--db`, `$FILEID_DB`, or
@@ -56,8 +60,11 @@ impl Ctx {
         } else {
             fileid_engine::paths::db_path().context("resolving default library location")?
         };
-        let color = !no_color && std::io::stdout().is_terminal();
-        Ok(Self { json, quiet, color, db, db_explicit })
+        // Honor the de-facto `NO_COLOR` standard (no-color.org): any value,
+        // even empty, disables color — in addition to the explicit `--no-color`.
+        let color_allowed = !no_color && std::env::var_os("NO_COLOR").is_none();
+        let color = color_allowed && std::io::stdout().is_terminal();
+        Ok(Self { json, quiet, color, color_allowed, db, db_explicit })
     }
 
     /// Interactive yes/no gate for destructive actions. SAFE by construction:
@@ -100,6 +107,26 @@ impl Ctx {
     pub fn dim(&self, s: &str) -> String {
         if self.color {
             format!("\x1b[2m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// Brand gold (`#FFCC00` ≈ xterm 220) — used to mark required models and
+    /// other identity accents. Pad text to its column width BEFORE wrapping, so
+    /// the invisible escape bytes never throw off `{:<width}` alignment.
+    pub fn gold(&self, s: &str) -> String {
+        if self.color {
+            format!("\x1b[38;5;220m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// Green accent — used for the "installed" state.
+    pub fn green(&self, s: &str) -> String {
+        if self.color {
+            format!("\x1b[32m{s}\x1b[0m")
         } else {
             s.to_string()
         }
