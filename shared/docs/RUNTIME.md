@@ -38,8 +38,11 @@ so the runtime is swappable and matches the Windows/Linux model.)
 ### Required version
 
 `ort 2.0.0-rc.10` targets **ONNX Runtime 1.22.0** and **hard-panics if the loaded
-dylib's minor version is < 22**. Install **1.22.x**. A newer build (e.g. Homebrew
-shipping 1.23) loads with a compatibility warning; an older one aborts.
+dylib's minor version is < 22**. Install **≥ 1.22**. Newer builds load fine via
+ONNX Runtime's ABI back-compat — **verified end-to-end on macOS arm64 with
+Homebrew's ONNX Runtime 1.27.0**: the engine dlopen'd it, loaded MobileCLIP, and
+a full-AI scan completed (real CLIP tags) from both the CLI and the TUI. An
+*older* dylib (< 1.22) aborts.
 
 ---
 
