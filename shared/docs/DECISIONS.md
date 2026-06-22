@@ -3779,3 +3779,53 @@ suites, CLI smoke); TUI clippy clean + 78 tests. **On-hardware gap (user must ru
 on the Mac):** the actual `fileid runtime install` download + a full-AI
 `scan --models` completing — running externally-downloaded native code is blocked
 in the sandbox, so the dlopen + inference path is unverified here.
+
+## 2026-06-21 — macOS ONNX Runtime: pinned to the official Microsoft GitHub release (.tgz), SHA256-pinned, download→verify→extract wired + verified end-to-end
+
+Closes the `TODO(runtime-dylib)` from the entry above. `fileid runtime install`
+now works **out-of-the-box on macOS arm64 with no env override**.
+
+**Source — the official Microsoft ONNX Runtime 1.22.0 GitHub release (MIT).**
+`PINNED_DYLIB_URL` (`platforms/cli/src/runtime.rs`) =
+`github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz`.
+`github.com` is **already** on the engine downloader's source + redirect
+allow-list (`downloader.rs` `REDIRECT_ALLOWED`), so this is **not a new egress
+host** at the code level — the download routes through the *same* single audited,
+CA-pinned client as model fetches. User-initiated, one-time, SHA256-pinned, no
+telemetry. 1.22.0 is `ort 2.0.0-rc.10`'s exact target (no version-compat warning).
+
+**Why GitHub and not a HuggingFace mirror (revising the prior entry's
+"preferred" stance):** there is no HF auth on the build host to upload a mirror,
+and the GitHub release is already allow-listed + canonical + MIT. The **HF-swap
+hook stays a one-line change**: mirror the same artifact on huggingface.co (also
+allow-listed) and repoint `PINNED_DYLIB_URL` (+ the matching SHA) — the installer
+branches on the URL extension (`url_is_tarball`), so a bare `.dylib` HF mirror
+works too. So strict HF-only egress remains available later for a single const
+edit; we ship the working GitHub source now.
+
+**Two-stage SHA256 pinning.** (1) The downloader verifies the **archive** hash
+(`cab6dcbd…`) before extraction — an unverified blob is never extracted. (2) After
+`tar -xzf`, a second guard verifies the **extracted dylib** hash (`2b885992…`).
+The second guard earned its keep immediately: the archive ships a `.dSYM` debug
+bundle containing a DWARF file with the **identical name**
+`libonnxruntime.1.22.0.dylib` but different bytes; the first locator picked it and
+the guard rejected it (installed nothing). Fix: exclude any `.dSYM` path component
+in `locate_extracted_dylib`.
+
+**Extraction uses the system `tar`** (`std::process::Command`, macOS always ships
+BSD tar w/ gzip) — **no `tar`/`flate2` crate** added. `sha2` + `hex` were added to
+the CLI for the second guard, but both are EXACT engine-dependency versions →
+Cargo unifies them, **zero new crates in the lock graph** (same pattern as
+`parking_lot`). `--force` now **always** takes the download+extract path (skips
+the already-resolvable + local-Homebrew-copy short-circuits) so a user can pin the
+exact 1.22 build even with Homebrew present (and so the path is testable there).
+
+**Verified end-to-end on the macOS arm64 dev host** (the prior entry's on-hardware
+gap is now closed): `fileid runtime install --force` downloaded the tgz, SHA-
+verified the archive, extracted, second-verified the dylib (`2b885992…`), and
+installed `~/.local/share/FileID/runtime/libonnxruntime.dylib`; `runtime status`
+resolves it from `runtime_dir` (searched before `/opt/homebrew`'s 1.27, so the
+pinned 1.22 wins); a full-AI `scan --models` then pinned `ORT_DYLIB_PATH` to it
+and ran inference (SFace/YuNet/MobileCLIP warmup complete, model loaded, "AI scan
+complete"). CLI `cargo build` + `clippy --all-targets -D warnings` + `cargo test`
+(incl. new SHA-mismatch + dylib-locator + `.dSYM`-exclusion tests) all green.

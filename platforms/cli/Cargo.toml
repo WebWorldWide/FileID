@@ -53,6 +53,12 @@ walkdir    = "2"
 # makes the type nameable so `restructure --apply` calls the engine's exact
 # apply path in-process (zero drift). Justified in shared/docs/DECISIONS.md.
 parking_lot = "0.12"
+# SHA256 of the extracted ONNX Runtime dylib — the second integrity guard in
+# `runtime install` after the downloader verifies the archive. Both are EXACT
+# engine dependency versions, so Cargo unifies them and adds NO crate to the
+# lock graph (same pattern as parking_lot above). See shared/docs/RUNTIME.md.
+sha2 = "0.10"
+hex  = "0.4"
 
 [profile.release]
 opt-level     = 3
