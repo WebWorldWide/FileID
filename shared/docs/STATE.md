@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — ✅ Full-AI scans VERIFIED end-to-end on macOS (CLI + TUI), ONNX Runtime provisioned
+
+Closed the loop on the ONNX-on-macOS work (commit e559bd9). On this Mac (arm64): `brew install onnxruntime` → **1.27.0** at `/opt/homebrew/lib/libonnxruntime.dylib`; `fileid runtime status` → ✓ resolved; `fileid models download arcface mobileclip_s2` → installed. Then:
+- **CLI** `fileid scan /tmp/fid_corpus --models --db /tmp/x.sqlite` → engine dlopen'd ONNX Runtime, `mobileclip warmup complete`, `model loaded mobileclip_s2_image.onnx`, **AI scan complete 3/3 · 8 tags · 294 files/s** (exit 0).
+- **TUI** PTY-driven (`s`→`t`→type `/private/tmp/fid_corpus`→Enter) → **Scan complete: 6/6 files indexed**, tags, stays responsive.
+
+So both surfaces do full-AI scans on macOS now. Two findings vs. the agent's docs: (1) the sandbox did NOT block dlopen of the Homebrew dylib here; (2) **ONNX Runtime 1.27 is ABI-compatible with `ort 2.0.0-rc.10`** (the `< 1.22` panic is a floor, not a ceiling) — RUNTIME.md updated to record 1.27 verified. The macOS user one-liner: `brew install onnxruntime` (or `fileid runtime install`) once → full AI in TUI + CLI. Remaining polish (not blocking): finalize the HF-mirror SHA pin for a pure-HF-egress `fileid runtime install` (currently relies on a local runtime or `FILEID_ORT_DYLIB_URL`).
+
 ## 2026-06-21 — TUI scan PTY-driven + fixed; ONNX-on-macOS chosen (in progress); cross-OS TEST.md
 
 User: "scan just does nothing / locks up — steer it start to stop on TUI and CLI." Drove the TUI in a real PTY (pyte + pty.fork, TIOCSWINSZ, full-frame capture) and ran `FileIDEngine` directly with stderr visible. **Root cause:** the engine is correct — on missing models it emits `phaseChanged:failed` + `error{kind:"models_not_installed", message:"Missing: mobileclip_s2, arcface"}` and exits clean. The **TUI** swallowed it: (1) `missing_models()` checked the macOS desktop-app model dir instead of the engine's `engine_models_dir` (so no early bail, no banner), (2) showed only a misleading "Scan phase: Failed" then reverted to blank, (3) `stderr(Stdio::null())` discarded the real error. Fixed all three in `platforms/tui/src/scan.rs` (commit d8bc809): dir-correct check, suppress bare `PhaseChanged`, TUI-appropriate message, bounded stderr capture; 78 tests. PTY-verified: failure path now shows a persistent "AI models not installed — press D…" (0 "Scan phase: Failed"); CLI metadata scan works (`Indexed: 5 · 2438 files/s`).
