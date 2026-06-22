@@ -65,6 +65,18 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         return Ok(());
     }
 
+    // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? ──────────────────
+    // The engine's `load-dynamic` build `dlopen`s `libonnxruntime.dylib`, but
+    // `ort`'s `download-binaries` ships only a STATIC lib for arm64 — so the
+    // runtime is a separate, one-time install from the model download. Catch it
+    // here with clear guidance instead of spawning an engine that will abort at
+    // model-load. No-op off macOS (`is_available()` is always true there).
+    #[cfg(target_os = "macos")]
+    if !fileid_engine::ort_runtime::is_available() {
+        report_runtime_missing(ctx);
+        return Ok(());
+    }
+
     // Pinned --db doesn't apply to the full pipeline: the engine binary
     // resolves its own library location. Surface that rather than silently
     // writing somewhere the user didn't expect.
@@ -167,6 +179,39 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
     println!(
         "  {}",
         ctx.dim("The default `fileid scan` (model-free FTS) needs no models.")
+    );
+}
+
+/// Clear, actionable "ONNX Runtime not installed" message (macOS). Distinct from
+/// the model download — points at the one-time `fileid runtime install`. Reused
+/// by the pre-flight gate and the engine's `runtime_not_installed` mapping.
+fn report_runtime_missing(ctx: &Ctx) {
+    let cmd = fileid_engine::ort_runtime::INSTALL_COMMAND;
+    if ctx.json {
+        print_json(&serde_json::json!({
+            "command": "scan",
+            "mode": "models",
+            "error": "runtime_not_installed",
+            "message": "the full ML pipeline needs ONNX Runtime, which isn't installed",
+            "hint": format!(
+                "install it once with `{cmd}` (or `brew install onnxruntime`), then re-run. \
+                 This is separate from `fileid models download`. See shared/docs/RUNTIME.md"
+            ),
+        }));
+        return;
+    }
+    println!("{}", ctx.bold("Full-pipeline scan unavailable — ONNX Runtime not installed."));
+    println!(
+        "  {}",
+        ctx.dim("The AI models are installed, but the runtime that loads them isn't.")
+    );
+    println!("  {}", ctx.bold("Install it once (any one):"));
+    println!("    {}", ctx.bold(cmd));
+    println!("    brew install onnxruntime");
+    println!("    shared/scripts/install_onnxruntime_macos.sh");
+    println!(
+        "  {}",
+        ctx.dim("Then re-run this scan. (Separate from `fileid models download`.) See shared/docs/RUNTIME.md.")
     );
 }
 
@@ -284,6 +329,12 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                     "error": kind,
                     "message": message,
                 }));
+                Ok(())
+            } else if kind == "runtime_not_installed" {
+                // The pre-flight normally catches this; if the engine still
+                // reports it (e.g. the dylib vanished after pre-flight), surface
+                // the same clean install guidance rather than a raw engine error.
+                report_runtime_missing(ctx);
                 Ok(())
             } else {
                 anyhow::bail!("engine scan failed [{kind}]: {message}")

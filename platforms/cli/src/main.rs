@@ -18,6 +18,7 @@ mod info;
 mod models;
 mod people;
 mod restructure;
+mod runtime;
 mod scan;
 mod scan_models;
 mod search;
@@ -211,6 +212,44 @@ enum Command {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
+
+    /// Manage the ONNX Runtime library the full-ML scan loads (`status` /
+    /// `install`).
+    ///
+    /// Separate from `models` (the AI weights): this is the inference library
+    /// that loads them. On macOS it must be installed once (`ort` ships only a
+    /// static lib for arm64); on Windows/Linux the platform provides it.
+    ///
+    /// Example: fileid runtime status   ·   fileid runtime install
+    Runtime {
+        #[command(subcommand)]
+        cmd: RuntimeCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCmd {
+    /// Show whether ONNX Runtime is installed + where the engine looks for it.
+    ///
+    /// Example: fileid runtime status
+    Status,
+
+    /// Install the ONNX Runtime library where the engine loads it (macOS).
+    ///
+    /// Idempotent: reports + exits if it's already available (e.g. via
+    /// Homebrew). Provisions from a local copy when possible (no network), else
+    /// guides you through the one-time install. On Windows/Linux there's nothing
+    /// to install — the platform provides the runtime.
+    ///
+    /// Example: fileid runtime install
+    Install {
+        /// Reinstall into the engine runtime dir even if one is already found.
+        #[arg(long)]
+        force: bool,
+        /// Skip the confirmation prompt for a download.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -339,6 +378,10 @@ fn main() -> ExitCode {
             ModelsCmd::Download { all, dry_run, yes, porcelain_progress, names } => {
                 models::download(&ctx, all, dry_run, yes, porcelain_progress, &names)
             }
+        },
+        Command::Runtime { cmd } => match cmd {
+            RuntimeCmd::Status => runtime::status(&ctx),
+            RuntimeCmd::Install { force, yes } => runtime::install(&ctx, yes, force),
         },
     };
 

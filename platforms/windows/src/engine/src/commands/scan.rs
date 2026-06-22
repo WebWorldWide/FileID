@@ -104,6 +104,33 @@ pub(crate) async fn handle_start_scan(
         return;
     }
 
+    // macOS pre-flight: the engine's `load-dynamic` ONNX Runtime build needs an
+    // installed `libonnxruntime.dylib` (ORT's `download-binaries` ships only a
+    // STATIC lib for arm64). If it isn't resolvable, fail fast with a distinct,
+    // actionable `runtime_not_installed` error — pointing at the ONE-TIME
+    // runtime install, NOT the model download — instead of wedging ORT for the
+    // 120 s model-load timeout and then surfacing an opaque dlopen panic as
+    // `model_load_failed`. No-op on Windows/Linux (`is_available()` is always
+    // true there). main.rs already pinned `ORT_DYLIB_PATH` when resolvable.
+    #[cfg(target_os = "macos")]
+    if !crate::ort_runtime::is_available() {
+        tracing::warn!("[SCAN] ONNX Runtime dylib not installed; aborting scan");
+        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+            ScanPhase::Failed,
+        ))))
+        .await;
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "runtime_not_installed".into(),
+            message: crate::ort_runtime::missing_runtime_message(),
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+        *scan_state.lock() = None;
+        tracing::warn!("[SCAN] handle_start_scan exiting: runtime_not_installed");
+        return;
+    }
+
     // Emit Discovering immediately so the UI flips out of IdlePanel within
     // microseconds, regardless of how long ModelStack takes to load. Use
     // .await (not try_send) so the event can't be silently dropped under
@@ -175,6 +202,16 @@ pub(crate) async fn handle_start_scan(
         Ok(Ok(m)) => Arc::new(m),
         Ok(Err(err)) => {
             tracing::error!(?err, "model stack load panicked");
+            // macOS: a dylib that resolved at pre-flight but fails to load is
+            // almost always the wrong architecture or older than the required
+            // ONNX Runtime 1.22 (`ort` hard-panics on a lower minor version) —
+            // point at the one-time runtime reinstall in addition to the models.
+            #[cfg(target_os = "macos")]
+            let runtime_hint = "\nOn macOS this can also mean the ONNX Runtime is the wrong \
+                                architecture or older than 1.22 — reinstall it with \
+                                `fileid runtime install`.";
+            #[cfg(not(target_os = "macos"))]
+            let runtime_hint = "";
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Failed,
             ))))
@@ -183,7 +220,7 @@ pub(crate) async fn handle_start_scan(
                 kind: "model_load_failed".into(),
                 message: format!(
                     "The inference engine couldn't load its models: {err}.\n\
-                     Try reinstalling models from Settings → Local AI."
+                     Try reinstalling models from Settings → Local AI.{runtime_hint}"
                 ),
                 path: None,
                 model_kind: None,

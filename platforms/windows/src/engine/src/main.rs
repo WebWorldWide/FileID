@@ -19,6 +19,7 @@ mod ipc;
 mod job_queue;
 mod logging;
 mod models;
+mod ort_runtime;
 mod paths;
 mod pipeline;
 mod platform;
@@ -104,6 +105,19 @@ async fn async_main() -> Result<()> {
     logging::install_panic_hook();
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
+
+    // macOS: the engine's `load-dynamic` ORT build `dlopen`s
+    // `libonnxruntime.dylib`, but `download-binaries` ships only a STATIC
+    // `libonnxruntime.a` for arm64 — so the dylib must be provisioned
+    // separately (`fileid runtime install` / `brew install onnxruntime`). Pin
+    // `ORT_DYLIB_PATH` to the provisioned dylib now, before any ORT session, so
+    // the loader finds it (and honor a pre-set `ORT_DYLIB_PATH`). No-op on
+    // Windows/Linux — they keep their own runtime resolution (the Windows
+    // accelerator-pack pin below; the Linux system/download-binaries path).
+    #[cfg(target_os = "macos")]
+    if let Some(dylib) = ort_runtime::pin_dylib_path() {
+        tracing::info!(path = %dylib.display(), "[ORT] pinned ORT_DYLIB_PATH to installed ONNX Runtime dylib");
+    }
 
     // VRAM probe at startup. The ML session-pool sizer clamps pool size to
     // fit available video memory — without this clamp, a larger pool

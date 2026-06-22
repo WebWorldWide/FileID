@@ -3715,3 +3715,67 @@ The user's real library over-split 991 faces into 407 person clusters. Analyzing
 - **Chosen fix — corroboration gate (safe by construction).** A cluster becomes a person only if it is corroborated: `size ≥ FILEID_FACE_MIN_CLUSTER_SIZE` (default 3 — ≥3 faces linked at cosine ≥0.66 is a real recurring identity even if every frame is mediocre, protecting low-light recurring people) **OR** its best face clears `FILEID_FACE_SOLO_QUALITY` (default 0.12). Otherwise its faces are left `person_id NULL` — unclustered candidates, never deleted, **never merged**. Because it only ever *removes* low-confidence lone faces, it is structurally incapable of bridging two identities, satisfying the "must not merge different people" constraint trivially. On the real data: **407 → 285 persons** (default 0.12), 127 junk micro-clusters dropped, 775/991 faces still clustered, 0 identity merges. `=0` disables it.
 
 - **Cross-platform calibration caveat.** The 0.12 default is calibrated to Apple Vision `faceCaptureQuality`. Windows face quality is SCRFD `score × geometry_confidence` on a similar 0..~0.95 range, so the mirror uses the same default as a conservative starting point with an on-hardware-recalibrate note (`G:\TrueNAS`) — the size≥3 half of the gate is scale-independent and safe as-is. macOS↔Windows kept byte-faithful in algorithm + env knobs; only the numeric default may diverge after Windows calibration.
+
+---
+
+## 2026-06-21 — macOS ONNX Runtime: keep `load-dynamic`, provision the dylib (don't static-link), engine-side resolver + `fileid runtime install`
+
+Full-AI `fileid scan --models` (and the TUI) failed on macOS with
+`model_load_failed: libonnxruntime.dylib (no such file)`. Root cause, established
+by reading `ort-sys 2.0.0-rc.10`'s `dist.txt` + `build.rs` and inspecting the
+on-disk build cache:
+
+- `ort` is built with **`load-dynamic`**, so it `dlopen`s `libonnxruntime.dylib`
+  at run time (default bare name; `ORT_DYLIB_PATH` overrides).
+- `download-binaries` **does** have an `aarch64-apple-darwin` entry (ORT 1.22.0,
+  pyke CDN, SHA-pinned in-crate), **but that tarball ships only a STATIC
+  `libonnxruntime.a`** — confirmed: the extracted cache
+  (`~/Library/Caches/ort.pyke.io/dfbin/aarch64-apple-darwin/<hash>/onnxruntime/lib/`)
+  contains `libonnxruntime.a` and **no `.dylib`**. So a load-dynamic build has no
+  runtime library on macOS arm64.
+- `ort`'s `copy-dylibs` is a **default** feature but is **not** pulled in by
+  `download-binaries`, and the engine sets `default-features = false` without
+  re-listing it — and it wouldn't help anyway (nothing to copy on macOS).
+
+**Decision 1 — keep `load-dynamic`, provision the dylib externally** (the user's
+explicit choice). Static-linking the already-downloaded `.a` is the lowest-effort
+zero-egress alternative and is noted as a fallback, but `load-dynamic` keeps the
+runtime swappable and uniform with Windows/Linux, and supports GPU/EP packs the
+same way. Pin **ONNX Runtime 1.22.0**: `ort` hard-panics if the loaded dylib's
+minor version is < 22 (warns if >).
+
+**Decision 2 — engine-side resolver, cfg-gated to macOS** (`src/ort_runtime.rs`).
+Mirrors the Windows `ORT_DYLIB_PATH` pin (which is untouched). Before the first ML
+session, `main.rs` pins `ORT_DYLIB_PATH` to the first hit of: explicit
+`ORT_DYLIB_PATH` → beside the executable → `<state-root>/runtime/` → `/opt/homebrew/lib`
+→ `/usr/local/lib`. If unresolved, `commands/scan.rs` fails fast with a new
+`runtime_not_installed` error kind (distinct from `models_not_installed`) instead
+of wedging ORT for the 120 s load timeout then surfacing an opaque dlopen panic.
+Windows/Linux are byte-for-byte unchanged (`is_available()` is unconditionally
+`true` off macOS, so the gate can never block them).
+
+**Decision 3 — provisioning is commercial-clean + egress-careful.**
+`fileid runtime install` / `fileid runtime status` (CLI) install the MIT-licensed
+dylib where the engine looks. It first reuses a local copy (Homebrew / beside-exe,
+**zero egress**); the download path reuses the engine's **single audited,
+CA-pinned downloader** (new `downloader::download_file_blocking`) whose redirect
+allow-list already includes `huggingface.co` + `github.com`.
+
+**Egress note (the project rule is "egress = user-initiated huggingface.co
+model downloads").** The runtime is a new artifact class. To keep egress
+HuggingFace-only, the **preferred** source is a bare `libonnxruntime.dylib`
+mirrored on huggingface.co — left as `TODO(runtime-dylib)` (`PINNED_DYLIB_URL` /
+`PINNED_DYLIB_SHA256` in `platforms/cli/src/runtime.rs`) since it can't be
+uploaded from the sandbox. Until then: `brew install onnxruntime` (no custom
+egress) and `shared/scripts/install_onnxruntime_macos.sh` (Microsoft's official
+**github.com** release — already an allow-listed host; user-initiated, one-time,
+MIT) both work today, and `FILEID_ORT_DYLIB_URL`/`SHA256` let a self-hoster point
+anywhere on the allow-list. No telemetry; SHA256-pinned. Per-OS detail in
+`shared/docs/RUNTIME.md`.
+
+**Verified** on the macOS dev host: engine + CLI `cargo clippy --all-targets -D
+warnings` clean and `cargo test` green (engine `ort_runtime` + `downloader`
+suites, CLI smoke); TUI clippy clean + 78 tests. **On-hardware gap (user must run
+on the Mac):** the actual `fileid runtime install` download + a full-AI
+`scan --models` completing — running externally-downloaded native code is blocked
+in the sandbox, so the dlopen + inference path is unverified here.

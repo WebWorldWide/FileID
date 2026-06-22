@@ -87,6 +87,15 @@ fn run_scan(
         anyhow::bail!("{}", missing_models_message());
     }
 
+    // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? The engine's
+    //    `load-dynamic` build needs `libonnxruntime.dylib`, but `ort`'s
+    //    `download-binaries` ships only a static lib for arm64 — a separate,
+    //    one-time install from the model download. No-op off macOS. ──
+    #[cfg(target_os = "macos")]
+    if !fileid_engine::ort_runtime::is_available() {
+        anyhow::bail!("{}", runtime_missing_message());
+    }
+
     // ── Pre-flight 2: engine binary located? ──
     let Some(engine_bin) = locate_engine_binary() else {
         anyhow::bail!(
@@ -181,6 +190,12 @@ fn run_scan(
         ScanOutcome::Error { kind, message } => {
             if kind == "models_not_installed" {
                 anyhow::bail!("{}", missing_models_message())
+            }
+            // The engine's macOS `runtime_not_installed` (the pre-flight didn't
+            // catch it — e.g. the dylib vanished) maps to the one-time runtime
+            // install guidance, distinct from the model download (D).
+            if kind == "runtime_not_installed" {
+                anyhow::bail!("{}", runtime_missing_message())
             }
             anyhow::bail!("engine scan failed [{kind}]: {message}")
         }
@@ -357,6 +372,18 @@ fn sentinel_present(root: Option<&Path>, model_id: &str) -> bool {
 /// real download size, the model kinds) — never the desktop app's welcome wording.
 fn missing_models_message() -> String {
     message_for_missing(&missing_models())
+}
+
+/// One-line "ONNX Runtime not installed" message (macOS). Distinct from the
+/// model download (D) — the runtime is the inference library that loads the
+/// models, and on macOS it's a separate one-time install. Shared by the scan
+/// pre-flight and the engine's `runtime_not_installed` mapping.
+fn runtime_missing_message() -> String {
+    format!(
+        "ONNX Runtime not installed — run `{}` in a shell (or `brew install onnxruntime`), \
+         then press s again. One-time setup, separate from the AI models (D).",
+        fileid_engine::ort_runtime::INSTALL_COMMAND
+    )
 }
 
 fn message_for_missing(missing: &[(&'static str, String)]) -> String {
