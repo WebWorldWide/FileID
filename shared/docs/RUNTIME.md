@@ -51,14 +51,18 @@ a full-AI scan completed (real CLIP tags) from both the CLI and the TUI. An
 ### 1. `fileid runtime install` (recommended)
 
 ```sh
-fileid runtime install      # idempotent; reports if already present
-fileid runtime status       # where it is / isn't + the search path
+fileid runtime install        # idempotent; reports if already present
+fileid runtime install --force # always (re)download the pinned 1.22.0 build
+fileid runtime status         # where it is / isn't + the search path + source
 ```
 
-It first reuses any runtime already on the machine (Homebrew, beside the engine —
-no network), and otherwise guides you to one of the options below. When the
-HuggingFace mirror is configured (see *Pinned source* below) it downloads the
-dylib directly through the engine's audited, CA-pinned network path.
+**Works out-of-the-box on macOS arm64 — no env override needed.** Without
+`--force` it first reuses any runtime already on the machine (Homebrew, beside the
+engine — **zero network**); if none is present it downloads the pinned source
+below. With `--force` it **always** downloads+extracts the pinned 1.22.0 build
+(skipping the reuse short-circuits), so you can pin the exact build even when
+Homebrew's ONNX Runtime is installed. The download goes through the engine's
+single audited, CA-pinned network path and is SHA256-verified before install.
 
 ### 2. Homebrew
 
@@ -104,34 +108,53 @@ also loads, but isn't auto-detected by the pre-flight.)
 
 ---
 
-## Pinned source (CLI download) — status
+## Pinned source (CLI download)
 
-The `fileid runtime install` **download** path is wired but its source is not yet
-pinned, because the project's egress rule prefers **huggingface.co only**:
+The `fileid runtime install` download is **pinned and live** for macOS arm64. It
+fetches the official, MIT-licensed Microsoft release, **SHA256-verifies the
+archive, extracts it, and second-verifies the extracted dylib** before install.
 
-- **Preferred:** mirror a bare `libonnxruntime.dylib` (1.22.x, macOS arm64) on
-  huggingface.co and set `PINNED_DYLIB_URL` + `PINNED_DYLIB_SHA256` in
-  `platforms/cli/src/runtime.rs`. Egress stays HuggingFace-only and reuses the
-  engine's existing CA-pinned downloader. **TODO(runtime-dylib).**
-- **Override (today):** point the installer anywhere with
-  `FILEID_ORT_DYLIB_URL` (+ optional `FILEID_ORT_DYLIB_SHA256`). The host must be
-  on the downloader's redirect allow-list (`huggingface.co`, `github.com`, …).
-- **No-network fallback (today):** `brew install onnxruntime` or the shell
-  script. Both work now; the engine finds the result via the search order above.
+| Constant (`platforms/cli/src/runtime.rs`) | Value |
+|-------------------------------------------|-------|
+| `PINNED_DYLIB_URL` | `https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz` |
+| `PINNED_DYLIB_SHA256` (the `.tgz`) | `cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07` |
+| `PINNED_EXTRACTED_DYLIB_SHA256` (`lib/libonnxruntime.1.22.0.dylib` inside it) | `2b885992d3d6fa4130d39ec84a80d7504ff52750027c547bb22c86165f19406a` |
 
-To produce + pin the artifact for the HF mirror:
+**Why GitHub:** `github.com` is already on the engine downloader's redirect
+allow-list, so this is **not a new egress host** — the runtime fetch reuses the
+*same* single audited, CA-pinned client as model downloads. User-initiated,
+one-time, no telemetry. Extraction uses the system `tar` (macOS always ships it),
+so **no `tar`/`flate2` crate** is added to the CLI.
+
+**Override (self-hosters):** point the installer anywhere with
+`FILEID_ORT_DYLIB_URL` (+ optional `FILEID_ORT_DYLIB_SHA256`) — wins over the pins
+above. The URL may be a `.tgz`/`.tar.gz` (extracted like the pinned source) **or**
+a bare `.dylib` (installed directly); the installer branches on the extension. The
+host must be on the downloader's redirect allow-list (`huggingface.co`,
+`github.com`, …).
+
+**No-network fallback:** `brew install onnxruntime` or the shell script — both
+work; the engine finds the result via the search order above.
+
+### HF-swap hook — keeping egress HuggingFace-only later
+
+If strict HF-only egress is ever required, it is a **one-line change**: mirror the
+**same artifact** on huggingface.co (already allow-listed) and repoint
+`PINNED_DYLIB_URL` (+ the matching SHA). A bare-`.dylib` HF mirror works too (the
+installer auto-detects archive vs. dylib). To reproduce + re-pin the hashes:
 
 ```sh
 ORT=1.22.0
 curl -fL -o ort.tgz \
   "https://github.com/microsoft/onnxruntime/releases/download/v${ORT}/onnxruntime-osx-arm64-${ORT}.tgz"
-shasum -a 256 ort.tgz                     # pin this for the shell script (EXPECTED_SHA256)
+shasum -a 256 ort.tgz                      # → PINNED_DYLIB_SHA256 (also the script's EXPECTED_SHA256)
 tar -xzf ort.tgz
-DY=$(find . -name 'libonnxruntime*.dylib' | head -1)
-cp -L "$DY" libonnxruntime.dylib
-shasum -a 256 libonnxruntime.dylib        # pin this for the CLI (PINNED_DYLIB_SHA256)
-# upload libonnxruntime.dylib to the HF mirror; set PINNED_DYLIB_URL to its resolve/ URL
+DY=$(find . -path '*/lib/libonnxruntime*.dylib' -not -path '*.dSYM/*' | head -1)
+shasum -a 256 "$DY"                         # → PINNED_EXTRACTED_DYLIB_SHA256
 ```
+
+(Exclude `*.dSYM/*`: the archive ships a debug bundle with a same-named DWARF file
+that is **not** the loadable dylib — the CLI locator skips it for the same reason.)
 
 ---
 
