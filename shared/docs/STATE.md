@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-21 — TUI scan PTY-driven + fixed; ONNX-on-macOS chosen (in progress); cross-OS TEST.md
+
+User: "scan just does nothing / locks up — steer it start to stop on TUI and CLI." Drove the TUI in a real PTY (pyte + pty.fork, TIOCSWINSZ, full-frame capture) and ran `FileIDEngine` directly with stderr visible. **Root cause:** the engine is correct — on missing models it emits `phaseChanged:failed` + `error{kind:"models_not_installed", message:"Missing: mobileclip_s2, arcface"}` and exits clean. The **TUI** swallowed it: (1) `missing_models()` checked the macOS desktop-app model dir instead of the engine's `engine_models_dir` (so no early bail, no banner), (2) showed only a misleading "Scan phase: Failed" then reverted to blank, (3) `stderr(Stdio::null())` discarded the real error. Fixed all three in `platforms/tui/src/scan.rs` (commit d8bc809): dir-correct check, suppress bare `PhaseChanged`, TUI-appropriate message, bounded stderr capture; 78 tests. PTY-verified: failure path now shows a persistent "AI models not installed — press D…" (0 "Scan phase: Failed"); CLI metadata scan works (`Indexed: 5 · 2438 files/s`).
+
+**Deeper blocker surfaced:** full-AI scans can't COMPLETE on macOS via the engine — `model_load_failed: libonnxruntime.dylib (no such file)`. The Rust engine uses ONNX Runtime; on macOS no dylib is provisioned (`ort =2.0.0-rc.10` load-dynamic + download-binaries produced none; the engine's `ORT_DYLIB_PATH` pin in `main.rs:121-159` is Windows-only). The macOS desktop app is unaffected (MLX/CoreML). **User chose: provision ONNX Runtime on macOS** (vs. metadata-only). Launched a background agent to add a cfg(macos) dylib resolver + `fileid runtime install` (SHA-pinned MIT ONNX Runtime) + docs; final dlopen verification needs the user's hardware (sandbox blocks running downloaded native code). [in progress]
+
+Also wrote `shared/docs/TEST.md` — cross-OS end-to-end runbook for app/TUI/CLI (safety/isolation rules, fixtures, build matrix, the PTY-drive TUI method, engine direct-diagnosis, per-OS prereqs incl. the macOS runtime, acceptance criteria). Indexed in root CLAUDE.md.
+
 ## 2026-06-21 — Model-install progress bar (CLI bar + TUI gauge) + interface polish pass
 
 User: "make a progress bar for installing all the models … and again try to fix up the interfaces more, there is still a lot left to do." (Context: the user had already run `fileid models download --all` in the CLI window from the prior turn — all 9 models / 24.9 GB now installed — so this is the install *experience*, not a blocker.)
