@@ -22,25 +22,51 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 
 use crate::data::{self, LoadMsg};
+
+/// A handle the UI thread holds to the running download child so it can `kill()`
+/// it on quit. The worker thread parks the child here after spawning and reclaims
+/// it (to reap) once the streams close; the UI thread only ever `kill()`s through
+/// it, never `take()`s — so the two can't race over ownership.
+pub type DownloadHandle = Arc<Mutex<Option<Child>>>;
 
 /// The CLI invocation, as a const so the SHARED CONTRACT (incl. the hidden
 /// `--porcelain-progress` flag that emits the machine-readable `PROGRESS` lines
 /// the gauge parses) is pinned in one place and guarded by a test. `--yes`
 /// pre-confirms the non-interactive download; `--porcelain-progress` switches the
 /// CLI to the structured output [`parse_porcelain_line`] understands.
-const DOWNLOAD_ARGS: [&str; 5] = ["models", "download", "--all", "--yes", "--porcelain-progress"];
+///
+/// Downloads ONLY the non-VLM weights the TUI actually uses (~1.6 GB) — faces
+/// (`arcface` = YuNet + SFace), image search/tags (`mobileclip_s2`, `ram_plus`),
+/// and text search (`clip_text`, `bge_text`) — NOT `--all`, which would also pull
+/// the three Deep-Analyze VLMs (~24 GB) the TUI has no tab for.
+const DOWNLOAD_ARGS: [&str; 9] = [
+    "models",
+    "download",
+    "--yes",
+    "--porcelain-progress",
+    "arcface",
+    "mobileclip_s2",
+    "ram_plus",
+    "clip_text",
+    "bge_text",
+];
 
 /// Spawn `fileid models download` on a worker thread, parsing progress into the
 /// install gauge + status line. Non-blocking. On success reloads `db` and sends
 /// `Done` (which clears the gauge); any failure becomes a single `LoadMsg::Error`.
-pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) {
-    std::thread::spawn(move || match run_download(&tx) {
+/// Returns a [`DownloadHandle`] the caller keeps so it can `kill()` the child on
+/// quit (the CLI has no parent watchdog, so it would otherwise orphan).
+pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) -> DownloadHandle {
+    let child_slot: DownloadHandle = Arc::new(Mutex::new(None));
+    let worker_slot = Arc::clone(&child_slot);
+    std::thread::spawn(move || match run_download(&tx, &worker_slot) {
         Ok(()) => {
             let _ = tx.send(LoadMsg::Status("AI models installed — refreshing…".to_string()));
             // Reloading after a model install never adds files (it fetches
@@ -63,12 +89,14 @@ pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) {
             let _ = tx.send(LoadMsg::Error(e.to_string()));
         }
     });
+    child_slot
 }
 
-/// Locate the `fileid` CLI, spawn `models download --all`, and forward each line
-/// of its output to the status line until it exits. Returns `Ok` on a zero exit,
-/// else a descriptive error (CLI missing / non-zero exit) — never panics.
-fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
+/// Locate the `fileid` CLI, spawn the model download, and forward each line of
+/// its output to the status line until it exits. Returns `Ok` on a zero exit,
+/// else a descriptive error (CLI missing / non-zero exit) — never panics. The
+/// spawned child is parked in `child_slot` so the UI can `kill()` it on quit.
+fn run_download(tx: &Sender<LoadMsg>, child_slot: &DownloadHandle) -> Result<()> {
     let Some(bin) = locate_fileid_cli() else {
         anyhow::bail!(
             "`{}` command not found — install the FileID CLI or put it on PATH (or set \
@@ -78,25 +106,34 @@ fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
     };
 
     let _ = tx.send(LoadMsg::Status(
-        "Downloading AI models — fileid models download --all…".to_string(),
+        "Downloading AI models — fileid models download…".to_string(),
     ));
 
     // `--yes` is REQUIRED here: the TUI drives this non-interactively with a null
-    // stdin, so the CLI's `--all` confirmation prompt would read EOF, treat it as
-    // "no", and abort (exit 0, nothing downloaded) — which the TUI would misreport
-    // as "models installed". Pre-confirming makes the download actually run.
+    // stdin, so the CLI's large-download confirmation prompt would read EOF, treat
+    // it as "no", and abort (exit 0, nothing downloaded) — which the TUI would
+    // misreport as "models installed". Pre-confirming makes the download run.
     let mut child = Command::new(&bin)
         .args(DOWNLOAD_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawning `{} models download --all`", bin.display()))?;
+        .with_context(|| format!("spawning `{} models download`", bin.display()))?;
 
     // Drain BOTH pipes so a chatty downloader can't deadlock on a full pipe:
     // stderr on a side thread, stdout on this one. Progress can land on either.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+
+    // Park the child so the UI thread can `kill()` it on quit — unlike the scan
+    // engine, the `fileid` CLI has no parent-PID/EOF watchdog, so without this it
+    // would keep downloading (orphaned) after the TUI exits. The pipes are taken
+    // first; once streaming hits EOF this thread reclaims the child and reaps it.
+    if let Ok(mut slot) = child_slot.lock() {
+        *slot = Some(child);
+    }
+
     let stderr_handle = stderr.map(|err| {
         let tx = tx.clone();
         std::thread::spawn(move || stream_lines(&tx, err))
@@ -108,6 +145,11 @@ fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
         let _ = h.join();
     }
 
+    // Reclaim the child (the UI thread may have `kill()`-ed it, but never takes
+    // it) and reap it so no zombie is left — bounded, never blocking the UI.
+    let Some(mut child) = child_slot.lock().ok().and_then(|mut s| s.take()) else {
+        anyhow::bail!("model download was cancelled");
+    };
     let status = child.wait().context("waiting for the model download to finish")?;
     if status.success() {
         Ok(())
@@ -237,13 +279,29 @@ mod tests {
 
     /// The CLI invocation matches the SHARED CONTRACT byte-for-byte, including
     /// the hidden `--porcelain-progress` flag the gauge depends on. If the CLI
-    /// renames the flag, this test (and the gauge) must change in lockstep.
+    /// renames the flag, this test (and the gauge) must change in lockstep. The
+    /// set is the TUI's non-VLM models — NOT `--all` (which would pull the
+    /// Deep-Analyze VLMs the TUI has no tab for).
     #[test]
     fn download_invocation_matches_shared_contract() {
         assert_eq!(
             DOWNLOAD_ARGS,
-            ["models", "download", "--all", "--yes", "--porcelain-progress"]
+            [
+                "models",
+                "download",
+                "--yes",
+                "--porcelain-progress",
+                "arcface",
+                "mobileclip_s2",
+                "ram_plus",
+                "clip_text",
+                "bge_text",
+            ]
         );
+        // Never the VLMs (no Deep-Analyze tab in the TUI).
+        for vlm in ["mistral_small_3_2", "qwen2_5_vl_7b", "gemma_3_4b", "--all"] {
+            assert!(!DOWNLOAD_ARGS.contains(&vlm), "must not download {vlm}");
+        }
     }
 
     /// A `PROGRESS\t{percent}\t{label}` line yields the integer percent + the

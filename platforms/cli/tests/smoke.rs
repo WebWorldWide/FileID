@@ -306,7 +306,12 @@ fn apply_dryrun_models_and_similar_model_free() {
             ("LOCALAPPDATA", state.to_str().unwrap()),
         ],
     );
-    assert!(out.status.success(), "scan --models failed: {}", String::from_utf8_lossy(&out.stderr));
+    // "did not scan" → non-zero exit (so `scan --models && next` can't proceed),
+    // but the actionable JSON payload is still on stdout.
+    assert!(
+        !out.status.success(),
+        "scan --models without models must exit non-zero so callers don't chain past it"
+    );
     let v = json(&out);
     assert_eq!(v["error"].as_str(), Some("models_not_installed"));
     let missing: Vec<String> = v["missing"]

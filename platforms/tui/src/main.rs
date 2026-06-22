@@ -114,6 +114,10 @@ fn event_loop(
     tx: &Sender<LoadMsg>,
     rx: &Receiver<LoadMsg>,
 ) -> Result<()> {
+    // Held across iterations so we can `kill()` an in-flight model download on
+    // quit — the `fileid` CLI has no parent-PID/EOF watchdog (unlike the scan
+    // engine), so without this it would keep downloading after the TUI exits.
+    let mut download: Option<models::DownloadHandle> = None;
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
@@ -154,9 +158,18 @@ fn event_loop(
         // The thread streams progress to the status line and reloads on success.
         if app.download_requested {
             app.download_requested = false;
-            models::spawn_download(ctx.db.clone(), tx.clone());
+            download = Some(models::spawn_download(ctx.db.clone(), tx.clone()));
         }
         if app.should_quit {
+            // Kill (don't take) an in-flight download child so it can't keep
+            // running orphaned; the worker thread still reclaims + reaps it.
+            if let Some(handle) = &download {
+                if let Ok(mut slot) = handle.lock() {
+                    if let Some(child) = slot.as_mut() {
+                        let _ = child.kill();
+                    }
+                }
+            }
             return Ok(());
         }
     }

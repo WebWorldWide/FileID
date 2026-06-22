@@ -96,12 +96,15 @@ pub fn resolve_dylib() -> Option<PathBuf> {
 }
 
 /// Pin `ORT_DYLIB_PATH` to a resolved dylib so the `load-dynamic` loader finds
-/// it. No-op when `ORT_DYLIB_PATH` is already set (honor the user's override) or
-/// nothing resolves. Call once, before the first ORT session. Returns the path
-/// pinned, if any.
+/// it. No-op when `ORT_DYLIB_PATH` already points at an existing file (honor the
+/// user's override) or nothing resolves. A set-but-non-existent `ORT_DYLIB_PATH`
+/// is treated as unset and overwritten with a real search hit — matching
+/// [`resolve_dylib`], so the preflight and the loader agree. Call once, before
+/// the first ORT session. Returns the path pinned, if any.
 #[cfg(target_os = "macos")]
 pub fn pin_dylib_path() -> Option<PathBuf> {
-    if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty()) {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some_and(|v| !v.is_empty() && PathBuf::from(&v).is_file())
+    {
         return None;
     }
     let resolved = search_locations().into_iter().find(|p| p.is_file())?;
@@ -184,7 +187,31 @@ mod tests {
         let prev = std::env::var_os("ORT_DYLIB_PATH");
         std::env::set_var("ORT_DYLIB_PATH", &fake);
         assert_eq!(resolve_dylib().as_deref(), Some(fake.as_path()));
-        assert!(pin_dylib_path().is_none(), "must not re-pin when already set");
+        assert!(
+            pin_dylib_path().is_none(),
+            "must not re-pin when already set to a real file"
+        );
+
+        // Stale/typo'd ORT_DYLIB_PATH (set but not a file) + a valid search hit:
+        // pin must treat the bogus var as unset and overwrite it with the real
+        // hit (mirroring resolve_dylib's existence check), so the scan preflight
+        // and the ort loader agree on the same dylib. The beside-exe slot is the
+        // highest-priority search location and is writable in the test sandbox.
+        let beside_exe = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(DYLIB_FILE_NAME);
+        std::fs::write(&beside_exe, b"not-a-real-dylib").unwrap();
+        std::env::set_var("ORT_DYLIB_PATH", dir.join("typo.dylib"));
+        assert_eq!(pin_dylib_path().as_deref(), Some(beside_exe.as_path()));
+        assert_eq!(
+            std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from).as_deref(),
+            Some(beside_exe.as_path()),
+            "stale ORT_DYLIB_PATH must be overwritten with the real search hit"
+        );
+        std::fs::remove_file(&beside_exe).ok();
+
         match prev {
             Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
             None => std::env::remove_var("ORT_DYLIB_PATH"),
