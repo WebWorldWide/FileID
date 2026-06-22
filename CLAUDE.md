@@ -53,4 +53,5 @@ Read the one for the work in front of you:
 - `shared/docs/ARCHITECTURE.md` — two-binary IPC design, scan pipeline, ML stack.
 - `shared/docs/RESTRUCTURE.md` — butler-grade restructure design + phased build.
 - `shared/docs/SHIP.md` — v1.0 release-readiness inventory.
+- `shared/docs/TEST.md` — cross-OS end-to-end test runbook (app/TUI/CLI on macOS/Windows/Linux).
 - `~/.claude/projects/<project-key>/memory/MEMORY.md` — auto-memory index.
