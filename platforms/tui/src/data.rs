@@ -76,6 +76,11 @@ pub struct Snapshot {
 /// Messages streamed from the loader thread to the UI thread.
 pub enum LoadMsg {
     Status(String),
+    /// Structured AI-model install progress, parsed from the CLI's porcelain
+    /// `PROGRESS\t{percent}\t{label}` line (see [`crate::models`]): `percent` is
+    /// the 0–100 overall figure, `label` a short human string like
+    /// `arcface · 182/271 MB · 3.4 MB/s · model 2/9`. Drives the install gauge.
+    DownloadProgress { percent: u16, label: String },
     Done(Box<Snapshot>),
     Error(String),
 }

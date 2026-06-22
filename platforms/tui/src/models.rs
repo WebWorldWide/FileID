@@ -1,10 +1,18 @@
 //! AI-model download driver (the Settings `D` key, FEATURE 3).
 //!
-//! Runs the FileID CLI's `models download --all --yes` on a worker thread and streams
-//! its stdout + stderr into the TUI status line, so the user can fetch the AI
-//! weights that full-ML scanning needs without leaving the terminal. The default
-//! models come from `huggingface.co` — the only network egress the project ever
-//! makes (see the no-telemetry principle).
+//! Runs the FileID CLI's `models download --all --yes --porcelain-progress` on a
+//! worker thread and parses its output into a live install gauge + status line,
+//! so the user can fetch the AI weights that full-ML scanning needs without
+//! leaving the terminal. The default models come from `huggingface.co` — the only
+//! network egress the project ever makes (see the no-telemetry principle).
+//!
+//! ## Porcelain progress contract (shared with the CLI, byte-for-byte)
+//! stdout lines of the form `PROGRESS\t{percent}\t{label}` (tab-separated;
+//! `percent` = integer 0–100 overall; `label` = a short human string like
+//! `arcface · 182/271 MB · 3.4 MB/s · model 2/9`) drive the gauge; the final
+//! progress line is `PROGRESS\t100\tdone`. Every other non-empty line — milestones
+//! (`✓ arcface installed`), the summary, errors, and all of stderr — is a status
+//! message. See [`parse_porcelain_line`].
 //!
 //! Non-blocking, mirroring [`crate::scan`]: the UI keeps drawing, `q` keeps
 //! quitting, and the `TerminalGuard` still restores the terminal on exit. On
@@ -21,9 +29,16 @@ use anyhow::{Context as _, Result};
 
 use crate::data::{self, LoadMsg};
 
-/// Spawn `fileid models download --all` on a worker thread, streaming progress
-/// to the status line. Non-blocking. On success reloads `db` and sends `Done`
-/// (which clears `downloading`); any failure becomes a single `LoadMsg::Error`.
+/// The CLI invocation, as a const so the SHARED CONTRACT (incl. the hidden
+/// `--porcelain-progress` flag that emits the machine-readable `PROGRESS` lines
+/// the gauge parses) is pinned in one place and guarded by a test. `--yes`
+/// pre-confirms the non-interactive download; `--porcelain-progress` switches the
+/// CLI to the structured output [`parse_porcelain_line`] understands.
+const DOWNLOAD_ARGS: [&str; 5] = ["models", "download", "--all", "--yes", "--porcelain-progress"];
+
+/// Spawn `fileid models download` on a worker thread, parsing progress into the
+/// install gauge + status line. Non-blocking. On success reloads `db` and sends
+/// `Done` (which clears the gauge); any failure becomes a single `LoadMsg::Error`.
 pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) {
     std::thread::spawn(move || match run_download(&tx) {
         Ok(()) => {
@@ -71,7 +86,7 @@ fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
     // "no", and abort (exit 0, nothing downloaded) — which the TUI would misreport
     // as "models installed". Pre-confirming makes the download actually run.
     let mut child = Command::new(&bin)
-        .args(["models", "download", "--all", "--yes"])
+        .args(DOWNLOAD_ARGS)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -107,17 +122,50 @@ fn run_download(tx: &Sender<LoadMsg>) -> Result<()> {
     }
 }
 
-/// Forward each non-empty, trimmed line of a child stream to the status line so
-/// the user sees live download progress.
+/// Parse each non-empty line of a child stream per the porcelain contract and
+/// forward it: a `PROGRESS` line becomes a [`LoadMsg::DownloadProgress`] gauge
+/// update, anything else a [`LoadMsg::Status`] line. Panic-free — a malformed
+/// line degrades to a status message, never a crash.
 fn stream_lines<R: std::io::Read>(tx: &Sender<LoadMsg>, stream: R) {
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            let _ = tx.send(LoadMsg::Status(trimmed.to_string()));
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg = match parse_porcelain_line(&line) {
+            ParsedLine::Progress { percent, label } => LoadMsg::DownloadProgress { percent, label },
+            ParsedLine::Status(s) if !s.is_empty() => LoadMsg::Status(s),
+            ParsedLine::Status(_) => continue,
+        };
+        let _ = tx.send(msg);
+    }
+}
+
+/// One parsed porcelain stdout line (the SHARED CONTRACT): a structured gauge
+/// update, or a plain status/milestone line.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum ParsedLine {
+    Progress { percent: u16, label: String },
+    Status(String),
+}
+
+/// Parse ONE porcelain line. `PROGRESS\t{percent}\t{label}` (tab-separated,
+/// integer percent 0–100; final line `PROGRESS\t100\tdone`) becomes a gauge
+/// update with the percent clamped to 0–100; everything else — milestones, the
+/// summary, errors, stderr — is a trimmed status message. A `PROGRESS`-prefixed
+/// line whose percent doesn't parse degrades to a status message rather than
+/// panicking, so a stray byte on the wire can never crash the TUI.
+fn parse_porcelain_line(line: &str) -> ParsedLine {
+    if let Some(rest) = line.strip_prefix("PROGRESS\t") {
+        let mut parts = rest.splitn(2, '\t');
+        let pct = parts.next().unwrap_or("").trim();
+        let label = parts.next().unwrap_or("").trim();
+        if let Ok(percent) = pct.parse::<u16>() {
+            return ParsedLine::Progress { percent: percent.min(100), label: label.to_string() };
         }
     }
+    ParsedLine::Status(line.trim().to_string())
 }
 
 fn fileid_exe_name() -> &'static str {
@@ -185,5 +233,69 @@ mod tests {
         // Whatever the environment, resolution returns a well-typed Option and
         // never panics (the `fileid`-absent path must not crash the TUI).
         let _ = locate_fileid_cli();
+    }
+
+    /// The CLI invocation matches the SHARED CONTRACT byte-for-byte, including
+    /// the hidden `--porcelain-progress` flag the gauge depends on. If the CLI
+    /// renames the flag, this test (and the gauge) must change in lockstep.
+    #[test]
+    fn download_invocation_matches_shared_contract() {
+        assert_eq!(
+            DOWNLOAD_ARGS,
+            ["models", "download", "--all", "--yes", "--porcelain-progress"]
+        );
+    }
+
+    /// A `PROGRESS\t{percent}\t{label}` line yields the integer percent + the
+    /// exact label string (the gauge's driver).
+    #[test]
+    fn parses_progress_line_into_percent_and_label() {
+        let label = "arcface · 182/271 MB · 3.4 MB/s · model 2/9";
+        assert_eq!(
+            parse_porcelain_line(&format!("PROGRESS\t62\t{label}")),
+            ParsedLine::Progress { percent: 62, label: label.to_string() },
+        );
+    }
+
+    /// The final progress line is `PROGRESS\t100\tdone`.
+    #[test]
+    fn final_progress_line_is_100_done() {
+        assert_eq!(
+            parse_porcelain_line("PROGRESS\t100\tdone"),
+            ParsedLine::Progress { percent: 100, label: "done".to_string() },
+        );
+    }
+
+    /// A non-`PROGRESS` line (milestone, summary, error, stderr) is a trimmed
+    /// status message — never mistaken for a gauge update.
+    #[test]
+    fn non_progress_line_is_a_status_message() {
+        assert_eq!(
+            parse_porcelain_line("✓ arcface installed"),
+            ParsedLine::Status("✓ arcface installed".to_string()),
+        );
+        // Leading/trailing whitespace (the CLI indents its milestones) is trimmed.
+        assert_eq!(
+            parse_porcelain_line("  All 9 models ready.  "),
+            ParsedLine::Status("All 9 models ready.".to_string()),
+        );
+    }
+
+    /// A `PROGRESS`-prefixed line with an unparseable percent degrades to a
+    /// status message rather than panicking (defensive against wire corruption).
+    #[test]
+    fn malformed_progress_line_degrades_to_status_not_panic() {
+        assert!(matches!(parse_porcelain_line("PROGRESS\tNaN\tlabel"), ParsedLine::Status(_)));
+        assert!(matches!(parse_porcelain_line("PROGRESS\t\t"), ParsedLine::Status(_)));
+    }
+
+    /// An out-of-range percent is clamped to 0–100 so `Gauge::percent` (which
+    /// panics above 100) can never be handed a bad value.
+    #[test]
+    fn progress_percent_is_clamped_to_100() {
+        assert_eq!(
+            parse_porcelain_line("PROGRESS\t150\tx"),
+            ParsedLine::Progress { percent: 100, label: "x".to_string() },
+        );
     }
 }

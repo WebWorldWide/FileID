@@ -21,10 +21,10 @@ use std::rc::Rc;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, Tab};
+use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, DownloadState, Tab};
 use crate::data::{human_size, short};
 
 // ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
@@ -59,6 +59,9 @@ const CYAN: Color = Color::Rgb(160, 226, 234);
 const PINK: Color = Color::Rgb(242, 166, 192);
 /// "Kept / safe / on-device" green (`#86d9a4`) — privacy + keep markers.
 const GREEN: Color = Color::Rgb(134, 217, 164);
+/// The install gauge's unfilled track — a dark gold-brown (`#302a1c`) so the
+/// gold fill reads clearly against it inside the gold-tinted banner band.
+const GAUGE_TRACK: Color = Color::Rgb(48, 42, 28);
 
 /// Top-level vertical split: header (2 — brand+tabs row, then a divider with the
 /// active-tab underline) · body (rest) · status line (1) · key bar (1). The key
@@ -172,29 +175,81 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
 /// selected row) so it reads as a persistent notice — NOT a fleeting status-line
 /// message — until the models are present or a download finishes.
 fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
-    if (app.missing_models.is_empty() && !app.downloading) || area.height < 2 {
+    // A live install takes the banner slot, replacing the static notice with a
+    // real progress gauge that visibly fills 0→100.
+    if let Some(dl) = &app.download {
+        if area.height >= 2 {
+            return render_download_gauge(f, dl, area);
+        }
+        return area;
+    }
+    if app.missing_models.is_empty() || area.height < 2 {
         return area;
     }
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let pill = Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD);
-    let line = if app.downloading {
+    let line = Line::from(vec![
+        Span::styled(" ⚠ ", pill),
+        Span::styled("  AI models not installed — press ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+        Span::styled(" D ", pill),
+        Span::styled(" to download (~25 GB). Tags, faces & search need them.", Style::default().fg(FG)),
+    ]);
+    f.render_widget(Paragraph::new(line).style(Style::default().bg(SEL_BG)), rows[0]);
+    rows[1]
+}
+
+/// The AI-model install gauge (the SHARED CONTRACT made visible). A gold-tinted
+/// band pinned above every tab while a `fileid models download` runs: a title
+/// row (`⟳ Installing AI models…`, or a green `✓ … press s to scan` once done),
+/// a ratatui [`Gauge`] (gold fill on a dark track, the overall percent centered),
+/// and — where there's room — the live label beneath (`arcface · 182/271 MB · …`).
+/// Returns the body area below the band. Degrades to a 2-row band (no label) on
+/// short terminals; the percent is clamped so the widget can't panic.
+fn render_download_gauge(f: &mut Frame, dl: &DownloadState, area: Rect) -> Rect {
+    let pct = dl.percent.min(100);
+    let band_h = if area.height >= 5 { 3 } else { 2 };
+    let rows = Layout::vertical([Constraint::Length(band_h), Constraint::Min(0)]).split(area);
+    let band = rows[0];
+    // Paint the whole band the standing-notice gold tint first; the gauge row
+    // overwrites its slice with the track colour.
+    f.render_widget(Block::default().style(Style::default().bg(SEL_BG)), band);
+
+    let inner = if band_h == 3 {
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)]).split(band)
+    } else {
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(band)
+    };
+
+    let title = if dl.done {
         Line::from(vec![
-            Span::styled(" ⟳ ", pill),
-            Span::styled("  Installing AI models…  ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                truncate(&app.status, rows[0].width.saturating_sub(26) as usize),
-                Style::default().fg(SECONDARY),
-            ),
+            Span::styled(" ✓ ", Style::default().fg(Color::Black).bg(GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled("  AI models installed — press ", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(" s ", Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(" to scan with full AI", Style::default().fg(GREEN)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" ⚠ ", pill),
-            Span::styled("  AI models not installed — press ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" D ", pill),
-            Span::styled(" to download (~25 GB). Tags, faces & search need them.", Style::default().fg(FG)),
+            Span::styled(" ⟳ ", Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled("  Installing AI models…", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
         ])
     };
-    f.render_widget(Paragraph::new(line).style(Style::default().bg(SEL_BG)), rows[0]);
+    f.render_widget(Paragraph::new(title).style(Style::default().bg(SEL_BG)), inner[0]);
+
+    let bar = if dl.done { GREEN } else { GOLD };
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(bar).bg(GAUGE_TRACK))
+        .percent(pct)
+        .label(Span::styled(format!("{pct}%"), Style::default().fg(FG).add_modifier(Modifier::BOLD)));
+    f.render_widget(gauge, inner[1]);
+
+    if band_h == 3 {
+        let label = truncate(&dl.label, band.width.saturating_sub(2) as usize);
+        f.render_widget(
+            Paragraph::new(Span::styled(format!("  {label}"), Style::default().fg(DIM)))
+                .style(Style::default().bg(SEL_BG)),
+            inner[2],
+        );
+    }
     rows[1]
 }
 
@@ -261,7 +316,6 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
 fn render_library(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     let visible = app.visible_files();
-    let cursor = app.cursor();
 
     // Context line: a live scan note, the active search, or the plain-language
     // search prompt — with the file count pinned to the right.
@@ -299,6 +353,33 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
         render_context(f, rows[0], left, Some(plural(visible.len(), "file", "files")));
     }
 
+    // Empty / no-match state: a full-width panel that says what to do, instead of
+    // a blank two-column list the user can't act on. While a scan is running we
+    // keep the (filling) list so the "Reading your files…" context reads right.
+    if visible.is_empty() && !app.scanning {
+        if !app.search.is_empty() {
+            render_empty(
+                f,
+                rows[1],
+                "Files",
+                "No matches.",
+                &format!("Nothing in this library matches \u{201c}{}\u{201d}.", app.search),
+                Some(cta("Esc", "clear the search")),
+            );
+        } else {
+            render_empty(
+                f,
+                rows[1],
+                "Files",
+                "No files yet.",
+                "FileID builds one searchable library from a folder you pick — photos, PDFs, videos and docs, with tags and text it reads on-device.",
+                Some(cta("s", "pick a folder and scan it")),
+            );
+        }
+        return;
+    }
+
+    let cursor = app.cursor();
     let cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
     let cw = content_width(cols[0]);
     let items: Vec<Vec<Span>> = visible.iter().map(|fr| file_row(cw, fr)).collect();
@@ -361,7 +442,14 @@ fn render_people(f: &mut Frame, app: &App, area: Rect) {
             vec![Span::styled("People — faces the engine grouped automatically.", Style::default().fg(DIM))],
             None,
         );
-        render_empty(f, rows[1], "Groups", "No people yet.", "Faces come from a full engine scan with the face models.");
+        render_empty(
+            f,
+            rows[1],
+            "Groups",
+            "No people yet.",
+            "FileID detects faces during a full scan and groups the ones that match into people you can name. Needs the AI face models installed.",
+            Some(cta("s", "scan a folder to detect & group faces")),
+        );
         return;
     }
     render_context(
@@ -387,7 +475,14 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
             vec![Span::styled("Cleanup — files saved more than once.", Style::default().fg(DIM))],
             None,
         );
-        render_empty(f, rows[1], "Duplicate sets", "Nothing duplicated.", "Content hashes come from a full engine scan.");
+        render_empty(
+            f,
+            rows[1],
+            "Duplicate sets",
+            "No duplicates found.",
+            "Cleanup spots files saved more than once by hashing their contents during a scan. It's a read-only preview — FileID never deletes anything here.",
+            Some(cta("s", "scan a folder to check for duplicates")),
+        );
         return;
     }
     render_context(
@@ -450,7 +545,14 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
             vec![Span::styled("Restructure — a suggested tidy-up.", Style::default().fg(DIM))],
             None,
         );
-        render_empty(f, rows[1], "Suggested moves", "No moves to suggest.", "Index some files, then reload (r) to preview a plan.");
+        render_empty(
+            f,
+            rows[1],
+            "Suggested moves",
+            "No moves to suggest yet.",
+            "Restructure previews a tidy, dated folder layout from your indexed files — a read-only plan you review before anything moves.",
+            Some(cta("s", "scan a folder, then this plan fills in")),
+        );
         return;
     }
     render_context(
@@ -468,6 +570,40 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
     let cw = content_width(rows[1]);
     let items: Vec<Vec<Span>> = app.data.plan.iter().map(|m| plan_row(cw, m)).collect();
     render_calm_list(f, rows[1], "Suggested moves", items, app.cursor(), true);
+}
+
+/// The live AI-model status line for Settings: a green "all installed", an
+/// in-flight "Installing… NN%" while a download runs, or a gold "not installed —
+/// <names>" listing exactly which weights are missing. Mirrors the standing
+/// banner so the same truth shows in both places.
+fn model_status_line(app: &App) -> Line<'static> {
+    if let Some(dl) = &app.download {
+        return if dl.done {
+            Line::from(vec![
+                Span::styled("● ", Style::default().fg(GREEN)),
+                Span::styled("All AI models installed.", Style::default().fg(FG)),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("● ", Style::default().fg(GOLD)),
+                Span::styled(format!("Installing… {}%", dl.percent.min(100)), Style::default().fg(FG)),
+            ])
+        };
+    }
+    if app.missing_models.is_empty() {
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(GREEN)),
+            Span::styled("Status: all required models installed.", Style::default().fg(FG)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(GOLD)),
+            Span::styled(
+                format!("Status: not installed — {}", app.missing_models.join(", ")),
+                Style::default().fg(FG),
+            ),
+        ])
+    }
 }
 
 fn render_settings(f: &mut Frame, app: &App, area: Rect) {
@@ -493,6 +629,7 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
         bullet("Only network use: downloading AI models from huggingface.co."),
         Line::from(""),
         section("AI models"),
+        model_status_line(app),
         Line::from(vec![
             Span::styled(
                 " D ",
@@ -501,7 +638,13 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("  Download all AI models for full scanning", Style::default().fg(FG)),
         ]),
         Line::from(Span::styled(
-            "Needed for tags, faces & search. Fetched from huggingface.co; progress shows below.",
+            "Needed for tags, faces & search. Fetched from huggingface.co; a progress bar shows above.",
+            Style::default().fg(DIM),
+        )),
+        Line::from(""),
+        section("Folder browser"),
+        Line::from(Span::styled(
+            "Press s anywhere to browse:  ↑↓ move · Enter open · ← up · d drives · . hidden files.",
             Style::default().fg(DIM),
         )),
         Line::from(""),
@@ -915,13 +1058,29 @@ fn calm_item(selected: bool, content: Vec<Span<'static>>) -> ListItem<'static> {
     ListItem::new(Line::from(line))
 }
 
-fn render_empty(f: &mut Frame, area: Rect, title: &str, head: &str, sub: &str) {
-    let text = Text::from(vec![
+/// An empty-state panel: a bold headline, a dim explanation of what the tab does
+/// and where its data comes from, and — crucially — a gold call-to-action keycap
+/// so "how do I actually fill this?" is answered on every empty screen.
+fn render_empty(f: &mut Frame, area: Rect, title: &str, head: &str, sub: &str, action: Option<Vec<Span<'static>>>) {
+    let mut lines = vec![
         Line::from(Span::styled(head.to_string(), Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from(Span::styled(sub.to_string(), Style::default().fg(DIM))),
-    ]);
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }).block(focus_block(title)), area);
+    ];
+    if let Some(action) = action {
+        lines.push(Line::from(""));
+        lines.push(Line::from(action));
+    }
+    f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(focus_block(title)), area);
+}
+
+/// A gold call-to-action line: a black-on-gold key chip + a plain-language
+/// instruction. The terminal stand-in for "click here to get started".
+fn cta(key: &str, text: &str) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(format!(" {key} "), Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {text}"), Style::default().fg(FG)),
+    ]
 }
 
 /// Usable text width inside a calm-list column: panel border (2) + gutter (2).
@@ -1275,16 +1434,21 @@ mod tests {
     /// brand near-black `BG` (never the terminal default `Color::Reset`), and a
     /// known label (the gold brand accent) must render in a readable foreground.
     ///
-    /// We sweep the body chunk specifically: with the default App it shows the
-    /// welcome screen (no selected-row tint), so every cell carries `BG`.
+    /// We sweep the body chunk specifically on the first-run welcome screen
+    /// (loaded-but-no-DB, Library tab): it uses only foreground accents — no
+    /// selected-row tint, no keycap chips — so every body cell must carry `BG`.
     #[test]
     fn paints_dark_background_and_gold_accent() {
         use crate::app::App;
+        use crate::data::{LoadMsg, Snapshot};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
         let (w, h) = (80u16, 24u16);
-        let app = App::new("/tmp/x.sqlite".into());
+        let mut app = App::new("/tmp/x.sqlite".into());
+        // Settle the loader to an empty, not-yet-created library so the welcome
+        // screen renders (loading=false, db_exists=false) — the all-BG body.
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
@@ -1532,21 +1696,72 @@ mod tests {
         );
     }
 
-    /// While a download is in flight the banner switches to a progress notice
-    /// rather than vanishing, so the user always knows models are being fetched.
+    /// While a download is in flight the banner becomes a real progress gauge:
+    /// the `Installing AI models…` title, the overall percent, the live label,
+    /// and a visibly gold-filled bar (full-block cells in the gold accent).
     #[test]
-    fn models_banner_shows_download_progress() {
-        use crate::app::App;
+    fn models_banner_shows_download_gauge() {
+        use crate::app::{App, DownloadState};
+        use crate::data::{LoadMsg, Snapshot};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.download = Some(DownloadState {
+            percent: 62,
+            label: "arcface · 182/271 MB · 3.4 MB/s · model 2/9".to_string(),
+            done: false,
+        });
+
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("Installing AI models"), "gauge title missing");
+        assert!(text.contains("62%"), "gauge percent label missing");
+        assert!(text.contains("arcface"), "gauge live label missing");
+
+        // The bar is actually FILLED in gold — proof it renders, not just labels.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let gold_fill = (0..30)
+            .any(|y| (0..100).any(|x| buf[(x, y)].fg == GOLD && buf[(x, y)].symbol() == "█"));
+        assert!(gold_fill, "gauge must paint a gold-filled bar");
+    }
+
+    /// The install gauge must render at ANY terminal size — including ones that
+    /// collapse the band to near-zero — without panicking (no bad `Layout` split,
+    /// no `Gauge::percent` overflow at the 0/47/100 boundaries).
+    #[test]
+    fn download_gauge_renders_at_every_size_without_panic() {
+        use crate::app::{App, DownloadState};
+        use crate::data::{LoadMsg, Snapshot};
+
+        for (w, h) in [(100u16, 30u16), (80, 24), (20, 6), (4, 3), (1, 1)] {
+            for (percent, done) in [(0u16, false), (47, false), (100, true)] {
+                let mut app = App::new("/tmp/x.sqlite".into());
+                app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+                app.download =
+                    Some(DownloadState { percent, label: "arcface · 182/271 MB".to_string(), done });
+                let _ = frame_text(w, h, &app); // must not panic
+            }
+        }
+    }
+
+    /// When the final `PROGRESS\t100\tdone` lands the gauge flips to its brief
+    /// green success state telling the user they can now scan with full AI.
+    #[test]
+    fn models_banner_gauge_done_state_invites_a_scan() {
+        use crate::app::{App, DownloadState};
         use crate::data::{LoadMsg, Snapshot};
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
-        app.downloading = true;
-        app.status = "fetching mobileclip…".to_string();
-        assert!(
-            frame_text(100, 30, &app).contains("Installing AI models"),
-            "the banner must show download progress while downloading",
-        );
+        app.download =
+            Some(DownloadState { percent: 100, label: "done".to_string(), done: true });
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("AI models installed"), "done gauge must confirm install");
+        assert!(text.contains("scan with full AI"), "done gauge must invite a scan");
+        assert!(text.contains("100%"), "done gauge shows 100%");
     }
 
     /// A failed action (e.g. the scan pre-flight bailing on missing models) wears
@@ -1561,5 +1776,72 @@ mod tests {
         let text = frame_text(100, 30, &app);
         assert!(text.contains("⚠"), "an errored status must show the ⚠ marker");
         assert!(text.contains("scan needs AI models not installed"), "the error text persists");
+    }
+
+    /// Every tab's empty state now answers "how do I fill this?" instead of
+    /// showing a blank panel: Library prompts a scan, a no-hit search shows a
+    /// distinct no-match state, and People/Cleanup/Restructure each explain
+    /// themselves and point at `s`.
+    #[test]
+    fn empty_states_explain_the_tab_and_offer_a_next_step() {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+
+        // A loaded-but-empty library (db_exists, zero rows) runs the per-tab
+        // empty branches rather than the first-run welcome screen.
+        let load = || {
+            let mut app = App::new("/tmp/x.sqlite".into());
+            app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+            app
+        };
+
+        // Library: a headline + the s-to-scan call-to-action.
+        let mut lib = load();
+        let t = frame_text(100, 30, &lib);
+        assert!(t.contains("No files yet."), "Library empty headline missing");
+        assert!(t.contains("pick a folder and scan it"), "Library empty CTA missing");
+
+        // Library no-match: a search that hits nothing is a DISTINCT state.
+        lib.search = "zzz-no-such-thing".to_string();
+        let t = frame_text(100, 30, &lib);
+        assert!(t.contains("No matches."), "Library no-match headline missing");
+        assert!(t.contains("clear the search"), "Library no-match CTA missing");
+
+        // People / Cleanup / Restructure: each explains itself + offers a step.
+        for (tab, headline, cta_text) in [
+            (Tab::People, "No people yet.", "detect & group faces"),
+            (Tab::Cleanup, "No duplicates found.", "check for duplicates"),
+            (Tab::Restructure, "No moves to suggest yet.", "this plan fills in"),
+        ] {
+            let mut app = load();
+            app.tab = tab;
+            let t = frame_text(100, 30, &app);
+            assert!(t.contains(headline), "{tab:?}: empty headline missing");
+            assert!(t.contains(cta_text), "{tab:?}: empty-state call-to-action missing");
+        }
+    }
+
+    /// Settings surfaces a live model-status line: gold "not installed — …"
+    /// naming the missing weights, flipping to green "all installed" when present.
+    #[test]
+    fn settings_shows_live_model_status() {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, Snapshot};
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        app.tab = Tab::Settings;
+
+        app.missing_models = vec!["arcface".to_string(), "MobileCLIP".to_string()];
+        let t = frame_text(90, 40, &app);
+        assert!(t.contains("not installed"), "Settings must report missing models");
+        assert!(t.contains("arcface"), "Settings must name the missing models");
+
+        app.missing_models.clear();
+        let t = frame_text(90, 40, &app);
+        assert!(
+            t.contains("all required models installed"),
+            "Settings must confirm when all models are present",
+        );
     }
 }

@@ -61,6 +61,18 @@ impl Tab {
     }
 }
 
+/// Live AI-model install progress backing the gauge (`ui.rs`). Set when a
+/// download is armed (at 0%), advanced by each [`LoadMsg::DownloadProgress`], and
+/// cleared when the worker finishes (its terminal `Done`/`Error`). `done` flips
+/// once the final `PROGRESS\t100\tdone` lands, switching the gauge to its brief
+/// success state before it clears.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DownloadState {
+    pub percent: u16,
+    pub label: String,
+    pub done: bool,
+}
+
 pub struct App {
     pub tab: Tab,
     pub data: Snapshot,
@@ -107,6 +119,10 @@ pub struct App {
     /// Set when the user presses `D`; `main` consumes it, spawns the download
     /// worker thread, and clears it (mirrors `scan_requested`).
     pub download_requested: bool,
+    /// Live model-install progress driving the gauge (`None` ⇒ no install in
+    /// flight). Armed at 0% by `request_download`, advanced by each
+    /// `DownloadProgress`, cleared on the worker's terminal `Done`/`Error`.
+    pub download: Option<DownloadState>,
 
     // ── Persistent model-state banner + error feedback ──────────────────────
     /// Display names of the required AI models that aren't installed yet (empty
@@ -144,6 +160,7 @@ impl App {
             browser: None,
             downloading: false,
             download_requested: false,
+            download: None,
             missing_models: Vec::new(),
             status_error: false,
         }
@@ -222,11 +239,19 @@ impl App {
                 self.status = s;
                 self.status_error = false;
             }
+            LoadMsg::DownloadProgress { percent, label } => {
+                // Clamp defensively (the parser already does, but the gauge must
+                // never see >100). A live install means no error on the status row.
+                let percent = percent.min(100);
+                self.download = Some(DownloadState { percent, label, done: percent >= 100 });
+                self.status_error = false;
+            }
             LoadMsg::Done(snap) => {
                 self.data = *snap;
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
+                self.download = None;
                 self.status_error = false;
                 // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
@@ -236,6 +261,7 @@ impl App {
                 self.loading = false;
                 self.scanning = false;
                 self.downloading = false;
+                self.download = None;
                 self.status_error = true;
             }
         }
@@ -316,6 +342,13 @@ impl App {
         self.loading = true;
         self.status = "Starting AI model download…".to_string();
         self.download_requested = true;
+        // Arm the gauge at 0% immediately so the bar appears the same frame the
+        // user presses D — before the first `PROGRESS` line lands.
+        self.download = Some(DownloadState {
+            percent: 0,
+            label: "Preparing…".to_string(),
+            done: false,
+        });
         self.show_help = false;
     }
 
@@ -1315,11 +1348,51 @@ mod tests {
         assert!(app.download_requested, "D on Settings arms a model download");
         assert!(app.downloading);
         assert!(app.loading);
+        // The gauge is armed at 0% the same frame, before any PROGRESS line.
+        assert_eq!(app.download.as_ref().map(|d| d.percent), Some(0));
         // A terminal load message (e.g. a `fileid`-not-found error) clears
-        // `downloading` — no panic, q still quits.
+        // `downloading` AND the gauge — no panic, q still quits.
         app.apply_load(LoadMsg::Error("`fileid` not found".into()));
         assert!(!app.downloading);
         assert!(!app.loading);
+        assert!(app.download.is_none(), "an errored download clears the gauge");
+        assert!(app.status_error, "the failure marks the status row as an error");
+    }
+
+    /// The porcelain gauge state: `DownloadProgress` advances the bar + label,
+    /// the final 100/done flips `done`, and the worker's terminal `Done` clears
+    /// the gauge — the exact lifecycle `ui.rs` renders.
+    #[test]
+    fn download_progress_drives_and_clears_the_gauge() {
+        let mut app = app_with_files(0);
+        app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT); // arm at 0%
+        assert_eq!(app.download.as_ref().unwrap().percent, 0);
+
+        let label = "arcface · 182/271 MB · 3.4 MB/s · model 2/9";
+        app.apply_load(LoadMsg::DownloadProgress { percent: 62, label: label.to_string() });
+        let d = app.download.as_ref().expect("gauge present mid-install");
+        assert_eq!(d.percent, 62);
+        assert_eq!(d.label, label);
+        assert!(!d.done, "62% is not done");
+
+        // The final PROGRESS line flips the gauge into its brief success state.
+        app.apply_load(LoadMsg::DownloadProgress { percent: 100, label: "done".to_string() });
+        assert!(app.download.as_ref().unwrap().done, "100% marks the gauge done");
+
+        // The worker's terminal Done clears the gauge entirely.
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        assert!(app.download.is_none(), "the gauge clears on completion");
+        assert!(!app.downloading);
+    }
+
+    /// An out-of-range percent is clamped so the gauge widget (which panics above
+    /// 100) is never handed a bad value, even if the reducer is fed one directly.
+    #[test]
+    fn download_progress_clamps_percent_to_100() {
+        let mut app = app_with_files(0);
+        app.apply_load(LoadMsg::DownloadProgress { percent: 150, label: "x".to_string() });
+        assert_eq!(app.download.as_ref().unwrap().percent, 100);
+        assert!(app.download.as_ref().unwrap().done);
     }
 
     /// `D` is GLOBAL: it arms a model download from a non-Settings tab too, so a
