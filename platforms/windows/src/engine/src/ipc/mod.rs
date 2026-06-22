@@ -775,7 +775,9 @@ pub struct ScanComplete {
 pub struct EngineError {
     /// Stable kind code: `discovery_failed`, `vision_failed`, `db_failed`,
     /// `model_load_failed`, `model_download_failed`, `download_tls_pin_failed`,
-    /// `pack_not_available`, `ipc_unknown_command`, `unknown`, ...
+    /// `pack_not_available`, `runtime_not_installed` (macOS: the `load-dynamic`
+    /// ONNX Runtime dylib isn't installed — see `ort_runtime.rs`),
+    /// `ipc_unknown_command`, `unknown`, ...
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

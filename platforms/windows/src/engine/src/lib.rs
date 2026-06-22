@@ -18,6 +18,7 @@ pub mod ipc;
 pub mod job_queue;
 pub mod logging;
 pub mod models;
+pub mod ort_runtime;
 pub mod paths;
 pub mod pipeline;
 pub mod platform;

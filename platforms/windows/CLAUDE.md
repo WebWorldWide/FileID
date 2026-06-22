@@ -6,7 +6,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 
 ## Stack
 
-- **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
+- **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp). ONNX Runtime is loaded via `ort`'s `load-dynamic` (Windows bundles `onnxruntime.dll` beside the engine + the accelerator-pack `ORT_DYLIB_PATH` pin). The engine is cross-platform; on **macOS** the dylib is a one-time install (`ort`'s `download-binaries` ships only a static lib for arm64) — `src/ort_runtime.rs` + `fileid runtime install`; see `shared/docs/RUNTIME.md`.
 - **App** — WinUI 3 (Windows App SDK 1.6+, .NET 8, C#/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
 - **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed.
 

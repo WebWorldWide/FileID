@@ -1201,6 +1201,42 @@ pub fn install_model_blocking(
     })
 }
 
+/// Download a single file to `dest`, blocking until done, verifying `sha256`
+/// (lowercase hex) when provided. Builds its own current-thread Tokio runtime so
+/// a non-async caller needs none, and reuses [`download_simple`]'s pinned-root
+/// TLS client + progress-aware retry + atomic-rename-on-complete.
+///
+/// This is the provisioning path for the macOS ONNX Runtime dylib
+/// (`fileid runtime install`). The download routes through the SAME audited,
+/// CA-pinned client as model downloads, so the egress host must be on the
+/// downloader's redirect allow-list (huggingface.co / github.com / …) — there is
+/// no second, unaudited network code path. Driven by the cross-platform `fileid`
+/// CLI (external lib consumer); the engine binary never calls it — hence
+/// `allow(dead_code)`.
+#[allow(dead_code)]
+pub fn download_file_blocking(
+    url: &str,
+    dest: &Path,
+    sha256: Option<&str>,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<dyn Fn(DownloadProgress) + Send + Sync>,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building runtime-install download runtime")?;
+    rt.block_on(async move {
+        let client = build_shared_client()?;
+        let req = DownloadRequest {
+            url: url.to_string(),
+            destination: dest.to_path_buf(),
+            expected_sha256: sha256.map(str::to_string),
+            expected_bytes: None,
+        };
+        download_simple(client, req, cancel, move |p| progress(p)).await
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
