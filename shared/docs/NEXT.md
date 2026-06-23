@@ -1,5 +1,14 @@
 # NEXT — resume here
 
+## 2026-06-23 — audit gap: C# Windows app + on-hardware verify of audit fixes
+
+The 2026-06-23 whole-codebase audit (STATE) did NOT cover the **C# Windows app** — its `win-core`/`win-ui` finders were rate-limited out before running. The Rust engine/CLI/TUI and the Swift macOS app were covered + fixed; the Windows WinUI/.NET layer (Services, ViewModels, Views, the engine IPC client) is unaudited this round.
+
+- **Re-run the Windows-app slice of the audit** (find→verify→recipe over `platforms/windows/**/*.cs`): async/await deadlocks, CancellationToken ordering, IDisposable leaks, DispatcherQueue threading, IPC parsing, binding/converter crashes.
+- **On-hardware build of the Swift + Linux audit fixes** (dc40735 / 868acda): Swift type-checked clean here (Swift 6.3.2), but build the app on macOS + the GTK app on Linux to confirm. Linux GTK never compiles on the macOS dev box.
+- **Optional:** re-verify the rate-limited engine areas (scan/tagging/faces/restructure) with full 3-skeptic votes when capacity allows — their fixes are cargo-green but had reduced verify coverage.
+
+
 ## 2026-06-21 — face junk-cluster suppression: confirm on the user's Mac + calibrate Windows
 
 Landed: a corroboration gate suppresses junk 1–2 face clusters (`size ≥ FILEID_FACE_MIN_CLUSTER_SIZE`=3 OR `max quality ≥ FILEID_FACE_SOLO_QUALITY`=0.12), offline-validated 407→285 persons on the real library with zero merges (see STATE/DECISIONS 2026-06-21).
