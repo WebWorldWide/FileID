@@ -1,8 +1,10 @@
 # NEXT — resume here
 
-## 2026-06-23 — quality/perf audit backlog (26 confirmed; scene_vocab cache DONE in e22d19b)
+## 2026-06-23 — quality/perf audit backlog
 
-Deep perf/dead-code/quality/comment audit (ultracode). The discovery workflow hit the **session limit mid-run**, so cli/linux/swift/windows areas were NOT covered — re-run those when capacity returns. Remaining confirmed items (2+ skeptic votes; recipes mostly rate-limited, so read each site before applying; compile-verify each, watchdog the test suite). Apply highest-impact first:
+Deep perf/dead-code/quality/comment audit (ultracode). The discovery workflow hit the **session limit mid-run**, so cli/linux/swift/windows areas were NOT covered — re-run those when capacity returns. Remaining confirmed items (2+ skeptic votes; recipes mostly rate-limited, so read each site before applying; compile-verify each, watchdog the test suite). Apply highest-impact first.
+
+**DONE:** scene_vocab dead cache (e22d19b); ClusterAnchor.anchor_embedding + ScanSession::new + the two-pass comment (2992b4f) — those bullets below + the scene_vocab:264-272 doc are complete. **SKIP — false positive:** `DetectedFace.landmarks` is NOT dead (read by align_112/estimate_pose). **DEFER (tangled — fresh context):** `uncertain_pairs()`/`COS_HIGH`/`COS_LOW` removal — `COS_LOW` is cross-referenced in the MERGE_SUGGEST_COS_LOW doc + the misleading "VLM-verifier" comments, so it needs coordinated doc rewrites. Lesson: several of these may be false positives — verify each by grep before removing.
 
 - **[comments-docs/M]** `scene_vocab.rs:264-272` — Stale doc on build_from_default_model describes a cache/encoder flow the body no longer runs
 - **[comments-docs/L]** `batch_clip.rs:7 (also tagging.rs:311 and tagging.rs:474)` — Stale `(N,3,256,256)` CLIP tensor-shape comments — model is now ViT-B/32 @ 224x224
