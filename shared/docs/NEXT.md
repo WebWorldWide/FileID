@@ -1,5 +1,14 @@
 # NEXT — resume here
 
+## 2026-06-23 — quality/perf audit COMPLETE (all platforms CI-green)
+
+The full perf/dead-code/quality/comment audit is applied + verified. Discovery covered all 6 surfaces (48 confirmed items); **~41 applied across 9 commits**, all five CI workflows green on `main` (8913d55 tui · 76dbc1d cli · 112ff56 engine · d8c75eb apple · 0b5671a linux · c950a61 windows, + the earlier e22d19b/2992b4f). Headline wins now live: TUI viewport windowing (O(library)->O(viewport)/frame), CLI dedupe O(n^2)->pigeonhole + N+1->bulk, engine borrow-not-clone on 512-d CLIP vectors + ORT session-bind dedup, Swift main-actor off-loading + ~450-line dead RestructureEngine removed, Linux thumbnail copy-avoidance + texture cache, Windows Sankey hover throttle, plus broad dead-code/comment cleanup.
+
+**Justified NOT-applied (few):** cfg(windows) COM-apartment-guard dedup (unverifiable without a Windows toolchain — do on a Windows box); `DetectedFace.landmarks` (false positive — it IS read); a couple cross-platform items folded into others.
+
+**The one genuinely-open performance item:** on-hardware profiling of the scan pipeline vs the TrueNAS corpus (>=140 files/s target). Source review found + fixed the visible inefficiencies; the remaining tuning needs real-data measurement (per the project's own "tune against real data, not guess" rule) — can't be done from the dev box.
+
+
 ## 2026-06-23 — quality/perf audit backlog
 
 Deep perf/dead-code/quality/comment audit (ultracode). The discovery workflow hit the **session limit mid-run**, so cli/linux/swift/windows areas were NOT covered — re-run those when capacity returns. Remaining confirmed items (2+ skeptic votes; recipes mostly rate-limited, so read each site before applying; compile-verify each, watchdog the test suite). Apply highest-impact first.
