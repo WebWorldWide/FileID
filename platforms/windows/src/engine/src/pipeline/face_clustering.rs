@@ -74,11 +74,10 @@ pub struct ClusterAssignment {
 pub struct ClusterAnchor {
     pub cluster_id: i32,
     pub anchor_face_id: i64,
-    pub anchor_embedding: Vec<f32>,
     pub member_count: u32,
 }
 
-/// Group `faces` into clusters via the two-pass density algorithm in
+/// Group `faces` into clusters via the 3-pass density algorithm in
 /// `identity_clustering`.
 ///
 /// Returns (assignments, anchors). Cluster IDs are 1-based and stable
@@ -193,7 +192,6 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         anchors.push(ClusterAnchor {
             cluster_id: cid,
             anchor_face_id: faces[best_idx].face_id,
-            anchor_embedding: faces[best_idx].embedding.clone(),
             member_count: members.len() as u32,
         });
     }
@@ -447,7 +445,6 @@ pub fn consolidate<S: std::hash::BuildHasher>(
             Some(ClusterAnchor {
                 cluster_id: canon,
                 anchor_face_id: base.anchor_face_id,
-                anchor_embedding: base.anchor_embedding.clone(),
                 member_count: total,
             })
         })
@@ -813,11 +810,10 @@ mod tests {
         }
     }
 
-    fn anchor(cid: i32, face: i64, e: Vec<f32>, count: u32) -> ClusterAnchor {
+    fn anchor(cid: i32, face: i64, _e: Vec<f32>, count: u32) -> ClusterAnchor {
         ClusterAnchor {
             cluster_id: cid,
             anchor_face_id: face,
-            anchor_embedding: e,
             member_count: count,
         }
     }

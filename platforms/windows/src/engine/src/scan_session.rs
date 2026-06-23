@@ -74,17 +74,6 @@ pub struct ScanSession {
 }
 
 impl ScanSession {
-    #[allow(dead_code)]
-    pub fn new(
-        coordinator: ScanCoordinator,
-        db_conn: Arc<Mutex<Connection>>,
-        worker_count: usize,
-        sink: Sink,
-        models: Arc<ModelStack>,
-    ) -> Self {
-        Self::new_with_options(coordinator, db_conn, worker_count, sink, models, false)
-    }
-
     pub fn new_with_options(
         coordinator: ScanCoordinator,
         db_conn: Arc<Mutex<Connection>>,
