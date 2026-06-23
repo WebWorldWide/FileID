@@ -1,5 +1,36 @@
 # NEXT — resume here
 
+## 2026-06-23 — quality/perf audit backlog (26 confirmed; scene_vocab cache DONE in e22d19b)
+
+Deep perf/dead-code/quality/comment audit (ultracode). The discovery workflow hit the **session limit mid-run**, so cli/linux/swift/windows areas were NOT covered — re-run those when capacity returns. Remaining confirmed items (2+ skeptic votes; recipes mostly rate-limited, so read each site before applying; compile-verify each, watchdog the test suite). Apply highest-impact first:
+
+- **[comments-docs/M]** `scene_vocab.rs:264-272` — Stale doc on build_from_default_model describes a cache/encoder flow the body no longer runs
+- **[comments-docs/L]** `batch_clip.rs:7 (also tagging.rs:311 and tagging.rs:474)` — Stale `(N,3,256,256)` CLIP tensor-shape comments — model is now ViT-B/32 @ 224x224
+- **[comments-docs/L]** `face_clustering.rs:82` — cluster() doc says 'two-pass' but the algorithm is three-pass
+- **[comments-docs/L]** `restructure.rs:6` — Module header points at the wrong path for the apply layer
+- **[comments-docs/L]** `restructure_semantic.rs:21-22` — SemanticFile.clip doc claims "512-d CLIP image embedding ... never empty" but the struct is reused for BGE and bag-of-words
+- **[comments-docs/L]** `mod.rs:33 (also migrations.rs:265)` — Stale 'up to v7' version references in DB module docs (registry is at v19)
+- **[dead-code/M]** `face_clustering.rs:77 (field), 196 + 450 (clones)` — ClusterAnchor.anchor_embedding is written (cloned) per cluster but never read
+- **[dead-code/M]** `face_clustering.rs:640 (fn), 27 (COS_HIGH), 32 (COS_LOW)` — uncertain_pairs() and its COS_HIGH/COS_LOW band are a designed-but-unwired feature
+- **[dead-code/L]** `scan_session.rs:77-86` — `ScanSession::new` is unused (dead `#[allow(dead_code)]` constructor)
+- **[dead-code/L]** `tagging.rs:253 (field), assigned 1612` — `DetectedFace.landmarks` is write-only (stored per face, never read)
+- **[dead-code/L]** `face_clustering.rs:61` — FaceRow.file_id is loaded but never read
+- **[dead-code/L]** `restructure.rs:72-78, 132-133` — ClassifiedFolder::move_count and dominant_category are write-only, masked by #[allow(dead_code)]
+- **[dead-code/L]** `ui.rs:1031, 1038` — render_calm_list `focused` parameter is always true; the titled_block branch is unreachable
+- **[performance/H]** `ui.rs:385, 465, 502, 571, 1031` — Dashboard lists materialize all rows every frame instead of windowing to the visible viewport
+- **[performance/M]** `restructure_semantic.rs:311` — Time-segment clustering clones every SemanticFile (incl. 512-d CLIP vector) per plan
+- **[performance/M]** `app.rs:170, 186, 196; ui.rs:318, 382` — visible_files() is recomputed twice per Library frame (re-lowercasing every path under an active search)
+- **[performance/L]** `discovery.rs:269-297` — Discovery computes `has_build_marker` for every directory even when no ambiguous build dir is present
+- **[performance/L]** `scrfd.rs:515-532 (inner loop 522-523)` — resize_nearest recomputes the source-X mapping for every pixel on the per-image detect path
+- **[performance/L]** `restructure.rs:99, 323` — Per-move String clones building category histograms
+- **[performance/L]** `sink.rs:134 (write_line, inside Sink::spawn drain loop at 58-87)` — IPC sink allocates a fresh Vec per event on the stdout writer hot path
+- **[performance/L]** `migrations.rs:208-249` — migrations::apply re-queries the DB per migration after already loading the applied set
+- **[quality/M]** `scan_session.rs:378-415 and 523-548` — Discovery empty/rescan/partial notice is built twice with identical IPC strings (DRY + drift risk)
+- **[quality/M]** `ram_plus.rs:159-180 (and sface.rs 37-58, mobileclip.rs load, clip_text.rs 30-55, yunet.rs load, bge_text.rs load)` — Per-model ORT session-bind boilerplate duplicated across six wrappers
+- **[quality/L]** `restructure.rs:300-306, 331-337, 360-366` — Three identical "absorb semantic moves" blocks in the plan handler
+- **[quality/L]** `ui.rs:949, 1148, 1167, 1187, 1207` — Right-aligned name/pad layout logic is duplicated across five row builders
+
+
 ## 2026-06-23 — CI / on-hardware verification of the audit fixes
 
 The whole-codebase audit + the follow-up C# Windows-app audit are now both DONE and fixed (STATE). What remains is **build/verify on the OSes the dev box can't compile**:

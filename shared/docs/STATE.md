@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-23 — Quality/perf/dead-code audit (ultracode), round 1: scene_vocab cache removed
+
+Ran a deep performance + dead-code + code-quality + comment/doc audit (`find → 3-skeptic verify → describe-only recipe`, distinct from the correctness bug audit). It hit the **session limit mid-run** (resets 3:10pm Chicago) — verify/recipe agents for cli/linux/swift/windows failed, so coverage landed on the Rust engine + TUI: **56 candidates → 26 confirmed** (8 perf, 8 dead-code, 4 quality, 6 comments-docs). With agents rate-limited, switched to direct compile-verified application.
+
+**Applied + verified (e22d19b):** removed the **dead on-disk scene-matrix cache** in `scene_vocab.rs` — 118 lines (SCENE_CACHE_* consts + 5 cache fns + orphaned ClipTokenizer import, all `#[allow(dead_code)]`), superseded by the `SCENE_EMBEDDINGS` static; fixed the stale doc. clippy -D + 386 tests green. Mechanical scan baseline: 67 `#[allow(dead_code/unused)]` in the engine (many legit cross-platform cfg-gating), CLI/TUI/Linux annotation-clean, only 2 Rust TODOs.
+
+**The other 25 confirmed items are enumerated in NEXT.md** (highlights: TUI dashboards materialize all ≤5000 rows every frame instead of windowing to the viewport [perf-H]; `ClusterAnchor.anchor_embedding` + `uncertain_pairs()`/COS band dead; `restructure_semantic` clones every 512-d SemanticFile per segment; scan_session discovery-notice DRY). Continue the loop — compile-verify each, watchdog the suite — and re-run the audit for cli/linux/swift/windows when capacity returns. Perf-critical scan paths still need on-hardware profiling vs the TrueNAS corpus (don't guess thresholds).
+
 ## 2026-06-23 — Whole-codebase bug audit (ultracode): 23 confirmed → all fixed + delta-verified
 
 Ran a multi-agent `find → 3-skeptic default-reject verify → fix-recipe` audit over the entire codebase (16 areas: Rust engine ×8, CLI, TUI, Linux GTK, C# Windows ×2, Swift macOS ×3). 146 agents, **33 candidates → 23 confirmed** (2 high / 9 med / 12 low; ~19 unique after dedupe). Rate limits + a session cap killed the `win-core`/`win-ui` finders and some verify/recipe agents — **the C# Windows app got no coverage this round** (flagged in NEXT). The recipe agents applied fixes directly to the working tree; I read-before-committed each, compile-gated all Rust, and ran a delta re-audit.
