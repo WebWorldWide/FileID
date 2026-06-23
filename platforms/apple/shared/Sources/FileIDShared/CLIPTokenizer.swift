@@ -90,10 +90,11 @@ public final class CLIPTokenizer: @unchecked Sendable {
         var enc: [String: Int32] = [:]
         enc.reserveCapacity(vocab.count)
         for (k, v) in vocab { enc[k] = Int32(v) }
-        // merges.txt: first line is a header, then "a b" per line.
-        // Split on any newline grapheme (\n, \r\n, \r) so a CRLF-saved file
-        // doesn't leave a trailing \r glued to the second token of every pair.
-        let lines = mergesText.split(whereSeparator: { $0.isNewline }).dropFirst()
+        // merges.txt: first line is a header, then "a b" per line. Split on
+        // \n / \r\n (matching the Rust engine's `.lines()`, not `.isNewline`) so a
+        // CRLF file doesn't leave a trailing \r glued to the second token of every
+        // pair, while staying byte-faithful across engines.
+        let lines = mergesText.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" }).dropFirst()
         guard lines.count <= 50_000 else { return false }
         var ranks: [Pair: Int] = [:]
         ranks.reserveCapacity(lines.count)

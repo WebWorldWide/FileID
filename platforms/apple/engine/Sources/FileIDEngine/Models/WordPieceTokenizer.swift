@@ -41,12 +41,14 @@ final class WordPieceTokenizer {
         guard let text = try? String(contentsOf: vocabFile, encoding: .utf8) else { return nil }
         var vocab: [String: Int64] = [:]
         var i: Int64 = 0
-        // Split on any newline grapheme (\n, \r\n, \r) so a CRLF/CR checkout can't
-        // leave a trailing \r glued to every token — that would break the
-        // [CLS]/[SEP]/[UNK] lookups and silently disable BGE. The \r\n grapheme is
-        // a single Character, so it's consumed whole. `omittingEmptySubsequences:
-        // false` keeps token id == line number (the HuggingFace vocab.txt contract).
-        for line in text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }) {
+        // Split on \n / \r\n only — exactly matching the Rust engine's `.lines()`
+        // so token id == line number stays byte-faithful across engines (NOT
+        // `.isNewline`, which also splits on VT/FF/NEL/LS/PS and could shift ids).
+        // The \r\n grapheme is a single Character, consumed whole, so a CRLF
+        // checkout can't leave a trailing \r glued to every token (which would
+        // break the [CLS]/[SEP]/[UNK] lookups and silently disable BGE).
+        // `omittingEmptySubsequences: false` keeps token id == line number.
+        for line in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" || $0 == "\r\n" }) {
             vocab[String(line)] = i
             i += 1
         }
