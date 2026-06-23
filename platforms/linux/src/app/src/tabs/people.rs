@@ -150,7 +150,10 @@ struct Ui {
     unknown_checked: RefCell<HashSet<i64>>,
     reload_gen: Cell<u64>,
     clustering: Cell<bool>,
-    thumb_cache: RefCell<HashMap<String, gtk::gdk::MemoryTexture>>,
+    // Keyed by (representative photo path, face bbox): two people can share a
+    // representative photo but crop different faces from it, so the path alone
+    // would make the second card reuse the first card's face crop.
+    thumb_cache: RefCell<HashMap<(String, Option<String>), gtk::gdk::MemoryTexture>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
@@ -688,11 +691,13 @@ fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
 }
 
 fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Option<String>) {
-    if let Some(tex) = ui.thumb_cache.borrow().get(&rep_path).cloned() {
+    // (path, bbox) — the crop region is part of the identity (see thumb_cache).
+    let key = (rep_path.clone(), bbox.clone());
+    if let Some(tex) = ui.thumb_cache.borrow().get(&key).cloned() {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = ui.engine.borrow().request_thumbnail(rep_path.clone());
+    let rx = ui.engine.borrow().request_thumbnail(rep_path);
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -708,7 +713,7 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Opti
             return;
         };
         let tex = texture_from_decoded(&decoded);
-        ui.thumb_cache.borrow_mut().insert(rep_path, tex.clone());
+        ui.thumb_cache.borrow_mut().insert(key, tex.clone());
         if let Some(pic) = pic_weak.upgrade() {
             pic.set_paintable(Some(&tex));
         }
