@@ -193,7 +193,13 @@ impl App {
 
     /// Cursor index for the active tab, clamped to the current list length.
     pub fn cursor(&self) -> usize {
-        let len = self.list_len();
+        self.cursor_clamped(self.list_len())
+    }
+
+    /// Clamp the active tab's stored cursor against an ALREADY-KNOWN length, so a
+    /// caller holding the list (e.g. a rendered `visible_files`) skips recomputing
+    /// it through `list_len`.
+    pub fn cursor_clamped(&self, len: usize) -> usize {
         if len == 0 {
             0
         } else {
