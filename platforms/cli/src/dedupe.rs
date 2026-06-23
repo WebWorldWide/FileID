@@ -14,7 +14,7 @@
 //! model-free `scan` does not compute them, so on a CLI-only-indexed library
 //! these report "no … in DB" until a full engine scan has run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -83,7 +83,13 @@ struct ExactGroup {
     files: Vec<(String, i64)>, // (path, size)
 }
 
-fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> {
+type HashBuckets = Vec<(String, Vec<(i64, String, i64)>)>;
+
+/// One COUNT + one ordered scan of content-hashed files, bucketed by hex hash.
+/// `None` = no content hashes in the DB (no engine scan yet); distinct from
+/// `Some(empty)` (hashes present, no duplicate groups) — callers rely on that
+/// split. Buckets are hash-sorted, only >1-member groups, members in path order.
+fn exact_buckets(conn: &rusqlite::Connection) -> Result<Option<HashBuckets>> {
     let total: i64 =
         conn.query_row("SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL", [], |r| {
             r.get(0)
@@ -92,22 +98,29 @@ fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> 
         return Ok(None);
     }
     let mut stmt = conn.prepare(
-        "SELECT lower(hex(content_hash)) AS h, path_text, size_bytes \
+        "SELECT lower(hex(content_hash)) AS h, id, path_text, size_bytes \
          FROM files WHERE content_hash IS NOT NULL ORDER BY h, path_text",
     )?;
-    let mut buckets: BTreeMap<String, Vec<(String, i64)>> = BTreeMap::new();
+    let mut buckets: BTreeMap<String, Vec<(i64, String, i64)>> = BTreeMap::new();
     let rows = stmt.query_map(params![], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
     })?;
     for row in rows.flatten() {
-        buckets.entry(row.0).or_default().push((row.1, row.2));
+        buckets.entry(row.0).or_default().push((row.1, row.2, row.3));
     }
-    let groups = buckets
-        .into_iter()
-        .filter(|(_, v)| v.len() > 1)
-        .map(|(hash, files)| ExactGroup { hash, files })
-        .collect();
-    Ok(Some(groups))
+    Ok(Some(buckets.into_iter().filter(|(_, v)| v.len() > 1).collect()))
+}
+
+fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> {
+    Ok(exact_buckets(conn)?.map(|buckets| {
+        buckets
+            .into_iter()
+            .map(|(hash, members)| ExactGroup {
+                hash,
+                files: members.into_iter().map(|(_, path, size)| (path, size)).collect(),
+            })
+            .collect()
+    }))
 }
 
 fn render_exact(ctx: &Ctx, groups: &Option<Vec<ExactGroup>>) {
@@ -171,15 +184,38 @@ fn similar_groups(conn: &rusqlite::Connection, threshold: u32) -> Result<Option<
         return Ok(None);
     }
 
-    // Union-find: union any pair within `threshold` Hamming distance; report
-    // connected components of size > 1.
+    // Union-find over phash Hamming distance; report connected components of
+    // size > 1. Candidates come from multi-index hashing: split each 64-bit
+    // hash into `threshold + 1` disjoint blocks — two hashes within `threshold`
+    // bits must match some block exactly (pigeonhole), so only same-block pairs
+    // can ever union. The full distance is still checked before unioning, so the
+    // result is identical to all-pairs.
     let n = rows.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let dist = (rows[i].2 ^ rows[j].2).count_ones();
-            if dist <= threshold {
-                union(&mut parent, i, j);
+    if threshold >= 64 {
+        for i in 1..n {
+            union(&mut parent, 0, i);
+        }
+    } else {
+        let blocks = (threshold + 1) as usize;
+        for b in 0..blocks {
+            let lo = (b * 64) / blocks;
+            let width = ((b + 1) * 64) / blocks - lo;
+            let mask: u64 = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let mut by_block: HashMap<u64, Vec<usize>> = HashMap::new();
+            for (idx, row) in rows.iter().enumerate() {
+                by_block.entry(((row.2 as u64) >> lo) & mask).or_default().push(idx);
+            }
+            for bucket in by_block.values() {
+                for (a, &i) in bucket.iter().enumerate() {
+                    for &j in &bucket[a + 1..] {
+                        if find(&mut parent, i) != find(&mut parent, j)
+                            && (rows[i].2 ^ rows[j].2).count_ones() <= threshold
+                        {
+                            union(&mut parent, i, j);
+                        }
+                    }
+                }
             }
         }
     }
@@ -491,29 +527,12 @@ fn remove_victims(
 /// Exact-duplicate victims: every byte-identical copy beyond the first
 /// (kept) one. Keeper = lexicographically-first path (deterministic).
 fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL",
-        [],
-        |r| r.get(0),
-    )?;
-    if total == 0 {
+    let Some(buckets) = exact_buckets(conn)? else {
         return Ok(VictimSet { available: false, victims: Vec::new() });
-    }
-    let mut stmt = conn.prepare(
-        "SELECT lower(hex(content_hash)) AS h, id, path_text, size_bytes \
-         FROM files WHERE content_hash IS NOT NULL ORDER BY h, path_text",
-    )?;
-    let mut buckets: BTreeMap<String, Vec<(i64, String, i64)>> = BTreeMap::new();
-    let rows = stmt.query_map(params![], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
-    })?;
-    for row in rows.flatten() {
-        buckets.entry(row.0).or_default().push((row.1, row.2, row.3));
-    }
+    };
     let victims = buckets
-        .into_values()
-        .filter(|v| v.len() > 1)
-        .flat_map(|v| v.into_iter().skip(1)) // keep first, remove the rest
+        .into_iter()
+        .flat_map(|(_, members)| members.into_iter().skip(1)) // keep first, remove the rest
         .map(|(id, path, size)| Victim { id, path, size })
         .collect();
     Ok(VictimSet { available: true, victims })
@@ -526,7 +545,11 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
     let Some(groups) = set else {
         return Ok(VictimSet { available: false, victims: Vec::new() });
     };
-    let mut size_stmt = conn.prepare("SELECT size_bytes FROM files WHERE id = ?1")?;
+    let mut size_stmt = conn.prepare("SELECT id, size_bytes FROM files WHERE phash IS NOT NULL")?;
+    let sizes: BTreeMap<i64, i64> = size_stmt
+        .query_map(params![], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .filter_map(Result::ok)
+        .collect();
     let victims = groups
         .into_iter()
         .flat_map(|g| {
@@ -535,7 +558,7 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
             files.into_iter().skip(1)
         })
         .map(|(id, path)| {
-            let size = size_stmt.query_row(params![id], |r| r.get::<_, i64>(0)).unwrap_or(0);
+            let size = sizes.get(&id).copied().unwrap_or(0);
             Victim { id, path, size }
         })
         .collect();

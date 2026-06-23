@@ -19,7 +19,7 @@ use anyhow::Result;
 use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-use crate::context::{human_size, print_json, Ctx};
+use crate::context::{human_size, print_json, truncate, Ctx};
 
 /// One curated, cross-platform, commercial-clean model the engine uses. `kind`
 /// is the registry key passed to `lookup_full`; `license` + `category` are the
@@ -81,15 +81,6 @@ fn hf_repo(url: &str) -> String {
             Some(format!("{}/{}", it.next()?, it.next()?))
         })
         .unwrap_or_else(|| url.to_string())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let keep: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{keep}…")
-    }
 }
 
 /// `fileid models list` — show every model, its installed state, size, license,

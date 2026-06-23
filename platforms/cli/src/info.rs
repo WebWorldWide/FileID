@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-use crate::context::{escape_like, human_size, print_json, Ctx};
+use crate::context::{human_size, print_json, Ctx};
 
 struct FileRow {
     id: i64,
@@ -141,54 +141,33 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
 }
 
 fn lookup(conn: &rusqlite::Connection, target: &str) -> Result<Option<FileRow>> {
-    let mapper = |r: &rusqlite::Row| -> rusqlite::Result<FileRow> {
-        Ok(FileRow {
-            id: r.get(0)?,
-            path: r.get(1)?,
-            kind: r.get(2)?,
-            extension: r.get(3)?,
-            size: r.get(4)?,
-            created: r.get(5)?,
-            modified: r.get(6)?,
-            scanned: r.get(7)?,
-            has_faces: r.get::<_, i64>(8)? != 0,
-            has_text: r.get::<_, i64>(9)? != 0,
-            camera: r.get(10)?,
-            lat: r.get(11)?,
-            lon: r.get(12)?,
-            failed: r.get::<_, i64>(13)? != 0,
-            error: r.get(14)?,
-            vlm_desc: r.get(15)?,
-            vlm_name: r.get(16)?,
-        })
+    let Some(id) = crate::context::resolve_file_id(conn, target) else {
+        return Ok(None);
     };
-
-    // Numeric target → file id.
-    if let Ok(id) = target.parse::<i64>() {
-        let sql = format!("SELECT {SELECT_COLS} FROM files WHERE id = ?1");
-        if let Some(row) = conn.query_row(&sql, params![id], mapper).optional()? {
-            return Ok(Some(row));
-        }
-    }
-
-    // Exact path match (try the canonicalized form first, then the raw arg).
-    let canon = std::fs::canonicalize(target)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| target.to_string());
-    let sql = format!("SELECT {SELECT_COLS} FROM files WHERE path_text = ?1");
-    for candidate in [canon.as_str(), target] {
-        if let Some(row) = conn.query_row(&sql, params![candidate], mapper).optional()? {
-            return Ok(Some(row));
-        }
-    }
-
-    // Last resort: basename suffix match (forgiving of cwd differences).
-    let like = format!("%/{}", escape_like(target.trim_start_matches('/')));
-    let sql = format!(
-        "SELECT {SELECT_COLS} FROM files WHERE path_text LIKE ?1 ESCAPE '\\' \
-         ORDER BY path_text LIMIT 1"
-    );
-    Ok(conn.query_row(&sql, params![like], mapper).optional()?)
+    let sql = format!("SELECT {SELECT_COLS} FROM files WHERE id = ?1");
+    Ok(conn
+        .query_row(&sql, params![id], |r| {
+            Ok(FileRow {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                kind: r.get(2)?,
+                extension: r.get(3)?,
+                size: r.get(4)?,
+                created: r.get(5)?,
+                modified: r.get(6)?,
+                scanned: r.get(7)?,
+                has_faces: r.get::<_, i64>(8)? != 0,
+                has_text: r.get::<_, i64>(9)? != 0,
+                camera: r.get(10)?,
+                lat: r.get(11)?,
+                lon: r.get(12)?,
+                failed: r.get::<_, i64>(13)? != 0,
+                error: r.get(14)?,
+                vlm_desc: r.get(15)?,
+                vlm_name: r.get(16)?,
+            })
+        })
+        .optional()?)
 }
 
 fn load_tags(conn: &rusqlite::Connection, file_id: i64) -> Vec<(String, String, Option<f64>)> {
