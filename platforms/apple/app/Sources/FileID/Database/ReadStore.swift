@@ -502,22 +502,6 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? []
     }
 
-    /// Top vision-classified tags by confidence (insert order preserved by
-    /// rowid; VisionWorker emits results pre-sorted descending). Used by
-    /// Library tiles for at-a-glance content cues — no need to open the
-    /// preview sheet to see what a photo contains.
-    public func topVisionTags(forFileID id: Int64, limit: Int) -> [String] {
-        guard let q = queue, limit > 0 else { return [] }
-        return (try? q.read { db in
-            try String.fetchAll(db, sql: """
-                SELECT tag FROM tags
-                WHERE file_id = ? AND source = 'auto'
-                ORDER BY rowid
-                LIMIT ?
-                """, arguments: [id, limit])
-        }) ?? []
-    }
-
     /// Bulk-fetch top vision tags for many files in one SQL query
     /// (the per-tile call would fire 1000+ queries on a large grid).
     /// Each file gets at most `limit` tags in confidence-descending order.
