@@ -13,6 +13,7 @@
 // scan, then does a final reload on completion.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,7 @@ use gtk::glib::BoxedAnyObject;
 use crate::engine_client::{
     decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent, FileRow, QuerySpec,
 };
+use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 
 const QUERY_LIMIT: i64 = 1000;
 const TILE_THUMB_PX: i32 = 256;
@@ -291,6 +293,33 @@ fn build_tile() -> gtk::Box {
     vbox
 }
 
+const THUMB_CACHE_CAP: usize = 512;
+
+thread_local! {
+    // GridView re-binds tiles on every scroll/recycle; without this each
+    // re-bind re-reads + re-decodes the file. Session-scoped, FIFO-bounded.
+    static THUMB_CACHE: RefCell<(HashMap<String, gtk::gdk::Texture>, VecDeque<String>)> =
+        RefCell::new((HashMap::new(), VecDeque::new()));
+}
+
+fn thumb_cache_get(path: &str) -> Option<gtk::gdk::Texture> {
+    THUMB_CACHE.with(|c| c.borrow().0.get(path).cloned())
+}
+
+fn thumb_cache_put(path: String, tex: gtk::gdk::Texture) {
+    THUMB_CACHE.with(|c| {
+        let (map, order) = &mut *c.borrow_mut();
+        if map.insert(path.clone(), tex).is_none() {
+            order.push_back(path);
+            while order.len() > THUMB_CACHE_CAP {
+                if let Some(evict) = order.pop_front() {
+                    map.remove(&evict);
+                }
+            }
+        }
+    });
+}
+
 fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     let Some(obj) = list_item.item() else { return };
     let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else { return };
@@ -313,8 +342,12 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     caption.set_text(&format!("{} · {}", row.kind.to_uppercase(), format_bytes(row.size_bytes)));
 
     if row.kind == "image" {
-        pic.set_paintable(None::<&gtk::gdk::Texture>);
         let path = row.path.clone();
+        if let Some(tex) = thumb_cache_get(&path) {
+            pic.set_paintable(Some(&tex));
+            return;
+        }
+        pic.set_paintable(None::<&gtk::gdk::Texture>);
         let want = path.clone();
         let rx = engine.borrow().request_thumbnail(path);
         let pic_weak = pic.downgrade();
@@ -328,15 +361,17 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             // Decode + scale OFF the main loop; only Send pixel data crosses back.
             let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
             std::thread::spawn(move || {
-                let _ = dtx.send_blocking(decode_scaled(&bytes, TILE_THUMB_PX));
+                let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
             });
             let Ok(Some(decoded)) = drx.recv().await else { return };
+            let tex: gtk::gdk::Texture = texture_from_decoded(&decoded).upcast();
+            thumb_cache_put(want.clone(), tex.clone());
             // Re-check: the tile may have been recycled while we were decoding.
             if !tile_still_wants(&li_weak, &want) {
                 return;
             }
             if let Some(pic) = pic_weak.upgrade() {
-                pic.set_paintable(Some(&texture_from_decoded(&decoded)));
+                pic.set_paintable(Some(&tex));
             }
         });
     } else {
@@ -422,7 +457,7 @@ fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widge
             // Decode + scale OFF the main loop; only Send pixel data crosses back.
             let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
             std::thread::spawn(move || {
-                let _ = dtx.send_blocking(decode_scaled(&bytes, PREVIEW_PX));
+                let _ = dtx.send_blocking(decode_scaled(bytes, PREVIEW_PX));
             });
             let Ok(Some(decoded)) = drx.recv().await else { return };
             if let Some(pic) = pic_weak.upgrade() {
@@ -479,42 +514,4 @@ fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &str) -> bool 
         .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
         .map(|o| o.borrow::<FileRow>().path == want)
         .unwrap_or(false)
-}
-
-fn icon_paintable(name: &str, size: i32) -> Option<gtk::IconPaintable> {
-    let display = gtk::gdk::Display::default()?;
-    let theme = gtk::IconTheme::for_display(&display);
-    Some(theme.lookup_icon(
-        name,
-        &[],
-        size,
-        1,
-        gtk::TextDirection::None,
-        gtk::IconLookupFlags::empty(),
-    ))
-}
-
-fn icon_for_kind(kind: &str) -> &'static str {
-    match kind {
-        "image" => "image-x-generic-symbolic",
-        "video" => "video-x-generic-symbolic",
-        "audio" => "audio-x-generic-symbolic",
-        "pdf" | "doc" => "x-office-document-symbolic",
-        _ => "text-x-generic-symbolic",
-    }
-}
-
-fn format_bytes(b: i64) -> String {
-    let kb = b as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{kb:.0} KB")
-    } else {
-        format!("{:.1} MB", kb / 1024.0)
-    }
-}
-
-fn fmt_date(secs: Option<f64>) -> Option<String> {
-    let s = secs?;
-    let dt = glib::DateTime::from_unix_local(s as i64).ok()?;
-    dt.format("%Y-%m-%d").ok().map(|g| g.to_string())
 }

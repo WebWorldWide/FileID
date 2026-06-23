@@ -18,29 +18,6 @@
 //     driven by `modelDownloadProgress`,
 //   * a "Smart names ready" list (files.vlm_proposed_name / vlm_description) with
 //     per-file Rename (`renameFiles`) + an Apply-all.
-//
-// ─── INTEGRATION NOTE (engine_client.rs additions this tab depends on) ─────────
-// `EngineEvent` does not yet carry the Deep Analyze events — `drain_stdout`
-// currently drops them (`_ => None`). For the live cards below to light up, add
-// these variants to `EngineEvent` and map them in `drain_stdout`, mirroring the
-// existing `Progress(ScanProgress)` arm (the payload types already live in
-// `fileid_engine::ipc` and are re-exported here):
-//
-//   EngineEvent::DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting)
-//   EngineEvent::DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress)
-//   EngineEvent::DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone)
-//   EngineEvent::DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete)
-//   EngineEvent::ModelDownloadProgress(fileid_engine::ipc::ModelDownloadProgress)
-//
-// drain_stdout mapping (one arm each):
-//   EventPayload::DeepAnalyzeStarting(w)   => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
-//   EventPayload::DeepAnalyzeProgress(w)   => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
-//   EventPayload::DeepAnalyzeFileDone(w)   => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
-//   EventPayload::DeepAnalyzeComplete(w)   => Some(EngineEvent::DeepAnalyzeComplete(w.inner)),
-//   EventPayload::ModelDownloadProgress(w) => Some(EngineEvent::ModelDownloadProgress(w.inner)),
-//
-// Everything else here (counts, the smart-names list, command routing) works
-// against the current EngineClient surface unchanged.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -57,6 +34,7 @@ use fileid_engine::ipc::{
 use fileid_engine::models::registry::{self, LookupResult};
 
 use crate::engine_client::{EngineClient, EngineEvent};
+use super::util::glass_card;
 
 const PROPOSED_LIMIT: i64 = 200;
 
@@ -1067,18 +1045,6 @@ fn build_last_card(desc: &gtk::Label, name: &gtk::Label) -> gtk::Box {
 }
 
 // ─── Small widget helpers ────────────────────────────────────────────────────
-
-fn glass_card() -> gtk::Box {
-    gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
-        .margin_top(14)
-        .margin_bottom(14)
-        .margin_start(16)
-        .margin_end(16)
-        .css_classes(["glass-card"])
-        .build()
-}
 
 fn heading(text: &str) -> gtk::Label {
     gtk::Label::builder()
