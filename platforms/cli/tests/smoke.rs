@@ -219,6 +219,49 @@ fn models_list_and_dry_run_need_no_network() {
     let _ = std::fs::remove_dir_all(&models);
 }
 
+/// `models download --all --json`, run non-interactively without `--yes`, trips
+/// the large-set confirmation gate — `confirm` returns false on a piped stdin, so
+/// nothing downloads. The abort must still honor `--json`: a machine caller doing
+/// `json.loads(stdout)` gets a JSON object (`aborted: true`), never the bare human
+/// "Aborted." line. No network; fully isolated via an empty `FILEID_MODELS_DIR`.
+#[test]
+fn models_download_json_abort_emits_json_not_human_text() {
+    let models = unique_dir("models-abort");
+    let md = models.to_str().unwrap();
+
+    let out = run_env(
+        &["--no-color", "--json", "models", "download", "--all"],
+        &[("FILEID_MODELS_DIR", md)],
+    );
+
+    // A non-interactive large-set abort stays a clean exit (exit 0), as before.
+    assert!(
+        out.status.success(),
+        "non-interactive --all abort must exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The contract: under --json, stdout is a JSON object — not "Aborted. (…)".
+    // Before the fix, `json()` (serde parse of stdout) panicked on the human line.
+    let v = json(&out);
+    assert_eq!(v["command"].as_str(), Some("models"), "json must carry the command tag");
+    assert_eq!(v["action"].as_str(), Some("download"), "json must carry the action tag");
+    assert_eq!(v["aborted"].as_bool(), Some(true), "the abort must self-identify in json");
+    assert!(
+        v["installed"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "an aborted download installs nothing"
+    );
+    assert!(
+        !stdout(&out).contains("Aborted. (nothing downloaded)"),
+        "the human abort line must not leak onto --json stdout"
+    );
+
+    // Nothing was fetched: no install sentinels written into the isolated dir.
+    assert!(!models.join(".sentinels").exists(), "an aborted download must not write sentinels");
+
+    let _ = std::fs::remove_dir_all(&models);
+}
+
 /// Covers the follow-on surfaces WITHOUT any ML models, fully isolated:
 /// `search --similar <file>` with no embeddings; `dedupe --apply --dry-run`
 /// (the no-signal message and a seeded group); `restructure --apply --dry-run`
@@ -327,6 +370,114 @@ fn apply_dryrun_models_and_similar_model_free() {
     let _ = std::fs::remove_dir_all(&corpus);
     let _ = std::fs::remove_dir_all(&dbdir);
     let _ = std::fs::remove_dir_all(&state);
+}
+
+/// Regression: a REAL `restructure --apply --json --yes` must print a single
+/// JSON object and nothing else. Before the fix the `Will move N file(s) into
+/// …:` header and per-move lines were written to stdout ahead of the result
+/// object, so the combined stdout was not parseable as one JSON value. `json()`
+/// parses the whole of stdout, so it panics here if any human preview line leaks.
+#[test]
+fn restructure_apply_json_real_emits_pure_json() {
+    let corpus = unique_dir("corpus-rapj");
+    let dbdir = unique_dir("db-rapj");
+    let db = dbdir.join("lib.sqlite");
+    let db_s = db.to_str().unwrap();
+
+    // Plain text/markdown the model-free cascade relocates into category
+    // subfolders, so the plan yields ≥1 move (the bug needs a non-empty plan).
+    std::fs::write(corpus.join("report.md"), "# Q3\nquarterly revenue figures\n").unwrap();
+    std::fs::write(corpus.join("notes.txt"), "meeting notes and action items\n").unwrap();
+    std::fs::write(corpus.join("readme.md"), "# Readme\nproject overview\n").unwrap();
+
+    let out = run(&["--db", db_s, "--no-color", "--json", "scan", corpus.to_str().unwrap()]);
+    assert!(out.status.success(), "scan failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Precondition: the plan proposes at least one move (else the bug can't fire).
+    let out = run(&["--db", db_s, "--no-color", "--json", "restructure", "--apply", "--dry-run"]);
+    assert!(out.status.success());
+    assert!(
+        json(&out)["moveCount"].as_u64().unwrap_or(0) >= 1,
+        "expected ≥1 proposed move so the real apply has work to do"
+    );
+
+    // REAL apply in --json mode. stdout MUST be one parseable JSON object;
+    // pre-fix it was `Will move … into …:\n  …\n{json}`, so json() panics.
+    let out = run(&["--db", db_s, "--no-color", "--json", "restructure", "--apply", "--yes"]);
+    assert!(out.status.success(), "real apply failed: {}", String::from_utf8_lossy(&out.stderr));
+    let v = json(&out);
+    assert_eq!(v["command"].as_str(), Some("restructure"));
+    assert_eq!(v["mode"].as_str(), Some("apply"));
+    assert_eq!(v["dryRun"].as_bool(), Some(false));
+    assert!(
+        v["applied"].as_u64().unwrap_or(0) >= 1,
+        "a real apply with a non-empty plan should move ≥1 file"
+    );
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
+}
+
+/// REGRESSION — a REAL `dedupe --apply` (no `--dry-run`) in `--json` mode must
+/// emit exactly ONE JSON value on stdout. Pre-fix the human "Will N file(s)
+/// would …" preview was printed unconditionally before the JSON result, so
+/// stdout was `Will …:\n  victim\n{json}` and `json()` panics. (The `--json`
+/// dry-run already early-returned clean JSON, so only the real-apply path was
+/// unguarded and untested.) `--delete` gives a deterministic, cross-platform
+/// removal; the corrupting preview block is shared by the trash and delete
+/// paths, so this exercises the exact regression with CI-stable post-conditions.
+#[test]
+fn dedupe_apply_json_real_emits_pure_json() {
+    let corpus = unique_dir("corpus-dapj");
+    let dbdir = unique_dir("db-dapj");
+    let db = dbdir.join("lib.sqlite");
+    let db_s = db.to_str().unwrap();
+
+    // Two byte-identical files (one exact-duplicate group) + a unique file.
+    std::fs::write(corpus.join("dup1.txt"), "identical apply body for dedupe json").unwrap();
+    std::fs::write(corpus.join("dup2.txt"), "identical apply body for dedupe json").unwrap();
+    std::fs::write(corpus.join("solo.md"), "# Solo\nunique\n").unwrap();
+
+    let out = run(&["--db", db_s, "--no-color", "--json", "scan", corpus.to_str().unwrap()]);
+    assert!(out.status.success(), "scan failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // Simulate a full engine scan's content hashes so the exact path has a group.
+    seed_content_hash(&db, "dup1.txt", "dup2.txt");
+
+    // REAL apply (no --dry-run) in --json with --yes — the reported trigger.
+    let out = run(&[
+        "--db", db_s, "--no-color", "--json", "dedupe", "--exact", "--apply", "--delete", "--yes",
+    ]);
+    assert!(out.status.success(), "real apply failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // THE LOCK: the entire stdout must parse as one JSON value (pre-fix: panic).
+    let v = json(&out);
+    assert_eq!(v["command"].as_str(), Some("dedupe"));
+    assert_eq!(v["mode"].as_str(), Some("apply"));
+    assert_eq!(v["dryRun"].as_bool(), Some(false));
+    assert_eq!(v["method"].as_str(), Some("delete"));
+    assert_eq!(v["removed"].as_u64(), Some(1), "kept one, removed the other");
+    assert!(v["reclaimBytes"].as_u64().unwrap_or(0) > 0, "reclaimed the victim's bytes");
+
+    // Belt-and-suspenders: no human preview text leaked onto stdout.
+    let s = stdout(&out);
+    assert!(
+        !s.contains("file(s) would") && !s.contains("reclaimable"),
+        "human preview text leaked into --json stdout: {s}"
+    );
+
+    // The file op still executes correctly (the fix is output-only): exactly one
+    // of the pair survives, the unique file is untouched, one DB row is dropped.
+    let survivors = [corpus.join("dup1.txt"), corpus.join("dup2.txt")]
+        .iter()
+        .filter(|p| p.exists())
+        .count();
+    assert_eq!(survivors, 1, "exactly one of the duplicate pair must remain on disk");
+    assert!(corpus.join("solo.md").exists(), "the unique file must be untouched");
+    assert_eq!(file_count(&db), 2, "apply must drop exactly the one victim row");
+
+    let _ = std::fs::remove_dir_all(&corpus);
+    let _ = std::fs::remove_dir_all(&dbdir);
 }
 
 /// Stamp identical `content_hash` blobs on two files so the exact-dedupe path

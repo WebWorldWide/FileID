@@ -21,8 +21,10 @@
 //!   2. Engine binary located? If not, we say how to point at it.
 //!
 //! The full pipeline writes the *engine's* library (XDG / `%LOCALAPPDATA%`),
-//! which the engine binary resolves itself — so a pinned `--db` that differs is
-//! reported as not-applicable here (unlike the read/model-free paths).
+//! which the engine binary resolves itself — so when the library the CLI's
+//! reads resolve to differs (a pinned `--db`, or on macOS the desktop app's
+//! library, preferred by default when present), that mismatch is surfaced here
+//! rather than silently honored (unlike the read/model-free paths).
 
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -77,19 +79,32 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("full-pipeline scan did not run: ONNX Runtime not installed");
     }
 
-    // Pinned --db doesn't apply to the full pipeline: the engine binary
-    // resolves its own library location. Surface that rather than silently
-    // writing somewhere the user didn't expect.
-    if ctx.db_explicit && engine_db.as_deref() != Some(ctx.db.as_path()) {
+    // `scan --models` ALWAYS writes the engine's OWN library (XDG /
+    // %LOCALAPPDATA%), resolved by the engine binary itself. Whenever that
+    // differs from the library the CLI's read/model-free commands open
+    // (`ctx.db`), the AI results land where no `fileid` read command looks. The
+    // divergence is NOT only the pinned-`--db` case: on macOS `ctx.db` defaults
+    // to the desktop app's library when present (context.rs resolve step 4),
+    // which is never where the Rust engine writes — so the note must fire for
+    // ANY mismatch, not just an explicit pin. The old `db_explicit` gate let the
+    // silent macOS default through, so info/search/people/dedupe/restructure all
+    // reported no AI data immediately after a successful scan.
+    if engine_writes_unseen_library(engine_db.as_deref(), ctx.db.as_path()) {
         let where_ = engine_db
             .as_ref()
             .map_or_else(|| "<engine default>".to_string(), |p| p.display().to_string());
+        let reader = if ctx.db_explicit {
+            "your pinned --db"
+        } else {
+            "the library your read commands use"
+        };
         ctx.progress(&format!(
             "  {}",
             ctx.dim(&format!(
                 "note: --models drives the engine, which writes its own library at {where_}; \
-                 your --db ({}) applies to read/model-free commands only. \
-                 Set XDG_DATA_HOME / %LOCALAPPDATA% to relocate the engine library.",
+                 {reader} ({}) is what info/search/people/dedupe/restructure read. \
+                 See the AI results there with `--db {where_}`, or relocate the engine \
+                 library via XDG_DATA_HOME / %LOCALAPPDATA%.",
                 ctx.db.display()
             ))
         ));
@@ -102,6 +117,31 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     };
 
     drive_scan(ctx, &engine_bin, &root_abs, rescan)
+}
+
+/// Will `scan --models` write a library the CLI's read/model-free commands
+/// won't open? The engine ALWAYS writes its OWN library (`engine_db`,
+/// XDG/`%LOCALAPPDATA%`-located); reads use `reader_db` (`ctx.db`). They diverge
+/// for a pinned `--db`/`$FILEID_DB`/`$CFFIXED_USER_HOME` AND — the silent macOS
+/// default — when reads fall back to the desktop app's library (context.rs
+/// resolve step 4) while the engine writes its XDG library. A `None` `engine_db`
+/// (the engine can't resolve its own path) counts as a divergence we can't name.
+fn engine_writes_unseen_library(engine_db: Option<&Path>, reader_db: &Path) -> bool {
+    engine_db != Some(reader_db)
+}
+
+/// The ` --db <engine library>` suffix for the post-scan "explore" commands, so
+/// they open the library the engine just wrote when the CLI's reads would
+/// otherwise default elsewhere (the macOS desktop-app library). Empty — keeping
+/// that line byte-identical to before — when reads already resolve to the
+/// engine's library (the Win/Linux default, or macOS with no desktop app).
+fn explore_db_arg(engine_db: Option<&Path>, reader_db: &Path) -> String {
+    match engine_db {
+        Some(p) if engine_writes_unseen_library(Some(p), reader_db) => {
+            format!(" --db {}", p.display())
+        }
+        _ => String::new(),
+    }
 }
 
 /// Required models without an install sentinel, as `(kind, display_name)`.
@@ -304,19 +344,26 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                         String::new()
                     }
                 );
+                let engine_db = fileid_engine::paths::db_path().ok();
                 if let Some((tags, faces, people)) =
-                    fileid_engine::paths::db_path().ok().as_deref().and_then(count_results)
+                    engine_db.as_deref().and_then(count_results)
                 {
                     println!(
                         "  Results:    {tags} tags · {faces} files with faces · {people} people"
                     );
                 }
                 println!("  Duration:   {seconds:.2}s{rate}");
+                // The engine wrote its OWN library; when the CLI's reads default
+                // elsewhere (the macOS desktop-app library), qualify the explore
+                // hints with that `--db` so the suggested commands open the
+                // library this scan just populated, not an empty one. Byte-
+                // identical (no suffix) when reads already resolve to it.
+                let db_hint = explore_db_arg(engine_db.as_deref(), ctx.db.as_path());
                 println!(
                     "  Explore:    {}  ·  {}  ·  {}",
-                    ctx.bold("fileid search \"...\""),
-                    ctx.bold("fileid people"),
-                    ctx.bold("fileid dedupe --similar"),
+                    ctx.bold(&format!("fileid search \"...\"{db_hint}")),
+                    ctx.bold(&format!("fileid people{db_hint}")),
+                    ctx.bold(&format!("fileid dedupe --similar{db_hint}")),
                 );
             }
             Ok(())
@@ -518,4 +565,65 @@ fn which_on_path(exe: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join(exe))
         .find(|cand| cand.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // Regression for the macOS default invocation: a successful `scan --models`
+    // writes the engine's XDG library, but the CLI's reads default to the
+    // desktop app's library — a divergence the old `db_explicit` gate let pass
+    // silently, so dedupe/search/people reported no AI data. The note must fire,
+    // and the explore hints must redirect reads at the engine's library. Pure
+    // path comparison, so this exercises the decision identically on every OS.
+    #[test]
+    fn divergence_fires_for_macos_app_db_default() {
+        let engine = Path::new("/home/u/.local/share/FileID/fileid.sqlite");
+        let app = Path::new("/home/u/Library/Application Support/FileID/fileid.sqlite");
+        assert!(
+            engine_writes_unseen_library(Some(engine), app),
+            "engine XDG vs macOS app library must be flagged divergent"
+        );
+        assert_eq!(
+            explore_db_arg(Some(engine), app),
+            format!(" --db {}", engine.display()),
+            "explore hints must point reads at the engine's library"
+        );
+    }
+
+    // Win/Linux default invocation (and macOS without a desktop-app library):
+    // reads resolve to the very library the engine writes. The note MUST stay
+    // silent and the explore line MUST be byte-identical (no `--db` suffix) — no
+    // false positive across platforms.
+    #[test]
+    fn no_divergence_when_reader_is_engine_library() {
+        let p = Path::new("/state/FileID/fileid.sqlite");
+        assert!(!engine_writes_unseen_library(Some(p), p));
+        assert_eq!(explore_db_arg(Some(p), p), "");
+    }
+
+    // An explicit `--db` elsewhere also diverges from the engine's own library —
+    // preserving the original (pre-fix) behavior for the pinned case.
+    #[test]
+    fn divergence_fires_for_explicit_db_elsewhere() {
+        let engine = Path::new("/state/FileID/fileid.sqlite");
+        let pinned = Path::new("/tmp/lib/fileid.sqlite");
+        assert!(engine_writes_unseen_library(Some(engine), pinned));
+        assert_eq!(
+            explore_db_arg(Some(engine), pinned),
+            format!(" --db {}", engine.display())
+        );
+    }
+
+    // The engine can't resolve its own path (`db_path()` -> Err): we can't name
+    // where it writes, so reads certainly don't open it — warn (note fires), but
+    // emit no `--db` hint we'd be unable to fill in.
+    #[test]
+    fn unresolvable_engine_db_warns_without_hint() {
+        let reader = Path::new("/state/FileID/fileid.sqlite");
+        assert!(engine_writes_unseen_library(None, reader));
+        assert_eq!(explore_db_arg(None, reader), "");
+    }
 }

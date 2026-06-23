@@ -114,8 +114,13 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     const RETRY_DELAY_MS: u64 = 50;
     for attempt in 1..=MAX_ATTEMPTS {
-        match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
-            Ok(()) => return Ok(()),
+        // wal_checkpoint(TRUNCATE) returns a row `(busy, log, checkpointed)`. A
+        // blocked truncate surfaces as `busy != 0` in that row, NOT as a
+        // SQLITE_BUSY error — `execute_batch` discards the row, so it would
+        // report Ok() even when nothing was truncated (and the SQLITE_BUSY retry
+        // arm was dead). Read the busy flag and retry on it.
+        let busy = match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)) {
+            Ok(busy) => busy,
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::DatabaseBusy
                     && attempt < MAX_ATTEMPTS =>
@@ -124,7 +129,14 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
                 continue;
             }
             Err(e) => return Err(e).context("WAL checkpoint(TRUNCATE) failed"),
+        };
+        if busy == 0 {
+            return Ok(());
         }
+        if attempt >= MAX_ATTEMPTS {
+            anyhow::bail!("WAL checkpoint(TRUNCATE) still busy after {MAX_ATTEMPTS} attempts");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
     }
     Ok(())
 }

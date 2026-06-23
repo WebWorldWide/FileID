@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-use crate::context::{human_size, print_json, Ctx};
+use crate::context::{escape_like, human_size, print_json, Ctx};
 
 struct FileRow {
     id: i64,
@@ -183,8 +183,11 @@ fn lookup(conn: &rusqlite::Connection, target: &str) -> Result<Option<FileRow>> 
     }
 
     // Last resort: basename suffix match (forgiving of cwd differences).
-    let like = format!("%/{}", target.trim_start_matches('/'));
-    let sql = format!("SELECT {SELECT_COLS} FROM files WHERE path_text LIKE ?1 LIMIT 1");
+    let like = format!("%/{}", escape_like(target.trim_start_matches('/')));
+    let sql = format!(
+        "SELECT {SELECT_COLS} FROM files WHERE path_text LIKE ?1 ESCAPE '\\' \
+         ORDER BY path_text LIMIT 1"
+    );
     Ok(conn.query_row(&sql, params![like], mapper).optional()?)
 }
 

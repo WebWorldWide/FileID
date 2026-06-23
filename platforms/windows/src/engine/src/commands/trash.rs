@@ -208,6 +208,17 @@ pub(crate) async fn handle_restore_from_trash(
     emit_bulk_result(&sink, "restoreFromTrash", result).await;
 }
 
+/// Separator for the `FILEID_RB_PATHS` env transport (engine -> PowerShell).
+/// MUST be NUL-free: `std::process::Command` runs `ensure_no_nuls` on every env
+/// value, so an interior NUL makes `.status()` return `Err` WITHOUT ever
+/// spawning powershell.exe — which silently restored NOTHING for every
+/// multi-file batch (`wanted_paths.len() >= 2`). U+001F (Unit Separator) is
+/// NUL-free yet still forbidden in Windows file names (0x01-0x1F), so it can't
+/// appear in any `original_path` or inject a spurious entry; the script splits
+/// on the same byte (`-split [char]0x1f`). (C1-018)
+#[cfg(any(windows, test))]
+const RB_PATH_SEP: &str = "\u{1f}";
+
 /// PowerShell batch-restore script. The wanted set uses an ordinal-IGNORE-CASE
 /// comparer so the bin's reconstructed `Join-Path $loc $i.Name` matches the
 /// DB-stored `original_path` even when their casing diverges (drive-letter /
@@ -219,7 +230,7 @@ const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
 $bin = $shell.NameSpace(0x0a); \
 $wanted = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase); \
-foreach ($w in ($env:FILEID_RB_PATHS -split [char]0)) { if ($w.Length -gt 0) { [void]$wanted.Add($w) } }; \
+foreach ($w in ($env:FILEID_RB_PATHS -split [char]0x1f)) { if ($w.Length -gt 0) { [void]$wanted.Add($w) } }; \
 foreach ($i in $bin.Items()) { \
     $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
     if ($null -eq $loc) { continue } \
@@ -238,9 +249,10 @@ foreach ($i in $bin.Items()) { \
 /// matching each item against the requested set.
 ///
 /// `wanted_paths` are the full original paths (each `parent\name`). They cross
-/// into the script as one NUL-separated env var so there is no string-
-/// interpolation surface. Best-effort: per-path success is verified by the
-/// caller via on-disk presence, so a non-zero exit here is not fatal.
+/// into the script as one U+001F-separated env var (NUL can't cross an env
+/// value — see `RB_PATH_SEP`), so there is no string-interpolation surface.
+/// Best-effort: per-path success is verified by the caller via on-disk
+/// presence, so a non-zero exit here is not fatal.
 #[cfg(windows)]
 fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     if wanted_paths.is_empty() {
@@ -248,11 +260,12 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     }
     // Build the wanted set. Use the FULL original path (DeletedFrom + Name) as
     // the match key so two trashed files with the same Name under different
-    // folders aren't confused. NUL-separate so a path containing a newline
+    // folders aren't confused. Separate with RB_PATH_SEP (U+001F, NUL-free so
+    // it survives the env-var hop) so a path containing a newline
     // can't inject a spurious entry. Restore the FIRST bin entry that matches a
     // given target path and then remove it from the wanted set — deterministic
     // when multiple bin entries share one original path (C1-003).
-    let joined = wanted_paths.join("\0");
+    let joined = wanted_paths.join(RB_PATH_SEP);
     let script = RESTORE_BATCH_SCRIPT;
     // SEC: pin -ExecutionPolicy Bypass so the script runs even when group
     // policy locks the user-default policy. Script is internal (not user-
@@ -269,9 +282,16 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
         ])
         .env("FILEID_RB_PATHS", &joined)
         .status();
-    if let Ok(status) = status {
-        if !status.success() {
+    match status {
+        Ok(status) if !status.success() => {
             tracing::warn!(code = ?status.code(), "powershell batch restore exited non-zero");
+        }
+        Ok(_) => {}
+        // A failed spawn (e.g. an env value Command rejects) must NOT pass
+        // silently — it means none of the batch was pulled from the Recycle
+        // Bin, so the caller reports every item as unrecoverable. (C1-018)
+        Err(e) => {
+            tracing::warn!(error = %e, "powershell batch restore failed to spawn");
         }
     }
 }
@@ -411,6 +431,44 @@ mod tests {
         assert!(
             !RESTORE_BATCH_SCRIPT.contains("System.Collections.Generic.HashSet[string];"),
             "must not use the parameterless (ordinal case-sensitive) HashSet ctor"
+        );
+    }
+
+    // C1-018: a multi-file batch crosses to PowerShell as the FILEID_RB_PATHS
+    // env var. std::process::Command runs `ensure_no_nuls` on every env value,
+    // so the previous `"\0"` separator made `.status()` return Err WITHOUT ever
+    // spawning powershell.exe for any batch of len >= 2 — restoring nothing even
+    // though the bytes still sat in the Recycle Bin. Lock the separator NUL-free
+    // and keep the Rust join + PowerShell split byte-identical so the script
+    // rebuilds exactly the wanted set the engine sent.
+    #[test]
+    fn batch_restore_env_separator_is_nul_free_and_round_trips() {
+        // The exact guard Command::env enforces: an interior NUL aborts the spawn.
+        assert!(
+            !RB_PATH_SEP.contains('\0'),
+            "FILEID_RB_PATHS separator must be NUL-free or Command::env aborts the spawn"
+        );
+        // The separator is a control char (< 0x20), forbidden in Windows file
+        // names, so it can never appear in an original_path and can't inject.
+        assert!(
+            RB_PATH_SEP.chars().all(|c| u32::from(c) < 0x20),
+            "separator must be a control char forbidden in Windows file names"
+        );
+        // The regressed case: 2+ paths must join to a value Command::env accepts.
+        let paths = ["C:\\Users\\a\\one.txt", "C:\\Users\\a\\two.txt", "D:\\x\\3"];
+        let joined = paths.join(RB_PATH_SEP);
+        assert!(!joined.contains('\0'), "multi-path env value must be NUL-free");
+        // Rust join and PowerShell split MUST agree on the separator.
+        let round_trip: Vec<&str> = joined.split(RB_PATH_SEP).collect();
+        assert_eq!(round_trip, paths.to_vec());
+        assert!(
+            RESTORE_BATCH_SCRIPT.contains("-split [char]0x1f"),
+            "script must split FILEID_RB_PATHS on the same U+001F separator"
+        );
+        // Guard against a silent revert to the NUL separator that aborts the spawn.
+        assert!(
+            !RESTORE_BATCH_SCRIPT.contains("-split [char]0)"),
+            "must not split on NUL: Command::env rejects the value and never spawns"
         );
     }
 }
