@@ -8,6 +8,17 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-23 — Whole-codebase bug audit (ultracode): 23 confirmed → all fixed + delta-verified
+
+Ran a multi-agent `find → 3-skeptic default-reject verify → fix-recipe` audit over the entire codebase (16 areas: Rust engine ×8, CLI, TUI, Linux GTK, C# Windows ×2, Swift macOS ×3). 146 agents, **33 candidates → 23 confirmed** (2 high / 9 med / 12 low; ~19 unique after dedupe). Rate limits + a session cap killed the `win-core`/`win-ui` finders and some verify/recipe agents — **the C# Windows app got no coverage this round** (flagged in NEXT). The recipe agents applied fixes directly to the working tree; I read-before-committed each, compile-gated all Rust, and ran a delta re-audit.
+
+Fixed + committed:
+- **f45f5a7 (Rust, cargo-verified: engine 386 / CLI 27 / TUI 80, clippy -D clean):** HIGH `trash.rs` Windows multi-file restore silently restored nothing (NUL in env value aborted the PowerShell spawn; the Err was swallowed) → U+001F separator + matched spawn result. MED: CLI `--json --apply` (dedupe+restructure) human lines corrupting JSON; macOS scan/read library mismatch now warns + emits the `--db`; `.obj` parser OOM (unbounded line + mtllib redirection); TUI reload/scan/typed-path now guard `scanning`. LOW: LIKE-wildcard escaping, models `--json` abort, empty `CFFIXED_USER_HOME` relative DB, deep-analyze full-pass done-marking, WAL `checkpoint_truncate` reading the busy row (was `execute_batch` → false Ok), empty `LOCALAPPDATA`, downloader resume progress overshoot. **Also fixed 2 recipe-agent test defects: removed a localhost-server downloader test that deadlocked on `incoming().take(2)`+`join`, and reordered a deep-analyze test that self-deadlocked (`db.lock()` then re-locked via `insert_file`).**
+- **dc40735 (Swift/Linux, source-level):** HIGH `CLIPTokenizer` fatal `0..<(-1)` trap on an oversized grapheme → `guard word.count >= 2`. MED CRLF in CLIP merges + BGE vocab; Linux People thumbnail cache keyed by path only → keyed by `(path,bbox)`. LOW Swift `movePersonFaces` stale `representative_face_id`; `FinderTagsEditor` tag-write clobber after navigation; Linux engine respawn counter never reset (died after 5 lifetime crashes).
+- **868acda (delta re-audit):** tightened both Swift tokenizers from `.isNewline` to `\n`/`\r\n`-only to byte-match the Rust `.lines()` parity (verified with `swift`).
+
+Delta re-audit (separate adversarial pass) found **no regressions** and **compiled all 4 Swift files clean** (Swift 6.3.2 on this Mac). Linux GTK fixes still need an on-hardware build. Commits are local (not pushed).
+
 ## 2026-06-21 — ✅ Full-AI scans VERIFIED end-to-end on macOS (CLI + TUI), ONNX Runtime provisioned
 
 Closed the loop on the ONNX-on-macOS work (commit e559bd9). On this Mac (arm64): `brew install onnxruntime` → **1.27.0** at `/opt/homebrew/lib/libonnxruntime.dylib`; `fileid runtime status` → ✓ resolved; `fileid models download arcface mobileclip_s2` → installed. Then:
