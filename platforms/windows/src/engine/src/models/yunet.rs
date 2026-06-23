@@ -20,10 +20,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    priority_chain, RuntimeProbe,
-};
+use super::runtime::{classify_inference_error, commit_chain_session};
 use super::scrfd::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
@@ -44,28 +41,7 @@ impl YuNet {
         if !path.exists() {
             anyhow::bail!("YuNet weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder =
-            configure_session_builder(builder).context("configure session (YuNet)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (YuNet)")?;
-        }
-        tracing::info!(model = "YuNet", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (YuNet)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("YuNet ONNX has no inputs"))?
-            .name
-            .clone();
+        let (session, input_name) = commit_chain_session("YuNet", path)?;
 
         // Validate the output-name contract at LOAD. detect() matches outputs by
         // literal name (cls_/obj_/bbox_/kps_ × strides 8/16/32); a mismatch makes

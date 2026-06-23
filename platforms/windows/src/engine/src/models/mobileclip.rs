@@ -16,7 +16,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, commit_chain_session};
 
 // OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet
 // stats on a CLIP model measurably degrades the embeddings.
@@ -39,28 +39,7 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder = configure_session_builder(builder)
-            .context("configure session (MobileCLIP image)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (MobileCLIP image)")?;
-        }
-        tracing::info!(model = "MobileCLIP image", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (MobileCLIP image)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
-            .name
-            .clone();
+        let (session, input_name) = commit_chain_session("MobileCLIP image", path)?;
         // Warmup with a zero 256×256 frame so first-call kernel compile
         // happens during load.
         let mut model = Self { session, input_name, input_size: 224 };

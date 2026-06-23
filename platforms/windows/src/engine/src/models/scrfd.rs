@@ -21,7 +21,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{classify_inference_error, commit_chain_session};
 
 #[derive(Debug, Clone)]
 pub struct Detection {
@@ -51,28 +51,7 @@ impl Scrfd {
         if !path.exists() {
             anyhow::bail!("SCRFD weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder = configure_session_builder(builder)
-            .context("configure session (SCRFD)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (SCRFD)")?;
-        }
-        tracing::info!(model = "SCRFD", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (SCRFD)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("SCRFD ONNX has no inputs"))?
-            .name
-            .clone();
+        let (session, input_name) = commit_chain_session("SCRFD", path)?;
         // SCRFD-10g default input is 640×640. We resize before feed.
         let mut model = Self {
             session,
@@ -516,11 +495,14 @@ pub(crate) fn resize_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> 
     if dw == 0 || dh == 0 {
         return Vec::new();
     }
+    let sx_map: Vec<u32> = (0..dw)
+        .map(|x| ((x as u64 * sw as u64) / dw as u64) as u32)
+        .collect();
     let mut out = vec![0u8; (dw as usize) * (dh as usize) * 3];
     for y in 0..dh {
         let sy = ((y as u64 * sh as u64) / dh as u64) as u32;
         for x in 0..dw {
-            let sx = ((x as u64 * sw as u64) / dw as u64) as u32;
+            let sx = sx_map[x as usize];
             let s_idx = ((sy * sw + sx) * 3) as usize;
             let d_idx = ((y * dw + x) * 3) as usize;
             out[d_idx] = src[s_idx];

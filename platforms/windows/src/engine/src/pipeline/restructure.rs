@@ -3,7 +3,7 @@
 // Inputs are file metadata + tags + (optional) VLM categories from Deep
 // Analyze; outputs are proposed destinations. No I/O happens here — this
 // module just decides *where* each file should go. The apply layer lives
-// in `shell/restructure_apply.rs`.
+// in `pipeline/restructure_apply.rs`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -67,14 +67,11 @@ pub enum FolderClassification {
     Junk,
 }
 
-/// Per-source-folder classification + the dominant destination category.
+/// Per-source-folder classification.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClassifiedFolder {
     pub source_folder: PathBuf,
     pub classification: FolderClassification,
-    pub move_count: u32,
-    pub dominant_category: String,
 }
 
 /// Classify every source folder appearing in `moves`. Returns one
@@ -94,16 +91,12 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
     let mut out = Vec::with_capacity(by_folder.len());
     for (folder, items) in by_folder {
         // Per-folder category histogram.
-        let mut hist: HashMap<String, u32> = HashMap::new();
+        let mut hist: HashMap<&str, u32> = HashMap::new();
         for m in &items {
-            *hist.entry(m.category.clone()).or_insert(0) += 1;
+            *hist.entry(m.category.as_str()).or_insert(0) += 1;
         }
         let total = items.len() as u32;
-        let (dominant, top) = hist
-            .iter()
-            .max_by_key(|(_, c)| **c)
-            .map(|(k, v)| (k.clone(), *v))
-            .unwrap_or_default();
+        let top = hist.values().copied().max().unwrap_or(0);
         let homogeneity = if total > 0 { top as f32 / total as f32 } else { 0.0 };
 
         // Folder name heuristic — generic names like "Downloads",
@@ -129,8 +122,6 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
         out.push(ClassifiedFolder {
             source_folder: folder,
             classification,
-            move_count: total,
-            dominant_category: dominant,
         });
     }
     out
@@ -320,13 +311,13 @@ pub struct CategorySummary {
 /// Aggregate ProposedMoves for the Sankey diagram: source-folder rollup
 /// → category. The macOS implementation does the same on the app side.
 pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
-    let mut buckets: HashMap<String, u32> = HashMap::new();
+    let mut buckets: HashMap<&str, u32> = HashMap::new();
     for m in moves {
-        *buckets.entry(m.category.clone()).or_default() += 1;
+        *buckets.entry(m.category.as_str()).or_default() += 1;
     }
     let mut out: Vec<_> = buckets
         .into_iter()
-        .map(|(category, count)| CategorySummary { category, count })
+        .map(|(category, count)| CategorySummary { category: category.to_string(), count })
         .collect();
     // Count desc, then category asc. The secondary key is load-bearing: the source is
     // a HashMap (arbitrary, run-to-run-randomized iteration), so a count-only sort left

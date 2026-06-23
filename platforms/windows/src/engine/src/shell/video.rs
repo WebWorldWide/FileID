@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Once;
 
 use windows::core::{PCWSTR, PROPVARIANT, GUID};
-use windows::Win32::Foundation::{S_OK, FALSE, TRUE};
+use windows::Win32::Foundation::TRUE;
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFStartup, MFVideoFormat_RGB32, MFMediaType_Video,
@@ -264,13 +264,6 @@ fn i64_to_propvariant(v: i64) -> PROPVARIANT {
     // PROPVARIANT impls From<i64>; type tag = VT_I8.
     PROPVARIANT::from(v)
 }
-
-// silence: S_OK / FALSE imports are exported above for downstream parity
-// with shell helpers; not all are referenced here.
-const _: () = {
-    let _ = S_OK;
-    let _ = FALSE;
-};
 
 #[cfg(test)]
 mod tests {

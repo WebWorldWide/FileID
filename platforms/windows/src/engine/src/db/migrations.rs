@@ -210,9 +210,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
         .query_map([], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()
         .context("listing applied migrations")?;
-    let unknown: Vec<String> = applied
-        .into_iter()
-        .filter(|id| !known.contains(&id.as_str()))
+    let unknown: Vec<&str> = applied
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !known.contains(id))
         .collect();
     if !unknown.is_empty() {
         anyhow::bail!(
@@ -223,18 +224,7 @@ pub fn apply(conn: &Connection) -> Result<()> {
     }
 
     for (id, sql) in registry() {
-        let already: bool = conn
-            .query_row(
-                "SELECT 1 FROM grdb_migrations WHERE identifier = ?1 LIMIT 1",
-                [id],
-                |_row| Ok(true),
-            )
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(false),
-                other => Err(other),
-            })
-            .with_context(|| format!("checking migration {id}"))?;
-        if already {
+        if applied.iter().any(|a| a.as_str() == id) {
             continue;
         }
         tracing::info!(migration = id, "applying migration");
@@ -262,7 +252,7 @@ pub fn apply(conn: &Connection) -> Result<()> {
 // sqlite_master MUST agree across platforms so an ORM doing
 // schema-text comparisons doesn't see drift.
 //
-// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v7.
+// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v19.
 
 const V1_CORE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS files (

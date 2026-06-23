@@ -308,7 +308,7 @@ pub struct ModelStack {
     pub scrfd: Option<Vec<Mutex<YuNet>>>,
     /// MobileCLIP has two paths (the default is chosen in `load_default`):
     /// - `mobileclip_batch` (DEFAULT) — single Session behind
-    ///   `ClipBatchCoordinator`, fed batched (N,3,256,256) tensors. On a 6 GB
+    ///   `ClipBatchCoordinator`, fed batched (N,3,224,224) tensors. On a 6 GB
     ///   card the VRAM clamp drops the pool to ~1-3 sessions behind the
     ///   `CLIP_CONCURRENCY=2` semaphore, so batching amortizes DirectML
     ///   dispatch better. Opt OUT with `FILEID_CLIP_USE_BATCH=0`.
@@ -471,7 +471,7 @@ impl ModelStack {
         // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
         // semaphore caps concurrent CLIP inferences regardless, so a pool
         // larger than 2 is partly wasted. The batch coordinator drives ONE
-        // Session with batched (N, 3, 256, 256) tensors, amortizing per-call
+        // Session with batched (N, 3, 224, 224) tensors, amortizing per-call
         // DirectML dispatch overhead. This default is PENDING hardware
         // confirmation — run the A/B (default vs `FILEID_CLIP_USE_BATCH=0`) and
         // compare clip_p95_ms + files_per_second. Set `FILEID_CLIP_USE_BATCH=0`

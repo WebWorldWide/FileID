@@ -17,7 +17,7 @@
 //!   EP again until the user re-enables it.
 //! - [`is_disabled`] is consulted by the provider picker (treat the pack as
 //!   absent → fall through to DirectML) and by the `ORT_DYLIB_PATH` pin.
-//! - [`reenable`] clears the disable (wired to the Settings "Verify install"
+//! - [`reenable_ep`] clears the disable (wired to the Settings "Verify install"
 //!   action / an explicit provider override / a pack reinstall).
 //!
 //! Only pack-backed GPU EPs are guarded (`cuda`, `openvino`); DirectML and CPU
@@ -202,7 +202,7 @@ pub fn is_disabled(ep: &str) -> bool {
 }
 
 /// Clear the persistent disable for ONE execution provider only — the targeted
-/// "Verify install" / per-pack reinstall path. Unlike [`reenable`] (clear-all),
+/// "Verify install" / per-pack reinstall path. Unlike a clear-all reset,
 /// this does NOT touch sibling EPs' disables, so verifying/installing the CUDA
 /// pack can't silently re-arm a separately crash-poisoned OpenVINO EP and send
 /// the next scan straight back into its bad bind (ENG-59's per-EP isolation).

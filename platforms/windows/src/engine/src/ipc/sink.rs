@@ -43,6 +43,7 @@ impl Sink {
         let writer = tokio::task::spawn_blocking(move || {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
+            let mut scratch: Vec<u8> = Vec::new();
             // The runtime can't await on the blocking thread, so we use a
             // sync-style consumer over the channel via blocking_recv.
             //
@@ -60,14 +61,14 @@ impl Sink {
                     Some(event) => event,
                     None => break, // channel closed and drained
                 };
-                if !write_line(&mut handle, &first) {
+                if !write_line(&mut handle, &mut scratch, &first) {
                     break;
                 }
                 // Drain the rest of the current burst without flushing.
                 loop {
                     match rx.try_recv() {
                         Ok(event) => {
-                            if !write_line(&mut handle, &event) {
+                            if !write_line(&mut handle, &mut scratch, &event) {
                                 closed = true;
                                 break;
                             }
@@ -127,26 +128,25 @@ impl Sink {
 /// An over-cap frame is dropped app-side with no error, hanging whatever UI
 /// awaited the reply; we substitute a small structured `ipc_frame_too_large`
 /// event so the app can surface the failure instead of hanging.
-fn write_line<W: Write>(w: &mut W, event: &IpcEvent) -> bool {
+fn write_line<W: Write>(w: &mut W, buf: &mut Vec<u8>, event: &IpcEvent) -> bool {
     // Insertion-order keys are fine — consumers don't care about JSON key
     // order. Byte-for-byte parity with sorted output would require a
     // custom sorted-key writer.
-    let bytes = match serde_json::to_vec(event) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::error!(?err, "ipc sink encode failed");
-            return true; // skip this frame; the channel is still healthy
-        }
-    };
-    if bytes.len() > MAX_FRAME_BYTES {
+    // `buf` is reused across frames so the hot drain loop allocates no Vec per event.
+    buf.clear();
+    if let Err(err) = serde_json::to_writer(&mut *buf, event) {
+        tracing::error!(?err, "ipc sink encode failed");
+        return true; // skip this frame; the channel is still healthy
+    }
+    if buf.len() > MAX_FRAME_BYTES {
         tracing::warn!(
-            frame_bytes = bytes.len(),
+            frame_bytes = buf.len(),
             cap = MAX_FRAME_BYTES,
             "ipc frame exceeds outbound cap; substituting ipc_frame_too_large"
         );
-        return write_frame_too_large(w, bytes.len());
+        return write_frame_too_large(w, buf.len());
     }
-    write_raw_line(w, &bytes)
+    write_raw_line(w, buf)
 }
 
 /// Emit the structured replacement for an over-cap frame. Tiny and fixed-size,
@@ -240,7 +240,8 @@ mod tests {
     fn oversize_frame_becomes_structured_error_event() {
         let huge = log_event("X".repeat(MAX_FRAME_BYTES + 1024));
         let mut out = CountingWriter::default();
-        assert!(write_line(&mut out, &huge), "write_line must not report a fatal error");
+        let mut buf = Vec::new();
+        assert!(write_line(&mut out, &mut buf, &huge), "write_line must not report a fatal error");
 
         // The bytes on the wire are the substitute event, well under the cap.
         assert!(
@@ -264,7 +265,8 @@ mod tests {
     fn normal_frame_is_written_verbatim() {
         let evt = log_event("hello".into());
         let mut out = CountingWriter::default();
-        assert!(write_line(&mut out, &evt));
+        let mut buf = Vec::new();
+        assert!(write_line(&mut out, &mut buf, &evt));
         let line = out.bytes.strip_suffix(b"\n").unwrap();
         let decoded: IpcEvent = serde_json::from_slice(line).unwrap();
         match decoded.payload {
@@ -280,8 +282,9 @@ mod tests {
     #[test]
     fn burst_writes_do_not_flush_per_frame() {
         let mut out = CountingWriter::default();
+        let mut buf = Vec::new();
         for i in 0..100 {
-            assert!(write_line(&mut out, &log_event(format!("event-{i}"))));
+            assert!(write_line(&mut out, &mut buf, &log_event(format!("event-{i}"))));
         }
         assert_eq!(
             out.flushes, 0,

@@ -21,10 +21,7 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{
-    classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    priority_chain, RuntimeProbe,
-};
+use super::runtime::{classify_inference_error, commit_chain_session};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -156,28 +153,8 @@ impl RamPlusTagger {
             anyhow::bail!("RAM++ tag list {} is empty", tag_list.display());
         }
 
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder =
-            configure_session_builder(builder).context("configure session (RAM++)")?;
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (RAM++)")?;
-        }
-        tracing::info!(model = "RAM++", tags = tags.len(), chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(onnx)
-            .context("ORT session commit (RAM++)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
-            .name
-            .clone();
+        tracing::info!(model = "RAM++", tags = tags.len(), "tag list loaded");
+        let (session, input_name) = commit_chain_session("RAM++", onnx)?;
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
         // disabled — handy for threshold sweeps). Otherwise load the per-class
