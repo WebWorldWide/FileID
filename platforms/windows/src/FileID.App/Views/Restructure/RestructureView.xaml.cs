@@ -42,6 +42,11 @@ public sealed partial class RestructureView : UserControl
     // Static so it survives the view's recreation for the app session; cleared
     // only when a genuinely new plan is computed (OnLoaded's recompute path).
     private static readonly HashSet<long> _deselectedFileIds = new();
+    // Companion to _deselectedFileIds: files the user EXPLICITLY selected. "ask"
+    // rows default to deselected, so opting one in is an intent that deselection
+    // tracking alone can't represent — without this it is wiped by the
+    // ask-default-deselect on the next SyncPlan after a tab switch.
+    private static readonly HashSet<long> _selectedFileIds = new();
 
     private bool _unloaded;
     private bool _suppressRecompute;
@@ -54,7 +59,12 @@ public sealed partial class RestructureView : UserControl
     private static RestructurePlan? _applyingPlan;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
-    private EngineError? _lastHandledError;
+    // R6-05: static (like _applying / _applyingPlan) so "the completion we've
+    // already surfaced" survives this view's per-tab-switch recreation, so a
+    // reload-time replay can't re-alert a completion an earlier instance already
+    // handled. See OnLoaded / SyncApplyResult / SyncEngineError.
+    private static EngineError? _lastHandledError;
+    private static RestructureApplyResult? _lastHandledApplyResult;
 
     // UI-thread brushes cached at ctor time (CLAUDE.md: never build brushes per
     // event). Tile tints match RestructureRecommendationVm's outcome colors.
@@ -113,6 +123,20 @@ public sealed partial class RestructureView : UserControl
             _ = RefreshDeepAnalyzeHintAsync();
             if (_unloaded) return;
             SyncUndoAffordance();   // R2: reflect any pending undoable run on open
+            // R6-05: the apply result/error is delivered via live PropertyChanged,
+            // but leaving the Restructure tab mid-apply unsubscribes this view
+            // (Unloaded), dropping that completion; because _applying is static the
+            // single-flight guard would stay engaged for the whole session (Apply
+            // buttons stuck disabled) — a 0-applied/failed/errored apply emits no
+            // re-plan, so SyncPlan's reference check can't release it. Replay both
+            // handlers on reload: each de-dupes on its static marker, so an apply
+            // still genuinely in flight (slot unchanged) is a no-op that keeps the
+            // guard engaged until the freshly re-subscribed live handler fires.
+            if (_applying)
+            {
+                SyncApplyResult();
+                SyncEngineError();
+            }
             if (EngineClient.Instance.LastRestructurePlan is not null)
             {
                 SyncPlan();
@@ -127,6 +151,7 @@ public sealed partial class RestructureView : UserControl
             PlanStatusText.Text = "Computing plan...";
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
+            _selectedFileIds.Clear();
             try
             {
                 await EngineClient.Instance.PlanRestructureAsync(folder);
@@ -182,6 +207,7 @@ public sealed partial class RestructureView : UserControl
                                 // user's selection intent from the old plan must not
                                 // leak forward (see _deselectedFileIds).
                                 _deselectedFileIds.Clear();
+                                _selectedFileIds.Clear();
                                 try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
                                 catch (Exception ex) { DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
                             }
@@ -317,10 +343,14 @@ public sealed partial class RestructureView : UserControl
                 kv.Value.IsSelected = false;
             }
         }
-        // Re-apply the selections the user made before navigating away (see _deselectedFileIds).
+        // Re-apply the explicit selections the user made before navigating away
+        // (see _deselectedFileIds/_selectedFileIds). Intent in either direction
+        // overrides the tier default, so an "ask" file the user opted in survives
+        // the view's per-tab-switch recreation instead of reverting to deselected.
         foreach (var kv in _allFileRows)
         {
             if (_deselectedFileIds.Contains(kv.Key)) { kv.Value.IsSelected = false; }
+            else if (_selectedFileIds.Contains(kv.Key)) { kv.Value.IsSelected = true; }
         }
         _suppressRecompute = false;
 
@@ -422,8 +452,8 @@ public sealed partial class RestructureView : UserControl
             if (sender is CheckBox cb && cb.DataContext is RestructureFileRowVm f)
             {
                 f.IsSelected = cb.IsChecked == true;
-                if (f.IsSelected) _deselectedFileIds.Remove(f.FileId);
-                else _deselectedFileIds.Add(f.FileId);
+                if (f.IsSelected) { _deselectedFileIds.Remove(f.FileId); _selectedFileIds.Add(f.FileId); }
+                else { _selectedFileIds.Remove(f.FileId); _deselectedFileIds.Add(f.FileId); }
             }
         });
 
@@ -447,8 +477,8 @@ public sealed partial class RestructureView : UserControl
                 foreach (var f in files)
                 {
                     f.IsSelected = approve;
-                    if (approve) _deselectedFileIds.Remove(f.FileId);
-                    else _deselectedFileIds.Add(f.FileId);
+                    if (approve) { _deselectedFileIds.Remove(f.FileId); _selectedFileIds.Add(f.FileId); }
+                    else { _selectedFileIds.Remove(f.FileId); _deselectedFileIds.Add(f.FileId); }
                 }
                 _suppressRecompute = false;
             }
@@ -635,6 +665,7 @@ public sealed partial class RestructureView : UserControl
             PlanStatusText.Text = "Computing plan...";
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
+            _selectedFileIds.Clear();
             try
             {
                 await EngineClient.Instance.PlanRestructureAsync(folder);
@@ -725,7 +756,8 @@ public sealed partial class RestructureView : UserControl
     private void SyncApplyResult()
     {
         var r = EngineClient.Instance.LastRestructureApplyResult;
-        if (r is null) return;
+        if (!IsUnhandledCompletion(r, _lastHandledApplyResult)) return;
+        _lastHandledApplyResult = r;
 
         // Anything actually moved -> the current plan is stale (real moves
         // updated the DB; applied rows must leave the view). Re-plan, exactly as
@@ -831,6 +863,15 @@ public sealed partial class RestructureView : UserControl
 
     private static string Count(int n, string noun)
         => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
+
+    // R6-05: a completion (apply-result or engine-error) is "unhandled" when it's
+    // present and not the reference we last surfaced. EngineClient.Set swaps in a
+    // new instance only when the payload changes, so reference identity is the
+    // de-dupe key (mirrors SyncEngineError's ReferenceEquals guard). Gates the
+    // OnLoaded reload replay so a still-in-flight apply (slot unchanged) is a
+    // no-op and an already-surfaced completion can't re-alert.
+    internal static bool IsUnhandledCompletion<T>([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] T? completion, T? lastSurfaced) where T : class
+        => completion is not null && !ReferenceEquals(completion, lastSurfaced);
 
     // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible ContentDialog
     // that never escalates to App.UnhandledException on a broken XamlRoot.

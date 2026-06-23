@@ -862,6 +862,15 @@ public sealed partial class DeepAnalyzeView : UserControl
                 openRenameSheet = pending.Count > 0;
             }
         }
+        catch
+        {
+            // The SetApplyBusy(false, …) that clears the busy UI lives after the
+            // try and is skipped when an awaited engine/DB call throws — clear it
+            // here so the card doesn't wedge on "Applying…". Rethrow so the outer
+            // SafeRunAsync still logs the original exception.
+            SetApplyBusy(false, "Couldn't apply — check the engine and try again.");
+            throw;
+        }
         finally
         {
             System.Threading.Interlocked.Exchange(ref _applyInFlight, 0);

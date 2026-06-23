@@ -339,6 +339,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         FailIfDownloading(RamPlus, "Engine restarted — please retry.");
         FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
         FailIfDownloading(Accelerator, "Engine restarted — please retry.");
+        // Whisper + Bge reach Downloading via the per-card Install button (SlotFor
+        // now routes "whisper"/"bge_text"); same crash-mid-download strand as above.
+        FailIfDownloading(Whisper, "Engine restarted — please retry.");
+        FailIfDownloading(Bge, "Engine restarted — please retry.");
 
         SeedFromSentinels();
     }
@@ -853,6 +857,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "ram_plus":
             case "ram-plus":
                 return RamPlus;
+            case "whisper":
+                return Whisper;
+            case "bge_text":
+                return Bge;
             // The CUDA provider pack + cuDNN (NVIDIA) and the OpenVINO pack
             // (Intel) all route to the single Accelerator slot.
             case "ort_cuda_x64":

@@ -980,6 +980,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // in-flight job is moot here. (Mirrors macOS handleEngineExit.)
         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
+        // Clear the observable mirror of _faceClusterAutoInFlight too: a crash
+        // mid-clustering never emits the FaceClusteringComplete / face_clustering_failed
+        // arm that normally flips it false, so without this the Library "finding
+        // people…" banner stays up and the bool desyncs from its just-reset int gate.
+        // Marshal through _ui (the property must be set on the UI thread); Cleanup()
+        // can run from Dispose() off any thread. (audit R3-app)
+        _ui.TryEnqueue(() => FaceClusteringInFlight = false);
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so the next apply's result would
         // be mis-attributed as the dead undo's. (audit R2-app)

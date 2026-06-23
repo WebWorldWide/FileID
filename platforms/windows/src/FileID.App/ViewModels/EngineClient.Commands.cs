@@ -432,6 +432,19 @@ internal sealed partial class EngineClient
     /// immediate feedback after installing cuDNN, without an engine
     /// restart.</summary>
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
+
+    // DeepAnalyzeFile replies carry no per-file id — the engine's single-file
+    // handler writes the one shared DeepAnalyzeComplete slot (the DTO/schema have
+    // no fileID; adding one is a deferred cross-platform IPC change, cf. the R7
+    // note on WaitForBulkActionResultAsync). Two concurrent waits would both
+    // subscribe against that one slot and both resolve off whichever terminal
+    // reply lands first — the second op reports the first op's outcome and its
+    // own reply is dropped. The Deep Analyze view never disables the per-file
+    // "Selected"/"Current" buttons (SyncStream gates only AnalyzeAllButton), so
+    // two clicks overlap. Serialize so at most one wait — one handler, one
+    // in-flight command — is live; released in the finally.
+    private readonly SemaphoreSlim _deepAnalyzeFileGate = new(1, 1);
+
     /// <summary>Send deepAnalyzeFile and await the engine's terminal
     /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits
     /// one — on success, analyze failure, AND the no-model early return), so a
@@ -443,6 +456,7 @@ internal sealed partial class EngineClient
     /// may still be in flight) rather than a hard error.</summary>
     public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
     {
+        await _deepAnalyzeFileGate.WaitAsync().ConfigureAwait(false);
         var tcs = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(TaskCreationOptions.RunContinuationsAsynchronously);
         PropertyChangedEventHandler? handler = null;
         handler = (_, e) =>
@@ -453,10 +467,14 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
             }
         };
-        DeepAnalyzeComplete = null;
-        PropertyChanged += handler;
         try
         {
+            // Reset + subscribe under the gate so a 2nd concurrent call can't
+            // null the shared slot or add a 2nd handler mid-flight; inside the
+            // try so the finally always releases the gate even if the reset's
+            // PropertyChanged subscriber throws (mirrors WaitForBulkActionResultAsync).
+            DeepAnalyzeComplete = null;
+            PropertyChanged += handler;
             await SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind)).ConfigureAwait(false);
             using var cts = new CancellationTokenSource(DeepAnalyzeFileTimeout);
             using var reg = cts.Token.Register(() =>
@@ -489,6 +507,7 @@ internal sealed partial class EngineClient
         finally
         {
             PropertyChanged -= handler;
+            _deepAnalyzeFileGate.Release();
         }
     }
 
