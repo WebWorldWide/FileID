@@ -17,7 +17,9 @@ Fixed + committed:
 - **dc40735 (Swift/Linux, source-level):** HIGH `CLIPTokenizer` fatal `0..<(-1)` trap on an oversized grapheme → `guard word.count >= 2`. MED CRLF in CLIP merges + BGE vocab; Linux People thumbnail cache keyed by path only → keyed by `(path,bbox)`. LOW Swift `movePersonFaces` stale `representative_face_id`; `FinderTagsEditor` tag-write clobber after navigation; Linux engine respawn counter never reset (died after 5 lifetime crashes).
 - **868acda (delta re-audit):** tightened both Swift tokenizers from `.isNewline` to `\n`/`\r\n`-only to byte-match the Rust `.lines()` parity (verified with `swift`).
 
-Delta re-audit (separate adversarial pass) found **no regressions** and **compiled all 4 Swift files clean** (Swift 6.3.2 on this Mac). Linux GTK fixes still need an on-hardware build. Commits are local (not pushed).
+Delta re-audit (separate adversarial pass) found **no regressions** and **compiled all 4 Swift files clean** (Swift 6.3.2 on this Mac). Linux GTK fixes still need an on-hardware build.
+
+**Follow-up — C# Windows app audit (a6855cb):** ran the rate-limited-out slice as its own focused audit (3 areas × 2 lenses, describe-only recipes). 9 candidates → **7 confirmed** (2 med, 5 low; 6 unique). Applied by read-before-apply (the agent also caught a CS8602 the recipe missed). MED: dead Whisper/BGE Settings Install buttons (`SlotFor` missing cases); Deep-Analyze apply soft-lock (busy-reset outside try/finally). LOW: stuck face-clustering banner, deep-analyze concurrent cross-resolve, restructure apply-guard never released + "ask"-tier opt-in lost on tab re-entry. **NOT compiled** (.NET is CI-only) → needs `dotnet build/test/format` on CI. Commits are local (not pushed).
 
 ## 2026-06-21 — ✅ Full-AI scans VERIFIED end-to-end on macOS (CLI + TUI), ONNX Runtime provisioned
 

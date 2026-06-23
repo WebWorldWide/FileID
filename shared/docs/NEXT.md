@@ -1,11 +1,12 @@
 # NEXT — resume here
 
-## 2026-06-23 — audit gap: C# Windows app + on-hardware verify of audit fixes
+## 2026-06-23 — CI / on-hardware verification of the audit fixes
 
-The 2026-06-23 whole-codebase audit (STATE) did NOT cover the **C# Windows app** — its `win-core`/`win-ui` finders were rate-limited out before running. The Rust engine/CLI/TUI and the Swift macOS app were covered + fixed; the Windows WinUI/.NET layer (Services, ViewModels, Views, the engine IPC client) is unaudited this round.
+The whole-codebase audit + the follow-up C# Windows-app audit are now both DONE and fixed (STATE). What remains is **build/verify on the OSes the dev box can't compile**:
 
-- **Re-run the Windows-app slice of the audit** (find→verify→recipe over `platforms/windows/**/*.cs`): async/await deadlocks, CancellationToken ordering, IDisposable leaks, DispatcherQueue threading, IPC parsing, binding/converter crashes.
-- **On-hardware build of the Swift + Linux audit fixes** (dc40735 / 868acda): Swift type-checked clean here (Swift 6.3.2), but build the app on macOS + the GTK app on Linux to confirm. Linux GTK never compiles on the macOS dev box.
+- **C# Windows app (a6855cb):** 6 fixes applied by read-before-apply but NOT compiled here (.NET is CI-only). Run on Windows/CI: `dotnet build` + `dotnet test` + `dotnet format --verify-no-changes` on `FileID.sln`; pay attention to the `[NotNullWhen(true)]` in RestructureView (load-bearing under `WarningsAsErrors=nullable`). Then the on-hardware UATs (Whisper/BGE install, Deep-Analyze apply-failure recovery, face-banner clear on crash, overlapping single-file Deep Analyze, Restructure tab-switch-mid-apply, "ask"-tier opt-in survival).
+- **Swift macOS app (dc40735 / 868acda):** all 4 Swift files type-checked clean here (Swift 6.3.2), but do a full `swift build`/Xcode build on macOS.
+- **Linux GTK app (dc40735):** source-reviewed only — never compiles on the macOS dev box; build on Linux.
 - **Optional:** re-verify the rate-limited engine areas (scan/tagging/faces/restructure) with full 3-skeptic votes when capacity allows — their fixes are cargo-green but had reduced verify coverage.
 
 
