@@ -11,9 +11,6 @@ struct Detail: View {
     /// When the sidebar is hidden, Detail shows a toggle button in the
     /// top safe-area inset to bring it back.
     @Binding var sidebarVisible: Bool
-    /// Reserved for future cross-tab navigation. Currently unused
-    /// but kept on the API surface so wiring it up later doesn't
-    /// require threading a new closure through MainWindow.
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
 
     var body: some View {

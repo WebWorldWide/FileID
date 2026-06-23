@@ -1100,6 +1100,7 @@ private struct FilePreviewSheet: View {
     var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
+    @State private var tags: [String] = []
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
     @FocusState private var keyFocus: Bool
@@ -1316,7 +1317,6 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
-                        let tags = store.tags(forFileID: file.id)
                         if !tags.isEmpty {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
@@ -1373,6 +1373,15 @@ private struct FilePreviewSheet: View {
             // would load only the first file. Clear first so the spinner shows
             // and the prior file's poster never bleeds into the new image.
             preview = nil
+            tags = []
+            // Read DB tags off the main actor (detached read doesn't inherit
+            // `.task` cancellation; drop it once `.task(id:)` superseded us — R7).
+            let fileID = file.id
+            let loadedTags = await Task.detached { [store] in
+                store.tags(forFileID: fileID)
+            }.value
+            guard !Task.isCancelled else { return }
+            tags = loadedTags
             let image = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
