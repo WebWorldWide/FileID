@@ -30,6 +30,7 @@ use gtk::glib;
 use gtk::glib::clone;
 
 use crate::engine_client::{EngineClient, EngineEvent};
+use super::util::glass_card;
 use fileid_engine::ipc::{CancelPrewarmPayload, CommandPayload, Empty, PrewarmModelPayload};
 
 /// Installable model slots, in macOS card order. Each `model_kind` is resolved
@@ -734,18 +735,6 @@ fn build_privacy_card() -> gtk::Widget {
 }
 
 // ── Shared UI helpers ────────────────────────────────────────────────────────
-
-fn glass_card() -> gtk::Box {
-    gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
-        .margin_top(14)
-        .margin_bottom(14)
-        .margin_start(16)
-        .margin_end(16)
-        .css_classes(["glass-card"])
-        .build()
-}
 
 fn section_label(text: &str) -> gtk::Label {
     gtk::Label::builder()

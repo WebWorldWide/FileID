@@ -34,6 +34,7 @@ use gtk::glib;
 use crate::engine_client::{
     decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent,
 };
+use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use fileid_engine::ipc::{CommandPayload, TrashFilesPayload};
 
 /// Files larger than this carry a head+tail+size COMPOSITE `content_hash`, not a
@@ -748,7 +749,7 @@ impl Cleanup {
                 // Decode + scale OFF the main loop; only Send pixel data crosses back.
                 let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
                 std::thread::spawn(move || {
-                    let _ = dtx.send_blocking(decode_scaled(&bytes, TILE_THUMB_PX));
+                    let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
                 });
                 let Ok(Some(decoded)) = drx.recv().await else { return };
                 if let Some(p) = pic_weak.upgrade() {
@@ -1446,42 +1447,4 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
-}
-
-fn icon_paintable(name: &str, size: i32) -> Option<gtk::IconPaintable> {
-    let display = gtk::gdk::Display::default()?;
-    let theme = gtk::IconTheme::for_display(&display);
-    Some(theme.lookup_icon(
-        name,
-        &[],
-        size,
-        1,
-        gtk::TextDirection::None,
-        gtk::IconLookupFlags::empty(),
-    ))
-}
-
-fn icon_for_kind(kind: &str) -> &'static str {
-    match kind {
-        "image" => "image-x-generic-symbolic",
-        "video" => "video-x-generic-symbolic",
-        "audio" => "audio-x-generic-symbolic",
-        "pdf" | "doc" => "x-office-document-symbolic",
-        _ => "text-x-generic-symbolic",
-    }
-}
-
-fn format_bytes(b: i64) -> String {
-    let kb = b as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{kb:.0} KB")
-    } else {
-        format!("{:.1} MB", kb / 1024.0)
-    }
-}
-
-fn fmt_date(secs: Option<f64>) -> Option<String> {
-    let s = secs?;
-    let dt = glib::DateTime::from_unix_local(s as i64).ok()?;
-    dt.format("%Y-%m-%d").ok().map(|g| g.to_string())
 }

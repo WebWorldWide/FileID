@@ -707,7 +707,7 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Opti
         // Decode + crop + scale OFF the main loop; only Send pixel data crosses back.
         let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
         std::thread::spawn(move || {
-            let _ = dtx.send_blocking(cropped_texture(&bytes, bbox.as_deref(), CARD_THUMB_PX));
+            let _ = dtx.send_blocking(cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX));
         });
         let Ok(Some(decoded)) = drx.recv().await else {
             return;
@@ -1004,7 +1004,7 @@ fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
         // Decode + scale OFF the main loop; only Send pixel data crosses back.
         let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
         std::thread::spawn(move || {
-            let _ = dtx.send_blocking(cropped_texture(&bytes, None, PHOTO_THUMB_PX));
+            let _ = dtx.send_blocking(cropped_texture(bytes, None, PHOTO_THUMB_PX));
         });
         let Ok(Some(decoded)) = drx.recv().await else {
             return;
@@ -1610,8 +1610,8 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// full-res is required because the bbox is in the original image's pixel space
 /// and the DB stores no dimensions to normalize against. Any failure falls back
 /// to the uncropped frame, then to `None` (icon placeholder).
-fn cropped_texture(bytes: &[u8], bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
-    let gbytes = glib::Bytes::from(bytes);
+fn cropped_texture(bytes: Vec<u8>, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
+    let gbytes = glib::Bytes::from_owned(bytes);
     let stream = gio::MemoryInputStream::from_bytes(&gbytes);
     let full = gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE).ok()?;
     let cropped = bbox.and_then(|b| crop_to_bbox(&full, b)).unwrap_or(full);

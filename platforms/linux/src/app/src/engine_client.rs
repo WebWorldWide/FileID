@@ -575,8 +575,8 @@ impl DecodedImage {
 
 /// Decode + scale image bytes to fit `max_px` on the longest side. Designed to
 /// run on a worker thread (creates no widgets, touches no main-loop state).
-pub fn decode_scaled(file_bytes: &[u8], max_px: i32) -> Option<DecodedImage> {
-    let gbytes = glib::Bytes::from(file_bytes);
+pub fn decode_scaled(file_bytes: Vec<u8>, max_px: i32) -> Option<DecodedImage> {
+    let gbytes = glib::Bytes::from_owned(file_bytes);
     let stream = gio::MemoryInputStream::from_bytes(&gbytes);
     let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
         &stream,
