@@ -250,6 +250,16 @@ pub fn human_size(bytes: i64) -> String {
     format!("{size:.1} {}", UNITS[unit])
 }
 
+/// Truncate to `max` characters (char-aware), appending an ellipsis when cut.
+pub fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let keep: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{keep}…")
+    }
+}
+
 /// Mirror of the engine's `util::path_safety::stable_path_hash` (which is
 /// crate-private). Byte-faithful: lowercase the path, hash with the std
 /// `DefaultHasher` (fixed-key SipHash → deterministic across runs/machines on

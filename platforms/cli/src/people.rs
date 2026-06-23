@@ -5,7 +5,7 @@
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::context::{print_json, Ctx};
+use crate::context::{print_json, truncate, Ctx};
 
 struct Person {
     id: i64,
@@ -110,14 +110,4 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
 }
