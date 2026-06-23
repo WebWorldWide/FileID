@@ -364,44 +364,7 @@ impl ScanSession {
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
                     // when a notice is actually delivered. (audit R3-21)
-                    let notice = if count == 0 && skip_count > 0 {
-                        // Incremental rescan where every file was already
-                        // current — not an error. Non-fatal "already up to
-                        // date" notice (#21).
-                        Some(crate::ipc::EngineError {
-                            kind: "rescan_no_changes".into(),
-                            message: "Library is already up to date — no new or changed files to scan."
-                                .into(),
-                            path: Some(root_for_tick.clone()),
-                            model_kind: None,
-                        })
-                    } else if count == 0 {
-                        // Genuinely empty / unsupported folder.
-                        Some(crate::ipc::EngineError {
-                            kind: "empty_folder".into(),
-                            message: format!(
-                                "No supported files found in {}.\n\
-                                 Pick a folder with images, videos, PDFs, or documents.",
-                                root_for_tick
-                            ),
-                            path: Some(root_for_tick.clone()),
-                            model_kind: None,
-                        })
-                    } else if errs > 0 {
-                        // Non-fatal: walk recovered after the failures.
-                        Some(crate::ipc::EngineError {
-                            kind: "discovery_partial".into(),
-                            message: format!(
-                                "Scanned {} file(s); {} path(s) couldn't be read \
-                                 (permission denied or removed mid-scan). Scan continues.",
-                                count, errs
-                            ),
-                            path: Some(root_for_tick.clone()),
-                            model_kind: None,
-                        })
-                    } else {
-                        None
-                    };
+                    let notice = discovery_notice(count, skip_count, errs, &root_for_tick);
                     if let Some(err) = notice {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
@@ -509,42 +472,10 @@ impl ScanSession {
             let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
             let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
             let root_display = root.to_string_lossy().into_owned();
-            let notice = if count == 0 && skip_count > 0 {
-                Some((
-                    "rescan_no_changes".to_string(),
-                    "Library is already up to date — no new or changed files to scan.".to_string(),
-                ))
-            } else if count == 0 {
-                Some((
-                    "empty_folder".to_string(),
-                    format!(
-                        "No supported files found in {}.\n\
-                         Pick a folder with images, videos, PDFs, or documents.",
-                        root_display
-                    ),
-                ))
-            } else if errs > 0 {
-                Some((
-                    "discovery_partial".to_string(),
-                    format!(
-                        "Scanned {} file(s); {} path(s) couldn't be read \
-                         (permission denied or removed mid-scan). Scan continues.",
-                        count, errs
-                    ),
-                ))
-            } else {
-                None
-            };
-            if let Some((kind, message)) = notice {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                    crate::ipc::EngineError {
-                        kind,
-                        message,
-                        path: Some(root_display),
-                        model_kind: None,
-                    },
-                ))))
-                .await;
+            let notice = discovery_notice(count, skip_count, errs, &root_display);
+            if let Some(err) = notice {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
+                    .await;
             }
         }
 
@@ -700,6 +631,49 @@ impl ProgressState {
         }
         self.rolling_fps
     }
+}
+
+/// Single source for the empty/rescan/partial discovery notice: the 250 ms
+/// tick and the post-drain backstop must emit byte-identical IPC, so the kind
+/// codes + messages live here once. (audit R3-21 / E3)
+fn discovery_notice(
+    count: u64,
+    skip_count: usize,
+    errs: u64,
+    root: &str,
+) -> Option<crate::ipc::EngineError> {
+    let (kind, message) = if count == 0 && skip_count > 0 {
+        (
+            "rescan_no_changes",
+            "Library is already up to date — no new or changed files to scan.".to_string(),
+        )
+    } else if count == 0 {
+        (
+            "empty_folder",
+            format!(
+                "No supported files found in {}.\n\
+                 Pick a folder with images, videos, PDFs, or documents.",
+                root
+            ),
+        )
+    } else if errs > 0 {
+        (
+            "discovery_partial",
+            format!(
+                "Scanned {} file(s); {} path(s) couldn't be read \
+                 (permission denied or removed mid-scan). Scan continues.",
+                count, errs
+            ),
+        )
+    } else {
+        return None;
+    };
+    Some(crate::ipc::EngineError {
+        kind: kind.into(),
+        message,
+        path: Some(root.to_string()),
+        model_kind: None,
+    })
 }
 
 fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {

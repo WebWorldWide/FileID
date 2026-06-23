@@ -266,15 +266,28 @@ impl Discovery {
                     // marker sits directly in it. Used to gate the ambiguous
                     // build-dir names (target/build/obj/bin/venv) so we don't
                     // prune a user's ordinary "build" / "bin" folder of files.
-                    let has_build_marker = children.iter().any(|res| {
+                    // has_build_marker is only read when an ambiguous build dir
+                    // is present, so skip its per-file scan (a lowercase alloc
+                    // per file) unless one actually is.
+                    let has_ambiguous_build_dir = children.iter().any(|res| {
                         res.as_ref()
                             .ok()
                             .map(|e| {
-                                e.file_type().is_file()
-                                    && is_build_marker(&e.file_name().to_string_lossy())
+                                e.file_type().is_dir()
+                                    && is_ambiguous_build_directory(&e.file_name().to_string_lossy())
                             })
                             .unwrap_or(false)
                     });
+                    let has_build_marker = has_ambiguous_build_dir
+                        && children.iter().any(|res| {
+                            res.as_ref()
+                                .ok()
+                                .map(|e| {
+                                    e.file_type().is_file()
+                                        && is_build_marker(&e.file_name().to_string_lossy())
+                                })
+                                .unwrap_or(false)
+                        });
                     children.retain(|res| {
                         let Ok(entry) = res.as_ref() else { return true; };
                         let file_type = entry.file_type();

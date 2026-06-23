@@ -97,6 +97,24 @@ fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&s
     legacy.unwrap_or("").trim().to_string()
 }
 
+/// Terminal `DeepAnalyzeComplete` for an early-failure path that ran before any
+/// file was processed (missing runner / target-query error). Always sent so the
+/// UI clears its "Loading…/Preparing…" card instead of stranding forever (#6).
+/// `cancelled` reports the ACTUAL cooperative cancel flag — a load/query
+/// failure is not a user cancel. (audit F-A2)
+async fn send_early_failure_complete(sink: &Sink, model_kind: &str, cancel: &AtomicBool) {
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed: 0,
+            failed: 1,
+            total_seconds: 0.0,
+            model_kind: model_kind.to_string(),
+            cancelled: cancel.load(Ordering::Relaxed),
+        },
+    ))))
+    .await;
+}
+
 pub(crate) async fn handle_deep_analyze_file(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -124,18 +142,7 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
             // Always send a terminal Complete so the UI clears the
             // "Loading model…" card instead of stranding forever (#6).
-            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                DeepAnalyzeComplete {
-                    processed: 0,
-                    failed: 1,
-                    total_seconds: 0.0,
-                    model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
-                    cancelled: cancel.load(Ordering::Relaxed),
-                },
-            ))))
-            .await;
+            send_early_failure_complete(&sink, &payload.model_kind, &cancel).await;
             return;
         }
     };
@@ -276,18 +283,7 @@ pub(crate) async fn handle_deep_analyze_folder(
             tracing::warn!(?err, "deep_analyze_folder query");
             // Terminal Complete on the query failure so the UI clears the
             // "Preparing…" card instead of stranding forever (#6).
-            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                DeepAnalyzeComplete {
-                    processed: 0,
-                    failed: 1,
-                    total_seconds: 0.0,
-                    model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
-                    cancelled: cancel.load(Ordering::Relaxed),
-                },
-            ))))
-            .await;
+            send_early_failure_complete(&sink, &payload.model_kind, &cancel).await;
             return;
         }
     };
@@ -311,18 +307,7 @@ pub(crate) async fn handle_deep_analyze_all(
             tracing::warn!(?err, "deep_analyze_all query");
             // Terminal Complete on the query failure so the UI clears the
             // "Preparing…" card instead of stranding forever (#6).
-            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                DeepAnalyzeComplete {
-                    processed: 0,
-                    failed: 1,
-                    total_seconds: 0.0,
-                    model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
-                    cancelled: cancel.load(Ordering::Relaxed),
-                },
-            ))))
-            .await;
+            send_early_failure_complete(&sink, &payload.model_kind, &cancel).await;
             return;
         }
     };

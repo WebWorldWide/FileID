@@ -30,7 +30,7 @@ pub const SETUP_PRAGMAS: &[&str] = &[
 ];
 
 /// Open the engine's writer connection. Creates the file + schema if absent.
-/// Applies every migration up to v7 in registered order.
+/// Applies every migration up to v19 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)

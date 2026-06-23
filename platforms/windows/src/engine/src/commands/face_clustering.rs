@@ -53,19 +53,18 @@ pub(crate) async fn handle_run_face_clustering(
             // (a) Load every face that has an ArcFace embedding.
             {
                 let mut stmt = conn.prepare(
-                    "SELECT id, file_id, arcface_embedding, COALESCE(face_quality, 0.0) \
+                    "SELECT id, arcface_embedding, COALESCE(face_quality, 0.0) \
                      FROM face_prints \
                      WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded, 0) = 0",
                 )?;
                 let rows = stmt.query_map([], |r| {
                     let id: i64 = r.get(0)?;
-                    let file_id: i64 = r.get(1)?;
-                    let blob: Vec<u8> = r.get(2)?;
-                    let quality: f64 = r.get(3)?;
-                    Ok((id, file_id, blob, quality))
+                    let blob: Vec<u8> = r.get(1)?;
+                    let quality: f64 = r.get(2)?;
+                    Ok((id, blob, quality))
                 })?;
                 for row in rows {
-                    let (id, file_id, blob, quality) = row?;
+                    let (id, blob, quality) = row?;
                     if blob.len() % 4 != 0 || blob.is_empty() {
                         continue;
                     }
@@ -76,7 +75,6 @@ pub(crate) async fn handle_run_face_clustering(
                     }
                     faces.push(FaceRow {
                         face_id: id,
-                        file_id,
                         embedding,
                         quality: quality as f32,
                     });

@@ -62,13 +62,10 @@ impl VlmModelKind {
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AnalyzeOutcome {
     pub file_id: i64,
     pub description: Option<String>,
     pub proposed_name: Option<String>,
-    pub model: String,
-    pub elapsed_ms: u64,
 }
 
 /// What we want from this file: caption, smart filename, or both.
@@ -116,8 +113,6 @@ pub async fn analyze_file(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
-    let started = std::time::Instant::now();
-
     // Non-rasterizable-or-specially-handled kinds are named WITHOUT the standard VLM
     // raster path here, BEFORE resolving weights (so they work without a VLM installed):
     //   • audio  → embedded title/artist tags, else Whisper transcription (no VLM ever).
@@ -127,7 +122,7 @@ pub async fn analyze_file(
     // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
     let weights = vlm::find_weights(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, started, weights.is_some()).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights.is_some()).await?
     {
         return Ok(outcome);
     }
@@ -143,7 +138,7 @@ pub async fn analyze_file(
             // A 3D model we couldn't render → fall back to its embedded-name metadata so
             // the file still gets a descriptive name (other kinds propagate the error).
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, started, false).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false).await?
             {
                 return Ok(outcome);
             }
@@ -228,8 +223,6 @@ pub async fn analyze_file(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
@@ -421,7 +414,6 @@ async fn analyze_metadata_named_file(
     file_id: i64,
     model_kind: &str,
     mode: AnalyzeMode,
-    started: std::time::Instant,
     model_to_vlm: bool,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
     let (path_text, kind): (String, String) = {
@@ -500,8 +492,6 @@ async fn analyze_metadata_named_file(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     }))
 }
 
@@ -796,12 +786,11 @@ pub(crate) async fn analyze_file_via_server(
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
-    let started = std::time::Instant::now();
 
     // Audio is named from metadata; 3D models render → VLM (the server is loaded, so
     // `model_to_vlm = true`). Same branch as `analyze_file`, before rasterize.
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, started, true).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, true).await?
     {
         return Ok(outcome);
     }
@@ -811,7 +800,7 @@ pub(crate) async fn analyze_file_via_server(
         Err(e) => {
             // A 3D model we couldn't render → fall back to embedded-name metadata.
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, started, false).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false).await?
             {
                 return Ok(outcome);
             }
@@ -879,8 +868,6 @@ pub(crate) async fn analyze_file_via_server(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
@@ -963,9 +950,6 @@ async fn rasterize_pdf_page(_path: &std::path::Path) -> anyhow::Result<std::path
     )
 }
 
-/// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
-/// quotes / extension / extra punctuation. The model usually obeys the
-/// prompt but defensive normalization saves a round-trip.
 /// Deterministically prefix the named people onto the VLM proposed filename so
 /// they ALWAYS land (the model treats the prompt hint as optional, so names often
 /// never reach the FILENAME). Each person's first-name token — lowercase
@@ -1004,6 +988,9 @@ pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String
     sanitize_proposed_name(&format!("{} {}", tokens.join(" "), name))
 }
 
+/// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
+/// quotes / extension / extra punctuation. The model usually obeys the
+/// prompt but defensive normalization saves a round-trip.
 fn sanitize_proposed_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
     let lowered = trimmed.to_lowercase();

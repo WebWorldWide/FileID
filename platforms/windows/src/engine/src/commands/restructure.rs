@@ -109,6 +109,21 @@ fn load_text_embeddings(
     Ok(out)
 }
 
+fn absorb_semantic_moves(
+    moves: Vec<restructure::ProposedMove>,
+    moved: &mut std::collections::HashSet<i64>,
+    semantic_source_folders: &mut std::collections::HashSet<PathBuf>,
+    proposed: &mut Vec<restructure::ProposedMove>,
+) {
+    for m in &moves {
+        moved.insert(m.file_id);
+        if let Some(parent) = m.source.parent() {
+            semantic_source_folders.insert(parent.to_path_buf());
+        }
+    }
+    proposed.extend(moves);
+}
+
 /// Walk the `files` table for the picked library root, classify each file,
 /// and emit a `restructurePlan` event with the proposed moves + per-category
 /// counts. The app's Restructure tab consumes this to render the Sankey +
@@ -297,13 +312,7 @@ pub(crate) async fn handle_plan_restructure(
     if semantic_files.len() >= 2 {
         let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
         let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path);
-        for m in &moves {
-            moved.insert(m.file_id);
-            if let Some(parent) = m.source.parent() {
-                semantic_source_folders.insert(parent.to_path_buf());
-            }
-        }
-        proposed.extend(moves);
+        absorb_semantic_moves(moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
     // Butler R3: document-content pass. Cluster documents by their BGE text embedding
@@ -328,13 +337,7 @@ pub(crate) async fn handle_plan_restructure(
             .collect();
         let doc_moves =
             restructure_semantic::classify_documents(&doc_files, library_root_path);
-        for m in &doc_moves {
-            moved.insert(m.file_id);
-            if let Some(parent) = m.source.parent() {
-                semantic_source_folders.insert(parent.to_path_buf());
-            }
-        }
-        proposed.extend(doc_moves);
+        absorb_semantic_moves(doc_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
     // Butler R1: non-image semantic pass. Cluster everything the doc + image passes didn't
@@ -357,13 +360,7 @@ pub(crate) async fn handle_plan_restructure(
             .collect();
         let ni_moves =
             restructure_semantic::classify_non_image(&non_image_files, library_root_path);
-        for m in &ni_moves {
-            moved.insert(m.file_id);
-            if let Some(parent) = m.source.parent() {
-                semantic_source_folders.insert(parent.to_path_buf());
-            }
-        }
-        proposed.extend(ni_moves);
+        absorb_semantic_moves(ni_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
     // Rule cascade for everything neither semantic pass claimed.

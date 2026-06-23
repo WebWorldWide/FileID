@@ -4,7 +4,7 @@
 // `MobileClipImage`. Tagging workers submit (rgb_256, oneshot) requests
 // through a crossbeam channel. The coordinator drains up to BATCH_SIZE
 // requests (or BATCH_TIMEOUT_MS, whichever first), packs them into one
-// (N, 3, 256, 256) tensor, runs `embed_batch` once, and fans the
+// (N, 3, 224, 224) tensor, runs `embed_batch` once, and fans the
 // embeddings back through the oneshots. Per-batch GPU dispatch is one
 // wake instead of N, and VRAM stays at single-session footprint.
 //

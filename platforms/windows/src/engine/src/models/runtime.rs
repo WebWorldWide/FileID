@@ -13,7 +13,7 @@
 // is consumed by `emit_ready` (advertised back to the app) and by
 // the EP-priority builder when an ORT session is created.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -408,6 +408,42 @@ pub fn configure_session_builder(
         1
     };
     builder.with_optimization_level(opt)?.with_intra_threads(intra)
+}
+
+/// Build -> configure -> register-EPs -> commit an ORT session from `onnx_path`
+/// over this process's EP priority chain, returning the session and its first
+/// input tensor name. Folds the identical per-wrapper session-bind boilerplate
+/// (RAM++, SFace, MobileCLIP, CLIP-text, YuNet, SCRFD) into one place; `label`
+/// flows into the `.context()` chain and the EP-chain log line. BGE binds the
+/// CPU EP with a thread override + multi-input binding, so it keeps its own path.
+pub fn commit_chain_session(
+    label: &str,
+    onnx_path: &Path,
+) -> anyhow::Result<(ort::session::Session, String)> {
+    use anyhow::Context;
+    let probe = RuntimeProbe::shared();
+    let chain = priority_chain(probe.vendor);
+    let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+    let builder = ort::session::Session::builder().context("ORT session builder")?;
+    let mut builder =
+        configure_session_builder(builder).with_context(|| format!("configure session ({label})"))?;
+    let providers = execution_providers_for_chain(&chain, probe.adapter_index);
+    if !providers.is_empty() {
+        builder = builder
+            .with_execution_providers(providers)
+            .with_context(|| format!("register execution providers ({label})"))?;
+    }
+    tracing::info!(model = label, chain = ?chain_labels, "EP priority chain registered");
+    let session = builder
+        .commit_from_file(onnx_path)
+        .with_context(|| format!("ORT session commit ({label})"))?;
+    let input_name = session
+        .inputs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("{label} ONNX has no inputs"))?
+        .name
+        .clone();
+    Ok((session, input_name))
 }
 
 /// User-supplied EP override stored in the C# app's `app-settings.json`

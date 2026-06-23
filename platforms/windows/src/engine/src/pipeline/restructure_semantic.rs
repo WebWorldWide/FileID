@@ -18,8 +18,10 @@ use std::path::{Path, PathBuf};
 use super::identity_clustering::{self, Hyperparameters, Neighbor};
 use super::restructure::{Confidence, ProposedMove};
 
-/// Per-file signals. `clip` is the L2-normalized 512-d CLIP image embedding;
-/// callers only pass files that have one (images), so it is never empty here.
+/// Per-file signals. `clip` is the L2-normalized representative vector for the
+/// pass that built it: the 512-d CLIP image embedding (image pass), the 384-d
+/// BGE text embedding (document pass), or empty for the non-image pass, which
+/// fills it with a bag-of-words signature in `non_image_signatures`.
 #[derive(Clone)]
 pub struct SemanticFile {
     pub file_id: i64,
@@ -302,13 +304,13 @@ pub fn semantic_classify(
     // with segment 2's independent "Beach" cluster into the same folder.
     let mut shared_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     if segments.len() <= 1 {
-        return semantic_classify_profiled(files, prototypes, library_root, profile, hp, &mut shared_names);
+        return semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), prototypes, library_root, profile, hp, &mut shared_names);
     }
     // Pre-segmented: cluster each time-gap window independently so content
     // similarity doesn't merge events that are separated by hours or days.
     let mut all_moves = Vec::new();
     for idxs in &segments {
-        let seg: Vec<SemanticFile> = idxs.iter().map(|&i| files[i].clone()).collect();
+        let seg: Vec<&SemanticFile> = idxs.iter().map(|&i| &files[i]).collect();
         let moves = semantic_classify_profiled(&seg, prototypes, library_root, profile, hp, &mut shared_names);
         all_moves.extend(moves);
     }
@@ -316,7 +318,7 @@ pub fn semantic_classify(
 }
 
 fn semantic_classify_profiled(
-    files: &[SemanticFile],
+    files: &[&SemanticFile],
     prototypes: &[FolderPrototype],
     library_root: &Path,
     profile: Profile,
@@ -519,7 +521,7 @@ pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(&sigs, &protos, library_root, non_image_profile(), file_hyperparams(), &mut std::collections::HashSet::new())
+    semantic_classify_profiled(&sigs.iter().collect::<Vec<_>>(), &protos, library_root, non_image_profile(), file_hyperparams(), &mut std::collections::HashSet::new())
 }
 
 /// Document-content pass — cluster documents by their BGE text embedding (read from
@@ -537,7 +539,7 @@ pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(files, &protos, library_root, doc_profile(), doc_hyperparams(), &mut std::collections::HashSet::new())
+    semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), &protos, library_root, doc_profile(), doc_hyperparams(), &mut std::collections::HashSet::new())
 }
 
 /// Document content-embedding profile. The representative IS the 384-d BGE vector (so
@@ -691,7 +693,7 @@ pub(crate) fn filename_tokens(path: &Path) -> Vec<String> {
 
 /// Global tag frequency across all files — drives both the vocab cap and the
 /// c-TF-IDF inverse-document weighting in [`distinctive_terms`].
-fn tag_frequencies(files: &[SemanticFile]) -> HashMap<String, usize> {
+fn tag_frequencies(files: &[&SemanticFile]) -> HashMap<String, usize> {
     let mut freq: HashMap<String, usize> = HashMap::new();
     for f in files {
         for t in &f.tags {
@@ -716,7 +718,7 @@ fn vocab_from_freq(freq: &HashMap<String, usize>, cap: usize) -> HashMap<String,
 
 #[cfg(test)]
 fn build_tag_vocab(files: &[SemanticFile], cap: usize) -> HashMap<String, usize> {
-    vocab_from_freq(&tag_frequencies(files), cap)
+    vocab_from_freq(&tag_frequencies(&files.iter().collect::<Vec<_>>()), cap)
 }
 
 /// Fuse one file: per-block L2-normalize, scale by weight, concatenate, then
@@ -877,7 +879,7 @@ fn folder_display_name(path: &Path) -> String {
 /// drop out on their own.
 fn distinctive_terms<'a>(
     members: &[usize],
-    files: &'a [SemanticFile],
+    files: &'a [&SemanticFile],
     global_freq: &HashMap<String, usize>,
 ) -> Vec<&'a str> {
     let mut in_cluster: HashMap<&str, usize> = HashMap::new();
