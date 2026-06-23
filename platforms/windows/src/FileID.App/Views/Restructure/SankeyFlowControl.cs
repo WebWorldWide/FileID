@@ -47,6 +47,7 @@ public sealed class SankeyFlowControl : Control
     private readonly Dictionary<string, Rectangle> _categoryRects = new();
     private readonly Dictionary<Rectangle, Brush> _rectIdleFill = new();
     private TextBlock? _hoverTooltip;
+    private Ribbon? _hovered;
 
     // Pre-cached brushes. Render() used to allocate ~2 brushes per ribbon
     // (idle/hover) plus 1 per category rect plus 2 more on every hover
@@ -167,6 +168,7 @@ public sealed class SankeyFlowControl : Control
         _categoryRects.Clear();
         _rectIdleFill.Clear();
         _hoverTooltip = null;
+        _hovered = null;
         if (_plan is null || _plan.Moves.Count == 0 || ActualWidth < 100 || ActualHeight < 60) return;
 
         var moves = _plan.Moves;
@@ -548,6 +550,12 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
+        // Pointer moves fire continuously while the cursor stays over one ribbon;
+        // the highlight + tooltip depend only on which ribbon is hit, not on the
+        // exact position, so skip the full repaint/realloc when it is unchanged.
+        if (ReferenceEquals(hovered, _hovered)) return;
+        _hovered = hovered;
+
         // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;

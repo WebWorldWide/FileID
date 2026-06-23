@@ -12,12 +12,6 @@ namespace FileID.ViewModels;
 
 internal sealed partial class EngineClient
 {
-    /// <summary>Maximum size of a single IPC frame in bytes. Windows
-    /// pipe buffers default to ~64 KB; flushing more than that in a
-    /// single Write can deadlock if the engine's stdout reader hasn't
-    /// drained its half. 1 MB is generous for every legitimate command
-    /// today (each fits comfortably under 100 KB) — beyond that the
-    /// caller should chunk explicitly.</summary>
     // 64 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
     // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
     // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
