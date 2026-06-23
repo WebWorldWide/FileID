@@ -571,6 +571,32 @@ where
 // 12-way parallel range-GET download path.
 // ─────────────────────────────────────────────────────────────────────
 
+/// A progress update a chunk task posts to `download_parallel`'s drainer.
+/// `Advanced` is fresh bytes just written to a `.part-NN`; `Rewound` un-counts
+/// the on-disk prefix of a part that was discarded for a clean re-fetch (a 416,
+/// or a 200 full-body answer to a resume), which `resume_seed_bytes` — or an
+/// earlier `Advanced` — had already counted once. Routed over the progress
+/// channel (not a direct `AtomicU64::fetch_sub`) so the drainer, the sole writer
+/// of the counter, applies the rewind strictly after this part's own adds and
+/// can never underflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartProgress {
+    Advanced(u64),
+    Rewound(u64),
+}
+
+/// Fold one `PartProgress` into the running `bytes_done` total. Pure so the
+/// resume/discard accounting is unit-testable without a live server. Saturating
+/// is defense-in-depth: channel ordering already guarantees a `Rewound` never
+/// exceeds what this part has added, so under correct operation this is an exact
+/// add/subtract.
+fn apply_part_progress(running: u64, msg: PartProgress) -> u64 {
+    match msg {
+        PartProgress::Advanced(n) => running.saturating_add(n),
+        PartProgress::Rewound(n) => running.saturating_sub(n),
+    }
+}
+
 /// Download a single file using up to PARALLEL_PARTS concurrent
 /// HTTP range-GET requests. Falls back to `download_simple` when:
 ///   - server doesn't support `Accept-Ranges: bytes`
@@ -674,12 +700,13 @@ where
     let started = Instant::now();
     let last_emit_ms = Arc::new(parking_lot::Mutex::new(0u128));
 
-    // Progress channel: each chunk task posts its delta; one drainer
-    // aggregates + emits at ≤10 Hz. Bounded so a slow drainer can't grow
-    // the queue without bound — overflow is fine to drop because
-    // bytes_done is monotonic + the drainer recomputes from the
-    // AtomicU64 each tick.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<usize>(512);
+    // Progress channel: each chunk task posts `PartProgress` updates; one
+    // drainer — the SOLE writer of `bytes_done` — folds them in and emits at
+    // ≤10 Hz. Bounded so a slow drainer can't grow the queue without bound;
+    // sends apply backpressure (never dropped), so a part's `Rewound` correction
+    // is never lost and always lands after that part's own `Advanced` deltas.
+    // `bytes_done` is therefore NOT monotonic — a discarded resume part rewinds it.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<PartProgress>(512);
 
     // Spawn drainer FIRST so the chunk tasks have something to send to.
     let total_for_drain = total;
@@ -687,8 +714,12 @@ where
     let bytes_done_drain = bytes_done.clone();
     let last_emit_drain = last_emit_ms.clone();
     let progress_handle: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-        while let Some(delta) = rx.recv().await {
-            let cur = bytes_done_drain.fetch_add(delta as u64, Ordering::Relaxed) + delta as u64;
+        while let Some(msg) = rx.recv().await {
+            // Sole writer of `bytes_done`, so load+store is race-free; folding
+            // through `apply_part_progress` keeps the add/rewind accounting in
+            // one unit-tested place.
+            let cur = apply_part_progress(bytes_done_drain.load(Ordering::Relaxed), msg);
+            bytes_done_drain.store(cur, Ordering::Relaxed);
             let now_ms = started.elapsed().as_millis();
             let emit = {
                 let mut last = last_emit_drain.lock();
@@ -934,6 +965,14 @@ fn classify_range_status(status: u16, existing_len: u64) -> RangeResumeAction {
 /// Download one byte range with retry-on-429/503 + resume support.
 /// If `<part_path>` already exists, send `Range: bytes={offset}-{end}`
 /// where offset = start + existing_len, and append.
+///
+/// Progress is reported by posting `PartProgress` over `tx`: `Advanced` for each
+/// freshly written chunk, and — on the DiscardAndRetry path — a single
+/// `Rewound(existing_len)` that un-counts the prefix this part throws away before
+/// re-fetching the whole range from offset 0. The rewind goes over the SAME
+/// channel (not a direct `AtomicU64::fetch_sub`) so the drainer applies it
+/// strictly after this part's own `Advanced` deltas; a direct subtract could
+/// overtake still-queued adds and underflow the counter.
 async fn download_range_with_retry(
     client: &reqwest::Client,
     url: &str,
@@ -941,7 +980,7 @@ async fn download_range_with_retry(
     end: u64,
     part_path: &Path,
     cancel: &AtomicBool,
-    tx: tokio::sync::mpsc::Sender<usize>,
+    tx: tokio::sync::mpsc::Sender<PartProgress>,
 ) -> Result<()> {
     let mut budget = RetryBudget::new();
     let mut retrying = false;
@@ -1033,6 +1072,18 @@ async fn download_range_with_retry(
                     part = %part_path.display(), %status, existing_len, range_len,
                     "range resume not honored (416/non-206); discarding stale part and re-fetching"
                 );
+                // Un-count the bytes we're discarding. `existing_len` (> 0 on
+                // every DiscardAndRetry — see classify_range_status) is exactly
+                // what this part has already contributed to bytes_done: the
+                // resume seed on the first attempt plus any deltas it streamed on
+                // an earlier one. The clean re-fetch below restarts from offset 0
+                // and re-streams the whole range, so without this the prefix is
+                // counted twice and bytes_done overshoots bytes_total (>100% bar
+                // + inflated final bytes/sec). Sent over `tx` (not a direct
+                // fetch_sub) so the drainer applies the rewind AFTER this part's
+                // own queued `Advanced` deltas — a direct subtract could overtake
+                // them and underflow the counter.
+                let _ = tx.send(PartProgress::Rewound(existing_len)).await;
                 let _ = tokio::fs::remove_file(part_path).await;
                 last_err = Some(anyhow::anyhow!("range resume answered HTTP {status} (restarted)"));
                 continue;
@@ -1070,7 +1121,7 @@ async fn download_range_with_retry(
             };
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await
                 .context("writing range chunk")?;
-            let _ = tx.send(chunk.len()).await;
+            let _ = tx.send(PartProgress::Advanced(chunk.len() as u64)).await;
         }
         tokio::io::AsyncWriteExt::flush(&mut file).await.ok();
         return Ok(());
@@ -1240,9 +1291,10 @@ pub fn download_file_blocking(
 #[cfg(test)]
 mod tests {
     use super::{
-        chain_has_disk_full, chain_has_pin_failure, check_size_plausible, classify_range_status,
-        message_indicates_pin_failure, resume_seed_bytes, source_chain_indicates_pin_failure,
-        RangeResumeAction, RetryBudget, PINNED_ROOT_CERTS,
+        apply_part_progress, chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
+        classify_range_status, message_indicates_pin_failure, resume_seed_bytes,
+        source_chain_indicates_pin_failure, PartProgress, RangeResumeAction, RetryBudget,
+        PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1483,5 +1535,51 @@ mod tests {
         // Other client/redirect errors still bail.
         assert_eq!(classify_range_status(404, 0), RangeResumeAction::Bail);
         assert_eq!(classify_range_status(403, 2048), RangeResumeAction::Bail);
+    }
+
+    // The accounting invariant the channel ordering buys us, exercised over the
+    // exact PartProgress stream the discard path emits — deterministic, no I/O,
+    // and it covers the interleaving the localhost test cannot force: a part that
+    // streamed some bytes (Advanced), hit a transient stream error, and only THEN
+    // got a 200/416 on the retry, so its Rewound un-counts seed + those streamed
+    // deltas. A direct task-side fetch_sub could fire that subtract before the
+    // drainer drained the queued Advanced and underflow the counter; routing
+    // Rewound over the same FIFO channel guarantees it lands strictly after them.
+    // bytes_done must stay within [0, total] throughout and finish EXACTLY at
+    // total (no >100% bar, no wraparound).
+    #[test]
+    fn rewound_discard_keeps_progress_within_bounds() {
+        const TOTAL: u64 = 300; // three 100-byte parts
+
+        // The PartProgress stream the discard path emits, FIFO per part.
+        // resume_seed counted every part's on-disk prefix up front (part0 40,
+        // part1 30, part2 100 = already complete). part1 then streamed 20 fresh
+        // bytes before a stream error; its retry is answered 200/416, so it emits
+        // Rewound(50) (= 30 seed + 20 streamed = its on-disk length) and re-fetches
+        // all 100. The Rewound is ENQUEUED AFTER part1's own Advanced(20) — which
+        // is what makes a channel-routed correction safe where a direct subtract
+        // is not.
+        let seed = 40 + 30 + 100;
+        let stream = [
+            PartProgress::Advanced(60),  // part0: 40 seed -> 100
+            PartProgress::Advanced(20),  // part1: streamed before the stream error
+            PartProgress::Rewound(50),   // part1: discard un-counts seed + streamed
+            PartProgress::Advanced(100), // part1: clean re-fetch of the whole range
+        ];
+
+        let mut done: u64 = seed;
+        let mut peak = done;
+        for msg in stream {
+            done = apply_part_progress(done, msg);
+            peak = peak.max(done);
+            assert!(done <= TOTAL, "bytes_done {done} exceeded total {TOTAL} (>100% bar)");
+        }
+        assert_eq!(done, TOTAL, "must finish exactly at total, not total + discarded prefix");
+        assert_eq!(peak, TOTAL);
+
+        // Floor guard: even if a Rewound were somehow applied before the matching
+        // Advanced (the underflow a direct task-side fetch_sub risks), saturating
+        // keeps bytes_done >= 0 rather than wrapping to a bogus ~1.8e19 reading.
+        assert_eq!(apply_part_progress(0, PartProgress::Rewound(50)), 0);
     }
 }

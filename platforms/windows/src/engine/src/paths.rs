@@ -24,7 +24,9 @@ use anyhow::{Context, Result};
 #[cfg(windows)]
 pub fn root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("LOCALAPPDATA") {
-        return Ok(PathBuf::from(s).join("FileID"));
+        if !s.is_empty() {
+            return Ok(PathBuf::from(s).join("FileID"));
+        }
     }
     if let Ok(home) = std::env::var("USERPROFILE") {
         return Ok(PathBuf::from(home).join("AppData").join("Local").join("FileID"));
@@ -144,4 +146,80 @@ pub fn ensure_state_dirs() -> Result<PathBuf> {
             .with_context(|| format!("creating {}", sub.display()))?;
     }
     Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `std::env` is process-global; serialize env-mutating tests so parallel
+    // `cargo test` threads can't observe each other's writes.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn restore(key: &str, val: Option<std::ffi::OsString>) {
+        match val {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// Regression: a set-but-EMPTY `%LOCALAPPDATA%` must not collapse to the
+    /// CWD-relative path `FileID`; it must fall through to `%USERPROFILE%`,
+    /// matching the non-Windows empty-`$XDG_DATA_HOME` guard. (An UNSET var is a
+    /// distinct, already-correct case: `var()` returns `Err` and falls through.)
+    #[cfg(windows)]
+    #[test]
+    fn root_empty_localappdata_falls_back_to_userprofile() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("LOCALAPPDATA");
+        let profile = std::env::var_os("USERPROFILE")
+            .expect("USERPROFILE must be set to exercise the fallback");
+
+        std::env::set_var("LOCALAPPDATA", "");
+        let empty = root();
+        std::env::set_var("LOCALAPPDATA", r"D:\State\Local");
+        let set = root();
+        std::env::remove_var("LOCALAPPDATA");
+        let unset = root();
+
+        restore("LOCALAPPDATA", saved);
+
+        let want = PathBuf::from(profile)
+            .join("AppData")
+            .join("Local")
+            .join("FileID");
+        let empty = empty.expect("empty LOCALAPPDATA must resolve via USERPROFILE");
+        assert!(empty.is_absolute(), "leaked a CWD-relative root: {}", empty.display());
+        assert_eq!(empty, want);
+        assert_eq!(set.unwrap(), PathBuf::from(r"D:\State\Local\FileID"));
+        assert_eq!(unset.unwrap(), want);
+    }
+
+    /// The non-Windows reference behavior the Windows guard now mirrors: empty
+    /// `$XDG_DATA_HOME` falls back to `$HOME`, never to a CWD-relative path.
+    #[cfg(not(windows))]
+    #[test]
+    fn root_empty_xdg_data_home_falls_back_to_home() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("XDG_DATA_HOME");
+        let home = std::env::var_os("HOME")
+            .expect("HOME must be set to exercise the fallback");
+
+        std::env::set_var("XDG_DATA_HOME", "");
+        let empty = root();
+        std::env::set_var("XDG_DATA_HOME", "/data/xdg");
+        let set = root();
+        std::env::remove_var("XDG_DATA_HOME");
+        let unset = root();
+
+        restore("XDG_DATA_HOME", saved);
+
+        let want = PathBuf::from(home).join(".local").join("share").join("FileID");
+        let empty = empty.expect("empty XDG_DATA_HOME must resolve via HOME");
+        assert!(empty.is_absolute(), "leaked a CWD-relative root: {}", empty.display());
+        assert_eq!(empty, want);
+        assert_eq!(set.unwrap(), PathBuf::from("/data/xdg/FileID"));
+        assert_eq!(unset.unwrap(), want);
+    }
 }

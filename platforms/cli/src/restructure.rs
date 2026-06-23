@@ -265,29 +265,35 @@ fn apply_moves(
         return Ok(());
     }
 
-    println!(
-        "{} {} file(s) into {}:",
-        if dry_run {
-            ctx.bold("DRY RUN — would")
-        } else {
-            ctx.bold(&format!("Will {verb}"))
-        },
-        moves.len(),
-        library_root.display(),
-    );
-    for m in moves.iter().take(MAX_PRINTED_MOVES) {
-        let src = Path::new(&m.source)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| m.source.clone());
-        let dest = rel_to(library_root, Path::new(&m.destination));
-        println!("    {}  {}  {}", src, ctx.dim("→"), dest);
-    }
-    if moves.len() > MAX_PRINTED_MOVES {
+    // Human preview only. In --json mode stdout must carry nothing but the
+    // final result object (the confirm prompt + progress lines already go to
+    // stderr); printing this header/loop there corrupts the JSON for the real
+    // `--apply --json` path, which falls through to the result print below.
+    if !ctx.json {
         println!(
-            "    {}",
-            ctx.dim(&format!("… and {} more", moves.len() - MAX_PRINTED_MOVES))
+            "{} {} file(s) into {}:",
+            if dry_run {
+                ctx.bold("DRY RUN — would")
+            } else {
+                ctx.bold(&format!("Will {verb}"))
+            },
+            moves.len(),
+            library_root.display(),
         );
+        for m in moves.iter().take(MAX_PRINTED_MOVES) {
+            let src = Path::new(&m.source)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| m.source.clone());
+            let dest = rel_to(library_root, Path::new(&m.destination));
+            println!("    {}  {}  {}", src, ctx.dim("→"), dest);
+        }
+        if moves.len() > MAX_PRINTED_MOVES {
+            println!(
+                "    {}",
+                ctx.dim(&format!("… and {} more", moves.len() - MAX_PRINTED_MOVES))
+            );
+        }
     }
 
     if dry_run {

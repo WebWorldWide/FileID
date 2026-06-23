@@ -311,19 +311,28 @@ fn push_unique(v: &mut Vec<String>, s: &str) {
 
 /// Scan a Wavefront `.obj` (and its referenced `.mtl`) for the modeler's semantic
 /// labels: object (`o`) + group (`g`) names, and material (`usemtl`/`newmtl`) names.
-/// Bounded — reads at most `MAX_OBJ_SCAN_LINES` so a multi-GB mesh can't stall the
-/// rename pass; we only need the distinct name set, which is tiny. Dedup,
-/// order-preserving.
+/// Bounded by BOTH a line count (`MAX_OBJ_SCAN_LINES`) and a hard byte cap
+/// (`MAX_OBJ_SCAN_BYTES`) so a multi-GB or newline-sparse mesh can neither
+/// stall the rename pass nor OOM the engine on a single unbounded line; we
+/// only need the distinct name set, which is tiny. Dedup, order-preserving.
 fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
-    use std::io::BufRead;
+    use std::io::{BufRead, Read};
     const MAX_OBJ_SCAN_LINES: usize = 200_000;
+    // SEC: `lines()` allocates each line up to the next '\n' with no byte
+    // bound — a newline-sparse file would materialize one gigantic String and
+    // abort the engine on alloc failure. The line-COUNT caps below run only
+    // AFTER a line is already read, so they can't bound a single huge line;
+    // hard-cap the bytes pulled from each reader instead (matches the
+    // `take(MAX_*_BYTES)` convention in the sibling doc_extract.rs).
+    const MAX_OBJ_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+    const MAX_MTL_SCAN_BYTES: u64 = 4 * 1024 * 1024;
     let mut objects: Vec<String> = Vec::new();
     let mut materials: Vec<String> = Vec::new();
     let mut mtllib: Option<String> = None;
 
     let p = crate::util::path_safety::to_extended_length(path);
     if let Ok(f) = std::fs::File::open(&p) {
-        for (i, line) in std::io::BufReader::new(f).lines().enumerate() {
+        for (i, line) in std::io::BufReader::new(f.take(MAX_OBJ_SCAN_BYTES)).lines().enumerate() {
             if i >= MAX_OBJ_SCAN_LINES {
                 break;
             }
@@ -341,12 +350,23 @@ fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<String>) {
         }
     }
     // Pull `newmtl` names from the referenced .mtl too (often richer than the
-    // `usemtl` refs). Resolved relative to the .obj's folder; bounded read.
+    // `usemtl` refs).
+    //
+    // SEC: the `mtllib` value is untrusted .obj content. Accept it ONLY as a
+    // safe single-component filename inside the .obj's own folder. An absolute
+    // value (`mtllib C:\pagefile.sys`) would otherwise REPLACE `parent` via
+    // join() and redirect the bounded read below to an arbitrary on-disk file
+    // — OOM bait plus a narrow info-leak of that file's `newmtl` lines.
+    let mtllib = mtllib.filter(|m| crate::util::path_safety::is_safe_filename(m));
     if let (Some(mtl), Some(parent)) = (mtllib, path.parent()) {
         let mtl_path = parent.join(&mtl);
         let mp = crate::util::path_safety::to_extended_length(&mtl_path);
         if let Ok(f) = std::fs::File::open(&mp) {
-            for line in std::io::BufReader::new(f).lines().take(50_000).map_while(Result::ok) {
+            for line in std::io::BufReader::new(f.take(MAX_MTL_SCAN_BYTES))
+                .lines()
+                .take(50_000)
+                .map_while(Result::ok)
+            {
                 if let Some(rest) = line.trim().strip_prefix("newmtl ") {
                     push_unique(&mut materials, rest);
                 }
@@ -1275,6 +1295,86 @@ mod tests {
 
         // End-to-end name: the first meaningful object wins.
         assert_eq!(build_obj_name(&objects, &materials).as_deref(), Some("Spaceship"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_obj_names_ignores_absolute_mtllib_redirection() {
+        // SEC: an ABSOLUTE `mtllib` path must not be followed. Without the
+        // guard, `parent.join(<absolute>)` replaces the parent and the read is
+        // redirected to an arbitrary on-disk file, leaking its `newmtl` lines.
+        let base = std::env::temp_dir().join(format!("fileid-obj-absmtl-{}", std::process::id()));
+        let objdir = base.join("model");
+        let secretdir = base.join("secret");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&objdir).unwrap();
+        std::fs::create_dir_all(&secretdir).unwrap();
+
+        let secret = secretdir.join("secret.mtl");
+        std::fs::write(&secret, "newmtl Leaked\n").unwrap();
+
+        let obj = objdir.join("model.obj");
+        std::fs::write(&obj, format!("o Box\nusemtl Steel\nmtllib {}\n", secret.display())).unwrap();
+
+        let (objects, materials) = parse_obj_names(&obj);
+        assert_eq!(objects, vec!["Box".to_string()]);
+        assert!(materials.contains(&"Steel".to_string()));
+        assert!(
+            !materials.contains(&"Leaked".to_string()),
+            "absolute mtllib redirection must be rejected, got {materials:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_obj_names_ignores_mtllib_path_traversal() {
+        // SEC: a `..`-relative mtllib must not escape the .obj's own folder.
+        let base = std::env::temp_dir().join(format!("fileid-obj-trav-{}", std::process::id()));
+        let objdir = base.join("sub");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&objdir).unwrap();
+
+        // Secret sits in the PARENT of the .obj's folder.
+        std::fs::write(base.join("secret.mtl"), "newmtl Leaked\n").unwrap();
+
+        let obj = objdir.join("model.obj");
+        std::fs::write(&obj, "o Box\nmtllib ../secret.mtl\n").unwrap();
+
+        let (_objects, materials) = parse_obj_names(&obj);
+        assert!(
+            !materials.contains(&"Leaked".to_string()),
+            "mtllib path traversal must be rejected, got {materials:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parse_obj_names_caps_obj_byte_read() {
+        // The byte cap (16 MiB) must stop the read before a directive that
+        // sits past it — proving `lines()` can't pull an unbounded blob into a
+        // single String. Long (~1 KiB) lines so the BYTE cap trips on bytes
+        // alone, well under the 200 000-line cap (≈17.5k lines here).
+        let dir = std::env::temp_dir().join(format!("fileid-obj-bytecap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut blob = String::with_capacity(18 * 1024 * 1024);
+        blob.push_str("o EarlyObject\n");
+        let filler = format!("# {}\n", "x".repeat(1022));
+        while blob.len() < 17 * 1024 * 1024 + 512 * 1024 {
+            blob.push_str(&filler);
+        }
+        blob.push_str("o LateObject\n");
+
+        let obj = dir.join("huge.obj");
+        std::fs::write(&obj, &blob).unwrap();
+
+        let (objects, _materials) = parse_obj_names(&obj);
+        assert!(objects.contains(&"EarlyObject".to_string()), "early directive must be read");
+        assert!(
+            !objects.contains(&"LateObject".to_string()),
+            "a directive past the byte cap must NOT be read"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -369,6 +369,29 @@ fn collect_file_ids(
     rows.collect()
 }
 
+/// Whether `file_id` is already analyzed by `model_kind` under skip_existing.
+/// Keyed on `vlm_model` ALONE — a file is DONE when analyzed BY THIS MODEL —
+/// exactly mirroring the macOS reference (DeepAnalyzeRunner.swift skip predicate
+/// `vlm_model IS NULL OR vlm_model != ?`). One predicate for both the tags-only
+/// (ENG-40) and full (F-C1-020) passes:
+///  - `persist_vlm_results` writes `vlm_model` on every successful pass, so it
+///    is the processed marker even when no caption/tag survives filtering.
+///  - a VLM switch still re-analyzes: a different `vlm_model` is not "done".
+///  - it must NOT additionally require `vlm_description IS NOT NULL` — metadata-
+///    named kinds legitimately persist a NULL caption (audio with no title/
+///    artist/album, a `.obj` with only generic names: pipeline `audio_description`
+///    / `obj_description` return None; a silent Whisper transcript too). Demanding
+///    a caption re-ran those files — re-running Whisper decode+transcribe — on
+///    every full pass even with skip_existing on.
+fn skip_existing_done(conn: &rusqlite::Connection, file_id: i64, model_kind: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
+        rusqlite::params![file_id, model_kind],
+        |r| r.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 async fn run_deep_analyze_batch(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -535,38 +558,7 @@ async fn run_deep_analyze_batch(
         if skip_existing {
             let already = {
                 let conn = db.lock();
-                if tags_only {
-                    // ENG-40: TagsOnly never writes vlm_description, but it DOES
-                    // write vlm_model (persist_vlm_results sets it on every
-                    // successful pass). Keying "already done" on ≥1 source='vlm'
-                    // tag row re-analyzed any file whose VLM tags were all
-                    // stopword/empty-filtered (zero rows persisted) on every run.
-                    // Mirror the macOS reference (DeepAnalyzeRunner.swift): a file
-                    // is DONE when it was analyzed BY THIS MODEL (vlm_model match)
-                    // — the processed marker is written even when no tag survives
-                    // filtering, while genuinely-unprocessed files (vlm_model NULL
-                    // or a different model) still run.
-                    conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
-                        rusqlite::params![file_id, model_kind],
-                        |r| r.get::<_, bool>(0),
-                    )
-                    .unwrap_or(false)
-                } else {
-                    // F-C1-020: the full pass is model-aware too. "Already done"
-                    // must mean "captioned BY THIS MODEL" (vlm_model match), not
-                    // "captioned by anything" — otherwise switching the VLM and
-                    // re-running skips every file the OLD model captioned, so the
-                    // new model never runs. Require both a non-null caption AND a
-                    // matching vlm_model so a model switch re-analyzes.
-                    conn.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM files \
-                         WHERE id=?1 AND vlm_model=?2 AND vlm_description IS NOT NULL)",
-                        rusqlite::params![file_id, model_kind],
-                        |r| r.get::<_, bool>(0),
-                    )
-                    .unwrap_or(false)
-                }
+                skip_existing_done(&conn, file_id, model_kind)
             };
             if already {
                 let is_last = idx as u64 == total.saturating_sub(1);
@@ -893,16 +885,10 @@ mod tests {
             Some("a dog on a couch"),
         );
 
-        // This is the exact predicate the non-tags-only skip branch runs.
+        // Exercises the real skip predicate shared by both passes.
         let skip_for = |model: &str| -> bool {
             let conn = db.lock();
-            conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM files \
-                 WHERE id=?1 AND vlm_model=?2 AND vlm_description IS NOT NULL)",
-                rusqlite::params![fid, model],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
+            super::skip_existing_done(&conn, fid, model)
         };
 
         // Same model that captioned it → skip (already done by this model).
@@ -911,6 +897,45 @@ mod tests {
         assert!(
             !skip_for("qwen2.5-vl-7b"),
             "a model switch must re-analyze, not skip the old model's caption"
+        );
+    }
+
+    /// Regression: metadata-named kinds legitimately persist `vlm_model` with a
+    /// NULL `vlm_description` (audio with no title/artist/album or a silent
+    /// transcript; a `.obj` with only generic names). The full-pass skip
+    /// predicate previously also demanded `vlm_description IS NOT NULL`, so these
+    /// files NEVER counted as done and were re-analyzed on every pass — re-running
+    /// Whisper decode+transcribe for audio. Keyed on `vlm_model` alone they are
+    /// done, matching the macOS reference.
+    #[test]
+    fn full_pass_skips_metadata_named_with_null_description() {
+        let db = in_memory_db();
+        // Analyzed by this run's model_kind, but no caption was produced.
+        let aud = insert_file(&db, r"C:\lib\silent.mp3", "audio", 0, Some("qwen2.5-vl-7b"), None);
+        let obj = insert_file(&db, r"C:\lib\part.obj", "model", 0, Some("qwen2.5-vl-7b"), None);
+        // Never analyzed → still runs. Insert ALL rows BEFORE locking: insert_file
+        // takes db.lock() internally, so inserting while `conn` is held would
+        // re-enter the (non-reentrant) mutex and deadlock the test.
+        let fresh = insert_file(&db, r"C:\lib\new.mp3", "audio", 0, None, None);
+
+        let conn = db.lock();
+        assert!(
+            super::skip_existing_done(&conn, aud, "qwen2.5-vl-7b"),
+            "an audio file analyzed by this model is done even with a NULL caption — \
+             it must not re-run Whisper on every full pass"
+        );
+        assert!(
+            super::skip_existing_done(&conn, obj, "qwen2.5-vl-7b"),
+            "a .obj analyzed by this model is done even with a NULL caption"
+        );
+        // Never analyzed → still runs; model switch → still re-analyzes.
+        assert!(
+            !super::skip_existing_done(&conn, fresh, "qwen2.5-vl-7b"),
+            "a never-analyzed file (vlm_model NULL) must run"
+        );
+        assert!(
+            !super::skip_existing_done(&conn, aud, "gemma-3-4b"),
+            "a different model must re-analyze, not skip"
         );
     }
 }

@@ -334,15 +334,21 @@ fn apply_run(
         return Ok(());
     }
 
-    println!(
-        "{} {} file(s) would {} ({} reclaimable):",
-        if dry_run { ctx.bold("DRY RUN —") } else { ctx.bold("Will") },
-        victims.len(),
-        method,
-        human_size(total_bytes),
-    );
-    for v in &victims {
-        println!("  {}  {}", display_path(&v.path), ctx.dim(&human_size(v.size)));
+    // Human preview only. In `--json` mode stdout must stay a single JSON value
+    // (the apply result is emitted below); the `--json` dry-run already returned
+    // its payload above, so reaching here under `--json` means a real apply —
+    // suppress the preview lines that would otherwise corrupt the JSON output.
+    if !ctx.json {
+        println!(
+            "{} {} file(s) would {} ({} reclaimable):",
+            if dry_run { ctx.bold("DRY RUN —") } else { ctx.bold("Will") },
+            victims.len(),
+            method,
+            human_size(total_bytes),
+        );
+        for v in &victims {
+            println!("  {}  {}", display_path(&v.path), ctx.dim(&human_size(v.size)));
+        }
     }
 
     if dry_run {

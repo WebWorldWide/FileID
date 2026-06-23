@@ -165,6 +165,15 @@ fn macos_app_db() -> Option<PathBuf> {
     None
 }
 
+/// Escape SQL `LIKE` metacharacters (`%`, `_`, and the `\` escape char) so a
+/// user-supplied string matches literally under `LIKE ?1 ESCAPE '\'`. The
+/// backslash is escaped first so it can't double-escape the wildcard escapes
+/// added afterward. Mirrors the macOS `ReadStore` escaping so a `_` or `%` in
+/// a name resolves the same file on every platform.
+pub fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
 /// Resolve a `<path-or-id>` argument to a `files.id`. Mirrors the lookup
 /// order `info` uses (numeric id → exact canonical/raw path → basename suffix)
 /// so the same argument resolves identically across subcommands.
@@ -195,9 +204,9 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
             return Some(id);
         }
     }
-    let like = format!("%/{}", target.trim_start_matches('/'));
+    let like = format!("%/{}", escape_like(target.trim_start_matches('/')));
     conn.query_row(
-        "SELECT id FROM files WHERE path_text LIKE ?1 LIMIT 1",
+        "SELECT id FROM files WHERE path_text LIKE ?1 ESCAPE '\\' ORDER BY path_text LIMIT 1",
         params![like],
         |r| r.get::<_, i64>(0),
     )
@@ -260,4 +269,61 @@ pub fn canonical_path_text(p: &Path) -> String {
         .unwrap_or_else(|_| p.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db_with(rows: &[(i64, &str)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL);")
+            .unwrap();
+        for (id, p) in rows {
+            conn.execute(
+                "INSERT INTO files (id, path_text) VALUES (?1, ?2)",
+                rusqlite::params![id, p],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn escape_like_neutralizes_wildcards_and_escape_char() {
+        assert_eq!(escape_like("report_2023.pdf"), "report\\_2023.pdf");
+        assert_eq!(escape_like("50%off.png"), "50\\%off.png");
+        // Backslash is escaped first so it can't swallow the wildcard escapes.
+        assert_eq!(escape_like("a\\b_c%"), "a\\\\b\\_c\\%");
+    }
+
+    #[test]
+    fn basename_underscore_is_literal_not_a_wildcard() {
+        // Only a look-alike is indexed; the named file is absent. The old
+        // unescaped `LIKE '%/report_2023.pdf'` resolved this wrong file.
+        let conn = db_with(&[(1, "/seed/reportX2023.pdf")]);
+        assert_eq!(resolve_file_id(&conn, "report_2023.pdf"), None);
+
+        // The exact literal basename still resolves once it is present.
+        let conn = db_with(&[(1, "/seed/reportX2023.pdf"), (2, "/seed/report_2023.pdf")]);
+        assert_eq!(resolve_file_id(&conn, "report_2023.pdf"), Some(2));
+    }
+
+    #[test]
+    fn basename_percent_is_literal_not_a_wildcard() {
+        let conn = db_with(&[(1, "/seed/50-discount-off.png")]);
+        assert_eq!(resolve_file_id(&conn, "50%off.png"), None);
+
+        let conn = db_with(&[(1, "/seed/50%off.png")]);
+        assert_eq!(resolve_file_id(&conn, "50%off.png"), Some(1));
+    }
+
+    #[test]
+    fn basename_match_is_deterministic_across_dirs() {
+        // Two legitimate matches: the lexicographically-first path wins
+        // deterministically, not an arbitrary `LIMIT 1` row (id 7 by rowid).
+        let conn = db_with(&[(7, "/b/report.pdf"), (3, "/a/report.pdf")]);
+        assert_eq!(resolve_file_id(&conn, "report.pdf"), Some(3));
+    }
 }

@@ -335,7 +335,18 @@ pub fn download(
             yes,
         )
     {
-        println!("Aborted. (nothing downloaded)");
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "models",
+                "action": "download",
+                "installed": [],
+                "aborted": true,
+                "reason": "confirmation_required",
+                "message": "large download not confirmed; pass --yes to install non-interactively",
+            }));
+        } else {
+            println!("Aborted. (nothing downloaded)");
+        }
         return Ok(());
     }
 

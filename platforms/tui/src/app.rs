@@ -329,13 +329,23 @@ impl App {
     }
 
     /// Arm a library reload (the `r` key): `main` consumes `reload_requested`
-    /// next tick and re-spawns the DB loader. Guarded against a live download —
-    /// `data::load` sends a terminal `Done` that `apply_load` folds in, clearing
-    /// the `downloading` gauge mid-install (and inviting a second `D` that would
-    /// double-spawn the same download). Ignored while one runs.
+    /// next tick and re-spawns the DB loader. Guarded against a live download AND
+    /// a live scan — both share the loader channel, and `data::load`'s terminal
+    /// `Done` (which `apply_load` folds in) clears `downloading`/`scanning`
+    /// wholesale. A reload racing a download would clear the install gauge
+    /// mid-install (inviting a second `D` that double-spawns the same download); a
+    /// reload racing a scan lands its quick DB-read `Done` first, clearing
+    /// `scanning` while the engine subprocess is still writing the DB — ending the
+    /// scan in the UI and re-enabling `s`/`D`, which could arm a SECOND engine on
+    /// the same SQLite file (violating the single-writer invariant). Ignored while
+    /// either runs.
     fn request_reload(&mut self) {
         if self.downloading {
             self.status = "A model download is running — wait for it to finish before reloading…".to_string();
+            return;
+        }
+        if self.scanning {
+            self.status = "A scan is in progress — wait for it to finish before reloading…".to_string();
             return;
         }
         self.loading = true;
