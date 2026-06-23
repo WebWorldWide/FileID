@@ -1057,6 +1057,17 @@ public final class ReadStore: @unchecked Sendable {
                         WHERE person_id = persons.id
                     ) WHERE id IN (?, ?)
                     """, arguments: [source, target])
+                // The source's representative_face_id may now point at a face that
+                // moved to the target; repoint it at a face the source still owns
+                // (or NULL if none remain) so its card stops showing a foreign face.
+                try db.execute(sql: """
+                    UPDATE persons
+                    SET representative_face_id =
+                        (SELECT id FROM face_prints WHERE person_id = ? ORDER BY id LIMIT 1)
+                    WHERE id = ?
+                      AND representative_face_id NOT IN
+                          (SELECT id FROM face_prints WHERE person_id = ?)
+                    """, arguments: [source, source, source])
                 return changes
             }
             self.notifyChanged()

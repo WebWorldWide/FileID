@@ -1416,6 +1416,10 @@ private struct FinderTagsEditor: View {
     // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
     // concurrently (one would clobber the other). Each edit awaits the previous.
     @State private var tagEditChain: Task<Void, Never>?
+    // The file currently displayed. `file` is a by-value `let` captured stale in
+    // the edit closure; this @State reads live, so a write that finishes after the
+    // user arrowed to another file knows not to apply its result to that file.
+    @State private var displayedFileID: Int64?
 
     var body: some View {
         GlassCard {
@@ -1458,6 +1462,9 @@ private struct FinderTagsEditor: View {
             }
         }
         .task(id: file.id) {
+            // Record the now-displayed file so a still-in-flight tag write for the
+            // prior file can detect that the user navigated away (see runTagEdit).
+            displayedFileID = file.id
             // Read xattr off the main thread — for files on slow / network
             // volumes the read can stall the preview sheet for hundreds of
             // milliseconds while the user is trying to scrub through.
@@ -1493,17 +1500,25 @@ private struct FinderTagsEditor: View {
     /// task, then assigns on the main actor.
     private func runTagEdit(_ write: @escaping @Sendable (URL) throws -> [String]) {
         let url = file.url
+        let targetID = file.id
         let previous = tagEditChain
         tagEditChain = Task { @MainActor in
             _ = await previous?.value   // serialize: the prior edit's write has landed
             do {
                 let updated = try await Task.detached { try write(url) }.value
-                tags = updated
-                error = nil
+                // The write (to `url`) always persists; only apply the result to the
+                // editor's @State if it's still showing the file we edited — else the
+                // user navigated away and this would clobber the new file's tags.
+                if displayedFileID == targetID {
+                    tags = updated
+                    error = nil
+                }
                 store.notifyChanged()   // refresh Library tile tag-count
                 onEdit()
             } catch {
-                self.error = error.localizedDescription
+                if displayedFileID == targetID {
+                    self.error = error.localizedDescription
+                }
             }
         }
     }

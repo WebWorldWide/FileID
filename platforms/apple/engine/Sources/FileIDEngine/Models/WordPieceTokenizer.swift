@@ -41,10 +41,13 @@ final class WordPieceTokenizer {
         guard let text = try? String(contentsOf: vocabFile, encoding: .utf8) else { return nil }
         var vocab: [String: Int64] = [:]
         var i: Int64 = 0
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            // A trailing \r from a Windows checkout never belongs to the token.
-            let tok = line.hasSuffix("\r") ? String(line.dropLast()) : String(line)
-            vocab[tok] = i
+        // Split on any newline grapheme (\n, \r\n, \r) so a CRLF/CR checkout can't
+        // leave a trailing \r glued to every token — that would break the
+        // [CLS]/[SEP]/[UNK] lookups and silently disable BGE. The \r\n grapheme is
+        // a single Character, so it's consumed whole. `omittingEmptySubsequences:
+        // false` keeps token id == line number (the HuggingFace vocab.txt contract).
+        for line in text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }) {
+            vocab[String(line)] = i
             i += 1
         }
         self.init(vocab: vocab, lowerCase: lowerCase)

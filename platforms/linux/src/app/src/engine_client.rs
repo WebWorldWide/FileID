@@ -168,6 +168,13 @@ impl EngineClient {
                 for sub in &subs {
                     let _ = sub.send(ev.clone()).await;
                 }
+                if let EngineEvent::Ready = ev {
+                    // A confirmed healthy (re)start clears the crash budget, so the
+                    // cap means "5 consecutive failed respawns", not "5 for the
+                    // whole session" — otherwise five crashes hours apart, each
+                    // recovered, would permanently give up on the engine.
+                    this_pump.borrow_mut().respawns = 0;
+                }
                 if let EngineEvent::Exited = ev {
                     let shutting = this_pump.borrow().shutting_down.load(Ordering::Relaxed);
                     if !shutting {
