@@ -94,6 +94,7 @@ pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 /// Defined cross-platform so the path is named in one place; Windows resolves
 /// its ORT DLLs via the accelerator-pack pin in `main.rs` and Linux via the
 /// system / `download-binaries` path, so neither writes here today.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn runtime_dir() -> Result<PathBuf> { Ok(root()?.join("runtime")) }
 
 #[cfg(not(target_os = "macos"))]
