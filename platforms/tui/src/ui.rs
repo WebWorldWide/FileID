@@ -379,11 +379,10 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    let cursor = app.cursor();
+    let cursor = app.cursor_clamped(visible.len());
     let cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
     let cw = content_width(cols[0]);
-    let items: Vec<Vec<Span>> = visible.iter().map(|fr| file_row(cw, fr)).collect();
-    render_calm_list(f, cols[0], "Files", items, cursor, true);
+    render_calm_list(f, cols[0], "Files", &visible, cursor, |fr| file_row(cw, fr));
     render_file_detail(f, app, cols[1], visible.get(cursor).copied());
 }
 
@@ -462,8 +461,7 @@ fn render_people(f: &mut Frame, app: &App, area: Rect) {
         None,
     );
     let cw = content_width(rows[1]);
-    let items: Vec<Vec<Span>> = app.data.people.iter().map(|p| person_row(cw, p)).collect();
-    render_calm_list(f, rows[1], "Groups", items, app.cursor(), true);
+    render_calm_list(f, rows[1], "Groups", &app.data.people, app.cursor(), |p| person_row(cw, p));
 }
 
 fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
@@ -499,8 +497,7 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
     let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
     let cursor = app.cursor();
     let cw = content_width(cols[0]);
-    let items: Vec<Vec<Span>> = app.data.dupes.iter().map(|g| dup_row(cw, g)).collect();
-    render_calm_list(f, cols[0], "Duplicate sets", items, cursor, true);
+    render_calm_list(f, cols[0], "Duplicate sets", &app.data.dupes, cursor, |g| dup_row(cw, g));
 
     // Detail: the copies in the selected set — the first marked KEEP (green), the
     // rest flagged as duplicates. Read-only: FileID never deletes here.
@@ -568,8 +565,7 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
         None,
     );
     let cw = content_width(rows[1]);
-    let items: Vec<Vec<Span>> = app.data.plan.iter().map(|m| plan_row(cw, m)).collect();
-    render_calm_list(f, rows[1], "Suggested moves", items, app.cursor(), true);
+    render_calm_list(f, rows[1], "Suggested moves", &app.data.plan, app.cursor(), |m| plan_row(cw, m));
 }
 
 /// The live AI-model status line for Settings: a green "all installed", an
@@ -949,10 +945,7 @@ fn render_file_preview(f: &mut Frame, browser: &Browser, area: Rect) {
 fn dir_row(name: &str, counts: Option<&str>, usable: usize) -> Vec<Span<'static>> {
     let counts = counts.unwrap_or("· unreadable");
     let cw = counts.chars().count();
-    let name_room = usable.saturating_sub(cw + 1).max(4);
-    let name_t = truncate(name, name_room);
-    let used = name_t.chars().count() + cw;
-    let pad = usable.saturating_sub(used).max(1);
+    let (name_t, pad) = name_pad(usable, 0, cw, name, 1, 4);
     vec![
         Span::styled(name_t, Style::default().fg(SECONDARY)),
         Span::raw(" ".repeat(pad)),
@@ -1028,18 +1021,29 @@ fn render_context(f: &mut Frame, area: Rect, left: Vec<Span<'static>>, right: Op
 /// left bar, a gold-tint background, and bold text, while each cell keeps its own
 /// accent colour because the highlight patches background only, never foreground.
 /// Auto-scrolls the cursor into view via `ListState`.
-fn render_calm_list(f: &mut Frame, area: Rect, title: &str, rows: Vec<Vec<Span<'static>>>, cursor: usize, focused: bool) {
-    let len = rows.len();
-    let items: Vec<ListItem> = rows
-        .into_iter()
+fn render_calm_list<T>(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    data: &[T],
+    cursor: usize,
+    row: impl Fn(&T) -> Vec<Span<'static>>,
+) {
+    let len = data.len();
+    let viewport = area.height.saturating_sub(2) as usize;
+    let cursor = cursor.min(len.saturating_sub(1));
+    let offset = if viewport == 0 || cursor < viewport { 0 } else { cursor - viewport + 1 };
+    let end = (offset + viewport).min(len);
+    let items: Vec<ListItem> = data[offset..end]
+        .iter()
         .enumerate()
-        .map(|(i, content)| calm_item(i == cursor, content))
+        .map(|(i, d)| calm_item(offset + i == cursor, row(d)))
         .collect();
-    let block = if focused { focus_block(title) } else { titled_block(title, GOLD) };
+    let block = focus_block(title);
     let list = List::new(items).block(block).highlight_style(Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD));
     let mut state = ListState::default();
     if len > 0 {
-        state.select(Some(cursor.min(len - 1)));
+        state.select(Some(cursor - offset));
     }
     f.render_stateful_widget(list, area, &mut state);
 }
@@ -1143,16 +1147,24 @@ fn input_tail(s: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Truncate `name` to the room left after the fixed `lead`/`trail` column widths
+/// (reserving `gap` between name and trailing column, never below `name_floor`),
+/// then return that name plus the run of spaces that pushes `trail` flush right.
+fn name_pad(total: usize, lead: usize, trail: usize, name: &str, gap: usize, name_floor: usize) -> (String, usize) {
+    let name_room = total.saturating_sub(lead + trail + gap).max(name_floor);
+    let name_t = truncate(name, name_room);
+    let used = lead + name_t.chars().count() + trail;
+    let pad = total.saturating_sub(used).max(gap);
+    (name_t, pad)
+}
+
 /// One Library file row's content spans: a coloured 3-letter kind code, the
 /// name, and a right-aligned size.
 fn file_row(content_w: usize, fr: &crate::data::FileRow) -> Vec<Span<'static>> {
     let (code, color) = kind_code(&fr.kind);
     let size = human_size(fr.size);
     let sizew = size.chars().count();
-    let name_room = content_w.saturating_sub(5 + sizew + 1).max(4); // 5 = "CODE " field
-    let name = truncate(&basename(&fr.path), name_room);
-    let used = 5 + name.chars().count() + sizew;
-    let pad = content_w.saturating_sub(used).max(1);
+    let (name, pad) = name_pad(content_w, 5, sizew, &basename(&fr.path), 1, 4); // 5 = "CODE " field
     vec![
         Span::styled(format!("{code:<4} "), Style::default().fg(color)),
         Span::styled(name, Style::default().fg(SECONDARY)),
@@ -1170,10 +1182,7 @@ fn person_row(content_w: usize, p: &crate::data::PersonRow) -> Vec<Span<'static>
     let dot_color = avatar[(p.id.unsigned_abs() as usize) % avatar.len()];
     let tally = format!("{} files · {} faces", p.files, p.faces);
     let tw = tally.chars().count();
-    let name_room = content_w.saturating_sub(2 + tw + 1).max(4);
-    let name = truncate(&p.name, name_room);
-    let used = 2 + name.chars().count() + tw;
-    let pad = content_w.saturating_sub(used).max(1);
+    let (name, pad) = name_pad(content_w, 2, tw, &p.name, 1, 4);
     vec![
         Span::styled("● ", Style::default().fg(dot_color)),
         Span::styled(name, Style::default().fg(if named { SECONDARY } else { FAINT })),
@@ -1190,10 +1199,7 @@ fn dup_row(content_w: usize, g: &crate::data::DupGroup) -> Vec<Span<'static>> {
     let name = g.paths.first().map_or_else(String::new, |p| basename(p));
     let size = human_size(g.size);
     let sizew = size.chars().count();
-    let name_room = content_w.saturating_sub(cw + 1 + sizew + 1).max(4);
-    let name_t = truncate(&name, name_room);
-    let used = cw + 1 + name_t.chars().count() + sizew;
-    let pad = content_w.saturating_sub(used).max(1);
+    let (name_t, pad) = name_pad(content_w, cw + 1, sizew, &name, 1, 4);
     vec![
         Span::styled(format!("{count} "), Style::default().fg(PINK)),
         Span::styled(name_t, Style::default().fg(SECONDARY)),
@@ -1215,10 +1221,7 @@ fn plan_row(content_w: usize, m: &crate::data::PlanRow) -> Vec<Span<'static>> {
     let dest = rel_dest(&m.destination);
     let tailw = 2 + dest.chars().count(); // "→ " + dest
     let fixed = 2 + catw + 1; // dot + category + space
-    let name_room = content_w.saturating_sub(fixed + tailw + 2).max(6);
-    let name = truncate(&basename(&m.source), name_room);
-    let used = fixed + name.chars().count() + tailw;
-    let pad = content_w.saturating_sub(used).max(2);
+    let (name, pad) = name_pad(content_w, fixed, tailw, &basename(&m.source), 2, 6);
     vec![
         Span::styled(format!("{dot} "), Style::default().fg(dot_color)),
         Span::styled(format!("{cat} "), Style::default().fg(CYAN)),
