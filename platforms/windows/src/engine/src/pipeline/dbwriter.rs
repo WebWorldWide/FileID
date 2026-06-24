@@ -284,7 +284,7 @@ impl DbWriter {
                 )
                 .context("preparing text_stage_done update")?;
             let mut face_delete = tx
-                .prepare_cached("DELETE FROM face_prints WHERE file_id = ?1")
+                .prepare_cached("DELETE FROM face_prints WHERE file_id = ?1 RETURNING id")
                 .context("preparing face delete")?;
             let mut face_stmt = tx
                 .prepare_cached(INSERT_FACE_SQL)
@@ -477,15 +477,14 @@ impl DbWriter {
                     // re-inserted faces get fresh AUTOINCREMENT ids, so without
                     // this every faces_evaluated re-process leaks the prior crops
                     // on disk (face_crops/ grows unbounded across re-scans).
-                    let stale_face_ids: Vec<i64> = {
-                        let mut q =
-                            tx.prepare_cached("SELECT id FROM face_prints WHERE file_id = ?1")?;
-                        let ids = q.query_map(params![file_id], |r| r.get::<_, i64>(0))?
-                            .collect::<rusqlite::Result<Vec<_>>>()?;
-                        ids
-                    };
-                    face_delete
-                        .execute(params![file_id])
+                    // DELETE ... RETURNING id captures the ids being replaced AND
+                    // deletes in one statement (vs a separate SELECT then DELETE) —
+                    // one fewer query per faces-evaluated file under the single
+                    // writer lock. Single-writer DB, so the returned set is exactly
+                    // the pre-delete rows.
+                    let stale_face_ids: Vec<i64> = face_delete
+                        .query_map(params![file_id], |r| r.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()
                         .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
                     for face in &f.faces {
                         let bbox_json = serde_json::json!({

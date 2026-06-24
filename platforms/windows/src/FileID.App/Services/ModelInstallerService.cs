@@ -25,11 +25,12 @@ namespace FileID.Services;
 
 internal sealed class ModelInstallerService : INotifyPropertyChanged
 {
-    // Sentinel model-id constants. The engine writes one sentinel file
-    // per installed model bundle at `%LOCALAPPDATA%\FileID\Models\.sentinels\
-    // {model.id}.installed` (atomic temp+rename; see engine main.rs
-    // handle_prewarm_model). The id strings here MUST match `Model.id`
-    // in engine/src/models/registry.rs.
+    // Sentinel model-id constants. The engine writes one sentinel file per
+    // installed model bundle under `%LOCALAPPDATA%\FileID\Models\.sentinels\`
+    // as either `{model.id}.installed` or a content-hashed
+    // `{model.id}-{hash}.installed` (atomic temp+rename; see engine main.rs
+    // handle_prewarm_model). `SentinelInstalled` matches BOTH forms. The id
+    // strings here MUST match `Model.id` in engine/src/models/registry.rs.
     //
     // Static field init runs in source order, so these MUST be declared
     // before Instance — its ctor calls SeedFromSentinels which reads them.
@@ -1087,17 +1088,29 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         return false;
     }
 
-    /// <summary>Probe for the engine's canonical install marker at
-    /// `%LOCALAPPDATA%\FileID\Models\.sentinels\{id}.installed`. Engine
-    /// writes the file atomically (tmp+rename) only after every file in
-    /// the bundle has landed successfully, so file presence is sufficient
-    /// — no need for the defensive "is the dir empty?" check we used to
-    /// do under the legacy per-model-dir sentinel layout.</summary>
+    /// <summary>Probe for the engine's install marker under
+    /// `%LOCALAPPDATA%\FileID\Models\.sentinels\`. The engine writes EITHER
+    /// `{id}.installed` OR, for versioned bundles, a content-hashed
+    /// `{id}-{hash}.installed` (e.g. `mobileclip_s2-6e850a21215b0755.installed`,
+    /// `arcface-….installed`, `ram_plus-….installed`) — both atomic (tmp+rename)
+    /// only after every bundle file landed, so presence is sufficient. Match
+    /// BOTH forms: an exact-name check (cheap) then the hashed variant. The `-`
+    /// after {id} guards against an id that is a prefix of another (e.g.
+    /// `arcface` must not match a hypothetical `arcface_xl-….installed`).
+    /// (Was exact-`{id}.installed` only, so hashed sentinels read as
+    /// NotInstalled and the Welcome sheet re-showed every launch.)</summary>
     private static bool SentinelInstalled(string modelId)
     {
         try
         {
-            return File.Exists(Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
+            var dir = Path.Combine(AppPaths.ModelsDir, ".sentinels");
+            if (File.Exists(Path.Combine(dir, $"{modelId}.installed"))) return true;
+            if (!Directory.Exists(dir)) return false;
+            foreach (var _ in Directory.EnumerateFiles(dir, $"{modelId}-*.installed"))
+            {
+                return true;
+            }
+            return false;
         }
         catch { return false; }
     }

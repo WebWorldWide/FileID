@@ -15,7 +15,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
+#[cfg(not(feature = "vlm-native"))]
+use anyhow::anyhow;
+#[cfg(not(feature = "vlm-native"))]
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -204,7 +207,7 @@ pub async fn caption(
     runner: &VlmRunner,
     req: &CaptionRequest,
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    mut on_token: impl FnMut(&str),
+    on_token: impl FnMut(&str),
 ) -> Result<CaptionResult> {
     #[cfg(feature = "vlm-native")]
     {
@@ -213,6 +216,7 @@ pub async fn caption(
 
     #[cfg(not(feature = "vlm-native"))]
     {
+        let mut on_token = on_token;
         let mut cmd = Command::new(&runner.binary);
         cmd.arg("-m").arg(&req.gguf_path);
         cmd.arg("--mmproj").arg(&req.mmproj_path);
@@ -319,17 +323,31 @@ mod native {
     // For now this is a placeholder that delegates to the subprocess
     // path so the feature builds cleanly. A real implementation lands
     // in a follow-up; the contract is the same.
-    use super::*;
+    use super::{bail, Arc, CaptionRequest, CaptionResult, Result, VlmRunner};
+    // `async` is intentional: the real llama-cpp-2 impl that replaces this
+    // placeholder is async, and the caller `.await`s it.
+    #[allow(clippy::unused_async)]
     pub async fn caption(
         runner: &VlmRunner,
         req: &CaptionRequest,
         cancel: Arc<std::sync::atomic::AtomicBool>,
         on_token: impl FnMut(&str),
     ) -> Result<CaptionResult> {
-        // Falls through to the subprocess code path so the feature is
-        // additive rather than an alternate code path. Replace with a
-        // real llama-cpp-2 invocation once the native build wires up.
-        let _ = (runner, req, cancel, on_token);
+        // Touch the full runner/request contract so its fields stay "read"
+        // even while this placeholder ignores them — the real llama-cpp-2 impl
+        // consumes all of them. Replace with that invocation once the native
+        // build wires up.
+        let _ = (
+            &runner.binary,
+            &req.gguf_path,
+            &req.mmproj_path,
+            &req.image_path,
+            &req.prompt,
+            req.max_tokens,
+            req.greedy,
+            cancel,
+            on_token,
+        );
         bail!("vlm-native is a build-time placeholder; rebuild without the feature")
     }
 }

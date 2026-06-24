@@ -883,9 +883,12 @@ fn drives_candidates() -> Vec<PathBuf> {
     if cfg!(target_os = "macos") {
         vec![PathBuf::from("/Volumes")]
     } else if cfg!(target_os = "windows") {
-        // No single mount root on Windows; fall through to `/` (the root of the
-        // current drive), from which the user can navigate to any drive.
-        Vec::new()
+        // No single mount root on Windows; use the system drive's root (e.g.
+        // `C:\`) as an absolute starting point to navigate from. `/` is NOT an
+        // absolute path on Windows (it's drive-relative), so — unlike Unix — it
+        // can't serve as the fallback `drives_root` returns.
+        let sysdrive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        vec![PathBuf::from(format!("{sysdrive}\\"))]
     } else {
         let mut v = Vec::with_capacity(3);
         if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {

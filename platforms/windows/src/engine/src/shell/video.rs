@@ -255,8 +255,14 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
 }
 
 fn propvariant_to_i64(pv: &PROPVARIANT) -> Option<i64> {
-    // PROPVARIANT impls TryFrom for the integer variants; round-trip
-    // through &PROPVARIANT which the windows-rs macros convert.
+    // PROPVARIANT impls TryFrom for the integer variants; round-trip through
+    // &PROPVARIANT which the windows-rs macros convert. MF_PD_DURATION is
+    // delivered as VT_UI8 (UINT64), so try the unsigned conversion first and
+    // saturate into i64 — otherwise a VT_UI8 duration fails the i64 TryFrom,
+    // resolves to 0, and the keyframe is grabbed from frame 0 instead of 25%.
+    if let Ok(u) = u64::try_from(pv) {
+        return Some(u.min(i64::MAX as u64) as i64);
+    }
     i64::try_from(pv).ok()
 }
 

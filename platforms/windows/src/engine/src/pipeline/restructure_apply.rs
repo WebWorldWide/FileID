@@ -291,8 +291,14 @@ impl RestructureApply {
                                 let _ = j.flush();
                                 let _ = j.get_ref().sync_all();
                             }
-                            // Same forward-only gate as the journal: this move was
-                            // approved by the user, so credit it to the feedback memory.
+                        }
+                        // Same forward-only gate as the journal: this move was
+                        // approved by the user, so credit it to the feedback
+                        // memory. Recorded for every real forward move
+                        // independently of journal state, so an undo journal
+                        // that failed to open doesn't also silently disable
+                        // learning. (record_undo=false on an undo run.)
+                        if record_undo {
                             applied_pairs.push((m.source.clone(), final_dest.clone()));
                         }
                     }

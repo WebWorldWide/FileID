@@ -441,7 +441,14 @@ fn apply_run(
         if delete { "This CANNOT be undone." } else { "(recoverable from Trash)" },
     );
     if !ctx.confirm(&prompt, yes) {
-        println!("Aborted — no files removed. {}", ctx.dim("(pass --yes to skip the prompt)"));
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "dedupe", "mode": "apply", "aborted": true,
+                "reason": "not_confirmed",
+            }));
+        } else {
+            println!("Aborted — no files removed. {}", ctx.dim("(pass --yes to skip the prompt)"));
+        }
         return Ok(());
     }
 

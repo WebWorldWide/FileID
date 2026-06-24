@@ -292,26 +292,31 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
 /// The image pass pre-segments files by capture-time gap before clustering so
 /// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
 /// never compete in the same cluster. (RESTRUCTURE.md §2)
-pub fn semantic_classify(
+///
+/// `used_group_names` is a caller-owned new-folder-name registry. The image /
+/// document / non-image passes all target the same `library_root`, so sharing
+/// one registry across them stops two passes independently minting the SAME new
+/// folder and silently merging unrelated content into it — the same de-collision
+/// the registry already gives clusters within a pass (#9) and across time-
+/// segments, extended library-wide.
+pub(crate) fn semantic_classify(
     files: &[SemanticFile],
     prototypes: &[FolderPrototype],
     library_root: &Path,
+    used_group_names: &mut std::collections::HashSet<String>,
 ) -> Vec<ProposedMove> {
     let profile = image_profile();
     let hp = file_hyperparams();
     let segments = time_segment_indices(files);
-    // Shared name registry so segment 1's "Beach" cluster doesn't collide
-    // with segment 2's independent "Beach" cluster into the same folder.
-    let mut shared_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     if segments.len() <= 1 {
-        return semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), prototypes, library_root, profile, hp, &mut shared_names);
+        return semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), prototypes, library_root, profile, hp, used_group_names);
     }
     // Pre-segmented: cluster each time-gap window independently so content
     // similarity doesn't merge events that are separated by hours or days.
     let mut all_moves = Vec::new();
     for idxs in &segments {
         let seg: Vec<&SemanticFile> = idxs.iter().map(|&i| &files[i]).collect();
-        let moves = semantic_classify_profiled(&seg, prototypes, library_root, profile, hp, &mut shared_names);
+        let moves = semantic_classify_profiled(&seg, prototypes, library_root, profile, hp, used_group_names);
         all_moves.extend(moves);
     }
     all_moves
@@ -508,7 +513,13 @@ fn semantic_classify_profiled(
 /// neither clusters. The bag-of-words IS the representative vector (there is no
 /// image embedding), so the same density clusterer + learn-your-style folder
 /// matching apply unchanged under the tighter non-image profile.
-pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<ProposedMove> {
+/// `used_group_names` is the caller-owned registry shared with the image and
+/// document passes so this pass can't mint a new folder name they already used.
+pub(crate) fn classify_non_image(
+    files: &[SemanticFile],
+    library_root: &Path,
+    used_group_names: &mut std::collections::HashSet<String>,
+) -> Vec<ProposedMove> {
     let sigs = non_image_signatures(files);
     if sigs.len() < 2 {
         return Vec::new();
@@ -521,7 +532,7 @@ pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(&sigs.iter().collect::<Vec<_>>(), &protos, library_root, non_image_profile(), file_hyperparams(), &mut std::collections::HashSet::new())
+    semantic_classify_profiled(&sigs.iter().collect::<Vec<_>>(), &protos, library_root, non_image_profile(), file_hyperparams(), used_group_names)
 }
 
 /// Document-content pass — cluster documents by their BGE text embedding (read from
@@ -531,7 +542,13 @@ pub fn classify_non_image(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
 /// `file.clip` MUST be the BGE vector; docs without an extractable-text embedding are
 /// excluded by the caller and fall through to `classify_non_image`. Uses doc-specific
 /// thresholds because BGE cosines sit lower than CLIP-image cosines. (RESTRUCTURE.md R3)
-pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<ProposedMove> {
+/// `used_group_names` is the caller-owned registry shared with the image and
+/// non-image passes so this pass can't mint a new folder name they already used.
+pub(crate) fn classify_documents(
+    files: &[SemanticFile],
+    library_root: &Path,
+    used_group_names: &mut std::collections::HashSet<String>,
+) -> Vec<ProposedMove> {
     if files.len() < 2 {
         return Vec::new();
     }
@@ -539,7 +556,7 @@ pub fn classify_documents(files: &[SemanticFile], library_root: &Path) -> Vec<Pr
         .into_iter()
         .filter(|p| !is_junk_prototype_folder(&p.path))
         .collect();
-    semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), &protos, library_root, doc_profile(), doc_hyperparams(), &mut std::collections::HashSet::new())
+    semantic_classify_profiled(&files.iter().collect::<Vec<_>>(), &protos, library_root, doc_profile(), doc_hyperparams(), used_group_names)
 }
 
 /// Document content-embedding profile. The representative IS the 384-d BGE vector (so
@@ -1010,7 +1027,7 @@ mod tests {
         for i in 0..6 {
             files.push(file(100 + i, &format!("src/boat{i}.jpg"), vec![0.0, 1.0, 0.0, 0.0], &["boat", "lake"]));
         }
-        let moves = semantic_classify(&files, &[], Path::new("/lib"));
+        let moves = semantic_classify(&files, &[], Path::new("/lib"), &mut std::collections::HashSet::new());
         let cats: std::collections::HashSet<_> = moves.iter().map(|m| m.category.clone()).collect();
         assert_eq!(cats.len(), 2, "expected 2 groups, got {cats:?}");
     }
@@ -1029,7 +1046,7 @@ mod tests {
         for i in 0..6 {
             files.push(file(100 + i, &format!("a/s{i}.jpg"), vec![0.0, 1.0, 0.0, 0.0], &["16/9"]));
         }
-        let moves = semantic_classify(&files, &[], Path::new("/lib"));
+        let moves = semantic_classify(&files, &[], Path::new("/lib"), &mut std::collections::HashSet::new());
         assert_eq!(moves.len(), 12, "all files placed: {moves:?}");
         let parents: std::collections::HashSet<_> = moves
             .iter()
@@ -1053,7 +1070,7 @@ mod tests {
             centroid: unit(vec![1.0, 0.0, 0.0]),
             name_tokens: std::collections::HashSet::default(),
         }];
-        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new());
         assert!(!moves.is_empty());
         assert!(
             moves.iter().all(|m| m.destination.starts_with("/lib/Dogs")),
@@ -1084,7 +1101,7 @@ mod tests {
         for i in 0..4 {
             files.push(file(100 + i, &format!("a/s{i}.jpg"), vec![0.0, 1.0, 0.0], &["photo", "sunset", "beach"]));
         }
-        let cats: std::collections::HashSet<_> = semantic_classify(&files, &[], Path::new("/lib"))
+        let cats: std::collections::HashSet<_> = semantic_classify(&files, &[], Path::new("/lib"), &mut std::collections::HashSet::new())
             .into_iter()
             .map(|m| m.category)
             .collect();
@@ -1102,7 +1119,7 @@ mod tests {
             centroid: unit(vec![1.0, 0.0, 0.0]),
             name_tokens: std::collections::HashSet::default(),
         }];
-        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new());
         assert!(!moves.is_empty());
         assert!(moves.iter().all(|m| m.confidence == Confidence::Auto), "exact match should auto-file");
         assert!(moves.iter().all(|m| m.reason.as_deref().unwrap_or("").contains("Dogs")));
@@ -1138,7 +1155,7 @@ mod tests {
             centroid: unit(vec![1.0, 0.0, 0.0]), // ~0.6 cosine from the cluster
             name_tokens: std::collections::HashSet::from(["acme".to_string(), "invoice".to_string()]),
         }];
-        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new());
         assert!(!moves.is_empty());
         assert!(
             moves.iter().all(|m| m.destination.starts_with("/lib/Acme Invoices")),
@@ -1166,7 +1183,7 @@ mod tests {
             centroid: unit(vec![1.0, 0.0, 0.0]),
             name_tokens: std::collections::HashSet::from(["dog".to_string(), "puppy".to_string()]),
         }];
-        let moves = semantic_classify(&files, &protos, Path::new("/lib"));
+        let moves = semantic_classify(&files, &protos, Path::new("/lib"), &mut std::collections::HashSet::new());
         assert!(!moves.is_empty());
         assert!(
             moves.iter().all(|m| m.confidence == Confidence::Review),
@@ -1201,7 +1218,7 @@ mod tests {
         }
         files.push(file(999, "/lib/downloads/zzqq_widget.txt", vec![], &[]));
 
-        let moves = classify_non_image(&files, Path::new("/lib"));
+        let moves = classify_non_image(&files, Path::new("/lib"), &mut std::collections::HashSet::new());
         assert_eq!(moves.len(), 10, "the singleton is excluded: {moves:?}");
         let cats: std::collections::HashSet<_> = moves.iter().map(|m| m.category.clone()).collect();
         assert_eq!(cats.len(), 2, "got {cats:?}");

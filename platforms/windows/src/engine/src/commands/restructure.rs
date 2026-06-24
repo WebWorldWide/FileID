@@ -307,11 +307,17 @@ pub(crate) async fn handle_plan_restructure(
         std::collections::HashSet::new();
     let mut proposed = Vec::new();
     let mut moved: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // One new-folder-name registry shared across all three semantic passes
+    // (image, document, non-image) — they target the same library_root, so a
+    // shared registry stops two passes minting the same new folder and silently
+    // merging unrelated content into it.
+    let mut used_group_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Butler P1: image semantic pass (CLIP-embedding content clusters).
     if semantic_files.len() >= 2 {
         let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
-        let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path);
+        let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path, &mut used_group_names);
         absorb_semantic_moves(moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
@@ -336,7 +342,7 @@ pub(crate) async fn handle_plan_restructure(
             })
             .collect();
         let doc_moves =
-            restructure_semantic::classify_documents(&doc_files, library_root_path);
+            restructure_semantic::classify_documents(&doc_files, library_root_path, &mut used_group_names);
         absorb_semantic_moves(doc_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
@@ -359,7 +365,7 @@ pub(crate) async fn handle_plan_restructure(
             })
             .collect();
         let ni_moves =
-            restructure_semantic::classify_non_image(&non_image_files, library_root_path);
+            restructure_semantic::classify_non_image(&non_image_files, library_root_path, &mut used_group_names);
         absorb_semantic_moves(ni_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
