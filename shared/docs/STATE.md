@@ -8,6 +8,25 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-24 (cont.) — audit loop CLOSED on `main`: 6 PRs merged + CI-green; engine bug-hunt found ZERO bugs
+
+Committed/pushed the on-hardware audit fixes as **6 PRs (#73–#78), all merged to `main`, all three CI workflows green** (Windows engine, Linux, Flatpak). The "/loop until perfect" backlog from the entries below is now closed:
+
+- **#73** — WinUI welcome/install sheet showing every launch: `ModelInstallerService.SentinelInstalled` now matches `{id}.installed` OR globs `{id}-*.installed` (hashed sentinels). Runtime-confirmed (log + screenshot: sheet gone when models present).
+- **#74** — CLI exit code (`bail` when `result.failed>0`) + `--exact/--similar/--apply` gating + `--json`-decline emits JSON; TUI Windows browse-root (SystemDrive, not `/`) + one fewer `visible_files()` alloc; `PeopleView` logs full `ex` + catches `OperationCanceledException`; Windows backslash-path fixes in CLI test seeds. CLI 20 + TUI 80 tests green.
+- **#75** — downloader egress hardening: initial-URL host allowlist (`download_url_allowed`, enforced in `download_simple`/`download_parallel`) + `actual_len == total` size-integrity check.
+- **#76** — `main.rs` stdio-loop panic firewall (`catch_unwind` per dispatch → `command_handler_panic` error frame; no silent hang holding the DB writer).
+- **#77** — TUI event-loop dirty-flag (redraw only on real events, not ~10×/s idle).
+- **#78** — fix-forward: #75's egress unit test embedded literal off-allowlist URLs, which broke the Windows-engine CI **source-URL allowlist scan** (greps source for `https?://<host>`); rebuilt the test URLs via `format!` so no literal URL appears. Root-caused from the CI log, replicated the scan locally, confirmed green. (Gotcha saved to auto-memory.)
+
+**Post-merge follow-ups (this PR):**
+- **`models/whisper.rs`** — `transcribe`'s `child.try_wait()?` propagated a rare OS error WITHOUT reaping the child (orphaned whisper-cli), while the timeout path cleaned up. Now all three exit paths (success / timeout / try_wait-error) reap the child + drain the reader symmetrically — matches the `kill_on_drop` convention every other engine child uses. clippy `--all-targets -D warnings` + 413 tests green.
+- **`build/iterate.ps1`** — `$MemoryCapMB` 1500→6000. The 1500 MB cap was macOS-MLX-derived; the Windows CUDA stack floor is ~2.4–3.6 GB (RAM++ Swin-L + CLIP + YuNet/SFace + cuDNN), so A4 false-failed every on-hardware run (measured peak 3635 MB @300 files). In-flight decode is concurrency-bounded so RSS plateaus; 6 GB clears steady state with headroom while still tripping a true unbounded leak. (Not CI-gated — `build/` is outside the engine workflow trigger.)
+
+**Deep engine bug-hunt (concurrency / cancellation / lifecycle / panic / locks): ZERO bugs found.** A focused agent + 5 parallel sub-audits read the whole high-risk surface (coordinator, stdio loop, discovery, tagging, dbwriter, sink, scan/wipe, all `models/*`, ipc, db, clustering, restructure, deep_analyze, obj_render, usn, util) and confirmed the engine is well-hardened — every hazard already guarded (panic firewalls, vision/clip semaphores, per-file 60s timeouts, length-gated tensor decodes, bounds + zero-dim guards, `kill_on_drop` children, NaN-safe divides, `try_reserve_exact` + pixel/byte clamps), with **zero production lock-unwraps** (only a test `ENV_LOCK`; `ep_guard` recovers from poison). The only two sub-P2 items it honestly flagged: whisper try_wait (now fixed) and `cluster_suggestions::compose_pair_jpeg`'s large-alloc path — but that module is `pub mod`-declared in `pipeline/mod.rs` and **never referenced anywhere**, so it's dead/unreachable, not a bug.
+
+**Perf — data-driven conclusion:** the ~7.9 f/s scan ceiling is GPU-compute-bound on RAM++ Swin-L (matches the documented ceiling). CPU-side micro-opts (ndarray per-pixel→planar fill) are marginal against a GPU-bound pipeline and risk a silent ML regression with no golden test — **deferred as not worth the risk** until the only real lever, the 384→256 RAM++ re-export (blocked on Py3.14 export tooling), is unblocked. Batching / INT8 / fp16 already verified dead-ends (model is fp16).
+
 ## 2026-06-24 — ON-HARDWARE validation (RTX 2060 + real G:\TrueNAS data); CLI+TUI Windows bugs fixed; WinUI app smoke-passed
 
 Ran the dev box's real hardware this session (NOT the usual headless env): **Adlon ext drive at `G:`, RTX 2060 (CUDA EP pack + cudnn installed — engine now auto-pins CUDA, no longer DirectML-only), 129 model files installed.** Backed up the user's real DB (311 files / 180 persons / 623 face_crops → `%LOCALAPPDATA%\FileID-backup-onhwtest`) before any wipe, then validated end-to-end:

@@ -1,5 +1,22 @@
 # NEXT — resume here
 
+## 2026-06-24 (cont.) — audit loop CLOSED; what genuinely remains
+
+The "/loop until perfect" engine + CLI + TUI backlog is **done and on `main` (CI-green: 6 PRs #73–#78 + the whisper/cap follow-up)**, and the deep engine bug-hunt found **zero** bugs (the engine is well-hardened). What's left is either blocked, needs a Mac, or is sensitive C# UI work that can't be runtime-verified from the headless box:
+
+**C# app (build/test/format-verifiable headless, but NO runtime verify here — touch with care):**
+- **[perf/HIGH, sensitive] `DebugLog` level-gate** — still not level-gated; `Debug`/`Info` do synchronous locked file I/O on the UI thread in scroll (`[THUMB]`/tile) + scan (`[APPLY:N]`/event) hot paths. CLAUDE.md is emphatic this is **load-bearing forensic infra** (`[APPLY:N]`/`[ENGINE-SUB]` catch the next native fast-fail; do NOT strip or re-batch). Needs careful Debug-vs-mandatory-Info scoping AND on-hardware confirmation the forensic capture still fires — defer until verifiable on the box.
+- **[perf/MED] `LibraryViewModel.MergeById` O(n²)** — `IndexOfInstance` per item; build a `Dictionary<FileTile,int>` once (or `Reset` on large permutation distance). Clean + headless-verifiable — a good next standalone PR.
+- **[perf/LOW] `FileTile.DateDisplay`/`SizeDisplay`** materialize-once (match the `TopTwoTags` precedent); `Convert.ToInt32`→`ToInt64` on COUNT/SUM reads (6 sites, overflow-only hardening).
+- **[robustness/MED, latent] `Theme/CompletionRipple` + `SankeyFlowControl`** teardown on unload (Popup/Storyboard + `_renderDebounce` timer can outlive a mid-animation unload); `IridescentBorder` per-vsync alloc + no occlusion gating — but it's currently UNUSED, so fix-or-document-the-mismatch before it ships.
+
+**Blocked / cross-platform:**
+- **[engine/perf] RAM++ 384→256 re-export** — the only remaining real throughput lever (pipeline is GPU-bound at ~7.9 f/s); blocked on the Py3.14 export tooling. The ndarray preprocessing micro-opt is deferred (marginal vs GPU-bound; gate on a byte-identity golden test first).
+- **macOS lockstep (WS-MAC)** — needs a Mac to build/verify (see `LOCKSTEP-2026-06-02.md`).
+- **`cluster_suggestions` module** — dead (`pub mod` in `pipeline/mod.rs`, never referenced). Remove it, or wire up if the pair-suggestion UI is still planned — decide with product intent.
+
+**Cleanup:** the `%LOCALAPPDATA%\FileID-backup-onhwtest` DB backup can be deleted once the user confirms their restored library + regenerated face thumbnails are fine.
+
 ## 2026-06-24 — bug+perf audit loop: remaining items (continue the loop)
 
 10 engine fixes + CLI/TUI Windows-bug fixes landed this session. **Engine + OCR are now ON-HARDWARE VERIFIED** (RTX 2060, real `G:\TrueNAS` data — see STATE 2026-06-24); CLI (20 tests) + TUI (80 tests) are green; the WinUI app smoke-passed on real data. **Still NOT committed/pushed.** Continue the "/loop until perfect" with the items below, highest value first. Read each site before editing (agent findings include false positives — several this session didn't survive review).
