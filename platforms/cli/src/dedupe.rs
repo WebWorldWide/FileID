@@ -317,6 +317,13 @@ fn apply_run(
 
     // Destructive apply acts on exactly one signal. Default exact (byte-
     // identical) — the safest; `--similar` opts into perceptual near-dups.
+    // Reject an explicit both-flags apply rather than silently dropping
+    // --similar — they select different victim sets.
+    if do_exact && do_similar {
+        anyhow::bail!(
+            "dedupe --apply: choose one of --exact or --similar (they select different victim sets)"
+        );
+    }
     let use_similar = do_similar && !do_exact;
     let set = if use_similar {
         similar_victims(&conn, threshold)?
@@ -465,6 +472,9 @@ fn apply_run(
             "unsupported": result.unsupported,
             "reclaimBytes": result.reclaimed,
         }));
+        if result.failed > 0 {
+            anyhow::bail!("dedupe: {} file(s) failed to remove", result.failed);
+        }
         return Ok(());
     }
 
@@ -484,6 +494,9 @@ fn apply_run(
             "  {}",
             ctx.dim("Trash is unavailable here — re-run with --delete to remove permanently.")
         );
+    }
+    if result.failed > 0 {
+        anyhow::bail!("dedupe: {} file(s) failed to remove", result.failed);
     }
     Ok(())
 }
