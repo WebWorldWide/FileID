@@ -118,28 +118,48 @@ fn event_loop(
     // quit — the `fileid` CLI has no parent-PID/EOF watchdog (unlike the scan
     // engine), so without this it would keep downloading after the TUI exits.
     let mut download: Option<models::DownloadHandle> = None;
+    // Redraw only when something changed — a key, a loader/scan/download message,
+    // or a resize. A pure 100 ms poll-timeout tick with none of those leaves the
+    // screen untouched, so an idle TUI stops rebuilding every widget (and
+    // re-filtering visible_files) ~10x/second for nothing. There is no time-based
+    // animation here (download/scan progress arrives as loader messages, each of
+    // which sets dirty), so gating on real events can't freeze the UI. ratatui
+    // already diffs the back buffer, so this saves the rebuild CPU, not writes.
+    let mut dirty = true;
     loop {
-        terminal.draw(|f| ui::render(f, app))?;
+        if dirty {
+            terminal.draw(|f| ui::render(f, app))?;
+            dirty = false;
+        }
 
         // Drain any pending loader events (non-blocking). Re-check the model
         // install state whenever a load/scan/download settles (loading goes
         // true→false), so the standing "models missing" banner clears the moment
         // a download finishes and re-appears if one failed.
         let was_loading = app.loading;
+        let mut got_msg = false;
         while let Ok(msg) = rx.try_recv() {
             app.apply_load(msg);
+            got_msg = true;
         }
         if was_loading && !app.loading {
             app.missing_models = scan::missing_models_display();
         }
+        if got_msg {
+            dirty = true;
+        }
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            match event::read()? {
                 // Accept Press AND Repeat; only ignore Release. Some terminals/configs
                 // report key kinds other than Press, which silently dropped keys.
-                if key.kind != KeyEventKind::Release {
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
                     app.on_key(key.code, key.modifiers);
+                    dirty = true;
                 }
+                // A resize changes the layout — force a redraw next iteration.
+                Event::Resize(_, _) => dirty = true,
+                _ => {}
             }
         }
 
