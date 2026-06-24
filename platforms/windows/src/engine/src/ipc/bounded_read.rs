@@ -6,7 +6,7 @@
 //! by byte (well, in 8 KB chunks via the BufReader's internal buffer) and
 //! rejects the moment the in-progress line crosses `max_bytes`.
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 /// Outcome of one stdin line read.
 pub(crate) enum BoundedRead {
@@ -76,10 +76,32 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
 /// Drain bytes from `reader` until the next newline. Used to resync the IPC
 /// framing after rejecting an oversized frame. Best-effort; swallows errors
 /// and returns on any failure or EOF.
+///
+/// Scans the BufReader's buffer in chunks (same R4-04 reasoning as
+/// `bounded_read_line` — not one ReadExact future per byte), and gives up after
+/// `MAX_DRAIN` bytes without a newline. This drain runs *outside* the stdio
+/// loop's `select!`, so a multi-GB newline-free stream on an unbounded
+/// byte-at-a-time drain could pin the loop and defeat shutdown; bounding it
+/// keeps each resync cheap and lets the loop re-check shutdown promptly.
 pub(crate) async fn drain_to_newline<R: AsyncBufRead + Unpin>(reader: &mut R) {
-    let mut byte = [0u8; 1];
-    while reader.read_exact(&mut byte).await.is_ok() {
-        if byte[0] == b'\n' {
+    const MAX_DRAIN: usize = 64 * 1024 * 1024;
+    let mut drained = 0usize;
+    loop {
+        let available = match reader.fill_buf().await {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        if available.is_empty() {
+            return; // EOF
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            reader.consume(pos + 1);
+            return;
+        }
+        let len = available.len();
+        reader.consume(len);
+        drained = drained.saturating_add(len);
+        if drained >= MAX_DRAIN {
             return;
         }
     }
