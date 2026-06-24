@@ -98,12 +98,25 @@ impl WhisperRunner {
         });
         let deadline = std::time::Instant::now() + TRANSCRIBE_TIMEOUT;
         loop {
-            if let Some(status) = child.try_wait()? {
-                let text = reader.join().unwrap_or_default();
-                if !status.success() {
-                    bail!("whisper-cli exited with status {}", status);
+            // try_wait() can itself fail with a rare OS error; on that path we
+            // must still reap the child + drain the reader, or the whisper-cli
+            // process is orphaned. Every other engine child uses kill_on_drop;
+            // this sync spawn predates that, so each exit path reaps explicitly.
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let text = reader.join().unwrap_or_default();
+                    if !status.success() {
+                        bail!("whisper-cli exited with status {}", status);
+                    }
+                    return Ok(collapse_transcript(&text));
                 }
-                return Ok(collapse_transcript(&text));
+                Ok(None) => {}
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = reader.join();
+                    return Err(e).context("whisper-cli try_wait");
+                }
             }
             if std::time::Instant::now() >= deadline {
                 let _ = child.kill();
