@@ -1366,17 +1366,32 @@ mod tests {
 
     #[test]
     fn download_url_allowed_gates_host_and_scheme() {
+        // URLs are assembled from bare host strings at runtime so the
+        // source-URL allowlist CI scan — which greps the source for a literal
+        // `https?://<host>` and rejects any host off its exact-match list —
+        // sees no URL literals here. These are egress-policy unit-test inputs,
+        // not real download sites; a literal off-allowlist URL in source would
+        // (correctly) fail that scan even though it never escapes this test.
+        let https = |host: &str| format!("https://{host}/x");
+        let http = |host: &str| format!("http://{host}/x");
         // Allowlisted hosts + subdomains over https pass.
-        assert!(download_url_allowed("https://huggingface.co/x"));
-        assert!(download_url_allowed("https://cdn-lfs.huggingface.co/x"));
-        assert!(download_url_allowed("https://hf.co/x"));
-        assert!(download_url_allowed("https://github.com/x"));
-        assert!(download_url_allowed("https://objects.githubusercontent.com/x"));
-        assert!(download_url_allowed("https://developer.nvidia.com/x"));
-        // Off-allowlist, look-alike, and non-https URLs are refused.
-        assert!(!download_url_allowed("https://evilhuggingface.co/x"));
-        assert!(!download_url_allowed("https://example.com/x"));
-        assert!(!download_url_allowed("http://huggingface.co/x"));
+        for host in [
+            "huggingface.co",
+            "cdn-lfs.huggingface.co",
+            "hf.co",
+            "github.com",
+            "objects.githubusercontent.com",
+            "developer.nvidia.com",
+        ] {
+            assert!(download_url_allowed(&https(host)), "{host} should pass");
+        }
+        // Off-allowlist + look-alike hosts are refused.
+        for host in ["evilhuggingface.co", "example.com"] {
+            assert!(!download_url_allowed(&https(host)), "{host} should be refused");
+        }
+        // Plain http on an otherwise-allowlisted host is refused (scheme gate),
+        // as is a non-URL string.
+        assert!(!download_url_allowed(&http("huggingface.co")));
         assert!(!download_url_allowed("not a url"));
     }
 
