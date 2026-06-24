@@ -17,7 +17,15 @@
 param(
     [string]$Corpus = "",
     [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
-    [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling per macOS, +25% slack
+    [int]$MemoryCapMB = 6000,        # Windows CUDA stack floor is ~2.4-3.6 GB (RAM++
+                                     # Swin-L + CLIP + YuNet/SFace weights + cuDNN
+                                     # context); measured peak 3635 MB @300 files on
+                                     # the RTX 2060. macOS's 1.2 GB ceiling never
+                                     # applied here. In-flight decode is concurrency-
+                                     # bounded, not file-count-bounded, so RSS
+                                     # plateaus; 6 GB clears steady state with
+                                     # headroom for 4K images while still tripping a
+                                     # true unbounded leak (which blows past 8+ GB).
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
     [switch]$Verbose
