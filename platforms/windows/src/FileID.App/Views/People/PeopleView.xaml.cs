@@ -85,7 +85,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 if (_unloaded) return;
                 try { await ViewModel.RefreshAsync(CancellationToken.None); }
-                catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
+                catch (OperationCanceledException) { /* benign: refresh superseded or view torn down */ }
+                catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex); }
             });
         });
 
@@ -93,7 +94,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (_unloaded) return;
         try { await ViewModel.RefreshAsync(CancellationToken.None); }
-        catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
+        catch (OperationCanceledException) { /* benign: refresh superseded or view torn down */ }
+        catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex); }
         UpdateHiddenUnknownsFooter();
         RefreshContinueToDeepAnalyzeBanner();
     }

@@ -340,6 +340,9 @@ fn apply_moves(
             "failed": result.failed,
             "privilegeError": result.privilege_error,
         }));
+        if result.failed > 0 {
+            anyhow::bail!("restructure: {} move(s) failed", result.failed);
+        }
         return Ok(());
     }
     println!("{}", ctx.bold("Restructure apply complete."));
@@ -349,6 +352,9 @@ fn apply_moves(
     }
     if let Some(pe) = &result.privilege_error {
         println!("  {} {}", ctx.bold("Symlink privilege:"), pe);
+    }
+    if result.failed > 0 {
+        anyhow::bail!("restructure: {} move(s) failed", result.failed);
     }
     Ok(())
 }
