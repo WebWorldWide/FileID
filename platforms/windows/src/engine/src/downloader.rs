@@ -48,6 +48,39 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
     SEMA.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_REQUESTS)))
 }
 
+/// Hosts FileID is permitted to download from — HF + its CDN, GitHub + its
+/// objects CDN, NVIDIA. Suffix-match with a leading dot for subdomains so
+/// "evilhuggingface.co" never matches ".huggingface.co". Used BOTH to gate the
+/// INITIAL request URL (`download_url_allowed`, enforced in `download_simple` /
+/// `download_parallel`) and to constrain redirect hops (the reqwest redirect
+/// policy in `build_shared_client`) — so the egress invariant is a runtime
+/// guarantee, not only the `registry.rs` URL list plus a CI grep.
+const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
+    "huggingface.co",
+    "hf.co",
+    "github.com",
+    "githubusercontent.com",
+    "download.nvidia.com",
+    "developer.nvidia.com",
+];
+
+/// True iff `url` parses, is https, and its host is on (or a subdomain of) the
+/// egress allowlist. A non-allowlisted or non-https initial URL is refused
+/// before any network I/O.
+fn download_url_allowed(url: &str) -> bool {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            u.scheme() == "https"
+                && u.host_str().is_some_and(|h| {
+                    ALLOWED_DOWNLOAD_HOSTS
+                        .iter()
+                        .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+                })
+        }
+        Err(_) => false,
+    }
+}
+
 /// CA-allowlist TLS pinning (SECURITY.md hardening item; documented in
 /// shared/security/tls-pins.json). These PEMs become the ONLY trust anchors
 /// on the download client, so an active MITM holding any other OS-trusted CA
@@ -103,14 +136,6 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
     // an off-allowlist host, dodging the source-URL allowlist that only checks
     // the ORIGINAL URL. Suffix-match with a leading dot for subdomains so
     // "evilhuggingface.co" never matches ".huggingface.co".
-    const REDIRECT_ALLOWED: &[&str] = &[
-        "huggingface.co",
-        "hf.co",
-        "github.com",
-        "githubusercontent.com",
-        "download.nvidia.com",
-        "developer.nvidia.com",
-    ];
     let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
             return attempt.stop();
@@ -124,7 +149,7 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
         }
         match attempt.url().host_str() {
             Some(h)
-                if REDIRECT_ALLOWED
+                if ALLOWED_DOWNLOAD_HOSTS
                     .iter()
                     .any(|d| h == *d || h.ends_with(&format!(".{d}"))) =>
             {
@@ -333,6 +358,13 @@ pub async fn download_simple<F>(
 where
     F: FnMut(DownloadProgress),
 {
+    if !download_url_allowed(&request.url) {
+        let host = reqwest::Url::parse(&request.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "<unparseable>".to_string());
+        anyhow::bail!("refusing to download: host '{host}' is not on the https egress allowlist");
+    }
     if let Some(parent) = request.destination.parent() {
         tokio::fs::create_dir_all(parent).await
             .with_context(|| format!("creating parent {}", parent.display()))?;
@@ -623,6 +655,13 @@ pub async fn download_parallel<F>(
 where
     F: FnMut(DownloadProgress) + Send + 'static,
 {
+    if !download_url_allowed(&request.url) {
+        let host = reqwest::Url::parse(&request.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| "<unparseable>".to_string());
+        anyhow::bail!("refusing to download: host '{host}' is not on the https egress allowlist");
+    }
     if let Some(parent) = request.destination.parent() {
         tokio::fs::create_dir_all(parent).await
             .with_context(|| format!("creating parent {}", parent.display()))?;
@@ -836,6 +875,22 @@ where
 
     // Size sanity before the atomic rename (mirrors download_simple).
     let actual_len = tokio::fs::metadata(&combined).await.map(|m| m.len()).unwrap_or(0);
+    // Exact-length guard: the parts were planned from `total` (the HEAD/probe
+    // Content-Length), so the assembled file MUST be exactly that many bytes.
+    // For a hash-less file (no expected_sha256) this is the only integrity gate
+    // — the loose 4x `check_size_plausible` floor below would miss a
+    // few-percent truncation. (total is always > 0 here: the < MIN_BYTES path
+    // above already routed to download_simple.)
+    if total > 0 && actual_len != total {
+        let _ = tokio::fs::remove_file(&combined).await;
+        for i in 0..PARALLEL_PARTS {
+            let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
+        }
+        anyhow::bail!(
+            "assembled size mismatch for {}: got {actual_len} bytes, expected {total}",
+            request.url
+        );
+    }
     if let Err(e) = check_size_plausible(actual_len, request.expected_bytes, &request.url) {
         let _ = tokio::fs::remove_file(&combined).await;
         for i in 0..PARALLEL_PARTS {
@@ -1292,9 +1347,9 @@ pub fn download_file_blocking(
 mod tests {
     use super::{
         apply_part_progress, chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
-        classify_range_status, message_indicates_pin_failure, resume_seed_bytes,
-        source_chain_indicates_pin_failure, PartProgress, RangeResumeAction, RetryBudget,
-        PINNED_ROOT_CERTS,
+        classify_range_status, download_url_allowed, message_indicates_pin_failure,
+        resume_seed_bytes, source_chain_indicates_pin_failure, PartProgress, RangeResumeAction,
+        RetryBudget, PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1307,6 +1362,22 @@ mod tests {
                 "pinned root '{slug}' failed to parse"
             );
         }
+    }
+
+    #[test]
+    fn download_url_allowed_gates_host_and_scheme() {
+        // Allowlisted hosts + subdomains over https pass.
+        assert!(download_url_allowed("https://huggingface.co/x"));
+        assert!(download_url_allowed("https://cdn-lfs.huggingface.co/x"));
+        assert!(download_url_allowed("https://hf.co/x"));
+        assert!(download_url_allowed("https://github.com/x"));
+        assert!(download_url_allowed("https://objects.githubusercontent.com/x"));
+        assert!(download_url_allowed("https://developer.nvidia.com/x"));
+        // Off-allowlist, look-alike, and non-https URLs are refused.
+        assert!(!download_url_allowed("https://evilhuggingface.co/x"));
+        assert!(!download_url_allowed("https://example.com/x"));
+        assert!(!download_url_allowed("http://huggingface.co/x"));
+        assert!(!download_url_allowed("not a url"));
     }
 
     #[test]
