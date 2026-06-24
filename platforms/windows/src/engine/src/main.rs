@@ -415,20 +415,48 @@ async fn async_main() -> Result<()> {
                             continue;
                         }
                         Ok(BoundedRead::Line(text)) => {
-                            handle_line(
-                                &dispatch_sink,
-                                &dispatch_shutdown,
-                                dispatch_db.as_ref(),
-                                &dispatch_db_path,
-                                &dispatch_scan_state,
-                                &dispatch_deep_cancel,
-                                &dispatch_deep_active,
-                                &dispatch_face_cluster_active,
-                                &dispatch_restructure_apply_cancel,
-                                &dispatch_jobs,
-                                &dispatch_http_client,
-                                &text,
-                            ).await;
+                            // Panic firewall: handle_line + the serde decode run
+                            // INSIDE this spawned loop, whose JoinHandle is only
+                            // ever abort()ed, never awaited. An uncaught panic in an
+                            // inline-dispatched arm would silently kill the loop — no
+                            // further commands read, no error frame, the engine a
+                            // zombie still holding the DB writer. Catch it, emit a
+                            // structured error, and keep serving. (parking_lot locks
+                            // don't poison, so continuing is sound; coordinator
+                            // methods are panic-free today — this guards a future
+                            // regression in an inline arm.)
+                            let handled = futures_util::FutureExt::catch_unwind(
+                                std::panic::AssertUnwindSafe(handle_line(
+                                    &dispatch_sink,
+                                    &dispatch_shutdown,
+                                    dispatch_db.as_ref(),
+                                    &dispatch_db_path,
+                                    &dispatch_scan_state,
+                                    &dispatch_deep_cancel,
+                                    &dispatch_deep_active,
+                                    &dispatch_face_cluster_active,
+                                    &dispatch_restructure_apply_cancel,
+                                    &dispatch_jobs,
+                                    &dispatch_http_client,
+                                    &text,
+                                )),
+                            )
+                            .await;
+                            if handled.is_err() {
+                                tracing::error!("panic in IPC command handler; engine continuing");
+                                dispatch_sink
+                                    .send(IpcEvent::now(EventPayload::Error(Wrap::new(
+                                        EngineError {
+                                            kind: "command_handler_panic".into(),
+                                            message: "an internal error interrupted a command; \
+                                                      the engine kept running"
+                                                .into(),
+                                            path: None,
+                                            model_kind: None,
+                                        },
+                                    ))))
+                                    .await;
+                            }
                         }
                         Ok(BoundedRead::Oversized(seen)) => {
                             // SEC: rejected mid-read, never allocated past the cap.
