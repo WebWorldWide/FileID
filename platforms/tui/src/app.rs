@@ -215,7 +215,10 @@ impl App {
     pub fn select_next(&mut self) {
         let len = self.list_len();
         if len > 0 {
-            let c = (self.cursor() + 1).min(len - 1);
+            // cursor_clamped(len) reuses the length we just computed instead of
+            // self.cursor() recomputing list_len() — one fewer visible_files()
+            // filter+alloc per keypress on the Library tab. (Matches select_last.)
+            let c = (self.cursor_clamped(len) + 1).min(len - 1);
             self.set_cursor(c);
         }
     }
