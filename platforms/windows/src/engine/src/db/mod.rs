@@ -53,11 +53,13 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     // exits abnormally the row stays stale forever, polluting Settings →
     // Recent scans. Mark them all as 'failed' on startup; new scans
     // overwrite this when they finish cleanly.
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
         [],
-    );
+    ) {
+        tracing::warn!(error = %e, "open_writer: sweeping orphaned 'running' scan_sessions failed");
+    }
 
     Ok(conn)
 }
@@ -199,7 +201,9 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         tx.commit().context("committing wipe")?;
         Ok(())
     })();
-    let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+    if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
+        tracing::error!(error = %e, "wipe_all: re-enabling foreign_keys failed; connection FK enforcement may remain OFF");
+    }
     wipe?;
 
     // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.

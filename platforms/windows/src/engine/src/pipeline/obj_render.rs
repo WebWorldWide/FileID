@@ -141,8 +141,21 @@ fn load_mtl(obj_path: &Path, mtl_name: &str, out: &mut std::collections::HashMap
 }
 
 fn read_text(path: &Path) -> Result<String> {
+    // Cap the read so a pathological multi-GB or newline-sparse `.obj`/`.mtl`
+    // can't exhaust memory — or abort the engine on an allocation failure — on
+    // the decoder pool (up to 12 threads). A partial parse still renders a
+    // recognizable shape, and the sibling `deep_analyze::parse_obj_names` caps
+    // its read the same way. `.obj`/`.mtl` are ASCII, so a byte-bounded read
+    // never splits a UTF-8 char.
+    const MAX_OBJ_BYTES: u64 = 64 * 1024 * 1024;
+    use std::io::Read;
     let p = crate::util::path_safety::to_extended_length(path);
-    std::fs::read_to_string(&p).with_context(|| format!("read {}", path.display()))
+    let f = std::fs::File::open(&p).with_context(|| format!("open {}", path.display()))?;
+    let mut s = String::new();
+    f.take(MAX_OBJ_BYTES)
+        .read_to_string(&mut s)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(s)
 }
 
 /// Project, shade, and z-buffer the triangles into a `SIZE×SIZE` RGB buffer.

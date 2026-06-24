@@ -448,11 +448,24 @@ async fn analyze_metadata_named_file(
 
     // The naming work blocks (symphonia decode, whisper subprocess, obj/mtl parse) — run
     // it off the async executor so a multi-second transcription doesn't stall the runtime.
-    let (description, proposed_name, tags) = tokio::task::spawn_blocking(move || {
+    let (description, proposed_name, tags) = match tokio::task::spawn_blocking(move || {
         metadata_naming_blocking(&path_text, &kind, &ext)
     })
     .await
-    .unwrap_or((None, None, Vec::new()));
+    {
+        Ok(triple) => triple,
+        // A panic (or cancellation) inside the blocking namer must not be
+        // silently recorded as "analyzed, no metadata" — that marks a whole
+        // class of files done while producing nothing. Surface it (no path in
+        // the log) and degrade to empty metadata.
+        Err(join_err) => {
+            tracing::warn!(
+                panicked = join_err.is_panic(),
+                "metadata naming task failed; recording empty metadata"
+            );
+            (None, None, Vec::new())
+        }
+    };
 
     // Mode-gate (mirror the VLM path's per-mode outputs).
     let description = if matches!(

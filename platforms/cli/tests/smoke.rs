@@ -488,7 +488,7 @@ fn seed_content_hash(db: &Path, a: &str, b: &str) {
     for name in [a, b] {
         conn.execute(
             "UPDATE files SET content_hash = ?1 WHERE path_text LIKE ?2",
-            rusqlite::params![blob, format!("%/{name}")],
+            rusqlite::params![blob, format!("%{name}")],
         )
         .expect("seed content_hash");
     }
@@ -508,7 +508,7 @@ fn seed_phash(db: &Path, names: &[&str]) {
     for name in names {
         conn.execute(
             "UPDATE files SET phash = ?1 WHERE path_text LIKE ?2",
-            rusqlite::params![phash, format!("%/{name}")],
+            rusqlite::params![phash, format!("%{name}")],
         )
         .expect("seed phash");
     }

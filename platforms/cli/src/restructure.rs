@@ -313,10 +313,17 @@ fn apply_moves(
         },
     );
     if !ctx.confirm(&prompt, yes) {
-        println!(
-            "Aborted — nothing moved. {}",
-            ctx.dim("(pass --yes to skip the prompt)")
-        );
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "restructure", "mode": "apply", "aborted": true,
+                "reason": "not_confirmed",
+            }));
+        } else {
+            println!(
+                "Aborted — nothing moved. {}",
+                ctx.dim("(pass --yes to skip the prompt)")
+            );
+        }
         return Ok(());
     }
 
