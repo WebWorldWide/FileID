@@ -1279,6 +1279,23 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
             }
         }
     }
+    // Linux: best-effort HEIC/HEIF via the libheif CLI tools (see
+    // shell::heic::decode). On success use it; if the tools are absent or fail,
+    // fall through to the original image-rs error so the file is just skipped —
+    // no hard error and no install nag for this optional path.
+    #[cfg(target_os = "linux")]
+    {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if ext == "heic" || ext == "heif" {
+            if let Ok(out) = shell::heic::decode(path) {
+                return Ok(out);
+            }
+        }
+    }
     primary
 }
 

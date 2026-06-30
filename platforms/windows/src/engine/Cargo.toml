@@ -190,9 +190,42 @@ windows = { version = "0.58", features = [
 ] }
 windows-core = "0.58"
 
-# Non-Windows deps. ort with CPU + CUDA + OpenVINO (no DirectML).
-# libc for getppid() / parent-death detection in platform.rs.
-[target.'cfg(not(windows))'.dependencies]
+# Linux: STATIC-link the CPU ONNX Runtime.
+#
+# pyke's `download-binaries` ships ONLY a static `libonnxruntime.a` for Linux
+# x64 — verified empirically: neither the CPU set nor the `cu12` set contains a
+# dynamic `libonnxruntime.so`. So a `load-dynamic` build (which dlopens
+# `libonnxruntime.so` by name at runtime) has NOTHING to load on Linux and every
+# ML session fails — full-ML was silently broken here. Dropping `load-dynamic`
+# makes ort static-link the `.a` into the engine binary: self-contained,
+# "download-and-run", and ORT is guaranteed present.
+#
+# `cuda`/`openvino` are intentionally omitted on Linux: (1) enabling `cuda` makes
+# download-binaries select the `cu12` set whose `libonnxruntime_providers_cuda.so`
+# needs CUDA 12 + cuDNN 9 (mismatched on CUDA-13 hosts and absent on most), and
+# (2) there is no DirectML GPU fallback on Linux, so a GPU EP that fails to bind
+# would silently drop to single-threaded CPU. Linux therefore runs the CPU EP
+# (multi-threaded). Linux GPU acceleration needs a CUDA-version-matched dynamic
+# ORT build and is tracked as future work — see shared/docs/DECISIONS.md.
+#
+# libc is for getppid() / parent-death + inode file_ref in platform.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+# `std` is required for ort's `impl std::error::Error for ort::Error` (so the
+# engine's `.context()` on `ort::Result` works). The old config got it
+# transitively from `load-dynamic` (= ["std", ...]); now that we drop
+# load-dynamic for static linking, request `std` explicitly.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "download-binaries",
+    "ndarray",
+] }
+libc = "0.2"
+
+# macOS / other Unix: UNCHANGED. `load-dynamic` + the macOS runtime-install flow
+# (`src/ort_runtime.rs`, `fileid runtime install`) provisions the `.dylib` at
+# runtime, since pyke ships only a static `.a` for arm64 macOS too. cuda/openvino
+# are inert on macOS but kept so this arm is byte-identical to the prior config.
+[target.'cfg(all(not(windows), not(target_os = "linux")))'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
     "download-binaries",

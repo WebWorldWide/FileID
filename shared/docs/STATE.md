@@ -8,6 +8,28 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-30 — Linux audit: full-ML CLI/TUI verified **on real Linux hardware** (first time); ORT static-link fix unblocks ML
+
+First on-hardware Linux run of the engine + `fileid` CLI + `fileid-tui` (branch `linux-audit-fixes`). CI only ever proved they *compile*; this session proved they *run*, end-to-end, against a real corpus on a Pop!_OS box (RTX 2060, but **CPU EP** — see below). A portability audit found 8 issues (1 data-loss, several silently-missing features); all fixed, then verified.
+
+**The headline blocker (was silent): ONNX Runtime didn't load on Linux at all.** The engine's `ort` was `load-dynamic` on all non-Windows targets, but pyke's `download-binaries` ships **only a static `libonnxruntime.a`** for Linux x64 (verified: no dynamic `.so` in the CPU *or* `cu12` set) — so `dlopen("libonnxruntime.so")` had nothing to open and every ML session would fail. Fix: Linux now **statically links the CPU ORT** (`download-binaries` + `std`, no `load-dynamic`; `cuda`/`openvino` dropped). macOS/Windows untouched. `ldd FileIDEngine` → no onnxruntime dep. GPU on Linux is future work (the `cu12` provider needs CUDA 12; the box has 13, and there's no DirectML fallback to size threads against). See DECISIONS.md (2026-06-30).
+
+**Fixes (engine = `platforms/windows/src/engine/src/`):**
+- **#1 (data loss):** `commands/bulk.rs` `no_clobber_rename` used `std::fs::rename`, which on POSIX *atomically replaces* the destination — a Linux rename onto an occupied name silently deleted it. Added the `symlink_metadata` pre-existence guard (mirrors `restructure_apply::move_file`). +regression test.
+- **#2:** `commands/trash.rs` restore-from-trash was a no-op on Linux. Implemented a freedesktop-trash restore in `shell::trash::restore` (parse `.trashinfo`, move back from `…/Trash/files/`, EXDEV-safe, no-clobber). +round-trip tests.
+- **#3:** the ORT static-link fix above.
+- **#4:** `models/vlm.rs` / `vlm_server.rs` hardcoded `llama-*-cli.exe` — added `BIN_EXT` gating (parity with `whisper.rs`) so Deep-Analyze can find its runtime on Linux.
+- **#5:** `.heic`/`.heif` were undecodable on Linux. Added a best-effort `shell::heic` Linux backend (`heif-dec`/`heif-convert` → temp PNG → `image` decode; graceful skip when absent — no GPL libheif linked) wired into `tagging::decode_image_sync`.
+- **#7:** `platform.rs` `file_ref` now returns the inode (`MetadataExt::ino`) on Unix (was `None`) so rename/move heal works without a content rehash.
+- **#8 (correctness):** `util/path_safety.rs` `stable_path_hash` lowercased every path → on case-sensitive ext4, `Foo.jpg`/`foo.jpg` collided on the dedup key (UPSERT shadowing). Now case-preserving on Linux; the macOS/Windows parity-pin test is `cfg`-gated off Linux.
+
+**Verification (all green):**
+- **Static gates (mirror `linux.yml`, Rust 1.90):** engine clippy `-D warnings` + **391 tests**; CLI clippy + **20 tests**; TUI clippy + **80 tests**. `scripts/build-tools.sh` installs `fileid`/`fileid-tui`/`FileIDEngine` (34M/8.4M/3.5M).
+- **CLI/TUI functional (deterministic corpus):** scan/search/info/dedupe + `--json`; the 5-tab `fileid-tui` renders live data and exits clean (PTY-driven).
+- **Full-ML on a 208-file Adlon/TrueNAS subset (CPU, 286s, 1.4 s/file):** `scan_assertions.py` → **GREEN**: 204 files, **0 failures**, **1604 RAM++ tags** (accurate: boy/child/dog/poodle/beach/sunset…), **128-d SFace face prints** (512 B — the commercial-clean model, not 2048-B ArcFace), **18 person clusters** (after a direct `runFaceClustering`), CLIP `--similar` (cos 0.82–0.87), exact dedupe (BLAKE3), and `restructure --plan` with EXIF GPS geo-buckets. HEIC graceful-skip confirmed (heif tools not yet installed).
+
+**Pending (need `sudo apt`, user-gated):** GTK4 app build (`libgtk-4-dev libadwaita-1-dev`) and real HEIC decode (`libheif-examples`). The engine/CLI/TUI — the session's target — are done.
+
 ## 2026-06-24 (cont.) — audit loop CLOSED on `main`: 6 PRs merged + CI-green; engine bug-hunt found ZERO bugs
 
 Committed/pushed the on-hardware audit fixes as **6 PRs (#73–#78), all merged to `main`, all three CI workflows green** (Windows engine, Linux, Flatpak). The "/loop until perfect" backlog from the entries below is now closed:

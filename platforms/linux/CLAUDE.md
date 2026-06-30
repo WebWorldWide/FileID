@@ -6,7 +6,7 @@ This file covers the Linux code under `platforms/linux/`. For the macOS referenc
 
 ## Stack
 
-- **Engine**: Rust (`fileid-engine`), single-binary release with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference. **Shared with the Windows port** — same crate at `platforms/windows/src/engine/`, referenced via Cargo path dependency. V15.5 cfg-gated the Win32 surface (`shell/*.rs` modules + `ort` DirectML feature) so the same code compiles on Linux.
+- **Engine**: Rust (`fileid-engine`), single-binary release with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference. **Shared with the Windows port** — same crate at `platforms/windows/src/engine/`, referenced via Cargo path dependency. V15.5 cfg-gated the Win32 surface (`shell/*.rs` modules + `ort` DirectML feature) so the same code compiles on Linux. On **Linux** the `ort` dependency is configured to **statically link the CPU ONNX Runtime** (`download-binaries` without `load-dynamic`): pyke ships only a static `libonnxruntime.a` for Linux x64, so a load-dynamic build had no `.so` to `dlopen` and ML silently failed — static linking bakes the runtime in and makes full-ML work. CPU EP only on Linux; GPU is future work. See `shared/docs/DECISIONS.md` (2026-06-30).
 - **App**: GTK4 + libadwaita via `gtk4-rs`. Rust binary, single executable. Adwaita HeaderBar / NavigationView / dark mode follows the system; brand palette (gold #FFCC00, lavender #B19BCE, cyan #A0E2EA, pink #F2A6C0) applied via custom CSS provider.
 - **Distribution**: Flatpak (planned, primary), AppImage (planned, secondary). Both produced by the same Cargo binary; the manifest just wraps it.
 
@@ -46,7 +46,10 @@ platforms/linux/
 ## App structure (current)
 
 Foundation + app shell + **Library tab implemented**; the other five tabs are
-`adw::StatusPage` "Coming soon" placeholders pending their ports.
+feature-shaped and compile CI-green (their GTK runtime isn't yet verified on real
+hardware). The **`fileid` CLI and `fileid-tui`** (sibling crates `platforms/cli`,
+`platforms/tui`) are the most-verified Linux surfaces — both run the shared engine
+end-to-end on Linux, including full-ML `scan --models`.
 
 - **Design system** (`theme.rs`): one `gtk::CssProvider` carries the brand
   palette as `@define-color` tokens + the reusable classes — `.glass-card`
@@ -135,7 +138,7 @@ These are blockers for full feature parity on Linux but not for the scaffold. Se
 | `shell/ocr` | `tesseract` CLI on a temp PPM, best-effort (empty when absent) | **Done** (no crate) |
 | `shell/video` | `ffmpeg` keyframe → P6 PPM we parse, best-effort (`ffprobe` for the 25% seek) | **Done** (no crate) |
 | `shell/thumbnail` | `gdk-pixbuf` thumbnail factory + xdg thumbnail spec at `~/.cache/thumbnails/` | TODO (~3 days) |
-| `shell/heic` | libheif decode | TODO |
+| `shell/heic` | best-effort `heif-dec`/`heif-convert` CLI → temp PNG → `image` decode (no GPL libheif linked; graceful skip when the tools are absent) | **Done** (subprocess) |
 | `shell/sleep` | DBus `org.freedesktop.ScreenSaver.Inhibit` | TODO (~1 day) |
 
 The five "Done" backends are gated `#[cfg(target_os = "linux")]` in `platforms/windows/src/engine/src/shell/mod.rs` and built only with **std + libc + subprocess** (no new crates). macOS / other Unix keep the `#[cfg(all(not(windows), not(target_os = "linux")))]` graceful stub; `thumbnail` + `heic` are still stubbed on every non-Windows OS. CI: `linux.yml` runs `cargo clippy --all-targets -D warnings` + `cargo test --lib` on the Linux target (where these arms actually compile).
