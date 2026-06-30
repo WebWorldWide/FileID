@@ -77,6 +77,32 @@ mod linux_util {
         out
     }
 
+    /// Inverse of `percent_encode_path`: decode `%XX` byte escapes back to a
+    /// path. Works on raw bytes so non-UTF-8 names round-trip; a malformed
+    /// escape is passed through literally. Used to read the original location
+    /// out of a `.trashinfo` `Path=` field on restore.
+    pub fn percent_decode_path(s: &str) -> PathBuf {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        PathBuf::from(OsString::from_vec(out))
+    }
+
     /// A unique temp path under the system temp dir (pid + nanos + counter).
     pub fn temp_file(ext: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -367,7 +393,7 @@ pub mod thumbnail {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod trash {
-    use super::linux_util::{absolute, percent_encode_path};
+    use super::linux_util::{absolute, percent_decode_path, percent_encode_path};
     use anyhow::{Context, Result};
     use std::ffi::{OsStr, OsString};
     use std::io::Write;
@@ -390,6 +416,83 @@ pub mod trash {
     pub fn trash_path(path: &Path) -> Result<()> {
         let trash = home_trash_dir()?;
         trash_into(path, &trash)
+    }
+
+    /// Restore files previously trashed by [`trash`]/[`trash_path`] back to
+    /// their original locations — the Linux parity of the Windows Recycle-Bin
+    /// batch restore (the Cleanup-tab undo). Best-effort: scans the home trash's
+    /// `info/*.trashinfo`, and for any whose recorded original `Path` matches a
+    /// requested path, moves the file back from `files/` (recreating the parent
+    /// if it was since removed) and deletes the `.trashinfo`. Never clobbers — a
+    /// path now occupied by something else is left alone. A requested path with
+    /// no matching trash entry is silently skipped (the caller verifies on-disk
+    /// presence, exactly like the Windows path).
+    pub fn restore(wanted: &[&Path]) {
+        let Ok(trash) = home_trash_dir() else {
+            return;
+        };
+        restore_from(wanted, &trash);
+    }
+
+    /// Inner restore against an explicit trash dir (so it's unit-testable
+    /// without mutating the process's `$XDG_DATA_HOME`). Mirrors how
+    /// `trash_into` is the testable core of `trash`.
+    fn restore_from(wanted: &[&Path], trash: &Path) {
+        use std::collections::HashSet;
+        if wanted.is_empty() {
+            return;
+        }
+        let info_dir = trash.join("info");
+        let files_dir = trash.join("files");
+        let mut remaining: HashSet<PathBuf> = wanted.iter().map(|p| p.to_path_buf()).collect();
+
+        let Ok(entries) = std::fs::read_dir(&info_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if remaining.is_empty() {
+                break;
+            }
+            let info_path = entry.path();
+            if info_path.extension().and_then(|e| e.to_str()) != Some("trashinfo") {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&info_path) else {
+                continue;
+            };
+            let Some(orig) = parse_trashinfo_orig(&contents) else {
+                continue;
+            };
+            if !remaining.contains(&orig) {
+                continue;
+            }
+            // info name is "<files-entry-name>.trashinfo" → the trashed file's
+            // name is the stem.
+            let Some(stem) = info_path.file_stem() else {
+                continue;
+            };
+            let src = files_dir.join(stem);
+            if let Some(parent) = orig.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            // Don't overwrite whatever now sits at the original path.
+            if orig.symlink_metadata().is_ok() {
+                continue;
+            }
+            if move_into(&src, &orig).is_ok() {
+                let _ = std::fs::remove_file(&info_path);
+                remaining.remove(&orig);
+            }
+        }
+    }
+
+    /// Pull the original location out of a `.trashinfo` body's `Path=` line
+    /// (percent-decoded). Returns None if there's no `Path=` key.
+    fn parse_trashinfo_orig(contents: &str) -> Option<PathBuf> {
+        contents
+            .lines()
+            .find_map(|l| l.strip_prefix("Path="))
+            .map(|v| percent_decode_path(v.trim()))
     }
 
     fn home_trash_dir() -> Result<PathBuf> {
@@ -571,6 +674,61 @@ pub mod trash {
             let trash = base.join("Trash");
             let ghost = base.join("does-not-exist.txt");
             assert!(trash_into(&ghost, &trash).is_ok());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn trash_then_restore_round_trip() {
+            let base =
+                std::env::temp_dir().join(format!("fileid-trash-restore-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let trash = base.join("Trash");
+            let src_dir = base.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            let file = src_dir.join("restoreme.txt");
+            std::fs::write(&file, b"payload").unwrap();
+
+            trash_into(&file, &trash).unwrap();
+            assert!(!file.exists(), "original should be gone after trash");
+            assert!(trash.join("files/restoreme.txt").exists());
+
+            restore_from(&[file.as_path()], &trash);
+
+            assert!(file.exists(), "file should be back at its original path");
+            assert_eq!(std::fs::read(&file).unwrap(), b"payload");
+            assert!(
+                !trash.join("info/restoreme.txt.trashinfo").exists(),
+                "the .trashinfo should be cleaned up after a successful restore"
+            );
+            assert!(
+                !trash.join("files/restoreme.txt").exists(),
+                "the trashed copy should be gone after restore"
+            );
+
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn restore_does_not_clobber_occupant() {
+            let base = std::env::temp_dir()
+                .join(format!("fileid-trash-restore-noclobber-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let trash = base.join("Trash");
+            let src_dir = base.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            let file = src_dir.join("keep.txt");
+            std::fs::write(&file, b"old").unwrap();
+            trash_into(&file, &trash).unwrap();
+
+            // Something new now occupies the original path.
+            std::fs::write(&file, b"new").unwrap();
+            restore_from(&[file.as_path()], &trash);
+
+            assert_eq!(
+                std::fs::read(&file).unwrap(),
+                b"new",
+                "restore must not overwrite a file that now occupies the original path"
+            );
             let _ = std::fs::remove_dir_all(&base);
         }
     }
@@ -839,7 +997,63 @@ pub mod video {
 // ────────────────────────────────────────────────────────────────────
 // heic  (stubbed on every non-Windows OS — TODO(linux): libheif)
 // ────────────────────────────────────────────────────────────────────
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub mod heic {
+    use super::linux_util::{run_silent, temp_file};
+    use anyhow::{Context, Result};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    /// Best-effort HEIC/HEIF decode on Linux via the libheif command-line tools
+    /// (`heif-dec`, falling back to the older `heif-convert`). Converts to a temp
+    /// PNG we then decode with the already-bundled `image` crate → RGB8 +
+    /// dimensions. Returns Err (never panics) when the tools are absent or the
+    /// conversion fails, so the caller cleanly skips the file — matching the
+    /// prior stub contract. No new dependency and no GPL `libheif` linked in: the
+    /// tools are an optional system package (`libheif-examples`), honoring the
+    /// download-and-run / no-GPL-dep rule.
+    pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+        let out = temp_file("png");
+        let mut produced: Option<PathBuf> = None;
+        for tool in ["heif-dec", "heif-convert"] {
+            if run_silent(Command::new(tool).arg(path).arg(&out)) {
+                if let Some(p) = resolve_output(&out) {
+                    produced = Some(p);
+                    break;
+                }
+            }
+        }
+        let Some(png) = produced else {
+            let _ = std::fs::remove_file(&out);
+            anyhow::bail!("heif-dec/heif-convert unavailable or produced no output");
+        };
+
+        let bytes = std::fs::read(&png);
+        let _ = std::fs::remove_file(&png);
+        if png != out {
+            let _ = std::fs::remove_file(&out);
+        }
+        let bytes = bytes.context("read converted heic png")?;
+        let dyn_img = image::load_from_memory(&bytes).context("decode converted heic png")?;
+        let rgb = dyn_img.to_rgb8();
+        let (w, h) = rgb.dimensions();
+        Ok((rgb.into_raw(), w, h))
+    }
+
+    /// `heif-convert` writes the requested name for a single-image file but
+    /// suffixes multi-image files (`out.png` → `out-1.png` for the primary). Try
+    /// the exact name first, then the `-1` variant.
+    fn resolve_output(out: &Path) -> Option<PathBuf> {
+        if out.exists() {
+            return Some(out.to_path_buf());
+        }
+        let stem = out.file_stem()?.to_str()?;
+        let alt = out.with_file_name(format!("{stem}-1.png"));
+        alt.exists().then_some(alt)
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 pub mod heic {
     use anyhow::Result;
     use std::path::Path;

@@ -53,6 +53,20 @@ fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[cfg(not(windows))]
 fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    // POSIX rename(2) ATOMICALLY REPLACES an existing destination — the opposite
+    // of the Windows MoveFileExW path (which drops MOVEFILE_REPLACE_EXISTING). So
+    // the "no-clobber" contract this function's name promises must be enforced
+    // here ourselves: a rename onto an occupied name would otherwise silently
+    // destroy the file already there. symlink_metadata (no traversal) treats a
+    // pre-existing file, directory, or broken symlink at `dst` as occupied —
+    // mirrors restructure_apply::move_file's guard. A surviving collision means
+    // an unexpected race, so fail safe rather than overwrite.
+    if dst.symlink_metadata().is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("destination already exists: {}", dst.display()),
+        ));
+    }
     std::fs::rename(
         crate::util::path_safety::to_extended_length(src),
         crate::util::path_safety::to_extended_length(dst),

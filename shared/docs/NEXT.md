@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## 2026-06-30 — Linux audit follow-ups (engine/CLI/TUI verified on hardware; see STATE.md)
+
+The `linux-audit-fixes` branch landed 8 portability fixes + the ORT static-link unblock, all verified on a real Linux box (CLI/TUI + full-ML scan GREEN). Remaining Linux work:
+
+- **[BLOCKED on `sudo apt`, user-gated] GTK4 app on-hardware verify** — `sudo apt install libgtk-4-dev libadwaita-1-dev`, then `platforms/linux/build/build.sh` + run `dist/fileid/fileid-linux`; eyeball all six tabs (LavaLamp/springs/glass, scan/cluster/restructure). CI only proves it compiles.
+- **[BLOCKED on `sudo apt`] HEIC real-decode (#5)** — `sudo apt install libheif-examples` (provides `heif-convert`; newer also `heif-dec`), then re-scan a HEIC folder and confirm tags/embeddings land. The graceful-skip path (tools absent) is already verified; the decode path is unverified.
+- **[engine/perf, future] Linux GPU EP** — Linux runs the CPU EP today (statically-linked CPU ORT). A real GPU path needs a *dynamic* ORT build whose CUDA provider matches the host toolkit (the bundled `cu12` provider needs CUDA 12; common boxes have 13), a Linux GPU vendor probe in `models/runtime.rs`, and thread-tuning that only pins 1 intra-op thread once a GPU EP has actually bound (Linux has no DirectML fallback). See DECISIONS.md (2026-06-30).
+- **[cosmetic] ML-pool log on CPU boxes** — `pipeline/tagging.rs resolve_pool_size` logs `VRAM unreadable; clamping ML pool to 1 (fail-safe)` on any GPU-less box. The clamp is *correct* on CPU (one all-cores ORT session is optimal for the compute-bound RAM++), but the wording reads like a fault — reword to distinguish "CPU EP: single all-cores session" from a real probe failure.
+- **[hygiene] engine relocation** — when the shared engine moves from `platforms/windows/src/engine/` to `shared/engine/`, update the `fileid-engine` path dep in cli/tui/linux-app Cargo.toml in lockstep (and the Linux ORT target stanza moves with it).
+
 ## 2026-06-24 (cont.) — audit loop CLOSED; what genuinely remains
 
 The "/loop until perfect" engine + CLI + TUI backlog is **done and on `main` (CI-green: 6 PRs #73–#78 + the whisper/cap follow-up)**, and the deep engine bug-hunt found **zero** bugs (the engine is well-hardened). What's left is either blocked, needs a Mac, or is sensitive C# UI work that can't be runtime-verified from the headless box:

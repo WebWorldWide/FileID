@@ -92,24 +92,32 @@ pub(crate) fn canonicalize_for_containment(p: &Path) -> PathBuf {
     canonical
 }
 
-/// Case-insensitive stable hash for a file path. NTFS is case-insensitive,
-/// so a re-scan after a path-case change must produce the same hash — else
-/// the next ingest creates a duplicate `files` row. `DefaultHasher` (SipHash)
-/// keyed off `to_ascii_lowercase` is enough: NTFS uses a Unicode case-folding
-/// table that's roughly equivalent for typical paths. A pathological
-/// filename with Turkish dotted I would not round-trip exactly, but the
-/// resulting hash collision is bounded and tolerable (worst case: one
-/// duplicate row that the next scan overwrites via UPSERT).
+/// Stable hash for a file path, case-folded ONLY where the filesystem is
+/// case-insensitive. On NTFS / exfat / default HFS+/APFS a re-scan after a
+/// path-case change must produce the same hash — else the next ingest creates a
+/// duplicate `files` row — so we key `DefaultHasher` (SipHash) off
+/// `to_ascii_lowercase`. NTFS uses a Unicode case-folding table that's roughly
+/// equivalent for typical paths; a pathological Turkish-dotted-I name wouldn't
+/// round-trip exactly, but the collision is bounded (worst case: one duplicate
+/// row the next scan overwrites via UPSERT).
 ///
-/// macOS volumes default to case-insensitive HFS+/APFS, so the same
-/// behavior is correct there — but each platform owns its own DB, so the
-/// cross-platform implication is moot. The wire schema stores the resulting
-/// i64 as-is.
+/// Linux's default filesystems (ext4 / btrfs / xfs / zfs) are case-SENSITIVE,
+/// so `Foo.jpg` and `foo.jpg` are genuinely distinct files. Lowercasing there
+/// would hash them to the same `path_hash` (the dedup/lookup key), letting one
+/// shadow or overwrite the other on UPSERT — silent data loss. So on Linux we
+/// hash the path as-is. (A case-insensitive volume mounted on Linux, e.g. the
+/// exfat test drive, can't hold two case-distinct names anyway, so preserving
+/// case is harmless there.) Each platform owns its own DB, so this per-OS
+/// difference has no cross-platform implication. The wire schema stores the
+/// resulting i64 as-is.
 pub(crate) fn stable_path_hash(path: &str) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let normalized = path.to_ascii_lowercase();
-    normalized.hash(&mut h);
+    if cfg!(target_os = "linux") {
+        path.hash(&mut h);
+    } else {
+        path.to_ascii_lowercase().hash(&mut h);
+    }
     h.finish() as i64
 }
 
@@ -317,16 +325,26 @@ mod tests {
             }
         }
 
-        // stable_path_hash must be case-insensitive: NTFS treats
-        // C:\Users\Foo and c:\users\foo as the same file. A re-scan after
-        // an Explorer rename mustn't create a duplicate row.
+        // Case folding follows the filesystem. On case-INSENSITIVE volumes
+        // (NTFS/exfat/default APFS) C:\Users\Foo and c:\users\foo are the same
+        // file, so a re-scan after an Explorer rename mustn't create a duplicate
+        // row → equal hashes. On case-SENSITIVE Linux fs they're distinct files,
+        // so case-distinct paths must hash differently (else one shadows the
+        // other on UPSERT) while identical strings still collide.
         #[test]
-        fn stable_path_hash_is_case_insensitive(
+        fn stable_path_hash_case_sensitivity(
             s in "[a-zA-Z0-9_./\\\\]{1,80}",
         ) {
             let lower = s.to_ascii_lowercase();
             let upper = s.to_ascii_uppercase();
-            proptest::prop_assert_eq!(stable_path_hash(&lower), stable_path_hash(&upper));
+            if cfg!(target_os = "linux") {
+                proptest::prop_assert_eq!(
+                    stable_path_hash(&lower) == stable_path_hash(&upper),
+                    lower == upper
+                );
+            } else {
+                proptest::prop_assert_eq!(stable_path_hash(&lower), stable_path_hash(&upper));
+            }
         }
 
         // stable_path_hash must be deterministic: same input twice in a
@@ -361,7 +379,14 @@ mod tests {
     /// StablePathHashTests) so `files.path_hash` is identical in both
     /// engines' DBs. If DefaultHasher's algorithm ever changes, this fails
     /// before the platforms silently drift apart.
+    ///
+    /// Linux is intentionally excluded: its case-SENSITIVE filesystems make
+    /// `stable_path_hash` preserve case (see the fn doc), so these lowercased
+    /// macOS/Windows-parity vectors don't apply there. Linux's contract is the
+    /// `stable_path_hash_case_sensitivity` property test above. (DBs are never
+    /// shared across OSes, so the divergence is invisible in practice.)
     #[test]
+    #[cfg(not(target_os = "linux"))]
     fn stable_path_hash_pinned_vectors() {
         assert_eq!(stable_path_hash(""), 3_476_900_567_878_811_119);
         assert_eq!(stable_path_hash("a"), 8_186_225_505_942_432_243);
