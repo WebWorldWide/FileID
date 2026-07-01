@@ -34,7 +34,7 @@ where
     W: IsA<gtk::Widget>,
     F: Fn(f64) + 'static,
 {
-    let target = adw::CallbackAnimationTarget::new(move |v| setter(v));
+    let target = adw::CallbackAnimationTarget::new(setter);
     let anim = adw::SpringAnimation::new(widget, from, to, brand_params(), target);
     anim.play();
     anim

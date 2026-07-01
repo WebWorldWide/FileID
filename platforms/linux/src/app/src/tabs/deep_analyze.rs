@@ -530,7 +530,7 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         .single_line_mode(true)
         .build();
     let new = gtk::Label::builder()
-        .label(&format!("→ {}", row.new_name()))
+        .label(format!("→ {}", row.new_name()))
         .xalign(0.0)
         .css_classes(["gold-accent"])
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
@@ -617,7 +617,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
         title_row.append(&badge);
 
         let stats = gtk::Label::builder()
-            .label(&format!(
+            .label(format!(
                 "≈ {:.1} GB RAM · {:.1} s/image · {}",
                 vlm.ram_gb, vlm.secs_per_image, vlm.license
             ))

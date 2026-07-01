@@ -64,17 +64,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     });
 
     let grid = gtk::GridView::new(Some(selection), Some(factory));
-    grid.set_min_columns(2);
+    grid.set_min_columns(1);
     grid.set_max_columns(12);
     grid.set_enable_rubberband(false);
     grid.add_css_class("fileid-tab");
 
     grid.connect_activate(clone!(@strong engine => move |gv, pos| {
-        if let Some(obj) = gv.model().and_then(|m| m.item(pos)) {
-            if let Ok(boxed) = obj.downcast::<BoxedAnyObject>() {
-                let row = boxed.borrow::<FileRow>().clone();
-                open_preview(&engine, gv, row);
-            }
+        if let Some(model) = gv.model() {
+            open_preview(&engine, gv, model, pos);
         }
     }));
 
@@ -387,34 +384,139 @@ fn clear_tile(tile: &gtk::Widget) {
 
 // ── Preview dialog ───────────────────────────────────────────────────────────
 
-fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widget>, row: FileRow) {
+/// The file preview dialog. Shows a large image + metadata and lets you page
+/// through the whole (filtered) library with the ‹ / › buttons or the ←/→ keys
+/// — matching the macOS/Windows preview navigation.
+fn open_preview(
+    engine: &Rc<RefCell<EngineClient>>,
+    parent: &impl IsA<gtk::Widget>,
+    model: gtk::SelectionModel,
+    start: u32,
+) {
+    let n = model.n_items();
+    if n == 0 {
+        return;
+    }
+    let idx = Rc::new(Cell::new(start.min(n - 1)));
+
     let dialog = adw::Dialog::new();
-    dialog.set_title(&row.name);
-    dialog.set_content_width(980);
-    dialog.set_content_height(660);
+    dialog.set_content_width(1000);
+    dialog.set_content_height(680);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
+    // Header: ‹ prev · counter · next › — the navigation the preview was missing.
+    let header = adw::HeaderBar::new();
+    let prev_btn = gtk::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("Previous (←)")
         .build();
+    let next_btn = gtk::Button::builder()
+        .icon_name("go-next-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("Next (→)")
+        .build();
+    let counter = gtk::Label::builder().css_classes(["dim-label"]).build();
+    header.pack_start(&prev_btn);
+    header.pack_start(&counter);
+    header.pack_end(&next_btn);
 
     let pic = gtk::Picture::builder()
         .hexpand(true)
         .vexpand(true)
         .content_fit(gtk::ContentFit::Contain)
         .build();
+    let meta_scroll = gtk::ScrolledWindow::builder()
+        .width_request(320)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .build();
     body.append(&pic);
     body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    body.append(&meta_scroll);
 
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&body));
+    dialog.set_child(Some(&toolbar));
+
+    // Load the row at the current index into the dialog (title, image, metadata).
+    let load: Rc<dyn Fn()> = {
+        let engine = engine.clone();
+        let model = model.clone();
+        let pic = pic.clone();
+        let meta_scroll = meta_scroll.clone();
+        let counter = counter.clone();
+        let dialog = dialog.clone();
+        let prev_btn = prev_btn.clone();
+        let next_btn = next_btn.clone();
+        let idx = idx.clone();
+        Rc::new(move || {
+            let pos = idx.get();
+            let Some(row) = row_at(&model, pos) else { return };
+            dialog.set_title(&row.name);
+            counter.set_label(&format!("{} of {}", pos + 1, model.n_items()));
+            prev_btn.set_sensitive(pos > 0);
+            next_btn.set_sensitive(pos + 1 < model.n_items());
+            meta_scroll.set_child(Some(&build_meta(&row)));
+            load_preview_image(&engine, &pic, &row);
+        })
+    };
+
+    prev_btn.connect_clicked(clone!(@strong idx, @strong load => move |_| {
+        if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
+    }));
+    next_btn.connect_clicked(clone!(@strong idx, @strong model, @strong load => move |_| {
+        if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
+    }));
+
+    // ←/→ arrow keys page through the library.
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(clone!(@strong idx, @strong model, @strong load => move |_, key, _, _| {
+        match key {
+            gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
+                if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
+                glib::Propagation::Stop
+            }
+            gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
+                if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    }));
+    dialog.add_controller(keys);
+
+    load();
+    dialog.present(parent);
+
+    // Springy fade-in of the body, on the shared brand spring.
+    let body_weak = body.downgrade();
+    let _ = crate::spring::animate(&body, 0.0, 1.0, move |v| {
+        if let Some(b) = body_weak.upgrade() {
+            b.set_opacity(v);
+        }
+    });
+}
+
+/// Resolve the `FileRow` at `pos` in the (selection) model.
+fn row_at(model: &gtk::SelectionModel, pos: u32) -> Option<FileRow> {
+    let boxed = model.item(pos)?.downcast::<BoxedAnyObject>().ok()?;
+    let r = boxed.borrow::<FileRow>();
+    Some(r.clone())
+}
+
+/// Build the metadata glass-card for one row (rebuilt on each navigation).
+fn build_meta(row: &FileRow) -> gtk::Box {
     let meta = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
-        .margin_top(16)
-        .margin_bottom(16)
-        .margin_start(16)
-        .margin_end(16)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
         .css_classes(["glass-card"])
         .build();
     meta.append(&meta_row("Path", &row.path));
@@ -438,23 +540,16 @@ fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widge
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         meta.append(&meta_row("Smart name", &format!("{}.{}", p, row.extension)));
     }
+    meta
+}
 
-    let meta_scroll = gtk::ScrolledWindow::builder()
-        .width_request(320)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&meta)
-        .build();
-    body.append(&meta_scroll);
-
-    toolbar.set_content(Some(&body));
-    dialog.set_child(Some(&toolbar));
-
+/// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.
+fn load_preview_image(engine: &Rc<RefCell<EngineClient>>, pic: &gtk::Picture, row: &FileRow) {
     if row.kind == "image" {
         let rx = engine.borrow().request_thumbnail(row.path.clone());
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
             let Ok(Some(bytes)) = rx.recv().await else { return };
-            // Decode + scale OFF the main loop; only Send pixel data crosses back.
             let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
             std::thread::spawn(move || {
                 let _ = dtx.send_blocking(decode_scaled(bytes, PREVIEW_PX));
@@ -467,16 +562,6 @@ fn open_preview(engine: &Rc<RefCell<EngineClient>>, parent: &impl IsA<gtk::Widge
     } else {
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 128).as_ref());
     }
-
-    dialog.present(parent);
-
-    // Springy fade-in of the body, on the shared brand spring.
-    let body_weak = body.downgrade();
-    let _ = crate::spring::animate(&body, 0.0, 1.0, move |v| {
-        if let Some(b) = body_weak.upgrade() {
-            b.set_opacity(v);
-        }
-    });
 }
 
 fn meta_row(key: &str, value: &str) -> gtk::Box {
