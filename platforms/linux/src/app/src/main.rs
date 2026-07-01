@@ -6,6 +6,10 @@
 // six tabs; Library implemented, the rest placeholders). The engine subprocess
 // is spawned by `EngineClient` from the window.
 
+// GTK signal-handler + model closures are inherently tuple-heavy; the engine
+// crate allows this lint for the same reason.
+#![allow(clippy::type_complexity)]
+
 mod engine_client;
 mod lavalamp;
 mod spring;
@@ -35,7 +39,16 @@ fn main() -> glib::ExitCode {
 
     // Install the FileID design system (palette CSS + glass classes) and force
     // dark mode, matching the macOS + Windows siblings.
-    app.connect_startup(|_| theme::install());
+    app.connect_startup(|_| {
+        theme::install();
+        // Set the default window icon by name so the taskbar/dock shows the
+        // FileID icon. On Wayland the compositor also matches the window's
+        // `app_id` (== APP_ID) to the installed `io.github.fileid.FileID.desktop`
+        // → `Icon=`; this line covers X11 / KDE and CSD title-bar icons too.
+        // Requires the icon installed in the hicolor theme (see
+        // `platforms/linux/data/io.github.fileid.FileID.svg` + build/install).
+        gtk::Window::set_default_icon_name(APP_ID);
+    });
     app.connect_activate(window::on_activate);
 
     app.run()

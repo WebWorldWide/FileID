@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-06-30 (cont.) — Linux GTK app: UI overhaul toward macOS/Windows parity (on-hardware, iterated from live captures)
+
+The GTK4 app (`platforms/linux/`) was a Phase-0 scaffold that "looked cheap / like stock GNOME." Reworked it toward the macOS/Windows reference, verified on real COSMIC hardware. Key wins:
+- **Left sidebar navigation** (`adw::OverlaySplitView`) replacing the GNOME top `ViewSwitcher` — gold-tinted active row, **collapsible** (header toggle + `adw::Breakpoint` auto-collapse when narrow, which also fixes small-window resizing; `set_size_request(360,320)` + `GridView` min-columns 1).
+- **Global brand stylesheet** (`theme.rs`) — recolors libadwaita's `accent` to gold so every stock widget (buttons, switches, checks, **progress bars** — was Adwaita-blue) brands itself; transparent view bgs so the LavaLamp reads through; glass cards with real depth + padding; **Inter** font with a fallback chain (DE-independent); button/pill/nav transitions.
+- **LavaLamp** retuned to the canonical **gold + orange `#FF6600` + dark** recipe on `#141414` (was pastel 4-blob) with a lighter scrim so the warm glow shows.
+- **Real app icon** in the dock — the shared brand mark (gold "?" warning-triangle), installed to the hicolor theme + fixed the committed `platforms/linux/data/*.svg` (was a placeholder document icon); `set_default_icon_name` for cross-DE.
+- **Preview navigation** — the photo dialog gained `‹`/`›` + "N of M" counter + ←/→ keys (was missing).
+- **Thumbnails** now respect EXIF orientation (were shown sideways); **Settings** is a centered `adw::Clamp` column with padded cards + uppercase section headings (was full-width/cramped).
+- Added a dev-only headless **self-capture** (`FILEID_SELF_SHOT`) since cosmic-comp exposes no screenshot API — enables headless UI iteration. App is clippy-clean; the required CI gates (engine/CLI/TUI) unchanged since the audit commit.
+
+**All distros:** pure GTK4 + libadwaita, no DE-specific code; Flatpak (planned) bundles the runtime + Inter for identical rendering everywhere.
+
 ## 2026-06-30 — Linux audit: full-ML CLI/TUI verified **on real Linux hardware** (first time); ORT static-link fix unblocks ML
 
 First on-hardware Linux run of the engine + `fileid` CLI + `fileid-tui` (branch `linux-audit-fixes`). CI only ever proved they *compile*; this session proved they *run*, end-to-end, against a real corpus on a Pop!_OS box (RTX 2060, but **CPU EP** — see below). A portability audit found 8 issues (1 data-loss, several silently-missing features); all fixed, then verified.
