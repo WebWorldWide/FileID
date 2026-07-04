@@ -33,7 +33,7 @@ Under `~/Library/Application Support/FileID/Models/` (VLMs under `~/Documents/hu
 - **Tagging** — RAM++ primary (planned mirror of Windows), CLIP zero-shot scene tags as fallback.
 - **Deep Analyze** — MLX VLMs: Qwen2.5-VL 7B / Gemma 3 / Mistral-Small-3.2.
 
-> **Lockstep status:** the commercial-clean model swap (ArcFace→SFace, MobileCLIP-S2→ViT-B/32, Qwen-3B→7B/Mistral) is written on the `macos-lockstep` branch and **needs a Mac to `swift build` + verify embedding parity** (see `platforms/apple/MACOS_LOCKSTEP_NOTES.md`). The RAM++ tagger and the butler-restructure mirror (`shared/docs/RESTRUCTURE.md`) are the remaining macOS work. Until merged, `main`'s macOS engine still loads the prior weights.
+> **Lockstep status (updated 2026-07):** the commercial-clean model swap (ArcFace→SFace, MobileCLIP-S2→ViT-B/32, Qwen-3B→7B/Mistral) has **LANDED on `main` and is wired as the primary stack** — `FaceEmbedderKind` is SFace-only (128-d), RAM++ Swin-L is the primary tagger, `MobileCLIPService` loads ViT-B/32, and all three are prewarmed at engine startup (`FileIDEngineMain.swift:669–676`). Verified statically against the code in `shared/docs/MACOS_AUDIT_2026-07.md`. The **only** remaining Mac task is on-hardware embedding-parity confirmation (the wiring is done, not pending). See `platforms/apple/MACOS_LOCKSTEP_NOTES.md`.
 
 ## Build
 

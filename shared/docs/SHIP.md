@@ -130,12 +130,17 @@ sign/notarize/DMG pipeline** (`platforms/apple/scripts/release.sh`; real signing
 on the Developer ID cert). The major open items:
 
 - **Restructure P2–P4** — VLM naming, confidence tiers + journal, Win2D Sankey.
-- **macOS lockstep (WS-MAC)** — mirror the commercial-clean swap into the Swift
-  app: RAM++ tagger, ViT-B/32, SFace (128-d) with Apple Vision detection, VLM
-  ladder. Goal: a face DB written on one platform round-trips on the other. Until
-  then, treat face DBs as platform-local.
-- **Throughput re-baseline** — DirectML on the RTX 2060 measures ~6–7 files/s
-  (RAM++ Swin-L-bound); host the ORT CUDA EP DLLs for the NVIDIA 3–5× path.
+- **macOS lockstep (WS-MAC) — swap LANDED (2026-07), on-hardware parity verify remains.**
+  The commercial-clean stack (RAM++ tagger, ViT-B/32, SFace 128-d with Apple Vision
+  detection, VLM ladder) is wired as primary on `main` (verified statically —
+  `shared/docs/MACOS_AUDIT_2026-07.md`). Remaining: confirm on a Mac that a face DB
+  written on one platform round-trips on the other; treat face DBs as platform-local
+  until that check passes. Also open on Mac: F1 (non-image Exact-dedup content_hash)
+  from the audit.
+- **Throughput re-baseline — DONE 2026-07 on RTX 5080.** Measured ~40 f/s full corpus
+  on DirectML (~5× the 2060); the GPU is dispatch-bound (idle p50=19%), so the CUDA
+  Performance Pack (3–5× on inference latency) is the biggest remaining lever —
+  blocked on ORT CUDA EP DLL hosting. See STATE.md.
 - **Face clustering** — Pass-1 single-linkage chains distinct people through
   bridge faces on very large libraries; structural fix (mutual-kNN / density-gated
   edges) + calibration against labeled faces.

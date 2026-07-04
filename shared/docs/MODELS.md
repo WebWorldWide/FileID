@@ -8,7 +8,7 @@ This file is the cross-platform source of truth for what FileID asks for and whe
 
 As of the 2026-05 commercial-clean pass, **every weight FileID downloads by default is permissively licensed (Apache-2.0 / MIT)** — no non-commercial weights in the core feature set. This keeps the project (Apache-2.0, see root `LICENSE`) free to be open-sourced *and* commercialized later without a weight-licensing blocker. The non-commercial InsightFace face stack (ArcFace + SCRFD) and the research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. The one conditional model, Gemma-3-4B, is commercially usable under Google's Gemma Terms and stays an opt-in, user-initiated download (its terms surface in the install flow).
 
-> **Windows is live on the commercial-clean stack now.** The macOS app mirror (RAM++ tagger, ViT-B/32, SFace) lands in **WS-MAC** — rows below mark macOS cells *(lockstep pending)* where the Swift swap hasn't been applied yet. Cross-platform DB round-trips (esp. 128-d face prints) require both platforms on the new models; until WS-MAC ships, treat face DBs as platform-local.
+> **Both Windows and macOS are on the commercial-clean stack (updated 2026-07).** The macOS Swift swap (RAM++ tagger, ViT-B/32, SFace 128-d) has **landed on `main` and is wired as primary** — verified statically in `shared/docs/MACOS_AUDIT_2026-07.md`. The *(lockstep pending)* markers on macOS cells below now mean **on-hardware embedding-parity verification is pending**, NOT that the Swift swap is unapplied. Cross-platform DB round-trips (esp. 128-d face prints) work once both engines have run on real hardware with the new models; until the macOS on-hardware parity check is done, treat face DBs as platform-local as a precaution.
 
 ## ML stack per platform
 
