@@ -980,6 +980,12 @@ pub struct SleepGuard {
     stop: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(windows)]
     thread: Option<std::thread::JoinHandle<()>>,
+    // Linux: a held `systemd-inhibit … sleep infinity` child. Alive => the
+    // sleep/idle inhibitor lock is held; killed on drop => released. `None`
+    // when systemd-inhibit is absent or failed to spawn (best-effort, matching
+    // the shell/* backends — a headless box without logind just isn't inhibited).
+    #[cfg(target_os = "linux")]
+    child: Option<std::process::Child>,
 }
 
 impl SleepGuard {
@@ -1024,8 +1030,52 @@ impl SleepGuard {
         }
     }
 
-    #[cfg(not(windows))]
+    // Linux: hold a logind sleep+idle inhibitor for the guard's lifetime by
+    // keeping a `systemd-inhibit … sleep infinity` child alive. This is the
+    // documented, dependency-free way to block suspend without linking libsystemd
+    // (mirrors the shell/* subprocess backends). Best-effort: if systemd-inhibit
+    // is missing or spawn fails (no logind, e.g. a bare container), the guard is
+    // simply inert — a scan on such a box just isn't sleep-protected, same as the
+    // pre-existing non-Windows no-op.
+    #[cfg(target_os = "linux")]
+    pub fn acquire() -> Self {
+        use std::process::{Command, Stdio};
+        let child = Command::new("systemd-inhibit")
+            .args([
+                "--what=sleep:idle",
+                "--who=FileID",
+                "--why=Scanning your library",
+                "--mode=block",
+                // The held command: sleep forever. Killing this child on drop
+                // releases the inhibitor lock. `sleep infinity` is coreutils
+                // (always present); systemd-inhibit waits on it.
+                "sleep",
+                "infinity",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok();
+        Self { child }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     pub fn acquire() -> Self { Self {} }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SleepGuard {
+    fn drop(&mut self) {
+        // Kill the held systemd-inhibit child; that drops its inhibitor lock and
+        // lets the machine sleep normally again. Best-effort — if the child
+        // already exited there's nothing to release. `wait` reaps the zombie so
+        // long-running engines don't leak defunct children across many scans.
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(windows)]

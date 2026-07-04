@@ -9,6 +9,16 @@ Findings from the full-corpus baseline (2026-07-04, RTX 5080, 62,731 files / 84,
 - **[quality/faces/MED] 84,629 faces → 10,208 person clusters (~12%)** is high — many small/singleton clusters. The macOS reference already tuned junk-cluster suppression (STATE 2026-06-21, 407→285 on a smaller set). Revisit `FILEID_FACE_*` thresholds against this real distribution in the perf/quality pass; a 10K-person People tab is not shippable UX.
 - **[harness, FIXED] iterate.ps1** fixed-5s clustering wait + hardcoded 15-min scan wait → now event-driven + `-ScanTimeoutMinutes`.
 
+Findings from the CLI adversarial audit (2026-07-04, both crates read end-to-end):
+- **[cli/restructure, FIXED] disparate-library root** — `restructure --apply` with no explicit ROOT over a library whose files share no common parent (`/home/u/Pics` + `/mnt/ext/Photos`, or `C:\`+`D:\`) organized into `/` (real relocation as root) or errored confusingly. Now refuses and asks for an explicit ROOT (`restructure.rs` common-ancestor parent guard + tests).
+- **[cli/search/MINOR] intra-tier relevance lost** (`search.rs:44-52`) — within a source tier, hits are keyed/sorted by file `id`, not FTS `rank`, so same-tier results display in id order and truncation keeps lowest-id rather than best-ranked rows. All rows genuinely match; only ordering/selection among same-tier hits is off. Fix = thread `rank` through `Hit` + merge. Deferred (needs the ranking model touched; not data-loss).
+- **[cli/scan/MINOR] stale has_text flag** (`scan.rs:39,141`) — model-free rescan of a file that previously had text but now yields none (e.g. a `.txt` grown past the 4 MB `TEXT_CAP_BYTES`) deletes `doc_text`/`doc_fts` but never lowers `has_text` (UPSERT only raises it). `info` then shows the text flag with no snippet and FTS won't match. Narrow trigger; stale flag only. Fix = lower `has_text` when the re-extract yields None.
+- **[cli/runtime/BY-DESIGN] `runtime install` non-interactive abort exits 0** — same tested contract as `models download` (the `--json` `aborted:true` field is the machine signal); not a bug, left as-is for consistency.
+
+Linux engine shell (2026-07-04, verified in WSL):
+- **[FIXED] SleepGuard** now holds a `systemd-inhibit … sleep infinity` child on Linux (was a non-Windows no-op) — parity with macOS's scan-time keep-awake; functionally verified (lock appears in `systemd-inhibit --list` while held, released on drop).
+- **[VERIFIED] HEIC decode on Linux works** end-to-end (11/12 corpus HEICs tagged, 9 with faces) — but ONLY with the HEVC decoder plugin `libheif-plugin-libde265` installed; `libheif-examples` alone decodes to 100% then fails "Decoder plugin … Unspecified" and the engine cleanly skips. **Packaging/docs must list `libheif-plugin-libde265` (+ `-dav1d` for AV1-in-HEIF) as a runtime dep** (Flatpak manifest, build.sh dep lists, README). `shell/thumbnail` confirmed to have no non-Windows caller — staying a stub is correct, not a gap.
+
 ## 2026-06-30 — Linux audit follow-ups (engine/CLI/TUI verified on hardware; see STATE.md)
 
 The `linux-audit-fixes` branch landed 8 portability fixes + the ORT static-link unblock, all verified on a real Linux box (CLI/TUI + full-ML scan GREEN). Remaining Linux work:
