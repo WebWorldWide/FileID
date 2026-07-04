@@ -613,6 +613,11 @@ fn set_root_and_plan(
         let mut s = state.borrow_mut();
         s.root = Some(root.clone());
         s.prior_deselected.clear();
+        // Undo is journal-keyed by the root that was applied. Switching to a
+        // different destination invalidates the "Undo last run" affordance —
+        // leaving it armed would send the NEW root to UndoRestructure and
+        // silently no-op (or error) against the wrong journal. Clear it.
+        s.can_undo = false;
     }
     ui.dest_label.set_text(&format!("Destination: {root}"));
     ui.dest_label.set_visible(true);
