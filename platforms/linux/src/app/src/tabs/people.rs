@@ -1582,7 +1582,7 @@ fn compute_candidates(rows: Vec<(i64, Vec<u8>)>) -> Vec<Candidate> {
     for i in 0..centroids.len() {
         for j in (i + 1)..centroids.len() {
             let s = dot(&centroids[i].1, &centroids[j].1);
-            if s >= BORDERLINE_MIN && s <= BORDERLINE_MAX {
+            if (BORDERLINE_MIN..=BORDERLINE_MAX).contains(&s) {
                 let a = centroids[i].0.min(centroids[j].0);
                 let b = centroids[i].0.max(centroids[j].0);
                 pairs.push(Candidate { a, b, sim: s });
@@ -1646,8 +1646,8 @@ fn crop_to_bbox(full: &gtk::gdk_pixbuf::Pixbuf, bbox: &str) -> Option<gtk::gdk_p
     let iw = full.width() as f64;
     let ih = full.height() as f64;
     let pad = 0.20;
-    let mut cx = (x - w * pad).max(0.0);
-    let mut cy = (y - h * pad).max(0.0);
+    let cx = (x - w * pad).max(0.0);
+    let cy = (y - h * pad).max(0.0);
     let mut cw = w * (1.0 + 2.0 * pad);
     let mut ch = h * (1.0 + 2.0 * pad);
     if cx + cw > iw {

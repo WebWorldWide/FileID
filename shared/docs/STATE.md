@@ -8,6 +8,55 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-04 — `linux-audit-fixes` verified on the new dev box (RTX 5080 + WSLg) and landed; cross-OS parity proven on one corpus
+
+New dev machine (Ryzen 9 9900X 24T / 31 GB / **RTX 5080 16 GB**; corpus drive is now **`F:\TrueNAS`** — the `G:` in older entries is stale). Environment stood up from zero: .NET 8 SDK, VS Build Tools UWP tooling, Ubuntu 26.04 under WSL2/WSLg (engine/CLI/GTK toolchain + models), stratified 1,000-file perf subset at `C:\fileid-perf-corpus` (seed 20260704, incl. 60 HEIC).
+
+**The branch's four commits verified everywhere the dev box allows, then merged:**
+- **Windows headless:** engine clippy `-D warnings` + full tests; CLI + TUI green (one new fix: `sort_by_cached_key` for a clippy-1.96 lint in `tui/src/app.rs`).
+- **Linux (WSL, ext4):** engine clippy + 391 tests; GTK app clippy + release build. **Fixed a real staging bug:** `platforms/linux/build/build.sh` looked for the app binary at the pre-workspace path (`src/app/target/`) — staging always failed despite a green build; now points at the workspace `target/`.
+- **Full-ML on Linux (static ORT, CPU EP):** 953/953 files, 6,835 RAM++ tags, 386 files with faces @ ~2 f/s. The 61 decode failures ≈ the 60 staged HEICs (graceful-skip path, `heif-dec` not installed — decode-path verify still owed, NEXT 06-30).
+- **Six-tab GTK walk under WSLg (screenshots):** Library grid + lazy thumbnails, People (**face clustering ran on Linux**: 954 faces → 442 people with crop thumbnails), Cleanup (10 dupe groups, KEEPER badges), Deep Analyze (model tiers), Restructure (**full Sankey folder map** + recommendations + Apply/Undo), Settings (model manager). Gold palette/LavaLamp/dark theme all read correctly.
+- **Windows on-hardware (`iterate.ps1`, RTX 5080, DirectML, default pool):** subset scan 953 files in **33 s ≈ 29 f/s** (2060 ceiling was ~7.9), 950 tagged, 3 failures, 1,011 SFace 128-d prints, 443 persons — **all 12 assertions green** at `-ThroughputTarget 20`. The stock 100/140 f/s target remains stale pending the M8 re-baseline (SHIP.md item). Full `F:\TrueNAS` baseline: see figure below.
+- **Cross-OS parity proof:** same subset scanned on Windows (DirectML/GPU) and Linux (static-ORT/CPU) produced matching DB outputs — 953 files, 1,011 face prints, 443 vs 442 person clusters.
+
+**RTX 5080 full-corpus baseline (pre-retune, DirectML, defaults):** full `F:\TrueNAS` (62,731 files) scanned + tagged + face-extracted in **1,548 s ≈ 40.5 files/sec** (~5× the RTX 2060's ~7.9 f/s), 85 decode failures (corrupt JPEGs, graceful), **84,629 face embeddings → 10,208 person clusters**, peak RSS **7.9 GB**. Two harness bugs surfaced and were fixed on this branch, not engine bugs: (1) `iterate.ps1` waited a fixed 5 s after `runFaceClustering` before shutdown — fine for a ~1K-face subset, but 84K faces cluster far longer, so shutdown killed clustering mid-run and persisted 0 persons (A5/A12 false-RED); now waits for the `faceClusteringComplete` event. (2) the scanComplete wait was hardcoded 15 min (message still said "5 min") — now `-ScanTimeoutMinutes`. Open items feeding later milestones: peak 7.9 GB exceeds the 2060-era 6000 MB cap (M8 memory posture); 10,208 persons from 84K faces is high (junk-cluster suppression, à la the macOS 2026-06-21 407→285 tuning — quality pass). Also bumped **quick-xml 0.36→0.41** (RUSTSEC-2026-0194/0195; reworked the OOXML text extractor for 0.41's `GeneralRef` entity split).
+
+## 2026-06-30 (cont.) — Linux GTK app: UI overhaul toward macOS/Windows parity (on-hardware, iterated from live captures)
+
+The GTK4 app (`platforms/linux/`) was a Phase-0 scaffold that "looked cheap / like stock GNOME." Reworked it toward the macOS/Windows reference, verified on real COSMIC hardware. Key wins:
+- **Left sidebar navigation** (`adw::OverlaySplitView`) replacing the GNOME top `ViewSwitcher` — gold-tinted active row, **collapsible** (header toggle + `adw::Breakpoint` auto-collapse when narrow, which also fixes small-window resizing; `set_size_request(360,320)` + `GridView` min-columns 1).
+- **Global brand stylesheet** (`theme.rs`) — recolors libadwaita's `accent` to gold so every stock widget (buttons, switches, checks, **progress bars** — was Adwaita-blue) brands itself; transparent view bgs so the LavaLamp reads through; glass cards with real depth + padding; **Inter** font with a fallback chain (DE-independent); button/pill/nav transitions.
+- **LavaLamp** retuned to the canonical **gold + orange `#FF6600` + dark** recipe on `#141414` (was pastel 4-blob) with a lighter scrim so the warm glow shows.
+- **Real app icon** in the dock — the shared brand mark (gold "?" warning-triangle), installed to the hicolor theme + fixed the committed `platforms/linux/data/*.svg` (was a placeholder document icon); `set_default_icon_name` for cross-DE.
+- **Preview navigation** — the photo dialog gained `‹`/`›` + "N of M" counter + ←/→ keys (was missing).
+- **Thumbnails** now respect EXIF orientation (were shown sideways); **Settings** is a centered `adw::Clamp` column with padded cards + uppercase section headings (was full-width/cramped).
+- Added a dev-only headless **self-capture** (`FILEID_SELF_SHOT`) since cosmic-comp exposes no screenshot API — enables headless UI iteration. App is clippy-clean; the required CI gates (engine/CLI/TUI) unchanged since the audit commit.
+
+**All distros:** pure GTK4 + libadwaita, no DE-specific code; Flatpak (planned) bundles the runtime + Inter for identical rendering everywhere.
+
+## 2026-06-30 — Linux audit: full-ML CLI/TUI verified **on real Linux hardware** (first time); ORT static-link fix unblocks ML
+
+First on-hardware Linux run of the engine + `fileid` CLI + `fileid-tui` (branch `linux-audit-fixes`). CI only ever proved they *compile*; this session proved they *run*, end-to-end, against a real corpus on a Pop!_OS box (RTX 2060, but **CPU EP** — see below). A portability audit found 8 issues (1 data-loss, several silently-missing features); all fixed, then verified.
+
+**The headline blocker (was silent): ONNX Runtime didn't load on Linux at all.** The engine's `ort` was `load-dynamic` on all non-Windows targets, but pyke's `download-binaries` ships **only a static `libonnxruntime.a`** for Linux x64 (verified: no dynamic `.so` in the CPU *or* `cu12` set) — so `dlopen("libonnxruntime.so")` had nothing to open and every ML session would fail. Fix: Linux now **statically links the CPU ORT** (`download-binaries` + `std`, no `load-dynamic`; `cuda`/`openvino` dropped). macOS/Windows untouched. `ldd FileIDEngine` → no onnxruntime dep. GPU on Linux is future work (the `cu12` provider needs CUDA 12; the box has 13, and there's no DirectML fallback to size threads against). See DECISIONS.md (2026-06-30).
+
+**Fixes (engine = `platforms/windows/src/engine/src/`):**
+- **#1 (data loss):** `commands/bulk.rs` `no_clobber_rename` used `std::fs::rename`, which on POSIX *atomically replaces* the destination — a Linux rename onto an occupied name silently deleted it. Added the `symlink_metadata` pre-existence guard (mirrors `restructure_apply::move_file`). +regression test.
+- **#2:** `commands/trash.rs` restore-from-trash was a no-op on Linux. Implemented a freedesktop-trash restore in `shell::trash::restore` (parse `.trashinfo`, move back from `…/Trash/files/`, EXDEV-safe, no-clobber). +round-trip tests.
+- **#3:** the ORT static-link fix above.
+- **#4:** `models/vlm.rs` / `vlm_server.rs` hardcoded `llama-*-cli.exe` — added `BIN_EXT` gating (parity with `whisper.rs`) so Deep-Analyze can find its runtime on Linux.
+- **#5:** `.heic`/`.heif` were undecodable on Linux. Added a best-effort `shell::heic` Linux backend (`heif-dec`/`heif-convert` → temp PNG → `image` decode; graceful skip when absent — no GPL libheif linked) wired into `tagging::decode_image_sync`.
+- **#7:** `platform.rs` `file_ref` now returns the inode (`MetadataExt::ino`) on Unix (was `None`) so rename/move heal works without a content rehash.
+- **#8 (correctness):** `util/path_safety.rs` `stable_path_hash` lowercased every path → on case-sensitive ext4, `Foo.jpg`/`foo.jpg` collided on the dedup key (UPSERT shadowing). Now case-preserving on Linux; the macOS/Windows parity-pin test is `cfg`-gated off Linux.
+
+**Verification (all green):**
+- **Static gates (mirror `linux.yml`, Rust 1.90):** engine clippy `-D warnings` + **391 tests**; CLI clippy + **20 tests**; TUI clippy + **80 tests**. `scripts/build-tools.sh` installs `fileid`/`fileid-tui`/`FileIDEngine` (34M/8.4M/3.5M).
+- **CLI/TUI functional (deterministic corpus):** scan/search/info/dedupe + `--json`; the 5-tab `fileid-tui` renders live data and exits clean (PTY-driven).
+- **Full-ML on a 208-file Adlon/TrueNAS subset (CPU, 286s, 1.4 s/file):** `scan_assertions.py` → **GREEN**: 204 files, **0 failures**, **1604 RAM++ tags** (accurate: boy/child/dog/poodle/beach/sunset…), **128-d SFace face prints** (512 B — the commercial-clean model, not 2048-B ArcFace), **18 person clusters** (after a direct `runFaceClustering`), CLIP `--similar` (cos 0.82–0.87), exact dedupe (BLAKE3), and `restructure --plan` with EXIF GPS geo-buckets. HEIC graceful-skip confirmed (heif tools not yet installed).
+
+**Pending (need `sudo apt`, user-gated):** GTK4 app build (`libgtk-4-dev libadwaita-1-dev`) and real HEIC decode (`libheif-examples`). The engine/CLI/TUI — the session's target — are done.
+
 ## 2026-06-24 (cont.) — audit loop CLOSED on `main`: 6 PRs merged + CI-green; engine bug-hunt found ZERO bugs
 
 Committed/pushed the on-hardware audit fixes as **6 PRs (#73–#78), all merged to `main`, all three CI workflows green** (Windows engine, Linux, Flatpak). The "/loop until perfect" backlog from the entries below is now closed:

@@ -16,9 +16,10 @@ sudo apt install build-essential libgtk-4-dev libadwaita-1-dev  # or distro equi
 
 | Surface | Status |
 |---------|--------|
-| Engine | Shared with Windows; `cargo check --target x86_64-unknown-linux-gnu` passes on V15.5 |
+| Engine | Shared with Windows; **builds, runs, and scans on real Linux hardware** — the CPU ONNX Runtime is statically linked (see `shared/docs/DECISIONS.md`), so full-ML `scan --models` (RAM++ tags · CLIP · faces) works on CPU. GPU EP is future work. |
+| `fileid` CLI / `fileid-tui` | **Verified on Linux** — scan/search/info/dedupe/restructure + the 5-tab terminal UI. Built via `scripts/build-tools.sh`. |
 | GTK app shell | Scaffolded: window, HeaderBar, dark mode, brand CSS, folder picker, engine spawn |
-| Library tab | Pending (Phase 1) |
-| People / Cleanup / Deep Analyze / Restructure / Settings | Pending (Phase 1) |
-| Shell ops (trash/thumbnail/ocr/video/reveal/tags/sleep) | Stubs return Err; real Linux impls planned (see CLAUDE.md table) |
+| Library tab | Implemented |
+| People / Cleanup / Deep Analyze / Restructure / Settings | Feature-shaped (CI-compiles); GTK runtime not yet verified on hardware |
+| Shell ops (trash/reveal/tags/ocr/video) | Implemented (std + libc + subprocess, no new crates); thumbnail/heic/sleep still TODO (see CLAUDE.md table) |
 | Flatpak / AppImage distribution | Phase 2 |

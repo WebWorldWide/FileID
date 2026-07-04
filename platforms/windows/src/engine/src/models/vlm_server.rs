@@ -27,8 +27,15 @@ pub struct VlmServer {
     client: reqwest::Client,
 }
 
+/// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
+/// bare elsewhere (parity with `whisper::BIN_EXT` / `vlm::BIN_EXT`).
+#[cfg(windows)]
+const BIN_EXT: &str = ".exe";
+#[cfg(not(windows))]
+const BIN_EXT: &str = "";
+
 impl VlmServer {
-    /// Candidate `llama-server.exe` paths in preference order: the CUDA runtime
+    /// Candidate `llama-server` paths in preference order: the CUDA runtime
     /// first (faster on NVIDIA), then the universal Vulkan runtime. `start`
     /// tries each until one becomes healthy, so a present-but-broken CUDA
     /// runtime (e.g. missing cudart DLLs) transparently falls back to Vulkan.
@@ -37,8 +44,8 @@ impl VlmServer {
         if let Ok(root) = crate::paths::models_dir() {
             for dir in [root.join("llama.cpp-cuda"), root.join("llama.cpp")] {
                 for cand in [
-                    dir.join("llama-server.exe"),
-                    dir.join("bin").join("llama-server.exe"),
+                    dir.join(format!("llama-server{BIN_EXT}")),
+                    dir.join("bin").join(format!("llama-server{BIN_EXT}")),
                 ] {
                     if cand.exists() {
                         out.push(cand);
@@ -57,7 +64,7 @@ impl VlmServer {
         let bins = Self::server_binaries();
         if bins.is_empty() {
             bail!(
-                "llama-server.exe not found — update the llama.cpp runtime from \
+                "llama-server{BIN_EXT} not found — update the llama.cpp runtime from \
                  Settings -> Performance -> 'Install llama.cpp runtime'."
             );
         }

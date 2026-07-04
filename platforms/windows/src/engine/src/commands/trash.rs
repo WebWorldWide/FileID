@@ -296,7 +296,20 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux: restore from the freedesktop home trash (the real parity of the
+/// Windows Recycle-Bin batch restore). Best-effort, same contract — the caller
+/// verifies on-disk presence afterward.
+#[cfg(target_os = "linux")]
+fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
+    let owned: Vec<std::path::PathBuf> =
+        wanted_paths.iter().map(std::path::PathBuf::from).collect();
+    let refs: Vec<&std::path::Path> = owned.iter().map(std::path::PathBuf::as_path).collect();
+    crate::shell::trash::restore(&refs);
+}
+
+/// macOS / other Unix: no restore backend yet (trash itself is a graceful stub
+/// on these targets), so this is a no-op like before.
+#[cfg(all(not(windows), not(target_os = "linux")))]
 fn restore_batch_from_recycle_bin(_wanted_paths: &[&str]) {}
 
 pub(crate) async fn handle_revert_merge(

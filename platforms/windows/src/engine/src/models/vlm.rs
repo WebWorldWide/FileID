@@ -87,8 +87,17 @@ pub struct CaptionResult {
     pub text: String,
 }
 
+/// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
+/// bare elsewhere (parity with `whisper::BIN_EXT`). Without this the Linux/macOS
+/// probe looks for a non-existent `*.exe` and Deep Analyze can never find its
+/// runtime even when it's installed.
+#[cfg(windows)]
+const BIN_EXT: &str = ".exe";
+#[cfg(not(windows))]
+const BIN_EXT: &str = "";
+
 impl VlmRunner {
-    /// Locate `llama-mtmd-cli.exe` under `%LOCALAPPDATA%\FileID\Models\
+    /// Locate `llama-mtmd-cli` under the engine's `Models/llama.cpp\
     /// llama.cpp\` and verify it's a sane PE binary in the expected
     /// size range. Returns Err with a friendly message if missing —
     /// callers surface that to the user as "VLM runtime not installed".
@@ -103,8 +112,8 @@ impl VlmRunner {
         // instead of erroring.
         for dir in [&cuda_dir, &vulkan_dir] {
             for cand in [
-                dir.join("llama-mtmd-cli.exe"),
-                dir.join("bin").join("llama-mtmd-cli.exe"),
+                dir.join(format!("llama-mtmd-cli{BIN_EXT}")),
+                dir.join("bin").join(format!("llama-mtmd-cli{BIN_EXT}")),
             ] {
                 if cand.exists() && sanity_check_binary(&cand).is_ok() {
                     return Ok(VlmRunner { binary: cand });
@@ -117,13 +126,13 @@ impl VlmRunner {
         // NOT the unified llama-mtmd-cli.exe this code drives — and they also
         // predate Qwen2.5-VL. Emit an accurate, actionable message rather than
         // the misleading "runtime not found" when a stale runtime is present.
-        if vulkan_dir.join("llama-server.exe").exists()
-            || vulkan_dir.join("llama-cli.exe").exists()
-            || cuda_dir.join("llama-server.exe").exists()
+        if vulkan_dir.join(format!("llama-server{BIN_EXT}")).exists()
+            || vulkan_dir.join(format!("llama-cli{BIN_EXT}")).exists()
+            || cuda_dir.join(format!("llama-server{BIN_EXT}")).exists()
         {
             bail!(
                 "The installed llama.cpp runtime is too old for image analysis \
-                 (missing llama-mtmd-cli.exe, and pre-Qwen2.5-VL). Update it from \
+                 (missing llama-mtmd-cli{BIN_EXT}, and pre-Qwen2.5-VL). Update it from \
                  Settings -> Performance -> 'Install llama.cpp runtime'."
             )
         }
