@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://adamnolle.github.io/FileID/">Website</a> ·
+  <a href="https://webworldwide.github.io/FileID/">Website</a> ·
   <a href="#features">Features</a> ·
   <a href="#front-ends">Front-ends</a> ·
   <a href="#using-the-cli-and-tui">CLI &amp; TUI</a> ·
@@ -22,10 +22,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS"></a>
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/linux.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/linux.yml/badge.svg" alt="Linux"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/macos.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/linux.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/linux.yml/badge.svg" alt="Linux"></a>
 </p>
 
 ---
@@ -142,7 +142,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 ## Architecture
 
-Each desktop app ships **two processes** that talk newline-delimited JSON over stdio: a native **UI** (SwiftUI / WinUI 3 / GTK4) and a **Rust engine** (Swift on macOS) that owns the SQLite WAL database, scan pipeline, and ML inference. The split buys crash isolation — a panic in the ML pipeline restarts the engine, not the UI. The `fileid` CLI and TUI link the engine crate in-process, so they can't drift either. The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), code-generated into Swift, Rust, and C# DTOs — schema drift is a build break.
+Each desktop app ships **two processes** that talk newline-delimited JSON over stdio: a native **UI** (SwiftUI / WinUI 3 / GTK4) and a **Rust engine** (Swift on macOS) that owns the SQLite WAL database, scan pipeline, and ML inference. The split buys crash isolation — a panic in the ML pipeline restarts the engine, not the UI. The `fileid` CLI and TUI link the engine crate in-process, so they can't drift either. The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), mirrored by hand-maintained Swift, Rust, and C# DTOs that per-language schema-conformance suites hold to the canonical schema — so casing or shape drift is a test break.
 
 FileID picks the best GPU/NPU path per machine: DirectML across every Windows vendor, CUDA / OpenVINO / QNN Performance Packs opt-in, CoreML + ANE on Apple Silicon, and an AVX2/NEON CPU floor. Full design, the GPU matrix, and the ML-model stack: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md). Build, CI, and troubleshooting detail: [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
 
@@ -162,8 +162,14 @@ FileID/
 ├── shared/
 │   ├── ipc-schema/ # Canonical IPC contract (JSON Schema)
 │   ├── docs/       # Architecture, decisions, models, contributing
+│   ├── models/     # Model export/registry helpers
+│   ├── security/   # Pinned TLS roots for model downloads
 │   ├── test-corpus/# Cross-platform regression assertions
 │   └── scripts/    # Shared helpers (model installers, etc.)
+├── website/        # Marketing site (GitHub Pages)
+├── tools/          # Repo tooling (git hooks, …)
+├── scripts/        # Top-level dev/setup scripts
+├── build.sh        # One-command per-platform build + run
 └── README.md
 ```
 
