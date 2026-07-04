@@ -21,11 +21,14 @@
 //   tags    → user.xdg.tags xattr via libc {set,get,list,remove}xattr
 //   ocr     → tesseract CLI (best-effort; empty when absent)
 //   video   → ffmpeg keyframe → P6 PPM we parse (best-effort)
+//   heic    → libheif tools (heif-dec/heif-convert) → temp PNG → `image`
+//             decode (best-effort; needs the HEVC decoder plugin
+//             `libheif-plugin-libde265`, else the file is cleanly skipped)
 //
 // macOS / other Unix keep a graceful stub
 // (`cfg(all(not(windows), not(target_os = "linux")))`) so the macOS build
-// still compiles; thumbnail + heic remain stubbed on every non-Windows OS.
-// TODO(linux): gdk-pixbuf thumbnails + libheif decode.
+// still compiles. `thumbnail` has no non-Windows caller (each app thumbnails
+// itself), so it stays a stub on every non-Windows OS.
 
 #[cfg(windows)] pub mod reveal;
 #[cfg(windows)] pub mod tags;

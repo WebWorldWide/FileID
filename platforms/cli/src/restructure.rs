@@ -88,8 +88,23 @@ pub fn run(
 
     let library_root = match root {
         Some(r) => std::fs::canonicalize(&r).unwrap_or(r),
-        None => common_ancestor(files.iter().map(|f| f.source.as_path()))
-            .unwrap_or_else(|| PathBuf::from(".")),
+        None => {
+            // Derive the root from the files' shared parent. Refuse when that's a
+            // filesystem root (`/`, a bare drive, or — on cross-drive Windows
+            // libraries — an empty prefix): `common_ancestor` never returns None,
+            // so an unguarded default would organize a disparate library straight
+            // into `/Photos`, `/Documents`, … (a real relocation when run as root)
+            // or fail later with a confusing empty-root error. A meaningful root
+            // always has a parent; a filesystem root does not.
+            match common_ancestor(files.iter().map(|f| f.source.as_path())) {
+                Some(a) if a.parent().is_some() => a,
+                _ => anyhow::bail!(
+                    "this library's files span multiple top-level locations with no \
+                     shared parent folder, so there's no safe root to organize into. \
+                     Re-run with an explicit destination, e.g. `fileid restructure <ROOT>`."
+                ),
+            }
+        }
     };
 
     let moves = classify(&files, &library_root);
@@ -368,5 +383,39 @@ fn to_ipc_move(pm: &ProposedMove) -> RestructureMove {
         tier: None,
         confidence: pm.confidence.as_str().to_string(),
         reason: pm.reason.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common_ancestor;
+    use std::path::{Path, PathBuf};
+
+    fn ca(paths: &[&str]) -> Option<PathBuf> {
+        common_ancestor(paths.iter().map(Path::new))
+    }
+
+    // A meaningful shared folder has a parent → the caller organizes into it.
+    #[test]
+    fn shared_folder_has_a_parent() {
+        let a = ca(&["/home/u/Pics/2019/a.jpg", "/home/u/Pics/2020/b.jpg"]).unwrap();
+        assert_eq!(a, PathBuf::from("/home/u/Pics"));
+        assert!(a.parent().is_some(), "a real root must have a parent so apply proceeds");
+    }
+
+    // Disparate absolute paths share only the filesystem root, which has NO
+    // parent — the signal the apply path uses to refuse (else it would organize
+    // a split library straight into `/Photos`, `/Documents`, …).
+    #[test]
+    fn disparate_unix_paths_collapse_to_parentless_root() {
+        let a = ca(&["/home/u/Pictures/x.jpg", "/mnt/ext/Photos/y.jpg"]).unwrap();
+        assert_eq!(a, PathBuf::from("/"));
+        assert!(a.parent().is_none(), "'/' must be parentless so apply refuses");
+    }
+
+    // A single file collapses to its parent directory (unchanged behavior).
+    #[test]
+    fn single_file_uses_its_parent() {
+        assert_eq!(ca(&["/home/u/Pics/only.jpg"]).unwrap(), PathBuf::from("/home/u/Pics"));
     }
 }
