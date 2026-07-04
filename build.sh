@@ -11,7 +11,7 @@
 #   ./build.sh -windows --debug       # Debug build (faster iteration)
 #   ./build.sh -windows --no-run      # Build only, don't launch
 #   ./build.sh -mac                   # macOS dev launch (run.sh)
-#   ./build.sh -linux                 # Phase 5 — not yet supported
+#   ./build.sh -linux                 # Build + stage + run the GTK4 app
 #
 # Defaults for -windows:
 #   - Wipe: ON          (destructive: clears Desktop\FileID + %LOCALAPPDATA%\FileID)
@@ -47,7 +47,7 @@ FileID — unified build dispatcher
                                  questions instead of flag soup)
   ./build.sh -windows [flags]    Build and launch on Windows
   ./build.sh -mac     [flags]    Build and launch on macOS
-  ./build.sh -linux   [flags]    Linux (Phase 5 — deferred)
+  ./build.sh -linux   [flags]    Build + run the GTK4 + libadwaita app
 
 Common flags (after the target):
   --no-wipe        Don't destructively clear prior install + user data
@@ -144,7 +144,7 @@ EOF
     plat=$(ask_choice "Where are we building?" 1 \
         "Windows" \
         "macOS" \
-        "Linux (Phase 5 — not yet supported)")
+        "Linux (GTK4 app)")
     case "$plat" in
         1) TARGET="windows" ;;
         2) TARGET="mac" ;;
@@ -152,9 +152,8 @@ EOF
     esac
     echo ""
 
-    # Linux isn't wired up yet — short-circuit before the rest of the
-    # wizard so the user doesn't answer irrelevant questions just to be
-    # told the platform is deferred.
+    # Linux + macOS run their own dedicated build scripts, so skip the
+    # Windows-specific preset wizard (wipe scope, arch, …) for them.
     if [ "$TARGET" = "linux" ]; then return; fi
 
     local preset
@@ -353,19 +352,24 @@ case "$TARGET" in
         ;;
 
     linux)
-        cat <<'EOF' >&2
-Linux is deferred to Phase 5 (see shared/docs/SHIP.md).
-
-The Rust engine is cross-platform-clean and will build on Linux today
-(`cargo build --release` from platforms/windows/src/engine/ — works on
-any *nix). The blocker is the UI: WinUI 3 is Windows-only, so the
-Linux app needs an Avalonia or GTK4-Rust port.
-
-If you need the engine standalone for headless use, run:
-    cd platforms/windows/src/engine && cargo build --release
-
-For UI: cross that bridge when we get there.
-EOF
-        exit 1
+        # The GTK4 + libadwaita app ships. Delegate to its dedicated build
+        # script, which builds the shared engine + the app and stages a
+        # runnable dist/ (see platforms/linux/build/build.sh).
+        SCRIPT="$REPO_ROOT/platforms/linux/build/build.sh"
+        if [ ! -f "$SCRIPT" ]; then
+            echo "ERROR: Linux build script not found at $SCRIPT" >&2
+            exit 1
+        fi
+        if [ "$RUN_TESTS" = "true" ]; then
+            ( cd "$REPO_ROOT/platforms/windows/src/engine" && cargo test )
+        fi
+        bash "$SCRIPT"
+        DIST="$REPO_ROOT/platforms/linux/dist/fileid/fileid-linux"
+        if [ "$RUN" = "true" ] && [ -x "$DIST" ]; then
+            echo "→ launching $DIST"
+            exec "$DIST"
+        else
+            echo "✅ Built + staged. Run: $DIST"
+        fi
         ;;
 esac
