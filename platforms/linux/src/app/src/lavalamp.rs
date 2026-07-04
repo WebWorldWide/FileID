@@ -1,17 +1,22 @@
-// LavaLampBackground — Cairo port of the macOS signature background
-// (`platforms/apple/.../Theme/LavaLampBackground.swift`). A `gtk::DrawingArea`
-// paints a near-black base, then four slowly-drifting radial-gradient blobs in
-// the brand palette (gold / lavender / cyan / pink), redrawn every frame via a
-// frame-clock tick callback. The macOS version blurs its Canvas; Cairo has no
-// cheap blur, so we reproduce the soft "lava" feel with large radial gradients
-// whose alpha falls to zero at the rim — visually equivalent at this scale.
+// LavaLampBackground — Cairo port of the macOS/Windows signature background
+// (`platforms/apple/.../Theme/LavaLampBackground.swift`,
+// `platforms/windows/.../Motion/LavaLampBackground.cs`). A `gtk::DrawingArea`
+// paints a near-black #141414 base, then three slowly-drifting radial-gradient
+// blobs in the canonical recipe — a warm GOLD glow, an ORANGE #FF6600 glow, and
+// a large DARK ellipse that mottles the centre darker — redrawn every frame via
+// a frame-clock tick callback. The macOS/Windows versions blur their blobs;
+// Cairo has no cheap blur, so we reproduce the soft "lava" feel with large
+// radial gradients whose alpha falls to zero at the rim — visually equivalent.
 //
 // Efficiency: tick callbacks only fire while the widget is mapped, so an
-// occluded / unmapped window stops animating for free. Four gradient fills per
+// occluded / unmapped window stops animating for free. Three gradient fills per
 // frame is trivial GPU/CPU work.
 
 use gtk::prelude::*;
 use std::time::Instant;
+
+/// (colour, speedX, speedY, driftX, driftY, radiusFrac, peakAlpha) for one blob.
+type Blob = ((f64, f64, f64), f64, f64, f64, f64, f64, f64);
 
 /// Build the animated LavaLamp drawing area. The returned widget is meant to be
 /// the bottom layer of a `gtk::Overlay`; it never takes input.
@@ -36,13 +41,13 @@ pub fn build() -> gtk::DrawingArea {
         cr.set_source_rgb(br, bg, bb);
         let _ = cr.paint();
 
-        // Each blob: (palette colour, drift speeds, drift extents, radius, peak alpha).
-        // Phases/speeds echo the macOS sin/cos drift so the motion language matches.
-        let blobs: [((f64, f64, f64), f64, f64, f64, f64, f64, f64); 4] = [
-            (crate::theme::rgb::GOLD, 0.20, 0.23, 0.30, 0.30, 0.46, 0.42),
-            (crate::theme::rgb::LAVENDER, 0.15, 0.18, 0.40, 0.40, 0.50, 0.34),
-            (crate::theme::rgb::CYAN, 0.10, 0.12, 0.20, 0.20, 0.40, 0.30),
-            (crate::theme::rgb::PINK, 0.13, 0.17, 0.35, 0.28, 0.44, 0.28),
+        // Each blob: (colour, speedX, speedY, driftX, driftY, radiusFrac, peakAlpha).
+        // Speeds/drifts/alphas match the macOS + Windows recipe 1:1 (gold 0.40 /
+        // orange 0.30 / dark 0.55), so the motion language + warmth match.
+        let blobs: [Blob; 3] = [
+            (crate::theme::rgb::GOLD, 0.20, 0.23, 0.30, 0.30, 0.46, 0.44),
+            (crate::theme::rgb::ORANGE, 0.15, 0.18, 0.40, 0.40, 0.38, 0.34),
+            (crate::theme::rgb::DARK, 0.10, 0.12, 0.20, 0.20, 0.50, 0.35),
         ];
 
         for (i, &((cr_, cg, cb), sx, sy, ex, ey, radf, alpha)) in blobs.iter().enumerate() {

@@ -71,6 +71,9 @@ pub enum EngineEvent {
 /// Windows `FileRow`, populated from the engine's `files` table.
 #[derive(Debug, Clone)]
 pub struct FileRow {
+    /// DB row id — kept for parity with the macOS/Windows `FileRow` even though
+    /// the GTK app currently keys off `path`.
+    #[allow(dead_code)]
     pub id: i64,
     pub path: String,
     pub name: String,
@@ -586,6 +589,10 @@ pub fn decode_scaled(file_bytes: Vec<u8>, max_px: i32) -> Option<DecodedImage> {
         gio::Cancellable::NONE,
     )
     .ok()?;
+    // Apply the EXIF orientation tag so portrait photos aren't shown sideways
+    // (from_stream_at_scale ignores it). Falls back to the raw pixbuf if there's
+    // no orientation to apply.
+    let pixbuf = pixbuf.apply_embedded_orientation().unwrap_or(pixbuf);
     Some(DecodedImage::from_pixbuf(&pixbuf))
 }
 

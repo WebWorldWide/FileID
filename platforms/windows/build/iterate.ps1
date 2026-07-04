@@ -28,6 +28,7 @@ param(
                                      # true unbounded leak (which blows past 8+ GB).
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
+    [int]$ScanTimeoutMinutes = 15,   # full-library corpora (60K+ files) need 60-90 min
     [switch]$Verbose
 )
 
@@ -201,7 +202,7 @@ $scanStart = Get-Date
 $scanComplete = $false
 $peakResidentMB = 0
 $totalProcessed = 0
-$deadline = (Get-Date).AddMinutes(15)
+$deadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
 while (-not $scanComplete -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
     $events = Get-Content $eventLog -ErrorAction SilentlyContinue
@@ -220,15 +221,33 @@ while (-not $scanComplete -and (Get-Date) -lt $deadline) {
 $scanElapsed = (Get-Date) - $scanStart
 
 if (-not $scanComplete) {
-    Fail "scan did not complete within 5 minutes"
+    Fail "scan did not complete within $ScanTimeoutMinutes minutes"
     $engineProc.Kill()
     exit 1
 }
 OK "scan completed in $([int]$scanElapsed.TotalSeconds)s"
 
-# Trigger face clustering.
+# Trigger face clustering, then WAIT for its completion event rather than a
+# fixed sleep. A hardcoded 5s was enough for a ~1K-face subset but not a real
+# library: 62K files yield ~85K face embeddings whose clustering runs far longer
+# than 5s, so an early shutdown killed it mid-run and persisted zero persons
+# (A5/A12 false-RED). Poll the event log for faceClusteringComplete with the same
+# deadline budget as the scan wait.
 Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
-Start-Sleep -Seconds 5
+$clusterDeadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
+$clusterDone = $false
+while (-not $clusterDone -and (Get-Date) -lt $clusterDeadline) {
+    Start-Sleep -Seconds 2
+    $events = Get-Content $eventLog -ErrorAction SilentlyContinue
+    foreach ($line in $events) {
+        if ($line -match '"residentMB"\s*:\s*(\d+)') {
+            $mb = [int]$Matches[1]
+            if ($mb -gt $peakResidentMB) { $peakResidentMB = $mb }
+        }
+        if ($line -match '"faceClusteringComplete"') { $clusterDone = $true; break }
+    }
+}
+if (-not $clusterDone) { Warn "face clustering did not emit completion within $ScanTimeoutMinutes min" }
 
 # Send shutdown.
 Send-Cmd @{ id = "shutdown-1"; payload = @{ shutdown = @{} } }

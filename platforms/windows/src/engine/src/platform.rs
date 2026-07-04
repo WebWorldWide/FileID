@@ -723,9 +723,17 @@ pub fn file_ref(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-pub fn file_ref(_path: &Path) -> Option<u64> {
-    // Linux/macOS would use libc::stat::st_ino; deferred until the Linux port.
-    None
+pub fn file_ref(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // Volume-local file identity = the inode number — the POSIX analog of the
+    // NTFS file index the Windows arm returns (both are volume-local, no volume
+    // id). `symlink_metadata` so a symlink reports its OWN identity, not its
+    // target's; `None` when the file can't be stat'd (deleted mid-scan,
+    // permission). This lets rename/move heal recognize a moved file without a
+    // content rehash, same as Windows. (Inode numbers can be recycled after
+    // delete, exactly like NTFS file indices, so the heal logic's other signals
+    // still apply.)
+    std::fs::symlink_metadata(path).ok().map(|m| m.ino())
 }
 
 // ─── Battery / AC power detection ───────────────────────────────────────────

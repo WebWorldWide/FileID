@@ -1250,7 +1250,7 @@ fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
 }
 
 fn finalize(mut groups: Vec<DupGroup>, candidate_count: usize) -> LoadResult {
-    groups.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.members.len()));
     if groups.len() > MAX_GROUPS {
         groups.truncate(MAX_GROUPS);
     }
@@ -1381,13 +1381,13 @@ fn group_by_hamming(items: &[(i64, i64)], max_hamming: u32) -> Vec<Vec<i64>> {
 
     let mut order: Vec<usize> = Vec::new();
     let mut members_by_root: HashMap<usize, Vec<i64>> = HashMap::new();
-    for i in 0..n {
+    for (i, item) in items.iter().enumerate() {
         let r = find(&mut parent, i);
-        if !members_by_root.contains_key(&r) {
+        members_by_root.entry(r).or_insert_with(|| {
             order.push(r);
-            members_by_root.insert(r, Vec::new());
-        }
-        members_by_root.get_mut(&r).unwrap().push(items[i].0);
+            Vec::new()
+        });
+        members_by_root.get_mut(&r).unwrap().push(item.0);
     }
 
     let mut groups = Vec::new();

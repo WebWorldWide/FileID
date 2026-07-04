@@ -39,13 +39,11 @@ pub(super) fn fmt_date(secs: Option<f64>) -> Option<String> {
 }
 
 pub(super) fn glass_card() -> gtk::Box {
+    // Inner padding comes from the `.glass-card` CSS (16/18); the parent box's
+    // `spacing` provides the gap between cards — so no margins here.
     gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
-        .margin_top(14)
-        .margin_bottom(14)
-        .margin_start(16)
-        .margin_end(16)
         .css_classes(["glass-card"])
         .build()
 }

@@ -114,11 +114,18 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&build_logs_card());
     root.append(&build_privacy_card());
 
+    // Constrain to a centered column (macOS/Windows settings are NOT full-width).
+    let clamp = adw::Clamp::builder()
+        .maximum_size(820)
+        .tightening_threshold(680)
+        .child(&root)
+        .build();
+
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&root)
+        .child(&clamp)
         .css_classes(["fileid-tab"])
         .build();
 
@@ -174,7 +181,7 @@ fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blur
     for (path, _) in &files {
         card.append(
             &gtk::Label::builder()
-                .label(&path.display().to_string())
+                .label(path.display().to_string())
                 .xalign(0.0)
                 .ellipsize(gtk::pango::EllipsizeMode::Middle)
                 .single_line_mode(true)
@@ -234,7 +241,7 @@ fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blur
                     .build();
                 row.append(
                     &gtk::Label::builder()
-                        .label(&format!("✓ Installed · {} on disk", fmt_bytes(on_disk)))
+                        .label(format!("✓ Installed · {} on disk", fmt_bytes(on_disk)))
                         .xalign(0.0)
                         .hexpand(true)
                         .css_classes(["gold-accent"])
@@ -635,7 +642,7 @@ fn scan_row(s: &ScanRow) -> gtk::Widget {
     let count = s.last_file_index.map(|n| format!(" · {n} files")).unwrap_or_default();
     detail.append(
         &gtk::Label::builder()
-            .label(&format!("{} · {}{}", fmt_unix(s.started_at), s.status, count))
+            .label(format!("{} · {}{}", fmt_unix(s.started_at), s.status, count))
             .xalign(0.0)
             .css_classes(["dim-label", "monospace"])
             .build(),
@@ -738,9 +745,10 @@ fn build_privacy_card() -> gtk::Widget {
 
 fn section_label(text: &str) -> gtk::Label {
     gtk::Label::builder()
-        .label(text)
+        .label(text.to_uppercase())
         .xalign(0.0)
-        .css_classes(["title-2"])
+        .margin_top(12)
+        .css_classes(["settings-heading"])
         .build()
 }
 

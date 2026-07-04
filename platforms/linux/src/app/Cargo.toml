@@ -48,12 +48,8 @@ tracing-appender   = "0.2"
 
 anyhow = "1"
 
-[profile.release]
-opt-level     = 3
-lto           = "fat"
-codegen-units = 1
-strip         = "symbols"
-panic         = "abort"
+# NOTE: release profile lives at the workspace root (platforms/linux/Cargo.toml)
+# — a member crate's [profile] is ignored by Cargo.
 
 [lints.rust]
 unused_imports = "warn"
