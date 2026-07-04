@@ -710,7 +710,7 @@ impl Browser {
             }
         }
         dirs.sort_by_key(|a| dir_key(a));
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        files.sort_by_cached_key(|f| f.name.to_lowercase());
 
         let mut rows = Vec::with_capacity(dirs.len() + 1);
         if self.cwd.parent().is_some() {
