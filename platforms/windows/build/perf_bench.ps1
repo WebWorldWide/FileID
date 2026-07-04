@@ -10,11 +10,11 @@
 
   Usage:
     pwsh build/perf_bench.ps1 -Label baseline -Cap 400
-    pwsh build/perf_bench.ps1 -Label after-fix -Cap 400 -Corpus "G:\TrueNAS\Users"
+    pwsh build/perf_bench.ps1 -Label after-fix -Cap 400 -Corpus "F:\TrueNAS\Users"
 #>
 [CmdletBinding()]
 param(
-    [string]$Corpus = "G:\TrueNAS\Users",
+    [string]$Corpus = "F:\TrueNAS\Users",
     [int]$Cap = 400,
     [string]$Label = "run",
     [int]$ScanTimeoutMin = 20,

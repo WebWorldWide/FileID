@@ -8,6 +8,17 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-04 (cont.) — RTX 5080 perf profiled: pipeline-bound on DirectML, NOT compute-bound; pool is already optimal; the real lever is the CUDA pack
+
+Measured the perf story on the RTX 5080 rather than assuming the "hardcoded to the RTX 2060" constants needed raising for a bigger GPU. **They don't — the measurement inverts the premise:**
+
+- **GPU is idle most of a scan.** `profile_gpu.ps1` over a 1K-image subset: GPU util **p50=19%, mean=27%**, only 6% of samples >80%, power p50=113 W of a ~360 W budget. The RTX 2060 was the opposite (compute-saturated ~87%). So the 5080 is **dispatch-latency / pipeline-bound**, waiting on per-call DirectML dispatch + CPU preprocessing, not on GPU compute.
+- **Raising the model pool REGRESSES throughput** (A/B on the subset, env `FILEID_MODEL_POOL_SIZE`, 953 files): pool **4 → 28.9 f/s**, 6 → 23.8, 8 → 20.3, 10 → 21.7 — monotonic decline. More concurrent DirectML sessions add dispatch/allocator contention that the idle GPU can't offset. **So `MODEL_POOL_SIZE = 4` (tuned on the 2060) is empirically optimal on the 5080 too** — no VRAM-tier pool function is warranted; one would slow this machine down. Left the constants unchanged (correct, now for a documented reason on both cards).
+- **The real 3-5× lever is the CUDA Performance Pack, which isn't installed** — the engine is on DirectML and logs "~3-5x slower" without `onnxruntime_providers_cuda.dll`. That pack's hosting is the open item in CLAUDE.md; provisioning it is the single biggest perf win and is deferred (needs the pack built + hosted). This is now the #1 perf recommendation.
+- **Batching is the one code lever the data supports** (unlike pooling): the GPU is dispatch-bound, so *fewer, larger* RAM++ dispatches could help where *more concurrent* ones hurt — exactly the "high-SM card that doesn't saturate at batch=1" case `ram_plus_batch.rs` predicted. It needs the dynamic-batch-axis ONNX re-export (`export_ram_plus_onnx.py --dynamic-batch`). **The Py3.14 tooling blocker is now GONE** (`onnx 1.22` ships a cp314 wheel — installed + verified), but producing/shipping a new weight requires the MODELS.md vetting + SHA-pin process, so it's a tracked experiment, not this session's change.
+
+Harness retune (shippable now, no engine change): fixed the stale `G:\TrueNAS` → `F:\TrueNAS` corpus default in the five live perf scripts (`profile_gpu`, `measure_batch`, `perf_bench`, `sample_corpus`, `audit_onhw`); reset `iterate.ps1` defaults to measured reality — `-ThroughputTarget 100→25` (~80% of the measured DirectML median; the 100/140 predated RAM++ and false-failed every run) and `-MemoryCapMB 6000→8500` (measured full-library peak was 7913 MB). Historical `G:\` references in dated audit docs left as-is (accurate when written).
+
 ## 2026-07-04 — `linux-audit-fixes` verified on the new dev box (RTX 5080 + WSLg) and landed; cross-OS parity proven on one corpus
 
 New dev machine (Ryzen 9 9900X 24T / 31 GB / **RTX 5080 16 GB**; corpus drive is now **`F:\TrueNAS`** — the `G:` in older entries is stale). Environment stood up from zero: .NET 8 SDK, VS Build Tools UWP tooling, Ubuntu 26.04 under WSL2/WSLg (engine/CLI/GTK toolchain + models), stratified 1,000-file perf subset at `C:\fileid-perf-corpus` (seed 20260704, incl. 60 HEIC).
