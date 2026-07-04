@@ -13,7 +13,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Corpus = "G:\TrueNAS\iMac Documents",
+    [string]$Corpus = "F:\TrueNAS\iMac Documents",
     [int]$ScanTimeoutMin = 25
 )
 

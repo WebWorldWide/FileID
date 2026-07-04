@@ -10,7 +10,7 @@
 param(
     [string]$Batched = "C:\Users\adamm\AppData\Local\Temp\ram_plus_batched\ram_plus.onnx",
     [int]$BatchN = 4,
-    [string]$Corpus = "G:\TrueNAS\iMac Documents"
+    [string]$Corpus = "F:\TrueNAS\iMac Documents"
 )
 $ErrorActionPreference = 'Stop'
 $real = Join-Path $env:LOCALAPPDATA "FileID\Models\ram_plus\ram_plus.onnx"
