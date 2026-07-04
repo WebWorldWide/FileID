@@ -11,7 +11,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Corpus = "G:\TrueNAS\iMac Documents"
+    [string]$Corpus = "F:\TrueNAS\iMac Documents"
 )
 $ErrorActionPreference = 'Stop'
 $csv = Join-Path $env:TEMP "fileid_gpu_profile.csv"
