@@ -1,11 +1,20 @@
 # NEXT — resume here
 
+## 2026-07-04 — production-hardening loop in flight (see STATE.md top entry)
+
+`linux-audit-fixes` (PR #80) is verified on the new RTX 5080 box (Windows headless + WSL/WSLg six-tab GTK walk + on-hardware iterate) and landing once CI is green. The loop's remaining milestones, in order: IPC casing alignment (schema-canonical `…ID` in Rust/C#) → engine-hardening residue (per-stream download cap, CPU-pool log reword, `cluster_suggestions` removal, clippy-allow audit) → CLI/TUI gap-check (most items landed via #74/#77; TUI panic hook still unconfirmed) → C# app fixes (MergeById, FileTile, Sankey/ripple teardown, IridescentBorder; welcome-sheet fixed by #73) → DebugLog level-gate (now runtime-verifiable on this box) → Linux `shell/thumbnail` + `shell/sleep` + HEIC decode-path verify → **RTX 5080 perf re-baseline + VRAM-tier defaults (A3 target is stale: measured ~29 f/s subset / 40.5 f/s full corpus @ defaults vs the aspirational 100/140)** → macOS conservative pass + audit doc → docs/README/website truth pass → adversarial endgame loop.
+
+Findings from the full-corpus baseline (2026-07-04, RTX 5080, 62,731 files / 84,629 faces — see STATE.md):
+- **[perf/MEM/MED] Peak RSS 7.9 GB on the full library** exceeds the 2060-era `iterate.ps1 -MemoryCapMB 6000` default. Decide the real memory posture in M8 (raise the harness default to a measured value AND consider whether the engine should cap steady-state on low-RAM machines).
+- **[quality/faces/MED] 84,629 faces → 10,208 person clusters (~12%)** is high — many small/singleton clusters. The macOS reference already tuned junk-cluster suppression (STATE 2026-06-21, 407→285 on a smaller set). Revisit `FILEID_FACE_*` thresholds against this real distribution in the perf/quality pass; a 10K-person People tab is not shippable UX.
+- **[harness, FIXED] iterate.ps1** fixed-5s clustering wait + hardcoded 15-min scan wait → now event-driven + `-ScanTimeoutMinutes`.
+
 ## 2026-06-30 — Linux audit follow-ups (engine/CLI/TUI verified on hardware; see STATE.md)
 
 The `linux-audit-fixes` branch landed 8 portability fixes + the ORT static-link unblock, all verified on a real Linux box (CLI/TUI + full-ML scan GREEN). Remaining Linux work:
 
-- **[BLOCKED on `sudo apt`, user-gated] GTK4 app on-hardware verify** — `sudo apt install libgtk-4-dev libadwaita-1-dev`, then `platforms/linux/build/build.sh` + run `dist/fileid/fileid-linux`; eyeball all six tabs (LavaLamp/springs/glass, scan/cluster/restructure). CI only proves it compiles.
-- **[BLOCKED on `sudo apt`] HEIC real-decode (#5)** — `sudo apt install libheif-examples` (provides `heif-convert`; newer also `heif-dec`), then re-scan a HEIC folder and confirm tags/embeddings land. The graceful-skip path (tools absent) is already verified; the decode path is unverified.
+- **~~GTK4 app on-hardware verify~~ DONE 2026-07-04** — six-tab walk under WSLg on the new box (screenshots in session log); face clustering, Sankey restructure map, dedupe groups all live. (Earlier COSMIC/Pop!_OS pass covered real-hardware GTK rendering.)
+- **[unblocked] HEIC real-decode (#5)** — `sudo apt install libheif-examples` (provides `heif-dec`), then re-scan a HEIC folder and confirm tags/embeddings land. The graceful-skip path is verified at scale (2026-07-04: 61 skips ≈ the 60 staged HEICs); the decode path is still unverified — fold into the Linux shell-stubs milestone.
 - **[engine/perf, future] Linux GPU EP** — Linux runs the CPU EP today (statically-linked CPU ORT). A real GPU path needs a *dynamic* ORT build whose CUDA provider matches the host toolkit (the bundled `cu12` provider needs CUDA 12; common boxes have 13), a Linux GPU vendor probe in `models/runtime.rs`, and thread-tuning that only pins 1 intra-op thread once a GPU EP has actually bound (Linux has no DirectML fallback). See DECISIONS.md (2026-06-30).
 - **[cosmetic] ML-pool log on CPU boxes** — `pipeline/tagging.rs resolve_pool_size` logs `VRAM unreadable; clamping ML pool to 1 (fail-safe)` on any GPU-less box. The clamp is *correct* on CPU (one all-cores ORT session is optimal for the compute-bound RAM++), but the wording reads like a fault — reword to distinguish "CPU EP: single all-cores session" from a real probe failure.
 - **[hygiene] engine relocation** — when the shared engine moves from `platforms/windows/src/engine/` to `shared/engine/`, update the `fileid-engine` path dep in cli/tui/linux-app Cargo.toml in lockstep (and the Linux ORT target stanza moves with it).
