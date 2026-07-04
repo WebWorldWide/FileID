@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-04 (cont.) — macOS static audit + lockstep-doc reconciliation; docs/README/website truth pass
+
+**macOS parity audit** (`shared/docs/MACOS_AUDIT_2026-07.md`, static — Swift can't build on this Windows box, so all code findings are UNVERIFIED-UNTIL-MAC). The audit overturned two planned assumptions (both were wrong): macOS restructure is **not** computed app-side — the engine computes the plan and the app renders it, confidence/reason/tier are used; and the Sankey palette does **not** diverge — macOS also uses Okabe-Ito. Real findings: **F1** (macOS `content_hash` is computed for images only, so Cleanup "Exact" silently misses non-image duplicate PDFs/docs/video/audio — a within-macOS gap vs Windows' all-kinds hashing; left for an on-Mac session as it touches the hashing pipeline); **F4** applied (added the missing CLIP `embedImage` output-dim guard, mirroring the SFace ENG-69 guard — a wrong/substituted model now fails cleanly instead of persisting an off-dim blob); **F5 NOT applied** (verification showed Windows stores the same `"mobileclip_s2"` tag, so changing only macOS would *create* cross-platform divergence). Swift hygiene re-confirmed clean (0 fatalError/try!/as!).
+
+**Lockstep docs reconciled** — the commercial-clean swap (SFace 128-d, RAM++ primary, ViT-B/32) **landed on `main` and is wired as primary** (SFace-only `FaceEmbedderKind`, prewarmed at `FileIDEngineMain.swift:669–676`), but apple/CLAUDE.md, MODELS.md, SHIP.md still said "pending / needs a Mac / main loads prior weights." Corrected all three: the wiring is done; only on-hardware embedding-parity verification remains.
+
+**Docs/README/website truth pass** — fixed wrong repo + Pages URLs in README (`AdamNolle`/`adamnolle` → the real `WebWorldWide`; Pages live at webworldwide.github.io), the false "code-generated DTOs" claim (hand-maintained, held to the schema by conformance suites), and the incomplete layout diagram. Wired root `build.sh -linux` to actually build+run the GTK4 app (was a Phase-5 "not yet supported" stub — verified end-to-end in WSL). De-staled website/index.html and both platforms/linux docs (all six tabs ship, not "Phase 0 scaffold"; phantom `flatpak/` dir fixed).
+
 ## 2026-07-04 (cont.) — RTX 5080 perf profiled: pipeline-bound on DirectML, NOT compute-bound; pool is already optimal; the real lever is the CUDA pack
 
 Measured the perf story on the RTX 5080 rather than assuming the "hardcoded to the RTX 2060" constants needed raising for a bigger GPU. **They don't — the measurement inverts the premise:**
