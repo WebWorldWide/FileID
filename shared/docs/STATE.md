@@ -8,6 +8,20 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-04 — `linux-audit-fixes` verified on the new dev box (RTX 5080 + WSLg) and landed; cross-OS parity proven on one corpus
+
+New dev machine (Ryzen 9 9900X 24T / 31 GB / **RTX 5080 16 GB**; corpus drive is now **`F:\TrueNAS`** — the `G:` in older entries is stale). Environment stood up from zero: .NET 8 SDK, VS Build Tools UWP tooling, Ubuntu 26.04 under WSL2/WSLg (engine/CLI/GTK toolchain + models), stratified 1,000-file perf subset at `C:\fileid-perf-corpus` (seed 20260704, incl. 60 HEIC).
+
+**The branch's four commits verified everywhere the dev box allows, then merged:**
+- **Windows headless:** engine clippy `-D warnings` + full tests; CLI + TUI green (one new fix: `sort_by_cached_key` for a clippy-1.96 lint in `tui/src/app.rs`).
+- **Linux (WSL, ext4):** engine clippy + 391 tests; GTK app clippy + release build. **Fixed a real staging bug:** `platforms/linux/build/build.sh` looked for the app binary at the pre-workspace path (`src/app/target/`) — staging always failed despite a green build; now points at the workspace `target/`.
+- **Full-ML on Linux (static ORT, CPU EP):** 953/953 files, 6,835 RAM++ tags, 386 files with faces @ ~2 f/s. The 61 decode failures ≈ the 60 staged HEICs (graceful-skip path, `heif-dec` not installed — decode-path verify still owed, NEXT 06-30).
+- **Six-tab GTK walk under WSLg (screenshots):** Library grid + lazy thumbnails, People (**face clustering ran on Linux**: 954 faces → 442 people with crop thumbnails), Cleanup (10 dupe groups, KEEPER badges), Deep Analyze (model tiers), Restructure (**full Sankey folder map** + recommendations + Apply/Undo), Settings (model manager). Gold palette/LavaLamp/dark theme all read correctly.
+- **Windows on-hardware (`iterate.ps1`, RTX 5080, DirectML, default pool):** subset scan 953 files in **33 s ≈ 29 f/s** (2060 ceiling was ~7.9), 950 tagged, 3 failures, 1,011 SFace 128-d prints, 443 persons — **all 12 assertions green** at `-ThroughputTarget 20`. The stock 100/140 f/s target remains stale pending the M8 re-baseline (SHIP.md item). Full `F:\TrueNAS` baseline: see figure below.
+- **Cross-OS parity proof:** same subset scanned on Windows (DirectML/GPU) and Linux (static-ORT/CPU) produced matching DB outputs — 953 files, 1,011 face prints, 443 vs 442 person clusters.
+
+**RTX 5080 full-corpus baseline (pre-retune, DirectML, defaults):** full `F:\TrueNAS` (62,731 files) scanned + tagged + face-extracted in **1,548 s ≈ 40.5 files/sec** (~5× the RTX 2060's ~7.9 f/s), 85 decode failures (corrupt JPEGs, graceful), **84,629 face embeddings → 10,208 person clusters**, peak RSS **7.9 GB**. Two harness bugs surfaced and were fixed on this branch, not engine bugs: (1) `iterate.ps1` waited a fixed 5 s after `runFaceClustering` before shutdown — fine for a ~1K-face subset, but 84K faces cluster far longer, so shutdown killed clustering mid-run and persisted 0 persons (A5/A12 false-RED); now waits for the `faceClusteringComplete` event. (2) the scanComplete wait was hardcoded 15 min (message still said "5 min") — now `-ScanTimeoutMinutes`. Open items feeding later milestones: peak 7.9 GB exceeds the 2060-era 6000 MB cap (M8 memory posture); 10,208 persons from 84K faces is high (junk-cluster suppression, à la the macOS 2026-06-21 407→285 tuning — quality pass). Also bumped **quick-xml 0.36→0.41** (RUSTSEC-2026-0194/0195; reworked the OOXML text extractor for 0.41's `GeneralRef` entity split).
+
 ## 2026-06-30 (cont.) — Linux GTK app: UI overhaul toward macOS/Windows parity (on-hardware, iterated from live captures)
 
 The GTK4 app (`platforms/linux/`) was a Phase-0 scaffold that "looked cheap / like stock GNOME." Reworked it toward the macOS/Windows reference, verified on real COSMIC hardware. Key wins:
