@@ -36,7 +36,8 @@ ok  "engine: $ENGINE_BIN"
 
 step "Building GTK app ($PROFILE)"
 ( cd "$APP_DIR" && cargo build --$PROFILE ) || fail "app build failed"
-APP_BIN="$APP_DIR/target/$PROFILE/fileid-linux"
+# The app is a workspace member; cargo emits into the workspace root target dir.
+APP_BIN="$PLATFORM_DIR/target/$PROFILE/fileid-linux"
 [[ -x "$APP_BIN" ]] || fail "app binary not found at $APP_BIN"
 ok  "app: $APP_BIN"
 
