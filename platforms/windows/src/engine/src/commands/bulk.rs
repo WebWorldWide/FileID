@@ -345,7 +345,13 @@ pub(crate) async fn handle_rename_files(
             match tx.execute(
                 // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
                 // renamed/moved file stays findable by its accented name. (audit parity)
-                "UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3",
+                // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE,
+                // so a PLAIN update colliding with a LIVE row already at dest (a
+                // check→rename TOCTOU on non-Windows, or an external desync) would
+                // silently REPLACE-delete that row + cascade its user metadata. OR
+                // ABORT raises instead, routing into the Err arm below (record +
+                // report failed) rather than losing data. (audit 2026-07 sibling)
+                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3",
                 rusqlite::params![
                     dest_text,
                     dest_hash,
