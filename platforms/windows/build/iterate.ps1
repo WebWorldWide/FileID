@@ -16,16 +16,28 @@
 
 param(
     [string]$Corpus = "",
-    [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
-    [int]$MemoryCapMB = 6000,        # Windows CUDA stack floor is ~2.4-3.6 GB (RAM++
-                                     # Swin-L + CLIP + YuNet/SFace weights + cuDNN
-                                     # context); measured peak 3635 MB @300 files on
-                                     # the RTX 2060. macOS's 1.2 GB ceiling never
-                                     # applied here. In-flight decode is concurrency-
-                                     # bounded, not file-count-bounded, so RSS
-                                     # plateaus; 6 GB clears steady state with
-                                     # headroom for 4K images while still tripping a
-                                     # true unbounded leak (which blows past 8+ GB).
+    [int]$ThroughputTarget = 25,     # files/sec REGRESSION FLOOR, not a spec.
+                                     # MEASURED on the RTX 5080 / DirectML EP:
+                                     # ~29 f/s on a 1K-image subset, ~40 f/s on the
+                                     # full 62K library (2026-07-04). The old 100/140
+                                     # defaults predate the RAM++ Swin-L tagger and the
+                                     # DirectML path and false-fail every real run.
+                                     # RAM++ is dispatch-latency-bound on DirectML (GPU
+                                     # sits ~19% p50 during a scan — pool>4 measurably
+                                     # REGRESSES, see NEXT.md), so the real 3-5x lever
+                                     # is the CUDA Performance Pack, not tuning. Set to
+                                     # ~80% of the measured DirectML median so the gate
+                                     # catches regressions without flaking. Raise it
+                                     # once the CUDA EP ships.
+    [int]$MemoryCapMB = 8500,        # RAM++ Swin-L + CLIP + YuNet/SFace weights + the
+                                     # DirectML allocator. MEASURED peak 7913 MB on the
+                                     # full 62K-file library (RTX 5080, 2026-07-04); the
+                                     # old 6000 was set from a 3635 MB @300-file RTX 2060
+                                     # run and false-fails a real full-library scan.
+                                     # In-flight decode is concurrency-bounded (not
+                                     # file-count-bounded), so RSS plateaus; 8500 clears
+                                     # the measured steady state with headroom while
+                                     # still tripping a true unbounded leak.
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
     [int]$ScanTimeoutMinutes = 15,   # full-library corpora (60K+ files) need 60-90 min
