@@ -636,7 +636,15 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     // (the v16 contract). Without this, a moved file is unsearchable by its
     // accented name until the next rescan re-stamps it. (audit parity fix)
     let path_search = crate::pipeline::dbwriter::nfc_path_search(&path_text);
-    conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
+    // OR ABORT is load-bearing: `path_text` is UNIQUE ON CONFLICT REPLACE, so a
+    // PLAIN update that collides with a LIVE row already at the new path (a
+    // transient earlier update failure left this file's on-disk move done but its
+    // DB path stale, then a later move routes another file here; or an external
+    // rename desynced the row) would silently REPLACE-delete that row and cascade
+    // its user tags/person assignments. OR ABORT raises instead, and the caller's
+    // record_path_update_failure recovery arm reconciles it on the next scan.
+    // (audit 2026-07: rename-heal ON CONFLICT REPLACE sibling)
+    conn.prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
         .execute(params![path_text, path_hash, file_id, path_search])
         .context("DB UPDATE files.path_text")?;
     Ok(())
@@ -920,6 +928,43 @@ mod tests {
         assert!(src.exists(), "source untouched by a cancelled apply");
         assert!(!root.join("Sorted").join("a.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression (audit 2026-07 — rename-heal ON CONFLICT REPLACE, sibling site):
+    /// `update_path_in_db` must NOT REPLACE-delete a LIVE row already occupying the
+    /// destination path. `path_text` is UNIQUE ON CONFLICT REPLACE, so before the
+    /// `UPDATE OR ABORT` fix a plain UPDATE onto an occupied path silently deleted
+    /// the occupant + FK-cascaded its user data. This can happen mid-restructure
+    /// after a transient earlier update failure desyncs a row.
+    #[test]
+    fn update_path_in_db_aborts_instead_of_clobbering_a_live_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, "C:/lib/A.jpg"); // row to be moved
+        insert_file_row(&conn, 2, "C:/lib/B.jpg"); // LIVE row occupying the target
+        // Give row 2 a user tag so a cascade would be observable.
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (2, 'Grandma', 'user', 1.0)",
+            [],
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        // Move row 1 onto B.jpg, which row 2 still owns → must error, not clobber.
+        let res = update_path_in_db(&db, 1, Path::new("C:/lib/B.jpg"));
+        assert!(res.is_err(), "colliding path update must abort, not silently REPLACE");
+
+        let g = db.lock();
+        let rows: i64 = g.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 2, "both rows must survive the aborted update");
+        let tag: i64 = g
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE file_id = 2 AND tag = 'Grandma'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag, 1, "the live row's user tag must not be FK-cascade-deleted");
     }
 
     #[test]
