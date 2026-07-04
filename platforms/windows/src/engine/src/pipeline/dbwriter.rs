@@ -799,15 +799,21 @@ const HEAL_LOOKUP_SQL: &str = r#"
     LIMIT 32
 "#;
 
-// Heal: move the existing row to the new path. `UPDATE OR REPLACE` handles
-// the rare case where ANOTHER row already sits at the new path (e.g. a copy
-// preceded the rename) — SQLite REPLACE deletes the colliding row and
-// FK-cascades its tags/embeddings/faces, then the healed row wins.
+// Heal: move the existing row to the new path. `UPDATE OR ABORT` is LOAD-BEARING:
+// `files.path_text` is declared `UNIQUE ON CONFLICT REPLACE`, so a PLAIN `UPDATE`
+// that collides on path_text silently REPLACE-deletes the row already sitting at
+// the new path (a content-identical copy scanned there independently) and
+// FK-cascades ITS user tags + person assignments — permanent, unrecoverable loss
+// of user-authored metadata. `OR ABORT` overrides the schema's REPLACE with ABORT
+// so the collision raises SQLITE_CONSTRAINT, which the call site catches to SKIP
+// the heal (leaving both rows intact — the intended behavior). Empirically
+// verified against SQLite: plain UPDATE deletes the copy's row; OR ABORT preserves
+// it. (audit 2026-07: rename-heal ON CONFLICT REPLACE data-loss)
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
 // query, mirroring the INSERT path. (F-C2-005)
 const HEAL_UPDATE_SQL: &str = r#"
-    UPDATE files
+    UPDATE OR ABORT files
        SET path_text = ?1, path_hash = ?2, path_search = ?4
      WHERE id = ?3
 "#;
@@ -1360,8 +1366,18 @@ mod tests {
                 .unwrap();
             if let Some((id, old_path, by_ref)) = healed {
                 if heal_candidate_moved(by_ref, &old_path) {
-                    conn.execute(HEAL_UPDATE_SQL, params![path_text, path_hash, id, path_search])
-                        .unwrap();
+                    // Mirror the production guard: `UPDATE OR ABORT` raises a
+                    // UNIQUE violation when the new path is already occupied by a
+                    // live row — skip the heal in that case (don't clobber it).
+                    match conn.execute(
+                        HEAL_UPDATE_SQL,
+                        params![path_text, path_hash, id, path_search],
+                    ) {
+                        Ok(_) => {}
+                        Err(rusqlite::Error::SqliteFailure(e, _))
+                            if e.code == rusqlite::ErrorCode::ConstraintViolation => {}
+                        Err(e) => panic!("unexpected heal error: {e}"),
+                    }
                 }
             }
         }
@@ -1530,6 +1546,66 @@ mod tests {
             .query_row("SELECT path_text FROM files WHERE id = ?1", params![id_b], |r| r.get(0))
             .unwrap();
         assert_eq!(healed_path, new_path.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (audit 2026-07 — rename-heal ON CONFLICT REPLACE data-loss):
+    /// when a content-identical COPY already occupies the new path with a LIVE
+    /// row carrying user-authored metadata, the heal of a moved-away orphan onto
+    /// that path must NOT clobber the copy's row. Before the `UPDATE OR ABORT`
+    /// fix, `path_text UNIQUE ON CONFLICT REPLACE` made a plain UPDATE silently
+    /// delete the copy's row + FK-cascade its user tags/person names.
+    #[test]
+    fn heal_does_not_clobber_a_live_copy_at_the_new_path() {
+        let dir = unique_tmp_dir("heal_no_clobber");
+        // Both copies exist on disk when first scanned, so each gets its own row
+        // (the heal only fires when an old path is GONE).
+        let p1 = dir.join("orig.jpg");
+        let p2 = dir.join("copy.jpg");
+        std::fs::write(&p1, b"payload").unwrap();
+        std::fs::write(&p2, b"payload").unwrap();
+
+        let conn = in_memory_db();
+        // Row A at P1 (same content hash), P1 present → no heal.
+        let mut a = fixture(p1.to_str().unwrap());
+        a.content_hash = Some([0x33; 32]);
+        a.file_ref = None;
+        let id_a = ingest_with_heal(&conn, &a);
+
+        // Row B at P2 (independent copy, same hash). P1 still present, so the heal
+        // lookup's old-path-gone check fails → B gets its OWN row.
+        let mut b = fixture(p2.to_str().unwrap());
+        b.content_hash = Some([0x33; 32]);
+        b.file_ref = None;
+        let id_b = ingest_with_heal(&conn, &b);
+        assert_ne!(id_a, id_b, "the copy at P2 must get its OWN row while P1 still exists");
+        // Now the orphan's old path disappears (P1 moved/deleted).
+        std::fs::remove_file(&p1).unwrap();
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'Grandma', 'user', 1.0)",
+            params![id_b],
+        )
+        .unwrap();
+
+        // Reprocess P2 (e.g. mtime changed): the heal lookup finds orphan A
+        // (P1 gone, hash matches) and tries to re-bind A onto P2 — which is
+        // occupied by live row B. The heal must be SKIPPED, not clobber B.
+        let id_reproc = ingest_with_heal(&conn, &b);
+        assert_eq!(id_reproc, id_b, "reprocessing P2 must keep B's row id");
+
+        let user_tag: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE file_id = ?1 AND tag = 'Grandma' AND source = 'user'",
+                params![id_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(user_tag, 1, "B's user-authored tag must survive; the heal must not REPLACE-delete B");
+        let b_still_at_p2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files WHERE id = ?1 AND path_text = ?2",
+                params![id_b, p2.to_string_lossy()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(b_still_at_p2, 1, "row B must still own P2");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

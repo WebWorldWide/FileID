@@ -18,6 +18,14 @@ use ort::value::Tensor;
 
 use super::runtime::{classify_inference_error, commit_chain_session};
 
+/// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
+/// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
+/// with a mismatched registry SHA) and must be rejected, not L2-normalized and
+/// persisted as an off-dimension `clip_embeddings` blob — that silently poisons
+/// scene-tag dot products (`scene_vocab::dot` folds over `min(len)`) and
+/// semantic search. Mirrors the SFace (`sface.rs` ENG-69), RAM++, and BGE guards.
+pub(crate) const CLIP_EMBED_DIM: usize = 512;
+
 // OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet
 // stats on a CLIP model measurably degrades the embeddings.
 #[allow(clippy::excessive_precision)]
@@ -95,6 +103,12 @@ impl MobileClipImage {
         let (_shape, data) = value
             .try_extract_tensor::<f32>()
             .context("extract MobileCLIP output as f32")?;
+        if data.len() != CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "MobileCLIP produced a {}-d embedding, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)",
+                data.len()
+            );
+        }
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
         Ok(emb)
@@ -170,6 +184,11 @@ impl MobileClipImage {
             );
         }
         let embed_dim = total / batch;
+        if embed_dim != CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "MobileCLIP produced {embed_dim}-d embeddings, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)"
+            );
+        }
         let mut out = Vec::with_capacity(batch);
         for b in 0..batch {
             let start = b * embed_dim;

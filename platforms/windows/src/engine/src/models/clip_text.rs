@@ -66,6 +66,13 @@ impl ClipText {
         let (_shape, data) = value
             .try_extract_tensor::<f32>()
             .context("extract CLIP text output as f32")?;
+        if data.len() != crate::models::mobileclip::CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "CLIP text produced a {}-d embedding, expected {} (wrong or corrupt model? text + image encoders must share the space)",
+                data.len(),
+                crate::models::mobileclip::CLIP_EMBED_DIM
+            );
+        }
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
         Ok(emb)
@@ -118,6 +125,12 @@ impl ClipText {
             );
         }
         let dim = data.len() / batch;
+        if dim != crate::models::mobileclip::CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "CLIP text produced {dim}-d embeddings, expected {} (wrong or corrupt model?)",
+                crate::models::mobileclip::CLIP_EMBED_DIM
+            );
+        }
         let mut out = Vec::with_capacity(batch);
         for i in 0..batch {
             let mut emb = data[i * dim..(i + 1) * dim].to_vec();
