@@ -30,6 +30,11 @@ public final class MobileCLIPService: @unchecked Sendable {
 
     // CLIP (OpenAI) preprocessing constants — identical to the Windows engine.
     private static let inputSize = 224
+    /// Expected image-embedding width. ViT-B/32 emits 512-d; a model whose output
+    /// width differs is wrong/substituted and must be rejected, not persisted as an
+    /// off-dimension `clip_embeddings` blob (mirrors the SFace dim guard,
+    /// ArcFaceService.embed / Windows sface.rs ENG-69).
+    private static let embeddingDim = 512
     private static let mean: [Float] = [0.481_454_66, 0.457_827_5, 0.408_210_73]
     private static let std: [Float] = [0.268_629_54, 0.261_302_58, 0.275_777_11]
 
@@ -129,7 +134,17 @@ public final class MobileCLIPService: @unchecked Sendable {
             guard let first = outputs.values.first else { return nil }
             let outData = try first.tensorData() as Data
             let count = outData.count / MemoryLayout<Float>.stride
-            guard count > 0 else { return nil }
+            // Reject a wrong/substituted model rather than persist an
+            // off-dimension blob that would poison semantic search + restructure
+            // clustering (symmetric with the SFace dim guard).
+            guard count == Self.embeddingDim else {
+                if count != 0 {
+                    JSONLog.shared.error(
+                        ev: "clip_embedding_dim_mismatch",
+                        error: "expected \(Self.embeddingDim), got \(count)")
+                }
+                return nil
+            }
             var out = [Float](repeating: 0, count: count)
             outData.withUnsafeBytes { raw in
                 let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)
