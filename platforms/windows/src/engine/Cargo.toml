@@ -114,7 +114,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Streaming XML pull-parser for Phase 4 OOXML text extraction. Pure-Rust,
 # tiny, MIT-licensed. The alternative (`xml-rs`) is heavier + DOM-oriented.
-quick-xml = "0.36"
+quick-xml = "0.41"
 
 # Phase 5: pure-Rust audio metadata + decode (no Java/ffmpeg system dep). Used
 # to read artist/album/title/genre/year tags from mp3/flac/wav/ogg/m4a/aac so
@@ -362,7 +362,7 @@ cast_possible_wrap      = "allow"  # u32→i32 conversions for SQLite parameter 
 map_unwrap_or           = "allow"  # `map().unwrap_or()` is at least as readable as `map_or()`
 manual_midpoint         = "allow"  # `(a + b) / 2` is fine where overflow is impossible
 manual_is_multiple_of   = "allow"  # `x % n == 0` is idiomatic Rust
-unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (lint was renamed from unchecked_time_subtraction)
+unchecked_time_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (renamed from unchecked_duration_subtraction in clippy 1.96)
 redundant_closure       = "allow"  # readability sometimes wins over conciseness
 needless_continue       = "allow"  # explicit continue in long loops aids readability
 needless_range_loop     = "allow"  # range-loop with index is sometimes clearer than iter

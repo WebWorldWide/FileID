@@ -374,8 +374,24 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 }
             }
             Ok(Event::Text(t)) if depth > 0 => {
-                if let Ok(s) = t.unescape() {
+                // quick-xml 0.41 emits entity refs as separate `GeneralRef`
+                // events, so `Text` payloads are already entity-free — a plain
+                // charset decode restores the run faithfully.
+                if let Ok(s) = t.decode() {
                     out.push_str(&s);
+                }
+            }
+            Ok(Event::GeneralRef(r)) if depth > 0 => {
+                // The `&amp;`/`&#8217;` runs the old `unescape()` used to fold
+                // into `Text`. Resolve numeric char refs and the five
+                // predefined named entities; drop unknown custom entities
+                // (the old `unescape()` errored on those and we skipped too).
+                if let Ok(Some(ch)) = r.resolve_char_ref() {
+                    out.push(ch);
+                } else if let Ok(name) = r.decode() {
+                    if let Some(rep) = quick_xml::escape::resolve_predefined_entity(&name) {
+                        out.push_str(rep);
+                    }
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -487,6 +503,15 @@ mod tests {
         let out = xml_text_runs(xml, &["t"]);
         assert!(out.contains("aa"));
         assert!(out.contains("bb"));
+    }
+
+    #[test]
+    fn xml_text_runs_resolves_entities() {
+        // Guards the quick-xml 0.41 migration: text runs must still be
+        // entity-decoded (predefined + numeric), not left as raw `&amp;`.
+        let xml = r"<root><w:t>Tom &amp; Jerry &#8217;s day &lt;3</w:t></root>";
+        let out = xml_text_runs(xml, &["w:t"]);
+        assert_eq!(out.trim(), "Tom & Jerry \u{2019}s day <3");
     }
 
     #[test]
