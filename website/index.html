@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>FileID — On-device AI file organization</title>
-<meta name="description" content="Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own. macOS today, Windows next, Linux soon." />
+<meta name="description" content="Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own. Native apps on macOS, Windows, and Linux." />
 <meta property="og:title" content="FileID — On-device AI file organization" />
 <meta property="og:description" content="Point FileID at a folder. It reads every file inside and builds one searchable library. 100% on-device. Zero telemetry." />
 <link rel="icon" type="image/png" href="assets/app-icon.png" />
@@ -79,7 +79,7 @@
     <ul class="hero-pills" aria-label="Platform support">
       <li><span class="pill-dot pill-dot-on"></span>macOS&nbsp;15+</li>
       <li><span class="pill-dot pill-dot-on"></span>Windows&nbsp;10/11 + WoA</li>
-      <li><span class="pill-dot pill-dot-soon"></span>Linux&nbsp;(Phase 5)</li>
+      <li><span class="pill-dot pill-dot-on"></span>Linux&nbsp;(GTK4)</li>
     </ul>
   </div>
 
@@ -188,7 +188,7 @@
     <div class="section-head reveal">
       <div class="kicker"><span class="kicker-dot"></span>Releases</div>
       <h2>Download for your platform.</h2>
-      <p class="section-sub">Auto-detects your CPU on Windows (x64 vs ARM64). Apple Silicon DMG for macOS. Linux engine builds standalone today; UI lands in Phase 5.</p>
+      <p class="section-sub">Auto-detects your CPU on Windows (x64 vs ARM64). Apple Silicon DMG for macOS. A native GTK4 + libadwaita app on Linux, packaged for Flatpak / AppImage / Nix.</p>
     </div>
 
     <div id="releaseStatus" class="release-status" hidden></div>
@@ -248,9 +248,9 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14.62 8.35c-.42.28-1.75 1.04-1.95 1.19-.3.24-.69.24-1.04 0-.21-.15-1.53-.91-1.95-1.19-.45-.31-1.34-.97-1.34-1.84 0-.96.69-1.69 1.39-2.24.39-.31.84-.55 1.29-.55h1.21c.45 0 .9.24 1.29.55.7.55 1.39 1.28 1.39 2.24 0 .87-.89 1.53-1.29 1.84zm-1.27-5.36c0-.36.29-.65.65-.65s.65.29.65.65-.29.65-.65.65-.65-.29-.65-.65zm-2.7 0c0-.36.29-.65.65-.65s.65.29.65.65-.29.65-.65.65-.65-.29-.65-.65zM12 0C6.48 0 2 4.48 2 10c0 2.45.88 4.69 2.34 6.43-.18.62-.6 1.6-1.34 2.27-.24.21-.13.6.18.66 1.27.24 2.62-.31 3.5-.78C9.99 19.48 10.98 20 12 20s2.01-.52 3.32-1.42c.88.47 2.23 1.02 3.5.78.31-.06.42-.45.18-.66-.74-.67-1.16-1.65-1.34-2.27C21.12 14.69 22 12.45 22 10 22 4.48 17.52 0 12 0z"></path></svg>
             <h3>Linux</h3>
           </div>
-          <span class="dl-badge dl-badge-soon">Phase 5</span>
+          <span class="dl-badge">GTK4</span>
         </div>
-        <p class="dl-blurb">Engine builds standalone today — UI port (Avalonia or GTK4) hasn't started. The Rust engine binary is fully functional headless.</p>
+        <p class="dl-blurb">A native GTK4 + libadwaita app with all six tabs, over the same Rust engine. The `fileid` CLI and `fileid-tui` run headless too.</p>
         <div class="dl-actions">
           <a class="btn btn-ghost btn-block" href="https://github.com/AdamNolle/FileID#build--linux" target="_blank" rel="noopener">
             <span>
@@ -267,7 +267,7 @@
       <p>Or build from source — one command, every platform:</p>
       <pre class="code-block"><code><span class="c-cmd">./build.sh</span> <span class="c-flag">-windows</span>         <span class="c-cmt"># Windows: full fresh-install build + run</span>
 <span class="c-cmd">./build.sh</span> <span class="c-flag">-mac</span>             <span class="c-cmt"># macOS:   build + launch</span>
-<span class="c-cmd">./build.sh</span> <span class="c-flag">-linux</span>           <span class="c-cmt"># Linux:   Phase 5 (engine-only today)</span></code></pre>
+<span class="c-cmd">./build.sh</span> <span class="c-flag">-linux</span>           <span class="c-cmt"># Linux:   build + run the GTK4 app</span></code></pre>
     </div>
   </div>
 </section>

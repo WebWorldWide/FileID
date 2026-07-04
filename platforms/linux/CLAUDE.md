@@ -32,24 +32,31 @@ platforms/linux/
 │           │                       #   thumbnail worker, crash respawn
 │           ├── window.rs           # app shell: Overlay(LavaLamp→scrim→UI),
 │           │                       #   adw::ViewStack + ViewSwitcher (6 tabs), pick/scan
-│           └── tabs/
-│               ├── mod.rs          # placeholder StatusPage builder
-│               └── library.rs      # Library tab: SearchEntry + GridView + preview
+│           └── tabs/               # all six tabs (1:1 ports of the macOS views)
+│               ├── mod.rs, util.rs # shared tab helpers
+│               ├── library.rs      # SearchEntry + GridView + preview
+│               ├── people.rs       # face clusters → name them
+│               ├── cleanup.rs      # duplicate groups (phash)
+│               ├── deep_analyze.rs # on-device VLM captions / renames
+│               ├── restructure.rs  # folder reorg — Sankey + rows + apply/undo
+│               └── settings.rs     # AI models, engine info, privacy
 ├── data/
 │   ├── io.github.fileid.FileID.desktop      # XDG desktop entry
 │   └── io.github.fileid.FileID.metainfo.xml # AppStream metadata (Flathub)
-├── build/
-│   └── build.sh                    # cargo build + stage assets
-└── flatpak/                        # Phase 2: Flatpak manifest + repo bootstrap
+└── build/
+    └── build.sh                    # builds engine + app, stages dist/fileid/
 ```
+
+Packaging (Flatpak / AppImage / Nix manifests) lives at the repo-root
+[`packaging/`](../../packaging/), not under `platforms/linux/`.
 
 ## App structure (current)
 
-Foundation + app shell + **Library tab implemented**; the other five tabs are
-feature-shaped and compile CI-green (their GTK runtime isn't yet verified on real
-hardware). The **`fileid` CLI and `fileid-tui`** (sibling crates `platforms/cli`,
-`platforms/tui`) are the most-verified Linux surfaces — both run the shared engine
-end-to-end on Linux, including full-ML `scan --models`.
+**All six tabs are implemented and runtime-verified** (Library · People · Cleanup ·
+Deep Analyze · Restructure · Settings) — 1:1 ports of the macOS views over the shared
+engine, walked end-to-end under WSLg (+ an earlier on-hardware pass). The **`fileid`
+CLI and `fileid-tui`** (sibling crates `platforms/cli`, `platforms/tui`) run the same
+engine headlessly on Linux, including full-ML `scan --models`.
 
 - **Design system** (`theme.rs`): one `gtk::CssProvider` carries the brand
   palette as `@define-color` tokens + the reusable classes — `.glass-card`
@@ -92,25 +99,21 @@ Considered:
 
 GTK4 + libadwaita wins.
 
-## Build (Phase 0 / scaffold)
+## Build
 
 ```bash
 # System deps (Debian/Ubuntu):
-sudo apt install libgtk-4-dev libadwaita-1-dev
+sudo apt install build-essential libgtk-4-dev libadwaita-1-dev tesseract-ocr ffmpeg \
+                 libheif-examples libheif-plugin-libde265   # HEIC decode plugin
 
-# Build the engine (shared with Windows port):
-cd platforms/windows/src/engine
-cargo build --release --target x86_64-unknown-linux-gnu
-
-# Build the GTK app:
-cd ../../../linux
-cargo build --release
-
-# Run:
-./target/release/fileid-linux
+# Build engine + app and stage a runnable dist/fileid/:
+./build/build.sh            # or, from the repo root: ./build.sh -linux
+./dist/fileid/fileid-linux
 ```
 
-The engine and the app build separately today. Phase 1 plans a unified `build/build.sh` that produces a single staged `dist/fileid/` folder containing both.
+`build/build.sh` builds the shared engine and the GTK app and stages both into
+`dist/fileid/` (engine binary beside the app so `EngineClient::locate_engine_binary`
+finds it). The repo-root `build.sh -linux` delegates here.
 
 ## Conventions (Rust app)
 
