@@ -8,6 +8,18 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — 5 on-hardware Windows-app bug fixes (PR #88); 0.0.2 pending owner test
+
+Owner ran the installed 0.0.1 app and reported 5 bugs; all fixed + merged (PR #88, CI green). NOT runtime-verified here (no WinUI runtime) — owner testing the rebuilt MSI (`~/Desktop/FileID-bugfix-test-x64.msi`) before a 0.0.2 release.
+
+- **Preview arrow keys dead** (HIGH): `FilePreviewSheet.HandleKeyDown` bailed on `if (e.Handled) return;` as its first line — defeated the host's `AddHandler(…, handledEventsToo:true)` that exists precisely because the ContentDialog pre-marks Left/Right/Space Handled. Removed.
+- **Preview image blank** (root cause unconfirmed → two safe additive fixes): (1) reset `_unloaded` in `OnSheetLoaded` — a ContentDialog Unloaded→Loaded cycle during open latched `_unloaded=true`, short-circuiting every image write; (2) `TryDirectImageDecodeAsync` — direct BitmapImage decode-from-stream fallback when the shell thumbnail returns Size==0 (FilePreviewSheet was the one image callsite missing it). Prev/Next buttons had no bug (only looked dead because the image never changed).
+- **Library tiles not staying loaded** (HIGH): cancelled thumbnail loads were mislabeled as render FAILURES (LibraryView.LoadThumbAsync null branch didn't check `ct.IsCancellationRequested`) → broken-glyph over a valid tile; and the ThumbnailService bounded(256) DropOldest channel dropped the oldest request WITHOUT completing its TCS → a visible tile's awaiter hung forever. Fixed both (cancelled = silent drop; channel → unbounded, since per-request cancellation sheds stale work O(1) at drain).
+- **Speech model not on onboarding** (HIGH): Whisper was installable only via Settings → Models. Added an optional Whisper card to the WelcomeSheet (own Install button; excluded from `AllInstalled` so it never gates completion). macOS correctly has NO such card — it uses built-in **Apple Speech** (`DeepAnalyzeNaming.swift`), no download; the divergence is right, not a parity gap.
+- **No auto-launch on install** (HIGH): `FileID.Msi` had no launch action. Added a first-install-only, impersonated, asyncNoWait CustomAction after InstallFinalize (WiX `msi validate -wx` passes).
+
+Rebuilt the fixed MSI (83.5 MB, WiX-validated). Version still 0.1.0 (mismatch with the v0.0.1 tag persists — resolve at 0.0.2 cut).
+
 ## 2026-07-05 (cont.) — NEXT.md doable-headless backlog cleared (PR #86 + #85 installers)
 
 Ran a `/loop` over the 1841-line NEXT.md: a triage agent split every item into DONE-already, BLOCKED (needs a Mac / EV cert / on-hardware GPU profiling / real Linux hw / the F:\TrueNAS scan / a repo Pages toggle / deferred future-phase features), and DOABLE-headless. Landed **every** doable item (PR #86, all real CI green; the lone red is the known Flatpak advisory):
