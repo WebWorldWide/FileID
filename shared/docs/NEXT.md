@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## STATUS 2026-07-05 — doable-from-a-headless-Windows-box backlog is CLEARED (`/loop`, PR #86)
+
+Every source-verifiable item was triaged + landed (STATE top entry): the wixproj version-gate, the engine ML-pool log + `unmatched_faces`, the CLI search relevance bug, the 6 app `ToInt32`→int64 reads, the `scan_assertions.py` guard, the `FILEID_FACE_*` DECISIONS note, and the AUR/Flatpak HEIC dep. Marginal items intentionally left (FileTile materialize-once, MergeById tail, TUI redraw, CLI `has_text`) — see STATE.
+
+**Everything still open below is BLOCKED off this box** and needs one of: the owner's **Mac** (macOS build / `.app` release / face-clustering calibration / FaceAlign wiring / any Swift edit / RAM++ CoreML), an **EV code-signing cert** (signed installers + `FileIDSetup.exe` CD), **on-hardware GPU profiling** (CUDA Performance Pack, RAM++ dynamic-batch re-export ship-gate, DebugLog level-gate on-hw confirm), **real Linux hardware** (Flatpak/AppImage behavioral + packaging verify, GPU-EP `.so` bundling), the physical **F:\TrueNAS** external drive (full 62k scan / 84k-face recluster), a **GitHub repo Settings toggle** (enable Pages), labeled **modern-photo data** (cross-corpus face generalization) or a **model-licensing decision** (stronger ArcFace), or is **deferred future-phase feature work** deliberately cut for 0.0.1 (`cluster_suggestions`, `usn`, `florence2`, YAMNet, `elevation`). Also owner-verify: smoke-test the unsigned MSI/AppImage on real hardware.
+
 ## Post-0.0.1 follow-ups (from the release-hardening pass, 2026-07-05)
 
 - **v0.0.1 now ships single-file installers** (2026-07-05): `FileID-0.0.1-Setup-x64.msi` (WiX MSI, built here) + `FileID-0.0.1-x86_64.AppImage` (linuxdeploy GTK bundle) replaced the folder-zips on the release. Both UNSIGNED + not launch-tested here (structurally validated: WiX `msi validate` passed; AppImage is a valid ELF). Owner should smoke-test install/launch on real hardware. macOS `.app` still needs a Mac.

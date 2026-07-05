@@ -8,6 +8,18 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — NEXT.md doable-headless backlog cleared (PR #86 + #85 installers)
+
+Ran a `/loop` over the 1841-line NEXT.md: a triage agent split every item into DONE-already, BLOCKED (needs a Mac / EV cert / on-hardware GPU profiling / real Linux hw / the F:\TrueNAS scan / a repo Pages toggle / deferred future-phase features), and DOABLE-headless. Landed **every** doable item (PR #86, all real CI green; the lone red is the known Flatpak advisory):
+
+- **installer:** `FileID.Msi.wixproj` version-drift gate's `%(Identity)` batching parses empty under both VS msbuild + `dotnet build`, tripping a false "drift" that blocked EVERY local MSI build — now errors only on a real (non-empty) mismatch. Also produced the actual **v0.0.1 single-file installers** (PR-adjacent): `FileID-0.0.1-Setup-x64.msi` (WiX) + `FileID-0.0.1-x86_64.AppImage` (linuxdeploy GTK), which replaced the folder-zips on the release.
+- **engine:** CPU-clamp ML-pool log `warn!`→`info!` (correct/expected on a CPU box, not a fault); `FaceClusteringResult.unmatched_faces` was hardcoded 0 → now reports the suppressed `person_id=NULL` count.
+- **cli:** `search` restored intra-tier FTS relevance (was sorting same-tier hits by file id, discarding `ORDER BY rank`).
+- **app:** 6 `Convert.ToInt32` COUNT/SUM reads → int64 + clamp.
+- **build/docs/packaging:** `scan_assertions.py` no longer red-trips zero-clusters on a <10-face corpus; DECISIONS.md documents the shared `FILEID_FACE_*` per-platform defaults; AUR `optdepends` gains libheif; Flatpak manifest notes the `heif-dec` gap.
+
+Deliberately NOT done (marginal, per triage): FileTile materialize-once (`x:Bind` reads once), MergeById tail (primary O(n²) already fixed), TUI redraw dirty-flag (cadence unconfirmable), CLI `has_text` monotonic (by-design). Everything else remaining in NEXT.md is BLOCKED off-box.
+
 ## 2026-07-05 (cont.) — 0.0.1 SHIPPED: adversarial audit + dead-code sweep + macOS parity mirror → first public pre-release
 
 Cut **[v0.0.1](https://github.com/WebWorldWide/FileID/releases/tag/v0.0.1)** (pre-release) after a release-hardening pass (PR #85, merged `d4d15ed`, all main CI green: engine x64/arm64/cross, .NET app x64/arm64, macOS SwiftPM, Linux, Flatpak).
