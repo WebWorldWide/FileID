@@ -65,6 +65,13 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
     {
+        // Reset the unloaded latch. A ContentDialog can cycle its content through
+        // Unloaded→Loaded during the open handshake; the Unloaded handler latches
+        // _unloaded=true and never clears it, so a spurious Unloaded during open
+        // would short-circuit EVERY later UI write (`if (_unloaded) return`) —
+        // a permanently blank image + nav that changes the filename but never the
+        // preview. If we're Loaded, we're in the tree and live.
+        _unloaded = false;
         // The host ContentDialog has no default button, so focus would otherwise
         // sit on the dialog chrome and the tunneling PreviewKeyDown would never
         // fire. Grab focus into the sheet so arrow keys navigate immediately.
@@ -107,7 +114,13 @@ public sealed partial class FilePreviewSheet : UserControl
     /// Button consumes Space — letting us intercept it for play/pause.</summary>
     internal void HandleKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        if (e.Handled) return;
+        // Do NOT bail on e.Handled here. The host wires this on the ContentDialog
+        // via AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true) *because*
+        // the dialog's own tunneling key handling marks Left/Right/Space/Esc as
+        // Handled before the tunnel reaches us — an early `if (e.Handled) return;`
+        // swallowed every sibling navigation. We set e.Handled after acting, and
+        // the sheet's own (non-handledEventsToo) PreviewKeyDown subscription is
+        // still gated by Handled, so acting here can't double-navigate.
         // While typing in the tag box, let Left/Right/Space act as text input.
         var focused = XamlRoot is null
             ? null
@@ -401,6 +414,18 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             try { thumb?.Dispose(); } catch { }
         }
+        // Shell thumbnail returned nothing / threw. For images, fall back to a
+        // DIRECT decode from the file stream — this bypasses the shell thumbnail
+        // provider, which can hand back Size==0 for perfectly-decodable JPEG/PNG
+        // on some systems (notably an unpackaged app with no registered per-user
+        // thumbnail cache). FilePreviewSheet was the ONE image callsite missing
+        // the from-bytes decode the grid's ThumbnailService already uses.
+        // Additive: only runs after the shell path produced no image.
+        if (kind == "image" && dispatcher != null && !_unloaded && _navGen == navGen
+            && await TryDirectImageDecodeAsync(path, cacheKey, dispatcher, navGen))
+        {
+            return;
+        }
         // Don't show the failure placeholder if we navigated away (or the stale
         // guard above set tcs=false for a superseded nav) — otherwise the prior
         // file's load clobbers the CURRENT sibling's preview with a placeholder.
@@ -418,6 +443,46 @@ public sealed partial class FilePreviewSheet : UserControl
     /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
     /// onto PreviewImage and bump it to most-recently-used. Returns true when a
     /// cached preview was shown (caller skips the shell extract + decode).</summary>
+    // Fallback decode straight from the file's bytes when the shell thumbnail
+    // provider returns nothing. Uses the same DecodePixelWidth=1024 BitmapImage
+    // as the shell path, so cache budget + display size are unchanged. Returns
+    // true only when it actually put an image on PreviewImage.
+    private async Task<bool> TryDirectImageDecodeAsync(
+        string path, string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
+    {
+        try
+        {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            using var stream = await file.OpenReadAsync();
+            if (stream.Size == 0) return false;
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var enqueued = dispatcher.TryEnqueue(async () =>
+            {
+                try
+                {
+                    if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
+                    var bmp = new BitmapImage { DecodePixelWidth = 1024 };
+                    await bmp.SetSourceAsync(stream);
+                    PreviewImage.Source = bmp;
+                    PreviewImage.Visibility = Visibility.Visible;
+                    StorePreview(cacheKey, bmp);
+                    tcs.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    Services.DebugLog.Warn($"FilePreviewSheet direct decode: {ex.Message}");
+                    tcs.TrySetResult(false);
+                }
+            });
+            return enqueued && await tcs.Task;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet direct decode open failed for {Services.PathRedactor.Redact(path)}: {ex.Message}");
+            return false;
+        }
+    }
+
     private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
     {
         for (var node = _previewCache.First; node != null; node = node.Next)
