@@ -24,10 +24,35 @@ internal static class DebugLog
     // off-thread sink MUST preserve per-line durability (e.g. a persistent
     // flushed StreamWriter), verified on hardware. Do not re-batch naively.
 
+    // Trace is the per-frame/per-tile firehose (e.g. [THUMB] on every scroll
+    // realization). It is the ONE class of line whose SYNCHRONOUS locked file I/O
+    // measurably stalls the UI thread in a hot path, and — unlike [APPLY:N] /
+    // [ENGINE-SUB] / fast-fail forensics — it is NOT load-bearing for diagnosing
+    // the native fast-fail class. So it is gated OFF by default and skips the I/O
+    // (and the lock) entirely unless explicitly enabled. Everything at Debug and
+    // above stays always-on + synchronous, preserving the forensic tail the field
+    // note below depends on. Enable via env FILEID_LOG_TRACE=1 or the setter.
+    private static volatile bool s_traceEnabled =
+        Environment.GetEnvironmentVariable("FILEID_LOG_TRACE") == "1";
+    public static bool TraceEnabled
+    {
+        get => s_traceEnabled;
+        set => s_traceEnabled = value;
+    }
+
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
     public static void Error(string message) => Write("ERROR", message);
     public static void Debug(string message) => Write("DEBUG", message);
+
+    /// <summary>Most-verbose level (per-scroll-frame / per-tile). Gated OFF by
+    /// default — skips all I/O unless <see cref="TraceEnabled"/>. Use for
+    /// diagnostic firehose lines that are NOT fast-fail forensics.</summary>
+    public static void Trace(string message)
+    {
+        if (!s_traceEnabled) return;
+        Write("TRACE", message);
+    }
 
     /// <summary>Handler-wrap helper. UI click handlers that call IPC or
     /// touch the file system should route through this so a thrown

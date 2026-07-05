@@ -120,6 +120,10 @@ public sealed class SankeyFlowControl : Control
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
         Tapped += OnTapped;
+        // Stop the debounce timer when the control leaves the tree (e.g. a
+        // tab-swap mid-resize). A pending Tick otherwise holds this detached
+        // control alive via its RenderIfResized closure until it fires.
+        Unloaded += (_, _) => _renderDebounce?.Stop();
     }
 
     /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
