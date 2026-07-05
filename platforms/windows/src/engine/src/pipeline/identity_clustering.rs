@@ -77,18 +77,24 @@ impl Default for Hyperparameters {
         // (same-person there is even higher, ~0.85+); loosen only if a corpus is
         // unusually low-quality. Further gains want a stronger face embedder +
         // cross-corpus labels — see NEXT.md.
+        // Reject non-finite (NaN/inf) env values — they'd silently poison
+        // comparisons (e.g. `q < NaN` is always false). `clamp` for the cosine
+        // knobs keeps a fat-fingered env from making pass1 a value that makes
+        // every face a singleton (>1) or one mega-cluster (<0).
         let env_f32 = |key: &str, default: f32| -> f32 {
             std::env::var(key)
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
                 .unwrap_or(default)
         };
+        let env_cos = |key: &str, default: f32| -> f32 { env_f32(key, default).clamp(0.0, 1.0) };
         Self {
-            pass1_cosine: env_f32("FILEID_FACE_PASS1_COSINE", 0.50),
-            pass2_cosine: env_f32("FILEID_FACE_PASS2_COSINE", 0.45),
-            pass2_margin: env_f32("FILEID_FACE_PASS2_MARGIN", 0.10),
+            pass1_cosine: env_cos("FILEID_FACE_PASS1_COSINE", 0.50),
+            pass2_cosine: env_cos("FILEID_FACE_PASS2_COSINE", 0.45),
+            pass2_margin: env_cos("FILEID_FACE_PASS2_MARGIN", 0.10),
             pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
-            pass3_min_mean_cosine: env_f32("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
+            pass3_min_mean_cosine: env_cos("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
             pass3_max_splits: std::env::var("FILEID_FACE_PASS3_MAX_SPLITS")
                 .ok()
                 .and_then(|s| s.trim().parse::<usize>().ok())
@@ -167,14 +173,14 @@ where
     }
 
     // ── Pass 1: connected components above pass1_cosine ───────────
-    // Single-linkage (default) unions i with every kNN hit above the
-    // threshold — one high-cosine "bridge" face can chain two identities into
-    // one mega-cluster (documented above). FILEID_FACE_MUTUAL_KNN=1 switches to
-    // MUTUAL-kNN: an edge i—j is kept only when each is in the other's
-    // above-threshold neighborhood, which breaks single-bridge chains at the
-    // cost of failing toward over-split (UI-mergeable, the safe direction — and
-    // Pass 3's 2-means split is unchanged). Gated default-off pending
-    // on-hardware calibration on a labeled library (see NEXT.md).
+    // MUTUAL-kNN is now the DEFAULT (label-validated 2026-07-05): an edge i—j is
+    // kept only when EACH face is in the other's above-threshold neighbourhood,
+    // which breaks the single "bridge" face that would otherwise chain two
+    // identities into one mega-cluster. Set FILEID_FACE_MUTUAL_KNN=0 to fall back
+    // to plain single-linkage (union i with every kNN hit above the threshold —
+    // simpler, zero extra allocation, but chains through bridge faces). Both fail
+    // toward over-split (UI-mergeable, the safe direction); Pass 3's 2-means split
+    // is unchanged either way.
     let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
         .ok()
         .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
