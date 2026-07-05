@@ -2,13 +2,16 @@
 
 ## 2026-07-04 — production-hardening loop in flight (see STATE.md top entry)
 
-Production-hardening loop landed M1–M4, M7–M10 + M11 data-loss fixes to main. **M5/M6 done on branch `m6-debuglog-trace-gate` (pushed, verified, PR/merge pending user `gh auth`)** — DebugLog Trace-gate for the `[THUMB]` hot path (forensics preserved, +4 gate tests) and SankeyFlowControl `Unloaded` timer teardown; the other M5 items dissolved on audit (see STATE 2026-07-05). WinUI now builds on the dev box via VS 18 Community's msbuild (memory has the recipe). M2/M3 were verified already-satisfied (IPC conformance suites already lock casing; engine already hardened — no changes).
+Production-hardening loop landed M1–M11 to main. **M5/M6 merged (PR #81):** DebugLog Trace-gate for the `[THUMB]` hot path (forensics preserved, +4 gate tests) + SankeyFlowControl `Unloaded` timer teardown; other M5 items dissolved on audit (STATE 2026-07-05). **Face over-clustering FIXED (PR #82, this branch):** 438→45 persons on the subset, recurrence-based, verified end-to-end + adversarially reviewed. WinUI now builds on the dev box via VS 18 Community's msbuild (memory has the recipe). M2/M3 were verified already-satisfied (IPC conformance suites already lock casing; engine already hardened — no changes).
 
 **Remaining to close the loop:**
-- **Merge `m6-debuglog-trace-gate`** once `gh` is authenticated (or via the GitHub PR UI) and confirm CI green.
-- **[quality/faces/MED — the one real shippability gap] face over-clustering.** The full-corpus baseline produced 84,629 faces → 10,208 person clusters (~12%, many singletons); a 10K-person People tab is not shippable UX. Retune `FILEID_FACE_*` (automerge cosine / min-cluster-size / mutual-kNN) against the real distribution on the RTX 5080 corpus, mirroring the macOS junk-cluster suppression pass (STATE 2026-06-21). On-hardware ML tuning, not a code bug.
 - **M11 termination:** one more clean adversarial pass (the prior pass found + fixed the data-loss bug; the plan wants two consecutive clean passes).
 - Perf big levers below (CUDA pack, RAM++ dynamic-batch re-export) remain the throughput ceiling — both deferred with rationale.
+
+**Low-priority follow-ups surfaced by the face-fix review (2026-07-05, non-blocking):**
+- `FaceClusteringResult.unmatched_faces` is hardcoded `0` (`commands/face_clustering.rs:~431`) — it should report the count of suppressed `person_id=NULL` faces (593 on the subset). Cosmetic IPC metric; the app may show a misleading "0 unmatched."
+- `FILEID_FACE_MIN_CLUSTER_SIZE` / `FILEID_FACE_SOLO_QUALITY` are shared env names across Windows + macOS, which now have *different* calibrated defaults (Windows 2/0.40, macOS 3/0.12). A user exporting them to tune one platform would also move the other's. Document, or namespace per platform.
+- `scan_assertions.py:108` fails on `persons < 1`; a pathological tiny corpus where no cluster reaches size 2 and no solo ≥0.40 could red-trip it. Low risk on real corpora.
 
 ### Perf follow-ups (the big levers, from the 2026-07-04 RTX 5080 profiling — see STATE.md)
 - **[perf/HIGH] Host + install the CUDA Performance Pack.** The 5080 runs DirectML (~3-5x slower than the CUDA EP per the engine's own log). Measured: the GPU is idle p50=19% during a scan — throughput is dispatch-latency-bound, and pool tuning can't help (pool>4 measurably regresses). The CUDA pack is the single biggest win. Blocked on pack hosting (CLAUDE.md open item), not code.
