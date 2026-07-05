@@ -447,7 +447,7 @@ pub fn consolidate<S: std::hash::BuildHasher>(
 /// the scale-robust "is this a person" signal — a face that appears in ≥2 of
 /// your photos is someone worth surfacing, and the count of such people is
 /// bounded by reality (not by the one-off-face tail that floods a big library).
-/// SFace's `face_quality` proved a weak discriminator on real Windows data
+/// The Windows `face_quality` proved a weak discriminator on real data
 /// (see `solo_quality_floor`), so recurrence carries the gate and the quality
 /// floor is only a narrow escape for exceptional single faces.
 pub fn min_cluster_size() -> u32 {
@@ -464,17 +464,19 @@ pub fn min_cluster_size() -> u32 {
 /// disables the quality escape entirely (pure recurrence gate).
 ///
 /// Default 0.12→0.40 (2026-07-05, RTX 5080 / F:\TrueNAS calibration). The old
-/// 0.12 was a macOS Apple-Vision guess and the comment ASSUMED Windows SCRFD
-/// scored on the same 0..~0.95 range. It does not: measured on 84,629 real
-/// faces the SFace/SCRFD `face_quality` is compressed into ~0.23..0.42, so 0.12
-/// admitted EVERY single face — 91% of "persons" were one-off singletons
+/// 0.12 was a macOS Apple-Vision guess and the comment ASSUMED Windows scored
+/// on the same 0..~0.95 range. It does not: `face_quality` here is the YuNet
+/// detection score × landmark geometry (`scrfd::validate_face_geometry`, whose
+/// `geom_conf` structurally caps ~0.42), so measured on 84,629 real faces it is
+/// compressed into ~0.23..0.42 and 0.12 admitted EVERY single face — 91% of
+/// "persons" were one-off singletons
 /// (10,208 persons on the full corpus / 438 on the 1k-file subset). Worse,
 /// singleton quality (median 0.33) barely separates from genuine recurring-face
 /// quality (median 0.37), and 55% of singletons sit &lt;0.40 cosine from ANY real
 /// cluster centroid — i.e. they are genuine distinct one-off faces (crowds,
 /// backgrounds), NOT fragments a looser merge would recover. So quality alone
 /// can't gate them; recurrence (`min_cluster_size`) does the work and 0.40 (the
-/// measured ~90th percentile of the SCRFD range) is a narrow escape that keeps
+/// measured ~90th percentile of the quality range) is a narrow escape that keeps
 /// only the crispest true solos. Net on the subset: 438 → ~45 persons, every
 /// ≥3-face identity intact. macOS keeps its own Apple-Vision-calibrated floor
 /// (different quality scale — intentional lockstep divergence).

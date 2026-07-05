@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — Face over-clustering fixed: 438→45 persons on the subset (People tab was flooded)
+
+The People tab's biggest shippability gap. The full-corpus baseline produced **10,208 persons from 84,629 faces** (~91% one-off singletons); the 1k-file subset showed the same pathology (438 persons / 1,011 faces).
+
+**Root cause (measured, not guessed):** `solo_quality_floor=0.12` was a macOS Apple-Vision value, and the code comment ASSUMED Windows SFace/SCRFD `face_quality` scored on the same 0..~0.95 range. It does not — on real data it's compressed into **~0.23..0.42**, so a 0.12 floor admitted *every* single face as its own person. Diagnostics on 811 assigned faces: singleton quality (median 0.33) barely separates from genuine recurring-face quality (median 0.37), and **55% of singletons sit <0.40 cosine from any real cluster centroid** — they're genuine distinct one-off faces (crowds/backgrounds), NOT fragments a looser merge would recover. So quality can't gate them; recurrence must.
+
+**Fix (`pipeline/face_clustering.rs` defaults; every knob stays env-overridable):**
+- `min_cluster_size` 3→2 — recurrence is the scale-robust "is this a person" signal (bounded by reality, not by the one-off tail).
+- `solo_quality_floor` 0.12→0.40 (~p90 of the measured SCRFD range) — a narrow escape keeping only the crispest true solos.
+- Pure suppression: no identity is ever merged; suppressed faces fall to `person_id=NULL` (searchable candidates + merge-suggestion fodder, never deleted).
+
+**Verified end-to-end** by re-clustering the scanned subset DB with the freshly-built engine: `faceClusteringComplete personCount 438→45`, every ≥3-face identity intact (127/35/34/31/20/20/15/15/15/10 faces), singletons 401→8, 593 faces unclustered. Engine: clippy clean, 414 lib tests green (incl. the updated default-assertion test). macOS keeps its own Apple-Vision-calibrated floor (different quality scale — intentional lockstep divergence). **Full-corpus (84,629-face) post-fix number: _FULLCORPUS-FACES-PENDING_** (re-scan running).
+
 ## 2026-07-05 — M5/M6 unblocked + landed: WinUI now builds on the dev box; DebugLog Trace-gate + Sankey teardown
 
 The WinUI build blocker is gone. Plain `dotnet build` can't build the app (the SDK lacks the MrtCore/PriGen `AppxPackage` task DLL), but **VS 18 Community** is installed with the Universal + WindowsAppSdkSupport.CSharp workloads — `"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"` has the `v18.0\AppxPackage` tooling, so the app + tests build the same way CI does (msbuild, not `dotnet build`). Recorded the full recipe (RID restore → build `-restore:false`; `dotnet format` clobbers RID assets so re-restore before rebuild; App.Tests need VS-msbuild build then `dotnet test --no-build`; VS18's newer Roslyn flags CA1861 that CI's SDK-8 analyzers don't, so build tests with `-p:RunAnalyzersDuringBuild=false` to mirror CI) in auto-memory.
