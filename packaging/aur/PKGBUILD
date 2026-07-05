@@ -18,7 +18,8 @@ license=('Apache-2.0')
 depends=('gtk4' 'libadwaita' 'onnxruntime' 'sqlite' 'glibc' 'glib2')
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=('tesseract: OCR for image/document text extraction'
-            'ffmpeg: video keyframe thumbnails')
+            'ffmpeg: video keyframe thumbnails'
+            'libheif: HEIC/HEIF image decoding (Arch libheif bundles the libde265 HEVC decoder)')
 source=("git+https://github.com/AdamNolle/FileID.git#tag=v${pkgver}")
 sha256sums=('SKIP')
 options=('!lto')  # the engine's release profile already sets fat LTO
