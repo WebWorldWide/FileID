@@ -8,6 +8,19 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — Face over-clustering: singleton flood FIXED (safe threshold); mega-merge + fragmentation found at scale (deferred, needs labelled data)
+
+The People tab's biggest shippability gap. Pre-fix full-corpus baseline: **10,208 persons from 84,629 faces**. Investigated on the 1k-file subset (1,011 faces) AND a partial ~44k-face scale set (from a timed-out full-corpus re-scan — the Adlon external drive ran the scan at <17 f/s and hit the 60-min cap; the partial DB was reused for clustering experiments, which need no re-scan).
+
+**What I fixed — the SINGLETON flood (safe, verified, shipping):** `solo_quality_floor=0.12` was a macOS Apple-Vision value; the code ASSUMED Windows scored on 0..~0.95. Measured, the Windows `face_quality` (YuNet det.score × landmark geometry, `scrfd::validate_face_geometry` — `geom_conf` structurally caps ~0.42) is compressed to **~0.23..0.42**, so 0.12 admitted *every* single face. Raised to **0.40** (~p90 of the real range). Subset (min=3): 438→34; scale: singleton flood gone (56 singletons on the 44k set). Pure suppression — no identity merged; suppressed faces → `person_id=NULL`. `min_cluster_size` kept at **3** (I briefly tried 2; at scale that keeps ~3,800 size-2 pairs — a pair flood — so reverted).
+
+**What the scale test EXPOSED (NOT fixed here — deeper clustering problems):**
+- **Bridge-face mega-merge.** The largest "person" on the 44k set is an **11,665-face blob whose members' median intra-cosine is ~0.30** (i.e. many DIFFERENT people chained together, embeddings valid/L2-normed). `FILEID_FACE_MUTUAL_KNN=1` did NOT break it (chains still form through dense mutual-edge regions; the blob even regrew via Pass-2/consolidate), and Pass-3's 2-means split cap (7 → ≤128 pieces) can't shred a blob that large.
+- **Size-2/3 fragmentation.** HNSW at scale spawns many tiny clusters.
+- Net at scale with the shipped defaults (min=3/floor=0.40): ~1,566 persons — far better than ~10k, but the mega-cluster + fragments mean the People tab is not yet "sane" at 44k+ faces.
+
+**These are a clustering-ALGORITHM problem, not a threshold one, and can't be validated without a LABELLED library** (cluster counts don't tell you precision/recall). Deferred to a scoped ML effort — see NEXT.md. The threshold fix that IS shipping is a strict improvement with zero regression risk. Engine: clippy clean, 414 lib tests green (updated default-assertion test). macOS keeps its own Apple-Vision floor (intentional divergence).
+
 ## 2026-07-05 — M5/M6 unblocked + landed: WinUI now builds on the dev box; DebugLog Trace-gate + Sankey teardown
 
 The WinUI build blocker is gone. Plain `dotnet build` can't build the app (the SDK lacks the MrtCore/PriGen `AppxPackage` task DLL), but **VS 18 Community** is installed with the Universal + WindowsAppSdkSupport.CSharp workloads — `"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"` has the `v18.0\AppxPackage` tooling, so the app + tests build the same way CI does (msbuild, not `dotnet build`). Recorded the full recipe (RID restore → build `-restore:false`; `dotnet format` clobbers RID assets so re-restore before rebuild; App.Tests need VS-msbuild build then `dotnet test --no-build`; VS18's newer Roslyn flags CA1861 that CI's SDK-8 analyzers don't, so build tests with `-p:RunAnalyzersDuringBuild=false` to mirror CI) in auto-memory.
