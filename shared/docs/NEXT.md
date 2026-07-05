@@ -2,7 +2,13 @@
 
 ## 2026-07-04 — production-hardening loop in flight (see STATE.md top entry)
 
-Production-hardening loop landed M1–M4, M7, M8 to main. Remaining: C# app fixes (MergeById, FileTile, Sankey/ripple teardown, IridescentBorder — needs the VS UWP build-tools workload installed via the VS Installer GUI to build WinUI locally; welcome-sheet already fixed by #73) → DebugLog level-gate (runtime-verifiable on this box once WinUI builds) → macOS conservative pass + audit doc (macos.yml CI is the compile gate) → docs/README/website truth pass → adversarial endgame loop. M2/M3 were verified already-satisfied (IPC conformance suites already lock casing; engine already hardened — no changes). 
+Production-hardening loop landed M1–M4, M7–M10 + M11 data-loss fixes to main. **M5/M6 done on branch `m6-debuglog-trace-gate` (pushed, verified, PR/merge pending user `gh auth`)** — DebugLog Trace-gate for the `[THUMB]` hot path (forensics preserved, +4 gate tests) and SankeyFlowControl `Unloaded` timer teardown; the other M5 items dissolved on audit (see STATE 2026-07-05). WinUI now builds on the dev box via VS 18 Community's msbuild (memory has the recipe). M2/M3 were verified already-satisfied (IPC conformance suites already lock casing; engine already hardened — no changes).
+
+**Remaining to close the loop:**
+- **Merge `m6-debuglog-trace-gate`** once `gh` is authenticated (or via the GitHub PR UI) and confirm CI green.
+- **[quality/faces/MED — the one real shippability gap] face over-clustering.** The full-corpus baseline produced 84,629 faces → 10,208 person clusters (~12%, many singletons); a 10K-person People tab is not shippable UX. Retune `FILEID_FACE_*` (automerge cosine / min-cluster-size / mutual-kNN) against the real distribution on the RTX 5080 corpus, mirroring the macOS junk-cluster suppression pass (STATE 2026-06-21). On-hardware ML tuning, not a code bug.
+- **M11 termination:** one more clean adversarial pass (the prior pass found + fixed the data-loss bug; the plan wants two consecutive clean passes).
+- Perf big levers below (CUDA pack, RAM++ dynamic-batch re-export) remain the throughput ceiling — both deferred with rationale.
 
 ### Perf follow-ups (the big levers, from the 2026-07-04 RTX 5080 profiling — see STATE.md)
 - **[perf/HIGH] Host + install the CUDA Performance Pack.** The 5080 runs DirectML (~3-5x slower than the CUDA EP per the engine's own log). Measured: the GPU is idle p50=19% during a scan — throughput is dispatch-latency-bound, and pool tuning can't help (pool>4 measurably regresses). The CUDA pack is the single biggest win. Blocked on pack hosting (CLAUDE.md open item), not code.
