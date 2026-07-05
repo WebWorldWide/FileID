@@ -99,9 +99,4 @@ public sealed partial class SidebarEngineStatus : UserControl
         // plus its detail line, so the dot+text reads as one announcement.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"Engine status: {text}");
     }
-
-    private static string BuildReadyTooltip(EngineClient ec) =>
-        ec.Info is { } info
-            ? $"Version {info.Version}  •  PID {info.Pid}  •  {info.WorkerCap} workers  •  {info.PhysicalMemoryGB:F1} GB RAM"
-            : "Engine running.";
 }

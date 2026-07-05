@@ -16,7 +16,7 @@ byte-identical embeddings.
 | `shared/.../AIModels.swift` | `FaceEmbedderKind` → single `.sface` (128-d, Apache, OpenCV Zoo). `AIModelKind` drops non-commercial Qwen-3B → Apache 7B, adds Mistral-Small-3.2, keeps Gemma/PaliGemma. New `migrated()` maps legacy rawValues. |
 | `engine/.../ArcFaceService.swift` | SFace input = **raw [0,255] RGB** (was ArcFace's `(px-127.5)/127.5`). |
 | `engine/.../FaceAlign.swift` (NEW) | Faithful port of Windows `face_align.rs` — 5-pt similarity alignment to the 112×112 template. **Not yet wired into detection.** |
-| `engine/.../IdentityClustering.swift` | Hyperparameters = the on-hardware-calibrated Windows SFace values. |
+| `engine/.../IdentityClustering.swift` | Hyperparameters = the PRE-retune Windows values (pass1 0.66 / pass2 0.54). **STALE vs Rust as of 2026-07-05**: the Rust engine retuned to pass1 0.50 / pass2 0.45 + mutual-kNN default-on + a pre-clustering quality gate, label-calibrated to People-tab F1 1.0. macOS now carries the mutual-kNN + quality-gate MECHANISMS (`mutualKNN` param + `FILEID_FACE_CLUSTER_MIN_QUALITY`, both DEFAULT-OFF so behaviour is unchanged), but the Rust VALUES do NOT transfer blind — macOS uses Apple Vision quality (different scale) and FaceAlign is **not yet wired into detection** (row above), so its embeddings differ. **On-Mac task:** wire FaceAlign, then run a label-calibration pass (the face-labeler tool works on the Mac's DB + `face_crops`) to set macOS's pass1/pass2/gate. |
 | `engine/.../Storage/Database.swift` | `v12_face_model_reset` wipes face tables (mirrors Windows v12). |
 | `engine/.../DeepAnalyze.swift`, `AIModelsEngine.swift`, `app/.../EngineClient.swift`, `ArcFaceModelInstaller.swift` | Cascade for the enum changes + SFace download URL. |
 

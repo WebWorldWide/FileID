@@ -3,8 +3,8 @@
 // Mirror of macOS FileIDApp.swift / Windows App.xaml.cs. Boots an
 // adw::Application, installs the shared brand design system (gold palette +
 // glass surfaces + force-dark), and presents the main window (LavaLamp shell +
-// six tabs; Library implemented, the rest placeholders). The engine subprocess
-// is spawned by `EngineClient` from the window.
+// all six tabs, 1:1 ports of the macOS views over the shared engine). The engine
+// subprocess is spawned by `EngineClient` from the window.
 
 // GTK signal-handler + model closures are inherently tuple-heavy; the engine
 // crate allows this lint for the same reason.

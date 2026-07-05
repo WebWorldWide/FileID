@@ -9,8 +9,8 @@
 // We poll on construction + listen to the AnimationsEnabledChanged event,
 // so toggles surfaced while the app is open take effect immediately.
 //
-// Every motion primitive (Shimmer, Ripple, IridescentBorder, LavaLamp,
-// springs) checks `ReducedMotion.IsReduced` before kicking off animation.
+// Every motion primitive (Shimmer, LavaLamp, springs) checks
+// `ReducedMotion.IsReduced` before kicking off animation.
 
 using System.ComponentModel;
 using Windows.UI.ViewManagement;
@@ -36,8 +36,8 @@ public sealed class ReducedMotion : INotifyPropertyChanged
 
     /// <summary>
     /// True when the user has asked the OS to minimize animations. All
-    /// motion primitives gate on this — Shimmer / IridescentBorder freeze,
-    /// CompletionRipple skips the pulse, LavaLamp halves its rate.
+    /// motion primitives gate on this — Shimmer freezes and LavaLamp
+    /// halves its rate.
     /// </summary>
     public bool IsReduced
     {
