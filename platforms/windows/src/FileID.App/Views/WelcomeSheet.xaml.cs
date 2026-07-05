@@ -322,6 +322,12 @@ public sealed partial class WelcomeSheet : UserControl
     // cuDNN download via PrewarmModelAsync("cudnn_runtime_x64"). On other
     // vendors the button isn't shown (ShowAcceleratorButton returns
     // Collapsed) so this handler can't fire.
+    private void OnWhisperActionClicked(object sender, RoutedEventArgs e)
+    {
+        DebugLog.Info("[INSTALL] Whisper (speech) per-row button clicked.");
+        HandleAction(Svc.Whisper);
+    }
+
     private void OnAcceleratorActionClicked(object sender, RoutedEventArgs e)
     {
         DebugLog.Info("[INSTALL] GPU Acceleration Pack per-row button clicked.");

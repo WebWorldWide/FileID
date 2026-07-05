@@ -111,15 +111,20 @@ internal sealed class ThumbnailService : IDisposable
         // capture the UI dispatcher at ctor time. Service is
         // expected to be constructed on the UI thread.
         _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        // Bigger queue: a fast scroll on a 256-px tile grid generates
-        // 50+ requests/sec. The previous 64-slot cap dropped older
-        // requests within ~1 second of fast scrolling. 256 absorbs
-        // burst scroll without dropping anything visible.
-        _queue = Channel.CreateBounded<ThumbnailRequest>(new BoundedChannelOptions(256)
+        // Unbounded on purpose. A bounded DropOldest channel silently drops the
+        // OLDEST queued request when full WITHOUT completing its
+        // TaskCompletionSource — so on a big refresh (a full screen re-prepared at
+        // once), a still-visible tile's request could be evicted and its awaiter
+        // (LoadThumbAsync) would hang forever in the shimmer state ("things don't
+        // stay loaded"). Unbounded never drops, so no awaiter is ever orphaned;
+        // backpressure is instead shed for free by the PER-REQUEST cancellation
+        // token — a scrolled-away tile's request is skipped in O(1) at the top of
+        // DrainAsync, so the queue drains near-instantly and never accumulates
+        // real work regardless of scroll velocity.
+        _queue = Channel.CreateUnbounded<ThumbnailRequest>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
-            FullMode = BoundedChannelFullMode.DropOldest,
         });
         // attach a fault sink so a DrainAsync exception leaves a
         // forensic trail instead of becoming an UnobservedTaskException

@@ -331,6 +331,78 @@
                     </Grid>
                 </Grid>
 
+                <!-- Whisper — speech transcription (OPTIONAL Deep Analyze
+                     enhancement; own Install button, does not gate onboarding
+                     completion / "Install all"). Surfaced here so it's
+                     discoverable at first launch, not buried in Settings. -->
+                <Grid Padding="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="28" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.Whisper.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.Whisper.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Speech transcription (Whisper)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind VlmSize(Svc.Whisper.ApproxBytes), Mode=OneWay}"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="Optional. Transcribes speech in audio + video files so Deep Analyze can name them by what's said. Install now or later from Settings."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Whisper.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.Whisper.Message, Svc.Whisper.Fraction, Svc.Whisper.BytesDone, Svc.Whisper.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Whisper.BytesPerSecond, Svc.Whisper.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Whisper.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Whisper.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Whisper.Status), Mode=OneWay}" />
+                        <Button Click="OnWhisperActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Whisper.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                AutomationProperties.HelpText="Speech transcription (Whisper) model"
+                                Visibility="{x:Bind ShowActionButton(Svc.Whisper.Status), Mode=OneWay}" />
+                    </Grid>
+                </Grid>
+
                 <!-- GPU Acceleration Pack. Adaptive per-vendor;
                      ModelInstallerService.UpdateAcceleratorForVendor sets
                      the status + message based on EngineClient.Info.Hardware.GpuVendor. -->
