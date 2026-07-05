@@ -41,28 +41,37 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
-        // SFace (128-d) defaults, calibrated on-hardware against G:\TrueNAS.
-        // Two empirical anchors drove these: (1) a known single identity
-        // (27 studio portraits) clusters with cosine-to-centroid 0.88–0.95
-        // (median 0.93) — so GENUINE same-person SFace cosines are very high,
-        // far above OpenCV's 0.363 verification EER; (2) Pass 1 is single-
-        // linkage connected-components, which chains different people through
-        // bridge faces (a 1475-face run at pass1=0.42 collapsed 1339 into one
-        // blob of mean cohesion ~0.40). The fix exploits the wide gap between
-        // genuine clusters (~0.85+ mean) and chained blobs (~0.50 mean):
-        // keep Pass-1 cores tight (0.66, above most cross-identity false
-        // matches), and set the Pass-3 split floor IN that gap (0.60) so the
-        // 2-means refinement shreds any non-tight cluster while leaving real
-        // identities whole. Fails toward over-split (mergeable in the UI), not
-        // the un-fixable over-merge. PROVISIONAL — single-linkage Pass 1 still
-        // chains on very large libraries; the real fix is mutual-kNN / density
-        // edges (see NEXT.md). Final calibration on a labeled library.
+        // SFace (128-d) defaults, RE-CALIBRATED on-hardware against F:\TrueNAS
+        // (RTX 5080, ~44k real faces, 2026-07-05) via an intra-cluster COHESION
+        // metric (no labels needed: genuine same-person SFace cosine is ~0.85+,
+        // so a cluster whose members are mutually ~0.85+ is one identity).
         //
-        // Two Pass-3 knobs are env-overridable for on-hardware tuning of the
-        // over-split aggressiveness (a lower mean floor / higher variance bar
-        // splits less): FILEID_FACE_PASS3_MIN_MEAN_COSINE and
-        // FILEID_FACE_PASS3_VARIANCE_THRESHOLD (both f32; unset/unparseable →
-        // the defaults below).
+        // The OLD pass1=0.66 was the disaster: at scale, single-linkage Pass 1
+        // chained different people into "cones" — an 11k-face "person" whose
+        // members had ~0.30 MEDIAN PAIRWISE cosine but ~0.61 to-centroid (so it
+        // slipped just past the Pass-3 split floor of 0.60 and was never split).
+        // Neither mutual-kNN nor a deeper Pass-3 split cap broke it (measured);
+        // consolidate then re-merged any pieces. Root cause: a "hub" face that is
+        // 0.66+ to many DIFFERENT people bridges them all into one component.
+        //
+        // The fix that WORKED: raise Pass-1 so same-person edges (0.85+) survive
+        // but hub-bridges (0.66–0.80) are cut — cones stop forming. Measured
+        // sweep (faces-in-coherent-clusters / largest cluster): 0.66→14%/10,690,
+        // 0.78→36%/6,047, 0.82→67%/1,586, 0.85→89%/429. 0.85 fully eliminates
+        // the cone but craters recall (only clusters faces that recur at 0.85+),
+        // which on a small/sparse library leaves the People tab nearly empty.
+        // 0.82 is the shipped BALANCE: a 7× smaller, far-less-egregious residual
+        // cone (cohesion ~0.63 vs the old 0.30) with materially more recall.
+        // Pass 2 tracks it (0.74). This trades recall + more over-split for the
+        // near-elimination of over-merge — the design's stated safe direction
+        // (over-split is UI-mergeable via "Suggest merges"; a cone is not). See
+        // consolidate()'s AUTOMERGE_COS_DEFAULT (0.88),
+        // raised in lockstep so it re-joins same-person fragments without gluing
+        // cone pieces back. Env-overridable per corpus (unset → these defaults):
+        // FILEID_FACE_PASS1_COSINE / _PASS2_COSINE / _PASS2_MARGIN /
+        // _PASS3_MIN_MEAN_COSINE / _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS.
+        // Further gains (recover recall without cones) need a mutual-nearest
+        // re-merge stage + a labelled library — see NEXT.md.
         let env_f32 = |key: &str, default: f32| -> f32 {
             std::env::var(key)
                 .ok()
@@ -70,12 +79,16 @@ impl Default for Hyperparameters {
                 .unwrap_or(default)
         };
         Self {
-            pass1_cosine: 0.66,
-            pass2_cosine: 0.54,
-            pass2_margin: 0.10,
+            pass1_cosine: env_f32("FILEID_FACE_PASS1_COSINE", 0.82),
+            pass2_cosine: env_f32("FILEID_FACE_PASS2_COSINE", 0.74),
+            pass2_margin: env_f32("FILEID_FACE_PASS2_MARGIN", 0.10),
             pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
             pass3_min_mean_cosine: env_f32("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
-            pass3_max_splits: 7,
+            pass3_max_splits: std::env::var("FILEID_FACE_PASS3_MAX_SPLITS")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .map(|v| v.clamp(1, 64))
+                .unwrap_or(7),
             k_nn: 10,
         }
     }
