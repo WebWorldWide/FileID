@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 — M5/M6 unblocked + landed: WinUI now builds on the dev box; DebugLog Trace-gate + Sankey teardown
+
+The WinUI build blocker is gone. Plain `dotnet build` can't build the app (the SDK lacks the MrtCore/PriGen `AppxPackage` task DLL), but **VS 18 Community** is installed with the Universal + WindowsAppSdkSupport.CSharp workloads — `"C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"` has the `v18.0\AppxPackage` tooling, so the app + tests build the same way CI does (msbuild, not `dotnet build`). Recorded the full recipe (RID restore → build `-restore:false`; `dotnet format` clobbers RID assets so re-restore before rebuild; App.Tests need VS-msbuild build then `dotnet test --no-build`; VS18's newer Roslyn flags CA1861 that CI's SDK-8 analyzers don't, so build tests with `-p:RunAnalyzersDuringBuild=false` to mirror CI) in auto-memory.
+
+**M5/M6 shipped on branch `m6-debuglog-trace-gate` (pushed; PR/merge pending user gh auth):**
+- **DebugLog Trace-gate (the one genuinely worthwhile WinUI perf change).** `DebugLog` did synchronous, `s_writeLock`-held file I/O on the UI thread for every `[THUMB]` line — and those fire per-tile on every scroll realization, stalling the render thread on disk during a fast scroll. Added a `Trace` level gated OFF by default (`FILEID_LOG_TRACE=1`/setter) that skips the lock + I/O entirely when disabled, and moved all 25 per-tile `[THUMB]` `Debug` lines onto it (the 3 `[THUMB]` `Warn` failure lines stay). Everything at `Debug`+ stays always-on + synchronous, so the `[APPLY:N]`/`[ENGINE-SUB]`/fast-fail forensic tail (CLAUDE.md: load-bearing) is never suppressed.
+- **SankeyFlowControl `Unloaded` teardown.** The `_renderDebounce` timer was never stopped on unload; a pending `Tick` held the detached control alive via its `RenderIfResized` closure across a tab-swap-mid-resize. Stop it on `Unloaded`.
+- **Verified:** app builds clean (0 warn/0 err, VS18 msbuild); `dotnet format FileID.sln --verify-no-changes` clean; **209 tests green** — 159 App + 46 IpcSchema + **4 new `DebugLogTraceGateTests`** that lock the contract (Trace suppressed when disabled, written when enabled, Debug/Error always written regardless of the flag); runtime launch (staged Debug build + engine + ORT against the scanned corpus DB) starts clean with the changes and shows `[THUMB]=0` at default level.
+- **Audit-dissolved M5 items (left as-is, correctly):** `MergeById` O(n²) is sub-ms (grid capped at 200); `Convert.ToInt32` overflow already moot (sizes are `long` end-to-end); `FileTile` display is a micro-opt; `IridescentBorder` is dead (only its own Style/template reference it — no instantiation), left in place as an unused signature primitive; welcome-sheet sentinels already fixed by #73.
+
 ## 2026-07-04 (cont.) — M11 endgame adversarial audit: fixed a silent DATA-LOSS bug; C# app confirmed clean
 
 Fanned out adversarial audits over every surface I can verify (engine scan/DB, engine ML/IPC, Linux GTK app, WinUI C# app). Biggest find of the whole hardening pass:

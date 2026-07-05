@@ -310,7 +310,7 @@ internal static class ThumbnailDiskCache
                 // ThumbnailService.cs for the rationale.
                 var bmp = new BitmapImage { DecodePixelWidth = 192 };
                 await bmp.SetSourceAsync(stream).AsTask(ct);
-                DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
+                DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(bmp);
             }
             catch (Exception ex)
