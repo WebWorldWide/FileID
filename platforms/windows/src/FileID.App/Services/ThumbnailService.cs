@@ -137,20 +137,20 @@ internal sealed class ThumbnailService : IDisposable
 
     public Task<BitmapImage?> RequestAsync(string path, double? modifiedAt, CancellationToken ct)
     {
-        DebugLog.Debug($"[THUMB] REQUEST file={PathRedactor.Redact(path)}");
+        DebugLog.Trace($"[THUMB] REQUEST file={PathRedactor.Redact(path)}");
         var key = CacheKey(path, modifiedAt);
         if (_cache.TryGetValue(key, out BitmapImage? cached) && cached != null)
         {
-            DebugLog.Debug($"[THUMB] L1_HIT file={PathRedactor.Redact(path)}");
+            DebugLog.Trace($"[THUMB] L1_HIT file={PathRedactor.Redact(path)}");
             return Task.FromResult<BitmapImage?>(cached);
         }
-        DebugLog.Debug($"[THUMB] L1_MISS file={PathRedactor.Redact(path)}");
+        DebugLog.Trace($"[THUMB] L1_MISS file={PathRedactor.Redact(path)}");
         var tcs = new TaskCompletionSource<BitmapImage?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         var ok = _queue.Writer.TryWrite(new ThumbnailRequest(path, modifiedAt, tcs, ct));
         if (!ok)
         {
-            DebugLog.Debug($"[THUMB] QUEUE_FULL_DROP file={PathRedactor.Redact(path)}");
+            DebugLog.Trace($"[THUMB] QUEUE_FULL_DROP file={PathRedactor.Redact(path)}");
             tcs.TrySetResult(null);
         }
         return tcs.Task;
@@ -243,12 +243,12 @@ internal sealed class ThumbnailService : IDisposable
             bool firstRequest = _requestedVideo.Add(key);
             if (firstRequest)
             {
-                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_REQUEST file={PathRedactor.Redact(req.Path)}");
+                DebugLog.Trace($"[THUMB] VIDEO_ENGINE_REQUEST file={PathRedactor.Redact(req.Path)}");
                 _ = EngineClient.Instance.GenerateVideoThumbnailAsync(req.Path, req.ModifiedAt);
             }
             else
             {
-                DebugLog.Debug($"[THUMB] VIDEO_ENGINE_DEDUP file={PathRedactor.Redact(req.Path)}");
+                DebugLog.Trace($"[THUMB] VIDEO_ENGINE_DEDUP file={PathRedactor.Redact(req.Path)}");
             }
         }
 
@@ -284,7 +284,7 @@ internal sealed class ThumbnailService : IDisposable
         }
         if (tcs.TrySetResult(null))
         {
-            DebugLog.Debug($"[THUMB] VIDEO_ENGINE_TIMEOUT key={PathRedactor.Redact(key)}");
+            DebugLog.Trace($"[THUMB] VIDEO_ENGINE_TIMEOUT key={PathRedactor.Redact(key)}");
         }
     }
 
@@ -360,7 +360,7 @@ internal sealed class ThumbnailService : IDisposable
                 Size = DecodedBytesPerEntry,
                 SlidingExpiration = TimeSpan.FromMinutes(15),
             });
-            DebugLog.Debug($"[THUMB] BITMAP_SET file={PathRedactor.Redact(evt.Path)} src=engine-video");
+            DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(evt.Path)} src=engine-video");
 
             TaskCompletionSource<BitmapImage?>? pending;
             lock (_videoLock)
@@ -409,7 +409,7 @@ internal sealed class ThumbnailService : IDisposable
             stream.Seek(0);
             var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
             await bmp.SetSourceAsync(stream).AsTask(ct);
-            DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} src=engine-video");
+            DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} src=engine-video");
             return bmp;
         }
         catch (Exception ex)
@@ -523,11 +523,11 @@ internal sealed class ThumbnailService : IDisposable
             .ConfigureAwait(false);
         if (diskHit != null)
         {
-            DebugLog.Debug($"[THUMB] L2_HIT file={PathRedactor.Redact(path)}");
+            DebugLog.Trace($"[THUMB] L2_HIT file={PathRedactor.Redact(path)}");
             Interlocked.Increment(ref _renderedOk);
             return diskHit;
         }
-        DebugLog.Debug($"[THUMB] L2_MISS file={PathRedactor.Redact(path)}");
+        DebugLog.Trace($"[THUMB] L2_MISS file={PathRedactor.Redact(path)}");
 
         var ext = Path.GetExtension(path);
 
@@ -537,7 +537,7 @@ internal sealed class ThumbnailService : IDisposable
         // risk a native fast-fail in an audio art handler.
         if (AudioExtensions.Contains(ext))
         {
-            DebugLog.Debug($"[THUMB] AUDIO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
+            DebugLog.Trace($"[THUMB] AUDIO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }
@@ -550,7 +550,7 @@ internal sealed class ThumbnailService : IDisposable
         // the follow-up to restore live video thumbnails — NEXT.md.)
         if (VideoExtensions.Contains(ext))
         {
-            DebugLog.Debug($"[THUMB] VIDEO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
+            DebugLog.Trace($"[THUMB] VIDEO_SHELL_SKIP file={PathRedactor.Redact(path)} ext={ext}");
             Interlocked.Increment(ref _renderedFailed);
             return null;
         }
@@ -572,11 +572,11 @@ internal sealed class ThumbnailService : IDisposable
             if (thumb != null && thumb.Size > 0)
             {
                 var bytes = await ReadAllBytesAsync(thumb, ct).ConfigureAwait(false);
-                DebugLog.Debug($"[THUMB] SHELL_OK file={PathRedactor.Redact(path)} bytes={bytes.Length}");
+                DebugLog.Trace($"[THUMB] SHELL_OK file={PathRedactor.Redact(path)} bytes={bytes.Length}");
                 var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
-                    DebugLog.Debug($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=shell");
+                    DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=shell");
                     _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, bytes);
                     Interlocked.Increment(ref _renderedOk);
                     return bmp;
@@ -584,7 +584,7 @@ internal sealed class ThumbnailService : IDisposable
             }
             else
             {
-                DebugLog.Debug($"[THUMB] SHELL_NULL file={PathRedactor.Redact(path)}");
+                DebugLog.Trace($"[THUMB] SHELL_NULL file={PathRedactor.Redact(path)}");
             }
         }
         catch (Exception ex)
@@ -595,7 +595,7 @@ internal sealed class ThumbnailService : IDisposable
             // the fallback path so a JPEG with a broken shell provider
             // still renders. Don't bump _renderedFailed here — fallback
             // gets a turn and bumps the right counter on the way out.
-            DebugLog.Debug($"[THUMB] SHELL_EX file={PathRedactor.Redact(path)} ex={ex.GetType().Name}");
+            DebugLog.Trace($"[THUMB] SHELL_EX file={PathRedactor.Redact(path)} ex={ex.GetType().Name}");
             DebugLog.Warn(
                 $"ThumbnailService shell-path ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
         }
@@ -612,18 +612,18 @@ internal sealed class ThumbnailService : IDisposable
                 var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
-                    DebugLog.Debug($"[THUMB] IMG_FB_OK file={PathRedactor.Redact(path)}");
-                    DebugLog.Debug($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=image-fallback");
+                    DebugLog.Trace($"[THUMB] IMG_FB_OK file={PathRedactor.Redact(path)}");
+                    DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(path)} src=image-fallback");
                     _ = ThumbnailDiskCache.TryWriteAsync(path, modifiedAt, fileBytes);
                     Interlocked.Increment(ref _fallbackUsed);
                     Interlocked.Increment(ref _renderedOk);
                     return bmp;
                 }
-                DebugLog.Debug($"[THUMB] IMG_FB_NULL file={PathRedactor.Redact(path)}");
+                DebugLog.Trace($"[THUMB] IMG_FB_NULL file={PathRedactor.Redact(path)}");
             }
             catch (Exception ex)
             {
-                DebugLog.Debug($"[THUMB] IMG_FB_EX file={PathRedactor.Redact(path)} ex={ex.GetType().Name}");
+                DebugLog.Trace($"[THUMB] IMG_FB_EX file={PathRedactor.Redact(path)} ex={ex.GetType().Name}");
                 DebugLog.Warn(
                     $"ThumbnailService image-fallback ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
                 Interlocked.Increment(ref _renderedFailed);
@@ -632,10 +632,10 @@ internal sealed class ThumbnailService : IDisposable
         }
         else
         {
-            DebugLog.Debug($"[THUMB] NO_PROVIDER file={PathRedactor.Redact(path)} ext={ext}");
+            DebugLog.Trace($"[THUMB] NO_PROVIDER file={PathRedactor.Redact(path)} ext={ext}");
         }
 
-        DebugLog.Debug($"[THUMB] RENDER_FAILED file={PathRedactor.Redact(path)}");
+        DebugLog.Trace($"[THUMB] RENDER_FAILED file={PathRedactor.Redact(path)}");
         Interlocked.Increment(ref _renderedFailed);
         return null;
     }
@@ -701,7 +701,7 @@ internal sealed class ThumbnailService : IDisposable
             stream.Seek(0);
             var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
             await bmp.SetSourceAsync(stream).AsTask(ct);
-            DebugLog.Debug($"[THUMB] DECODE_OK bytes={bytes.Length} px={ThumbnailRequestPx}");
+            DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} px={ThumbnailRequestPx}");
             tcs.TrySetResult(bmp);
         }
         catch (Exception ex)
