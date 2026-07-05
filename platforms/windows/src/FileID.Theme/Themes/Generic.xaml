@@ -46,16 +46,6 @@
         </Setter>
     </Style>
 
-    <Style TargetType="motion:IridescentBorder">
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="motion:IridescentBorder">
-                    <win2d:CanvasControl x:Name="PART_Canvas" ClearColor="Transparent" IsHitTestVisible="False" />
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-    </Style>
-
     <!-- LavaLampBackground draws via Microsoft.UI.Composition directly —
          no Win2D, no template part needed. The default style just enforces
          that the control is hit-transparent. -->

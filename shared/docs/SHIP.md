@@ -13,7 +13,7 @@ tens of thousands of files locally. Two platforms ship at v1.0:
 - **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 8 C# app.
 - **macOS** — Swift / SwiftUI app + engine, MLX inference. The visual + UX reference.
 
-Linux is deferred. The two binaries on each platform talk newline-delimited JSON
+Linux (GTK4 + libadwaita) ships all six tabs over the shared engine. The two binaries on each platform talk newline-delimited JSON
 over stdio; the engine owns a SQLite WAL DB (migrations v1–v12, byte-faithful
 across the macOS GRDB and Windows rusqlite stores).
 
@@ -141,9 +141,12 @@ on the Developer ID cert). The major open items:
   on DirectML (~5× the 2060); the GPU is dispatch-bound (idle p50=19%), so the CUDA
   Performance Pack (3–5× on inference latency) is the biggest remaining lever —
   blocked on ORT CUDA EP DLL hosting. See STATE.md.
-- **Face clustering** — Pass-1 single-linkage chains distinct people through
-  bridge faces on very large libraries; structural fix (mutual-kNN / density-gated
-  edges) + calibration against labeled faces.
+- **Face clustering** — DONE on the Rust engine (Windows/Linux/CLI/TUI): mutual-kNN
+  default-on + a pre-clustering quality gate + label-calibrated thresholds
+  (pass1 0.50) took the owner's labelled People-tab precision/recall to 1.0
+  (STATE 2026-07-05). REMAINING: macOS Swift carries the mechanisms (default-off)
+  but needs its own on-Mac label-calibration pass (Apple Vision quality scale +
+  FaceAlign) before adopting the values.
 - **Rename-heal exact-duplicate fix** — coexisting byte-identical files currently
   collapse to one row; fix so N pairs yield 2N rows and Cleanup surfaces the group.
 - **Packaging + signing (Windows)** — WiX MSI + Authenticode EV cert.

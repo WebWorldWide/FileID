@@ -8,7 +8,6 @@
 //! probabilities. The full YAMNet sound-event tagger + Whisper transcription
 //! are documented Phase-5b follow-ups; both need a publicly downloadable ONNX
 //! release per the no-self-host policy.
-#![allow(dead_code)] // wired into run_decoder_thread for FileKind::Audio.
 
 use std::path::Path;
 
@@ -67,8 +66,6 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     // thousands of "N sec" tags at score 0.000). This mirrors the earlier
     // refinement that dropped "Has Faces"/"Has Text"/aspect tags for the same
     // reason — metadata facts belong in columns/facets, not the tag stream.
-    // `duration_label` is kept (module-level allow(dead_code)) for a future
-    // duration facet/column.
 
     // Some formats (FLAC, Vorbis, M4A) carry metadata on the FormatReader;
     // others (MP3 with ID3v2) carry it on the probe's MetadataLog. Read
@@ -146,33 +143,6 @@ fn collect_structured(tags: &mut AudioTags, rev: &symphonia::core::meta::Metadat
             _ => {}
         }
     }
-}
-
-/// Format the audio's total duration as a Library chip ("12 min" / "1 h 5 min").
-/// Returns None when symphonia can't expose enough info (some streamed formats).
-fn duration_label(format: &dyn symphonia::core::formats::FormatReader) -> Option<String> {
-    let track = format.default_track().or_else(|| format.tracks().first())?;
-    let cp = &track.codec_params;
-    let n_frames = cp.n_frames?;
-    let sample_rate = cp.sample_rate?;
-    if sample_rate == 0 {
-        return None;
-    }
-    let total_secs = (n_frames as f64) / (sample_rate as f64);
-    if total_secs < 1.0 {
-        return None;
-    }
-    let total_secs = total_secs.round() as u64;
-    let hours = total_secs / 3600;
-    let mins = (total_secs % 3600) / 60;
-    let secs = total_secs % 60;
-    Some(if hours > 0 {
-        format!("{hours} h {mins:02} min")
-    } else if mins > 0 {
-        format!("{mins} min")
-    } else {
-        format!("{secs} sec")
-    })
 }
 
 fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::meta::MetadataRevision) {

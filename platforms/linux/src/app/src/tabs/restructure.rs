@@ -15,12 +15,6 @@
 //
 // Ask-confidence moves start UNchecked (RESTRUCTURE.md §6) — the user must opt
 // them in before applying.
-//
-// INTEGRATION NOTE: this tab consumes two `EngineEvent` variants the current
-// `engine_client.rs` doesn't surface yet — `RestructurePlan(RestructurePlan)`
-// and `RestructureApplyResult(RestructureApplyResult)`. The integrator must add
-// them to the `EngineEvent` enum + map them in `drain_stdout`, and add a
-// catch-all arm to `window.rs`'s status match. See this module's return note.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};

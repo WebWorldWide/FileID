@@ -35,16 +35,6 @@ public static class ScanCompleteToast
             });
     }
 
-    /// <summary>
-    /// Disposes the Rx subscription. Call from app shutdown (App.OnSuspending
-    /// or equivalent) so the lambda doesn't outlive the process intent.
-    /// </summary>
-    public static void Stop()
-    {
-        _sub?.Dispose();
-        _sub = null;
-    }
-
     private static void Show(ScanComplete result)
     {
         try

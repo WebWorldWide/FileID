@@ -27,7 +27,6 @@ pub mod ram_plus;
 pub mod ram_plus_batch;
 pub mod registry;
 pub mod runtime;
-pub mod florence2;
 pub mod scene_vocab;
 pub mod face_align;
 pub mod scrfd;

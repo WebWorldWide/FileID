@@ -1,5 +1,18 @@
 # NEXT — resume here
 
+## Deferred features removed at 0.0.1 (re-add when the phase is built)
+
+Dead/planned scaffolding cut from the Windows Rust engine for the 0.0.1 release (branch `release-hardening-0.0.1`). Nothing was wired to a runtime path; each is a future-phase feature to re-add when that phase is actually built:
+
+- **pipeline/cluster_suggestions.rs** — VLM-driven face-pair merge-suggestion module (Phase: identity review). Was never driven by an IPC command; its planned `verifyMergeSuggestions` handler was never built. Re-add with the VLM merge-verification feature.
+- **pipeline/usn.rs** — NTFS USN change-journal reader (Phase 3, fast incremental rescans). Never called by the scan pipeline. Re-add with incremental-scan work.
+- **util/elevation.rs** — process-elevation (`is_elevated`) gate that existed only to guard the USN journal read. Removed with usn.rs (its sole consumer).
+- **models/florence2.rs** — Florence-2 grounded-regions model stub (Phase 7b); only exposed a `default_weights_dir()` resolver with no loader/caller. The downloadable `florence2_base` registry entry in `models/registry.rs` is untouched. Re-add with grounded-region tagging.
+- **audio_meta.rs `duration_label()`** — dead helper formatting audio duration as a Library chip; duration is intentionally not emitted as a tag. Removed the fn + the module's `#![allow(dead_code)]`. Re-add if a duration facet/column is built.
+- **models/scrfd.rs** (partial) — removed the superseded `Scrfd` ONNX detector (`Scrfd::load`/`detect`, `decode_scrfd_stride`, `decode_scrfd_single_anchor`, decode constants + their tests), kept the LIVE shared helpers YuNet + tagging depend on (`Detection`, `Pose`, `estimate_pose`, `validate_face_geometry`, `nms`, `iou`, `resize_nearest`). Also dropped the dead `default_weights_path`. YuNet is the active detector.
+
+Kept (turned out wired, not dead): `job_queue.rs` (main.rs sidebar tracker), `util/keywords.rs` (doc-tag path in tagging.rs), `models/wordpiece_tokenizer.rs` (used by the live BGE-small text embedder), `pipeline/doc_extract.rs` + `pipeline/audio_meta.rs` (both called from `run_decoder_thread`).
+
 ## 2026-07-04 — production-hardening loop in flight (see STATE.md top entry)
 
 Production-hardening loop landed M1–M11 to main. **M5/M6 merged (PR #81):** DebugLog Trace-gate for the `[THUMB]` hot path (forensics preserved, +4 gate tests) + SankeyFlowControl `Unloaded` timer teardown; other M5 items dissolved on audit (STATE 2026-07-05). **Face singleton-flood fixed (PR #82, this branch):** `solo_quality_floor` 0.12→0.40 (Windows quality is compressed ~0.23-0.42) — kills the one-off-face flood; `min_cluster_size` kept at 3 (min=2 caused a pair flood at scale). WinUI now builds on the dev box via VS 18 Community's msbuild (memory has the recipe). M2/M3 were verified already-satisfied.

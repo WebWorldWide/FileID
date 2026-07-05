@@ -77,6 +77,16 @@ public enum FaceClustering {
             .flatMap { range.contains($0) ? $0 : nil } ?? dflt
     }
 
+    /// Boolean env override: "1"/"true" (case-insensitive) → true, anything else
+    /// present → false, absent → `dflt`. Used for the mutual-kNN Pass-1 gate, which
+    /// stays OFF by default on macOS pending on-Mac label calibration (Apple Vision
+    /// quality is a different scale than the Windows YuNet path). (parity mirror)
+    // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+    static func envBool(_ key: String, _ dflt: Bool) -> Bool {
+        guard let v = ProcessInfo.processInfo.environment[key] else { return dflt }
+        return v == "1" || v.lowercased() == "true"
+    }
+
     /// Apply junk-cluster suppression to a dense-index cluster map: keep a cluster
     /// iff it has ≥ `minSize` members OR its best member quality ≥ `qualityFloor`.
     /// Pure + deterministic so it can be unit-tested without a DB. Returns the kept
@@ -218,6 +228,19 @@ public enum FaceClustering {
         // so they stay attached to their existing unknown person row and
         // never participate in a re-cluster pass.
         struct FaceRow: Sendable { let id: Int64; let arcFace: Data; let quality: Double }
+        // Pre-clustering quality gate — parity hook for the Rust
+        // FILEID_FACE_CLUSTER_MIN_QUALITY. In the Windows engine sub-threshold
+        // faces embed as non-discriminative noise (same-person cosine ~= diff)
+        // and chain through hub faces into low-cohesion mega-cones, so gating
+        // them (left UNCLUSTERED, person_id NULL) raised precision.
+        // CAVEAT: macOS `face_quality` is Apple Vision `faceCaptureQuality`, a
+        // DIFFERENT 0..1 scale than the Windows YuNet det.score×geometry (whose
+        // calibrated gate is 0.35) — that value does NOT transfer. So the macOS
+        // DEFAULT is 0.0 = OFF (zero regression); a Mac session must calibrate it
+        // against labels before enabling. Only applied when > 0, so missing/NULL
+        // quality (-1 sentinel) is untouched at the default. (see MACOS_LOCKSTEP_NOTES)
+        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+        let clusterMinQuality = envDouble("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0...1.0)
         let rows: [FaceRow]
         do {
             rows = try await database.pool.read { db in
@@ -231,9 +254,16 @@ public enum FaceClustering {
                 return r.compactMap { row -> FaceRow? in
                     let id: Int64 = row["id"] ?? 0
                     if unknownFaceIDs.contains(id) { return nil }
+                    let quality: Double = row["face_quality"] ?? -1
+                    // Gate is OFF at the 0.0 default, so this is a no-op unless a
+                    // Mac-calibrated FILEID_FACE_CLUSTER_MIN_QUALITY is set. Gated
+                    // faces never enter the clustering pool and the Phase-4 persist
+                    // NULLs every non-preserved face_print, so they stay unclustered.
+                    // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+                    if clusterMinQuality > 0, quality < clusterMinQuality { return nil }
                     return FaceRow(id: id,
                                    arcFace: row["arcface_embedding"] ?? Data(),
-                                   quality: row["face_quality"] ?? -1)
+                                   quality: quality)
                 }
             }
         } catch {
@@ -338,7 +368,12 @@ public enum FaceClustering {
         // FILEID_FACE_PASS1_COS (e.g. 0.70) to split different people apart more
         // aggressively when over-merging. Default preserved.
         let icParams = IdentityClustering.Hyperparameters(
-            pass1Cosine: envCos("FILEID_FACE_PASS1_COS", 0.66)
+            pass1Cosine: envCos("FILEID_FACE_PASS1_COS", 0.66),
+            // Mutual-kNN Pass-1 gate — parity hook for the Rust FILEID_FACE_MUTUAL_KNN.
+            // DEFAULT OFF on macOS (Windows is default-ON): the Vision quality scale +
+            // separate alignment path mean the Windows calibration doesn't transfer, so
+            // enable only after on-Mac label validation. (see MACOS_LOCKSTEP_NOTES)
+            mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false) // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         )
         let icResult = IdentityClustering.cluster(
             embeddings: vecsByDense,
