@@ -185,24 +185,19 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
 }
 
 /// Default minimum CENTROID cosine to auto-fold two clusters into one person.
-/// 0.88 sits inside genuine same-person territory (empirical SFace median
-/// 0.88–0.95) yet above the "cone" pieces the tight Pass-1 (0.85) leaves — so
-/// fragments of the SAME identity that the over-split-safe clusterer left apart
-/// get rejoined, WITHOUT re-merging different-people cone pieces back into a
-/// mega-cluster (see AUTOMERGE_COS_DEFAULT below) — the "WAY too many similar faces" the
-/// People tab otherwise shows — while distinct people stay apart. Override with
-/// `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable and
-/// keep pure over-split). Centroids (means of all member embeddings) are
-/// denoised, so this is safer than any single anchor-to-anchor comparison.
+/// 0.88 is a CONSERVATIVE re-merge bar: only clusters whose centroids are near-
+/// identical get folded, so it recovers a same-person over-split without ever
+/// gluing two different people together. Override with `FILEID_FACE_AUTOMERGE_COS`
+/// (clamped to [0.70, 1.0]; set 1.0 to disable and keep pure over-split).
+/// Centroids (means of all member embeddings) are denoised, so this is safer
+/// than any single anchor-to-anchor comparison.
 ///
-/// Raised 0.75→0.88 (2026-07-05, F:\TrueNAS cohesion calibration). With the
-/// tighter Pass-1 (0.85, see identity_clustering.rs) the cores are pure, but a
-/// loose consolidate then RE-MERGES the split pieces of a "cone" (many similar-
-/// looking different people SFace places near a common direction) back into a
-/// low-cohesion mega-cluster — the exact over-merge Pass-1 just prevented.
-/// Genuine same-person split clusters have centroid cosine ~0.88+ (so they still
-/// merge); cone pieces sit below that (so they stay apart). Measured effect at
-/// scale: raising this from 0.75 to 0.88 kept the fraction of faces in coherent
+/// Kept high (0.88) after the 2026-07-05 label-driven Pass-1 retune (now 0.50 +
+/// mutual-kNN + quality gate — see identity_clustering.rs). With mutual-kNN cores
+/// already pure and fragmentation low, consolidate is a light touch; a HIGH bar
+/// keeps it from re-merging the residual low-quality-noise clusters. Measured on
+/// the labelled set, this config gave People-tab precision/recall = 1.0. (Prior
+/// note, superseded: raising 0.75→0.88 in the cohesion-only pass kept coherent
 /// (cohesion≥0.75) clusters high instead of collapsing back to ~14%.
 pub const AUTOMERGE_COS_DEFAULT: f32 = 0.88;
 

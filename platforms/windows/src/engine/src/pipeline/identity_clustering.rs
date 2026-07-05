@@ -41,37 +41,42 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
-        // SFace (128-d) defaults, RE-CALIBRATED on-hardware against F:\TrueNAS
-        // (RTX 5080, ~44k real faces, 2026-07-05) via an intra-cluster COHESION
-        // metric (no labels needed: genuine same-person SFace cosine is ~0.85+,
-        // so a cluster whose members are mutually ~0.85+ is one identity).
+        // SFace (128-d) defaults, calibrated on-hardware against F:\TrueNAS with a
+        // GROUND-TRUTH LABELLED set (RTX 5080, 2026-07-05: the owner labelled ~185
+        // faces across a dozen people via the face-labeler tool). The labels
+        // overturned the earlier cohesion-only guess (pass1=0.82) — see below.
         //
-        // The OLD pass1=0.66 was the disaster: at scale, single-linkage Pass 1
-        // chained different people into "cones" — an 11k-face "person" whose
-        // members had ~0.30 MEDIAN PAIRWISE cosine but ~0.61 to-centroid (so it
-        // slipped just past the Pass-3 split floor of 0.60 and was never split).
-        // Neither mutual-kNN nor a deeper Pass-3 split cap broke it (measured);
-        // consolidate then re-merged any pieces. Root cause: a "hub" face that is
-        // 0.66+ to many DIFFERENT people bridges them all into one component.
+        // What the labels showed, on REAL same-age same-person pairs: SFace works
+        // WELL — same-person cosine median ~0.59 (p90 0.82), different-person
+        // median 0.16 with a MAX of only 0.47. So the classes separate cleanly and
+        // the optimal link threshold is ~0.43–0.50, NOT 0.82. At 0.82 recall was
+        // ~1% (it only linked near-duplicate shots) — which is exactly why real
+        // people fragmented into many clusters. Dropping to 0.50 took the labelled
+        // People-tab F1 from ~0.02 to 1.00 (precision 1.0, recall 1.0).
         //
-        // The fix that WORKED: raise Pass-1 so same-person edges (0.85+) survive
-        // but hub-bridges (0.66–0.80) are cut — cones stop forming. Measured
-        // sweep (faces-in-coherent-clusters / largest cluster): 0.66→14%/10,690,
-        // 0.78→36%/6,047, 0.82→67%/1,586, 0.85→89%/429. 0.85 fully eliminates
-        // the cone but craters recall (only clusters faces that recur at 0.85+),
-        // which on a small/sparse library leaves the People tab nearly empty.
-        // 0.82 is the shipped BALANCE: a 7× smaller, far-less-egregious residual
-        // cone (cohesion ~0.63 vs the old 0.30) with materially more recall.
-        // Pass 2 tracks it (0.74). This trades recall + more over-split for the
-        // near-elimination of over-merge — the design's stated safe direction
-        // (over-split is UI-mergeable via "Suggest merges"; a cone is not). See
-        // consolidate()'s AUTOMERGE_COS_DEFAULT (0.88),
-        // raised in lockstep so it re-joins same-person fragments without gluing
-        // cone pieces back. Env-overridable per corpus (unset → these defaults):
-        // FILEID_FACE_PASS1_COSINE / _PASS2_COSINE / _PASS2_MARGIN /
-        // _PASS3_MIN_MEAN_COSINE / _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS.
-        // Further gains (recover recall without cones) need a mutual-nearest
-        // re-merge stage + a labelled library — see NEXT.md.
+        // Two confounds that had masked this and MUST stay in mind:
+        //  (1) A person across a big AGE gap (child↔adult) is genuinely unmatchable
+        //      by any face model (their embeddings differ like different people) —
+        //      those legitimately land in separate clusters; only manual naming /
+        //      "Suggest merges" unites them. Not a bug.
+        //  (2) LOW-QUALITY faces (this corpus is scanned/old — quality caps ~0.42)
+        //      produce noise embeddings: same-person cosine on quality<0.35 faces
+        //      is ~0.14 (== different-person), and they chain into cones. Handled
+        //      by the PRE-clustering quality gate FILEID_FACE_CLUSTER_MIN_QUALITY
+        //      (commands/face_clustering.rs, default 0.35) — a mild gate that drops
+        //      only the deepest noise and lifted labelled F1 to a clean 1.00.
+        //
+        // So: pass1=0.50 (link threshold in the same/diff gap), pass2=0.45, and
+        // MUTUAL-kNN default-ON (each edge needs both faces in the other's above-
+        // threshold neighbourhood — kills the last single-bridge chaining; lifted
+        // recall to 1.0 with no fragmentation). All env-overridable per corpus
+        // (unset → these defaults): FILEID_FACE_PASS1_COSINE / _PASS2_COSINE /
+        // _PASS2_MARGIN / _MUTUAL_KNN / _PASS3_MIN_MEAN_COSINE /
+        // _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS, plus the quality gate.
+        // On a higher-quality (modern-photo) corpus these thresholds still hold
+        // (same-person there is even higher, ~0.85+); loosen only if a corpus is
+        // unusually low-quality. Further gains want a stronger face embedder +
+        // cross-corpus labels — see NEXT.md.
         let env_f32 = |key: &str, default: f32| -> f32 {
             std::env::var(key)
                 .ok()
@@ -79,8 +84,8 @@ impl Default for Hyperparameters {
                 .unwrap_or(default)
         };
         Self {
-            pass1_cosine: env_f32("FILEID_FACE_PASS1_COSINE", 0.82),
-            pass2_cosine: env_f32("FILEID_FACE_PASS2_COSINE", 0.74),
+            pass1_cosine: env_f32("FILEID_FACE_PASS1_COSINE", 0.50),
+            pass2_cosine: env_f32("FILEID_FACE_PASS2_COSINE", 0.45),
             pass2_margin: env_f32("FILEID_FACE_PASS2_MARGIN", 0.10),
             pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
             pass3_min_mean_cosine: env_f32("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),
@@ -172,8 +177,8 @@ where
     // on-hardware calibration on a labeled library (see NEXT.md).
     let mutual_knn = std::env::var("FILEID_FACE_MUTUAL_KNN")
         .ok()
-        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
+        .unwrap_or(true);
     let mut uf = UnionFind::new(n);
     if mutual_knn {
         let mut directed: std::collections::HashSet<(usize, usize)> =
