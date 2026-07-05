@@ -51,6 +51,21 @@ pub(crate) async fn handle_run_face_clustering(
             let conn = db.lock();
 
             // (a) Load every face that has an ArcFace embedding.
+            //
+            // Pre-clustering quality gate (FILEID_FACE_CLUSTER_MIN_QUALITY): faces
+            // below this quality produce non-discriminative "noise" embeddings —
+            // ground-truth labels showed same-person cosine on such faces is ~0.14
+            // (indistinguishable from different-person ~0.16), and they chain
+            // through hub faces into low-cohesion mega-cones. Faces at/above it
+            // separate cleanly (same ~0.59 vs diff max ~0.47). Gated faces are left
+            // UNCLUSTERED (person_id NULL) — still searchable, never in a bad
+            // cluster. `face_quality` = YuNet det.score × landmark geometry, so this
+            // naturally keeps well-detected frontal faces on any corpus. 0 disables.
+            let min_cluster_quality: f32 = std::env::var("FILEID_FACE_CLUSTER_MIN_QUALITY")
+                .ok()
+                .and_then(|s| s.trim().parse::<f32>().ok())
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(0.35);
             {
                 let mut stmt = conn.prepare(
                     "SELECT id, arcface_embedding, COALESCE(face_quality, 0.0) \
@@ -65,6 +80,9 @@ pub(crate) async fn handle_run_face_clustering(
                 })?;
                 for row in rows {
                     let (id, blob, quality) = row?;
+                    if (quality as f32) < min_cluster_quality {
+                        continue;
+                    }
                     if blob.len() % 4 != 0 || blob.is_empty() {
                         continue;
                     }
