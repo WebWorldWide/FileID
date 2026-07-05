@@ -41,7 +41,6 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private SolidColorBrush? _fadedGold;
     private SolidColorBrush? _goldStroke;
     private Brush? _primaryText;
-    private Brush? _secondaryText;
     private Brush? _tertiaryText;
     private SolidColorBrush? _inactiveDot;
     private SolidColorBrush? _inactiveDotStroke;
@@ -57,7 +56,6 @@ public sealed partial class SidebarPipelineProgress : UserControl
         _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
         _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         _primaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush");
-        _secondaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
         _tertiaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush");
         _inactiveDot = InactiveDotBrush();
         _inactiveDotStroke = InactiveDotStrokeBrush();

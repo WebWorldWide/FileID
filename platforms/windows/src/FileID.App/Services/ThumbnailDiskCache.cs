@@ -62,7 +62,6 @@ internal static class ThumbnailDiskCache
     public static long DiskWrites => Interlocked.Read(ref _diskWrites);
     public static long DiskSweeps => Interlocked.Read(ref _diskSweeps);
     public static long CachedBytes => Interlocked.Read(ref _cachedBytes);
-    public static int IndexedEntries => _index.Count;
 
     private static string CacheRoot { get; } = Path.Combine(AppPaths.ThumbsDir, "v1");
 

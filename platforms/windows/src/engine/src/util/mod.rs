@@ -4,7 +4,6 @@
 //! can pull them in without dragging in the wider command graph.
 
 pub(crate) mod content_hash;
-pub(crate) mod elevation;
 pub(crate) mod hmac;
 pub(crate) mod hnsw_index;
 pub(crate) mod keywords;

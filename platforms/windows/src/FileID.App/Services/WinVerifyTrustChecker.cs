@@ -180,7 +180,6 @@ internal static class WinVerifyTrustChecker
     // ─── Win32 interop ─────────────────────────────────────────────────────
 
     private const uint WTD_UI_NONE = 2;
-    private const uint WTD_REVOKE_NONE = 0;
     private const uint WTD_REVOKE_WHOLECHAIN = 1; // SEC-4: actually checks revocation
     private const uint WTD_CHOICE_FILE = 1;
     private const uint WTD_STATEACTION_VERIFY = 1;

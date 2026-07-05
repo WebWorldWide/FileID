@@ -101,23 +101,6 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
-    /// <summary>Filter to the moves whose proposed destination starts with the given path.</summary>
-    public void SetTreeFilter(RestructurePlan plan, string proposedPath)
-    {
-        HeaderText.Text = $"Proposed: {proposedPath}";
-        var moves = new List<RestructureMove>();
-        var libRoot = plan.LibraryRoot ?? "";
-        foreach (var m in plan.Moves)
-        {
-            var dstRel = TrimRoot(m.Destination, libRoot);
-            if (dstRel.StartsWith(proposedPath, StringComparison.OrdinalIgnoreCase))
-            {
-                moves.Add(m);
-            }
-        }
-        Render(moves);
-    }
-
     /// <summary>Filter to the moves whose engine Tier maps to the given outcome
     /// (Tidy = Mixed-tier, Reorganize = Junk-tier). Backs a recommendation card's
     /// "See all N files" — mirrors macOS drillDownSheet(.outcome(...)).</summary>

@@ -1,10 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
     FileID.Theme — visual language as a class library.
-    Owns: Theme.xaml (brushes + tokens), GlassCard / GoldButton / BadgePill /
+    Owns: Theme.xaml (brushes + tokens), GlassCard / GoldButton /
     SettingToggleRow / ThemedSegmentedControl reusable components, motion
-    primitives (Shimmer, CompletionRipple, IridescentBorder, LavaLamp,
-    SpringEasing), and the ReducedMotion bridge.
+    primitives (Shimmer, LavaLamp, SpringEasing), and the ReducedMotion bridge.
 
     Separated from FileID.App so the theme can be unit-tested + visually
     audited in isolation (a future Theme Gallery debug app references this).
