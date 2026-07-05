@@ -441,28 +441,49 @@ pub fn consolidate<S: std::hash::BuildHasher>(
 /// Minimum CORROBORATED cluster size kept regardless of per-face quality:
 /// ≥ this many mutually-similar faces is a real recurring identity even when
 /// every frame is mediocre. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000];
-/// default 3).
+/// default 2).
+///
+/// Default 3→2 (2026-07-05, RTX 5080 / F:\TrueNAS calibration): recurrence is
+/// the scale-robust "is this a person" signal — a face that appears in ≥2 of
+/// your photos is someone worth surfacing, and the count of such people is
+/// bounded by reality (not by the one-off-face tail that floods a big library).
+/// SFace's `face_quality` proved a weak discriminator on real Windows data
+/// (see `solo_quality_floor`), so recurrence carries the gate and the quality
+/// floor is only a narrow escape for exceptional single faces.
 pub fn min_cluster_size() -> u32 {
     std::env::var("FILEID_FACE_MIN_CLUSTER_SIZE")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(|v| v.clamp(1, 10_000))
-        .unwrap_or(3)
+        .unwrap_or(2)
 }
 
-/// A 1–2 face cluster must contain a face at/above this quality to be persisted
-/// as a person; otherwise it is left UNCLUSTERED (no spurious singleton).
-/// `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.12). The default is
-/// calibrated on the macOS reference library (Apple Vision faceCaptureQuality);
-/// Windows quality is SCRFD score×geometry on a similar 0..~0.95 range, so 0.12
-/// is a conservative starting point — recalibrate on-hardware against
-/// `G:\TrueNAS`. 0 disables suppression entirely (pure over-split behavior).
+/// A cluster below `min_cluster_size` must contain a face at/above this quality
+/// to be persisted as a person; otherwise it is left UNCLUSTERED (no spurious
+/// singleton). `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.40). 0
+/// disables the quality escape entirely (pure recurrence gate).
+///
+/// Default 0.12→0.40 (2026-07-05, RTX 5080 / F:\TrueNAS calibration). The old
+/// 0.12 was a macOS Apple-Vision guess and the comment ASSUMED Windows SCRFD
+/// scored on the same 0..~0.95 range. It does not: measured on 84,629 real
+/// faces the SFace/SCRFD `face_quality` is compressed into ~0.23..0.42, so 0.12
+/// admitted EVERY single face — 91% of "persons" were one-off singletons
+/// (10,208 persons on the full corpus / 438 on the 1k-file subset). Worse,
+/// singleton quality (median 0.33) barely separates from genuine recurring-face
+/// quality (median 0.37), and 55% of singletons sit &lt;0.40 cosine from ANY real
+/// cluster centroid — i.e. they are genuine distinct one-off faces (crowds,
+/// backgrounds), NOT fragments a looser merge would recover. So quality alone
+/// can't gate them; recurrence (`min_cluster_size`) does the work and 0.40 (the
+/// measured ~90th percentile of the SCRFD range) is a narrow escape that keeps
+/// only the crispest true solos. Net on the subset: 438 → ~45 persons, every
+/// ≥3-face identity intact. macOS keeps its own Apple-Vision-calibrated floor
+/// (different quality scale — intentional lockstep divergence).
 pub fn solo_quality_floor() -> f32 {
     std::env::var("FILEID_FACE_SOLO_QUALITY")
         .ok()
         .and_then(|s| s.trim().parse::<f32>().ok())
         .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(0.12)
+        .unwrap_or(0.40)
 }
 
 /// Drop "junk" micro-clusters so the People tab isn't flooded with spurious
@@ -1059,8 +1080,8 @@ mod tests {
     fn suppression_env_defaults() {
         std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE");
         std::env::remove_var("FILEID_FACE_SOLO_QUALITY");
-        assert_eq!(min_cluster_size(), 3);
-        assert!((solo_quality_floor() - 0.12).abs() < 1e-6);
+        assert_eq!(min_cluster_size(), 2);
+        assert!((solo_quality_floor() - 0.40).abs() < 1e-6);
     }
 
     // Collapse a set of merge edges into a canonical per-centroid grouping via
