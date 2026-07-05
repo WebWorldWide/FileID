@@ -24,8 +24,11 @@ public enum RestructureSemantic {
         case auto, review, ask
     }
 
-    /// Per-file signals. `clip` is the L2-normalized 512-d CLIP image embedding;
-    /// callers only pass files that have one (images), so it is never empty.
+    /// Per-file signals. `clip` is the L2-normalized representative vector for the
+    /// pass that built it: the 512-d CLIP image embedding (image pass), or a
+    /// filename+tag bag-of-words signature for the non-image pass (PDFs, video,
+    /// audio — see `nonImageSignatures`). Empty only in the raw input to the
+    /// non-image pass, before `nonImageSignatures` fills it.
     public struct SemanticFile: Sendable {
         public let fileID: Int64
         public let source: String
