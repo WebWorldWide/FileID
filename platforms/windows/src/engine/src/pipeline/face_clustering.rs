@@ -441,21 +441,20 @@ pub fn consolidate<S: std::hash::BuildHasher>(
 /// Minimum CORROBORATED cluster size kept regardless of per-face quality:
 /// ≥ this many mutually-similar faces is a real recurring identity even when
 /// every frame is mediocre. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000];
-/// default 2).
+/// default 3).
 ///
-/// Default 3→2 (2026-07-05, RTX 5080 / F:\TrueNAS calibration): recurrence is
-/// the scale-robust "is this a person" signal — a face that appears in ≥2 of
-/// your photos is someone worth surfacing, and the count of such people is
-/// bounded by reality (not by the one-off-face tail that floods a big library).
-/// The Windows `face_quality` proved a weak discriminator on real data
-/// (see `solo_quality_floor`), so recurrence carries the gate and the quality
-/// floor is only a narrow escape for exceptional single faces.
+/// Stays 3 (NOT lowered to 2): a 2026-07-05 scale test on ~44k faces from
+/// F:\TrueNAS showed min=2 keeps ~3,800 size-2 clusters (HNSW at scale produces
+/// a flood of pairs), so min=2 traded the singleton flood for a pair flood.
+/// min=3 + `solo_quality_floor` 0.40 cut that scale run to ~1,566 persons with
+/// no pair flood. Recurrence is still the primary "is this a person" signal;
+/// the quality floor only rescues exceptional single faces.
 pub fn min_cluster_size() -> u32 {
     std::env::var("FILEID_FACE_MIN_CLUSTER_SIZE")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(|v| v.clamp(1, 10_000))
-        .unwrap_or(2)
+        .unwrap_or(3)
 }
 
 /// A cluster below `min_cluster_size` must contain a face at/above this quality
@@ -477,9 +476,18 @@ pub fn min_cluster_size() -> u32 {
 /// backgrounds), NOT fragments a looser merge would recover. So quality alone
 /// can't gate them; recurrence (`min_cluster_size`) does the work and 0.40 (the
 /// measured ~90th percentile of the quality range) is a narrow escape that keeps
-/// only the crispest true solos. Net on the subset: 438 → ~45 persons, every
-/// ≥3-face identity intact. macOS keeps its own Apple-Vision-calibrated floor
-/// (different quality scale — intentional lockstep divergence).
+/// only the crispest true solos. Subset (min=3): 438 → ~34 persons; ~44k-face
+/// scale run (min=3): singleton flood gone. macOS keeps its own Apple-Vision-
+/// calibrated floor (different quality scale — intentional lockstep divergence).
+///
+/// SCOPE NOTE: this floor fixes the SINGLETON flood only. At ~44k-face scale the
+/// People tab still has two orthogonal clustering-quality problems this threshold
+/// does NOT address — (1) bridge-face over-merge (an 11.6k-face "person" whose
+/// members' median intra-cosine is ~0.30, i.e. many different people chained; not
+/// broken by `FILEID_FACE_MUTUAL_KNN=1`, and Pass-3's 2-means split cap of 7
+/// can't shred a blob that large) and (2) size-2/3 fragmentation. Fixing those is
+/// a clustering-algorithm change that needs a LABELLED library to validate
+/// precision/recall — tracked in NEXT.md, not attempted blind on unlabelled data.
 pub fn solo_quality_floor() -> f32 {
     std::env::var("FILEID_FACE_SOLO_QUALITY")
         .ok()
@@ -1082,7 +1090,7 @@ mod tests {
     fn suppression_env_defaults() {
         std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE");
         std::env::remove_var("FILEID_FACE_SOLO_QUALITY");
-        assert_eq!(min_cluster_size(), 2);
+        assert_eq!(min_cluster_size(), 3);
         assert!((solo_quality_floor() - 0.40).abs() < 1e-6);
     }
 
