@@ -100,5 +100,22 @@
       <ComponentGroupRef Id="PublishedFiles" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
+
+    <!-- Auto-launch FileID after a fresh install (not on uninstall/repair/major-
+         upgrade removal). Immediate + Impersonate="yes" so it starts as the
+         logged-in USER, not the elevated perMachine installer context (launching
+         a GUI app as SYSTEM would fail to show a window). Return="asyncNoWait"
+         so setup's finish page isn't blocked on the app process. Condition
+         "NOT Installed" restricts it to first install / major upgrade, never a
+         repair or uninstall. No WiX extension needed (Directory+ExeCommand CA). -->
+    <CustomAction Id="LaunchFileID"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]FileID.exe"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="LaunchFileID" After="InstallFinalize" Condition="NOT Installed" />
+    </InstallExecuteSequence>
   </Package>
 </Wix>
