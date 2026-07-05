@@ -642,6 +642,20 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null)
             {
+                // A CANCELLED request also completes null (a scrolled-away tile
+                // cancels its own load; a rapid clear→re-prepare of the same
+                // visible tile supersedes this load with a fresh one). That is a
+                // DROP, not a render failure — falling through to set
+                // ThumbnailFailed would strand a still-valid, re-attached tile
+                // under the broken-image placeholder (its re-prepare's own load
+                // is what will actually bind). Only a null from a LIVE token is a
+                // real failure. Mirrors the ct.IsCancellationRequested guard on
+                // the success path below.
+                if (ct.IsCancellationRequested)
+                {
+                    Services.DebugLog.Trace($"[THUMB] LOAD_DROPPED_NULL file={Services.PathRedactor.Redact(tile.Path)}");
+                    return;
+                }
                 Services.DebugLog.Trace($"[THUMB] LOAD_NULL file={Services.PathRedactor.Redact(tile.Path)}");
                 // Hand off from shimmer to a broken-image placeholder so the
                 // tile doesn't shimmer forever. Setter is UI-thread-affined
