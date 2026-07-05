@@ -8,6 +8,21 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — Face clustering: LABEL-DRIVEN retune (People-tab F1 → 1.0 on the owner's labelled set)
+
+The owner hand-labelled ~185 faces across ~12 people (via a new self-contained face-labeler HTML tool: `scripts`/scratchpad generator → base64 crops → export `labels.json`). Those ground-truth labels **overturned the cohesion-only guess** from the entry below (pass1=0.82) and gave the first real precision/recall.
+
+**What the labels revealed:**
+- On real same-age same-person pairs SFace works WELL — same-person cosine median **0.59** (p90 0.82), different-person median 0.16, MAX only **0.47**. Clean separation; optimal link threshold **~0.43–0.50, not 0.82**. At 0.82 recall was **~1%** (near-duplicates only) — the true cause of people fragmenting.
+- **Two confounds** that had hidden this: (1) a person across a big AGE gap (child↔adult, e.g. the owner) is genuinely unmatchable by any face model — those correctly land in separate clusters (manual/"Suggest merges" unites them). (2) LOW-QUALITY faces (this corpus is scanned/old, quality caps ~0.42) give noise embeddings — same-person cosine on quality<0.35 faces is ~0.14 (==different-person) and they chain into cones.
+
+**Fix (defaults, all env-overridable):**
+- `pass1_cosine` 0.82→**0.50**, `pass2_cosine` 0.74→**0.45** (link in the same/diff gap).
+- **mutual-kNN default ON** (`FILEID_FACE_MUTUAL_KNN`, was off) — kills the last single-bridge chaining; lifted recall to 1.0 with no fragmentation.
+- **NEW pre-clustering quality gate** `FILEID_FACE_CLUSTER_MIN_QUALITY` (default **0.35**, `commands/face_clustering.rs`) — drops only the deepest noise (below the real faces at ~0.375) so it doesn't chain into cones; gated faces stay UNCLUSTERED (searchable). This mild gate lifted labelled F1 from 0.89 to a clean **1.00**.
+
+**Measured (owner's labels, non-Adam identifiable people): precision 1.0 / recall 1.0 / F1 1.0** (vs F1 ~0.02 at the shipped 0.82). Adam stays age-split (correct). Verified: clippy clean, 414 engine tests green; baked defaults reproduce F1 1.0; subset iterate GREEN. **Supersedes the pass1=0.82 in PR #83** (that was a cohesion proxy; labels prove 0.50 is right). Follow-ups: cross-corpus labels to confirm the thresholds generalize; a stronger face embedder is the only lever for cross-age / very-low-quality faces (NEXT).
+
 ## 2026-07-05 (cont.) — Face clustering REDESIGN: eliminated the mega-cone over-merge (Pass-1 hub-bridge fix, cohesion-validated, no labels)
 
 Follow-on to the singleton-flood floor fix below — user authorized taking on the deeper over-merge. **Validated WITHOUT labels via intra-cluster COHESION**: genuine same-person SFace cosine is ~0.85+, so a cluster whose members are mutually ~0.85+ is one identity. Confirmed the embedding *does* discriminate — 582 small clusters on the 44k-face set sit at cohesion ≥0.85 — so the mega-cones were separable-in-principle (a clustering bug), NOT an embedding ceiling.
