@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## STATUS 2026-07-05 (later) — 5 on-hardware Windows-app bugs fixed (PR #88); awaiting owner test → 0.0.2
+
+Owner-reported runtime bugs (preview image/nav, library tiles not staying loaded, speech model not on onboarding, no auto-launch on install) are fixed + merged (STATE top). NONE are runtime-verified on this box — the owner is testing `~/Desktop/FileID-bugfix-test-x64.msi`. **Next actions (owner-gated):** (1) owner confirms which fixes work / shares the `FilePreviewSheet` log line if the image is still blank; (2) then cut **0.0.2** — bump `platforms/windows/VERSION` (currently 0.1.0, mismatched with the v0.0.1 tag) + engine Cargo.toml, rebuild MSI + AppImage, publish. If the blank-image fix didn't take, iterate on the shell-thumbnail path.
+
 ## STATUS 2026-07-05 — doable-from-a-headless-Windows-box backlog is CLEARED (`/loop`, PR #86)
 
 Every source-verifiable item was triaged + landed (STATE top entry): the wixproj version-gate, the engine ML-pool log + `unmatched_faces`, the CLI search relevance bug, the 6 app `ToInt32`→int64 reads, the `scan_assertions.py` guard, the `FILEID_FACE_*` DECISIONS note, and the AUR/Flatpak HEIC dep. Marginal items intentionally left (FileTile materialize-once, MergeById tail, TUI redraw, CLI `has_text`) — see STATE.
