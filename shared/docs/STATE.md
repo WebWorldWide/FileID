@@ -8,6 +8,23 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — Face clustering REDESIGN: eliminated the mega-cone over-merge (Pass-1 hub-bridge fix, cohesion-validated, no labels)
+
+Follow-on to the singleton-flood floor fix below — user authorized taking on the deeper over-merge. **Validated WITHOUT labels via intra-cluster COHESION**: genuine same-person SFace cosine is ~0.85+, so a cluster whose members are mutually ~0.85+ is one identity. Confirmed the embedding *does* discriminate — 582 small clusters on the 44k-face set sit at cohesion ≥0.85 — so the mega-cones were separable-in-principle (a clustering bug), NOT an embedding ceiling.
+
+**Root cause of the 10,690-face "person":** Pass-1 single-linkage at cosine **0.66** chained different people through "hub" faces (a generic face that is 0.66+ to many different people) into cones — median PAIRWISE cohesion ~0.30 but to-centroid ~0.61, so it slipped just past the Pass-3 split floor (0.60) and was never split. Neither `FILEID_FACE_MUTUAL_KNN=1` nor a deeper Pass-3 split cap broke it (both measured — cheap knobs do nothing); `consolidate()` re-merged any split pieces.
+
+**Fix (`identity_clustering.rs` + `face_clustering.rs` defaults; all env-overridable, calibrated on F:\TrueNAS via cohesion):**
+- `pass1_cosine` 0.66→**0.82** — cut hub-bridges (0.66–0.80) while keeping same-person edges (0.85+); cones stop forming.
+- `pass2_cosine` 0.54→**0.74**; `AUTOMERGE_COS_DEFAULT` (consolidate) 0.75→**0.88** — re-join same-person fragments without re-gluing cone pieces.
+- Exposed `FILEID_FACE_PASS1_COSINE` / `_PASS2_COSINE` / `_PASS2_MARGIN` / `_PASS3_MAX_SPLITS` as new env knobs (were hardcoded).
+
+**Measured on 44k faces (faces in coherent ≥0.75 clusters / largest cluster):** the sweep was 0.66→14%/10,690, 0.78→36%/6,047, 0.82→**67%/1,586**, 0.85→89%/429. Shipped **0.82** as the balance: 0.85 fully eliminates the cone but craters recall (on the sparse 1k subset it clustered only ~75 faces), so 0.82 keeps a 7× smaller, far-less-egregious residual cone (cohesion 0.63 vs the old 0.30) with materially more recall.
+
+**Tradeoff (honest):** precision-biased per the design's explicit over-split-safe stance. Recall drops (~43% of embedded faces clustered on the 44k set) and the same person may span several clusters — mitigated by the app's "Suggest merges", and unclustered faces stay searchable. A mutual-nearest re-merge stage to recover recall without re-coning, plus full-corpus + labelled-set validation, are the remaining work (NEXT).
+
+**Verified:** engine clippy clean + **414 lib tests green**; subset iterate GREEN (all 13 assertions), clean small clusters, no cone; baked defaults reproduce the 44k numbers.
+
 ## 2026-07-05 (cont.) — Face over-clustering: singleton flood FIXED (safe threshold); mega-merge + fragmentation found at scale (deferred, needs labelled data)
 
 The People tab's biggest shippability gap. Pre-fix full-corpus baseline: **10,208 persons from 84,629 faces**. Investigated on the 1k-file subset (1,011 faces) AND a partial ~44k-face scale set (from a timed-out full-corpus re-scan — the Adlon external drive ran the scan at <17 f/s and hit the 60-min cap; the partial DB was reused for clustering experiments, which need no re-scan).

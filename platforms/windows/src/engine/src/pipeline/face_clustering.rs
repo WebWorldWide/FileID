@@ -12,7 +12,7 @@
 //      Pass-1 kNN connected components ≥ pass1_cosine, Pass-2 margin-gated
 //      outlier assignment, Pass-3 2-means split of low-cohesion clusters.
 //   3. `consolidate()` folds near-certain duplicate clusters by CENTROID cosine
-//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.75), respecting user "different
+//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.88), respecting user "different
 //      people" verdicts. Anchor per cluster = highest-quality member face.
 //   4. The handler persists `persons` + `face_prints.person_id` in one tx and
 //      emits `FaceClusteringResult`. `face_verifications` is only READ here
@@ -184,19 +184,27 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     (assignments, anchors)
 }
 
-/// Default minimum CENTROID cosine to auto-fold two clusters into one person —
-/// the Balanced default. 0.75 sits inside genuine same-person territory
-/// (empirical SFace median 0.88–0.95) yet comfortably above the hardest
-/// cross-identity / lookalike matches (~0.55, well under the 0.66 Pass-1 core
-/// threshold), so fragments of the SAME identity that the over-split-safe
-/// clusterer left apart get rejoined — the "WAY too many similar faces" the
-/// People tab otherwise shows — while distinct people stay apart. Lowered from
-/// 0.85 to claw back more over-split without inviting cross-identity merges
-/// (the ~0.55 lookalike ceiling leaves a wide margin). Override with
+/// Default minimum CENTROID cosine to auto-fold two clusters into one person.
+/// 0.88 sits inside genuine same-person territory (empirical SFace median
+/// 0.88–0.95) yet above the "cone" pieces the tight Pass-1 (0.85) leaves — so
+/// fragments of the SAME identity that the over-split-safe clusterer left apart
+/// get rejoined, WITHOUT re-merging different-people cone pieces back into a
+/// mega-cluster (see AUTOMERGE_COS_DEFAULT below) — the "WAY too many similar faces" the
+/// People tab otherwise shows — while distinct people stay apart. Override with
 /// `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable and
 /// keep pure over-split). Centroids (means of all member embeddings) are
 /// denoised, so this is safer than any single anchor-to-anchor comparison.
-pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
+///
+/// Raised 0.75→0.88 (2026-07-05, F:\TrueNAS cohesion calibration). With the
+/// tighter Pass-1 (0.85, see identity_clustering.rs) the cores are pure, but a
+/// loose consolidate then RE-MERGES the split pieces of a "cone" (many similar-
+/// looking different people SFace places near a common direction) back into a
+/// low-cohesion mega-cluster — the exact over-merge Pass-1 just prevented.
+/// Genuine same-person split clusters have centroid cosine ~0.88+ (so they still
+/// merge); cone pieces sit below that (so they stay apart). Measured effect at
+/// scale: raising this from 0.75 to 0.88 kept the fraction of faces in coherent
+/// (cohesion≥0.75) clusters high instead of collapsing back to ~14%.
+pub const AUTOMERGE_COS_DEFAULT: f32 = 0.88;
 
 /// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
 /// clamped to [0.70, 1.0]. A value ≥ 1.0 disables consolidation (no two
