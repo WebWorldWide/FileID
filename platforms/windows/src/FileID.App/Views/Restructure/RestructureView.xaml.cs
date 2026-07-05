@@ -625,8 +625,8 @@ public sealed partial class RestructureView : UserControl
             using var reader = cmd.ExecuteReader();
             if (reader.Read())
             {
-                int total = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                int captioned = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                int total = reader.IsDBNull(0) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(0)), int.MaxValue);
+                int captioned = reader.IsDBNull(1) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(1)), int.MaxValue);
                 return (captioned, total);
             }
             return (0, 0);

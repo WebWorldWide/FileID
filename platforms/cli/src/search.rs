@@ -24,6 +24,10 @@ struct Hit {
     size: i64,
     source: &'static str,
     snippet: Option<String>,
+    /// Rank position within this hit's source tier (0 = best). The FTS queries
+    /// `ORDER BY rank`, so capturing the row index preserves relevance order
+    /// through the id-keyed dedup map and the truncation to `limit`.
+    ordinal: usize,
 }
 
 pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> Result<()> {
@@ -48,7 +52,7 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
     collect_filename(&conn, raw, limit, &mut hits);
 
     let mut rows: Vec<Hit> = hits.into_values().collect();
-    rows.sort_by_key(|h| (source_rank(h.source), h.id));
+    rows.sort_by_key(|h| (source_rank(h.source), h.ordinal, h.id));
     rows.truncate(limit);
 
     if ctx.json {
@@ -124,10 +128,14 @@ fn collect_fts(
             size: r.get(3)?,
             source,
             snippet: r.get::<_, Option<String>>(4)?,
+            ordinal: 0,
         })
     });
     if let Ok(rows) = rows {
-        for h in rows.flatten() {
+        // Rows arrive in `ORDER BY rank` (best first) — record the position so the
+        // id-keyed dedup + final sort preserve FTS relevance within this tier.
+        for (i, mut h) in rows.flatten().enumerate() {
+            h.ordinal = i;
             out.entry(h.id).or_insert(h);
         }
     }
@@ -154,10 +162,14 @@ fn collect_filename(
             size: r.get(3)?,
             source: "filename",
             snippet: None,
+            ordinal: 0,
         })
     });
     if let Ok(rows) = rows {
-        for h in rows.flatten() {
+        // Filename LIKE has no relevance rank — keep query (rowid) order as the
+        // tier's natural order (this is the lowest-priority tier anyway).
+        for (i, mut h) in rows.flatten().enumerate() {
+            h.ordinal = i;
             out.entry(h.id).or_insert(h);
         }
     }
@@ -249,7 +261,7 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
                 return None;
             }
             let cos = dot(&seed_vec, &v) / (seed_norm * n);
-            Some((cos, Hit { id, path, kind, size, source: "similar", snippet: None }))
+            Some((cos, Hit { id, path, kind, size, source: "similar", snippet: None, ordinal: 0 }))
         })
         .collect();
 
