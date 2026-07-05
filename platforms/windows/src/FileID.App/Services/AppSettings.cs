@@ -149,12 +149,6 @@ internal sealed class AppSettings
     private static readonly HashSet<string> AllowedGranularities =
         new(StringComparer.Ordinal) { "loose", "normal", "tight" };
 
-    /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
-    /// can install. The Deep Analyze card guards use this to reject removed /
-    /// non-commercial models (e.g. the dropped qwen2_5_vl_3b).</summary>
-    public static bool IsAllowedVlmKind(string? kind) =>
-        kind is { } k && AllowedVlmKinds.Contains(k);
-
     public static AppSettings Load()
     {
         try

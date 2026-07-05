@@ -483,14 +483,14 @@ pub fn min_cluster_size() -> u32 {
 /// scale run (min=3): singleton flood gone. macOS keeps its own Apple-Vision-
 /// calibrated floor (different quality scale — intentional lockstep divergence).
 ///
-/// SCOPE NOTE: this floor fixes the SINGLETON flood only. At ~44k-face scale the
-/// People tab still has two orthogonal clustering-quality problems this threshold
-/// does NOT address — (1) bridge-face over-merge (an 11.6k-face "person" whose
-/// members' median intra-cosine is ~0.30, i.e. many different people chained; not
-/// broken by `FILEID_FACE_MUTUAL_KNN=1`, and Pass-3's 2-means split cap of 7
-/// can't shred a blob that large) and (2) size-2/3 fragmentation. Fixing those is
-/// a clustering-algorithm change that needs a LABELLED library to validate
-/// precision/recall — tracked in NEXT.md, not attempted blind on unlabelled data.
+/// SCOPE NOTE: this floor is a POST-clustering suppression of small low-quality
+/// clusters. It works alongside two other levers added in the 2026-07-05
+/// label-driven retune: the PRE-clustering quality gate
+/// FILEID_FACE_CLUSTER_MIN_QUALITY (drops noise faces before they can chain into
+/// cones) and the Pass-1 threshold + mutual-kNN in identity_clustering.rs (which
+/// DID fix the bridge-face over-merge — see there). On the owner's labelled set
+/// that combination reached precision/recall 1.0; cross-corpus + full-84k recall
+/// confirmation is tracked in NEXT.md.
 pub fn solo_quality_floor() -> f32 {
     std::env::var("FILEID_FACE_SOLO_QUALITY")
         .ok()

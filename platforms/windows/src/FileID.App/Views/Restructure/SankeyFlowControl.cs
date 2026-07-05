@@ -132,7 +132,34 @@ public sealed class SankeyFlowControl : Control
     public void SetPlan(RestructurePlan? plan)
     {
         _plan = plan;
+        UpdateAccessibleSummary();
         Render();
+    }
+
+    // The Sankey is a custom Canvas-drawn control with no intrinsic UI-Automation
+    // surface, so a screen reader would otherwise see an empty box. Expose a live
+    // text summary of the flow (source folders → destination categories) as the
+    // control's accessible Name + HelpText, and make it keyboard-focusable so the
+    // supplementary "where do my files go" view is reachable without a mouse. The
+    // primary flow (stat tiles, file-row checkboxes, drill-down buttons) is
+    // already accessible in RestructureView; this closes the gap on the diagram.
+    private void UpdateAccessibleSummary()
+    {
+        IsTabStop = true;
+        var moves = _plan?.Moves;
+        if (moves is null || moves.Count == 0)
+        {
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, "Folder flow diagram (nothing to move)");
+            return;
+        }
+        var sources = moves.Select(m => m.Source).Distinct().Count();
+        var categories = moves.Select(m => m.Category).Distinct().Count();
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            this,
+            $"Folder reorganization flow: {moves.Count} files from {sources} source folders into {categories} destination categories.");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
+            this,
+            "Diagram of where files move. Use the recommendation list below to review and select individual moves.");
     }
 
     protected override void OnApplyTemplate()
