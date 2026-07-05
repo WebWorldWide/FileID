@@ -453,10 +453,17 @@ pub(crate) async fn handle_run_face_clustering(
         drop(update);
         tx.commit()?;
 
+        // Faces that stayed person_id=NULL — either they never clustered, or their
+        // micro-cluster was suppressed (below min-size / quality). = loaded faces
+        // minus those assigned to a promoted person cluster.
+        let matched = assignments
+            .iter()
+            .filter(|a| cid_to_person.contains_key(&a.cluster_id))
+            .count();
         Ok(FaceClusteringResult {
             person_count: anchors.len() as u32,
             face_count,
-            unmatched_faces: 0,
+            unmatched_faces: face_count.saturating_sub(matched as u64),
             duration_seconds: started.elapsed().as_secs_f64(),
         })
     })

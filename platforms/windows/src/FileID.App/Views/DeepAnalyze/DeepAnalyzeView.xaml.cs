@@ -182,7 +182,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                     // to "Person N" in PeopleViewModel.
                     cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL;";
                     var result = cmd.ExecuteScalar();
-                    return result is null ? 0 : Convert.ToInt32(result);
+                    return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
                 }
                 catch { return 0; }
             }).ConfigureAwait(false);

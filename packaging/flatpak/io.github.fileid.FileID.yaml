@@ -41,6 +41,13 @@
 # =============================================================================
 
 app-id: io.github.fileid.FileID
+# HEIC/HEIF NOTE: the engine decodes HEIC via the `heif-dec`/`heif-convert` CLI
+# tools (shell/heic.rs), which are NOT in org.gnome.Platform. To enable HEIC in
+# the sandbox, add a libheif build module (built with the libde265 HEVC decoder,
+# + libdav1d for AV1-in-HEIF) that installs heif-dec into /app/bin. Verified only
+# on a Linux Flatpak build — tracked in NEXT.md. Without it, HEIC files skip
+# gracefully (no crash). AUR ships this as an optdepend; native Ubuntu needs
+# libheif-examples + libheif-plugin-libde265.
 runtime: org.gnome.Platform
 runtime-version: '46'
 sdk: org.gnome.Sdk

@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-05 — Shared `FILEID_FACE_*` env names carry per-platform defaults (a documented foot-gun)
+
+`FILEID_FACE_SOLO_QUALITY` and `FILEID_FACE_MIN_CLUSTER_SIZE` (and the pass1/pass2/gate cosine knobs) use the **same env-var names** on the Windows/Linux Rust engine and the macOS Swift engine, but their **calibrated defaults differ** because face *quality* is on different scales: Windows/Linux `face_quality` = YuNet `det.score × landmark-geometry` (compressed ~0.23–0.42), so the solo-suppression floor default is **0.40**; macOS uses Apple Vision `faceCaptureQuality` (0–1), so its floor default is **0.12**. Cosine knobs (pass1 0.50 / pass2 0.45, mutual-kNN, gate 0.35) are calibrated on the Rust side; macOS carries the mechanisms but keeps them opt-in pending its own on-Mac label calibration (see MACOS_LOCKSTEP_NOTES).
+
+Decision: **keep the shared names** (they name the same *concept*, and a user typically runs one platform) but **document the divergence** rather than namespace them (`FILEID_FACE_SOLO_QUALITY_WIN` etc.). Namespacing would touch the macOS Swift engine (unverifiable from the Windows dev box) and make the common single-platform case uglier. The foot-gun: a user who exports `FILEID_FACE_SOLO_QUALITY=0.30` to tune one platform would also move the other's — but a value tuned on one quality scale is meaningless on the other, so cross-platform env export was never sensible. If a real multi-platform-on-one-machine tuning need appears, revisit with per-platform names.
+
 ## 2026-06-30 — Linux statically links the CPU ONNX Runtime (drops `load-dynamic`); GPU EP is future work
 
 The engine's `ort` crate was configured `load-dynamic` + `download-binaries` + `cuda` + `openvino` on **all** non-Windows targets. On Linux this is silently broken for full-ML: `load-dynamic` makes `ort` `dlopen("libonnxruntime.so")` at runtime, but pyke's `download-binaries` ships **only a static `libonnxruntime.a`** for Linux x64 — verified empirically for *both* the CPU set and the `cu12` set (`~/.cache/ort.pyke.io/.../onnxruntime/lib/` contains `libonnxruntime.a` + provider `.so`s, **no** dynamic `libonnxruntime.so`), and there is no system `libonnxruntime.so` either. So every ML session would fail to load ORT — the audit's "single riskiest unverified Linux item," now confirmed.

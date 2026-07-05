@@ -106,7 +106,14 @@ if faces:
         fails.append(f"face print_data sizes {sizes} include non-512 "
                      f"(SFace must be 128-d/512B; 2048B = stale ArcFace)")
     if persons < 1:
-        fails.append("faces present but zero person clusters formed")
+        # With min_cluster_size=3 + the quality gate, a corpus can legitimately
+        # yield zero clusters when every face is distinct or low-quality — only a
+        # red flag once there are enough faces that at least one recurring person
+        # should have formed. Below that, warn instead of failing the run.
+        if faces >= 10:
+            fails.append(f"{faces} faces present but zero person clusters formed")
+        else:
+            warns.append(f"{faces} faces but zero clusters (too few to expect one)")
 elif EXPECT_FACES:
     fails.append("expected faces on this corpus but face_prints is empty")
 else:

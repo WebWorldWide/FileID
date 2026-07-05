@@ -411,12 +411,14 @@ fn resolve_pool_size(worker_count: usize) -> usize {
             }
         }
         None => {
-            // Fail SAFE, not open: with no VRAM reading we can't size the pool,
-            // so default to a single session rather than MODEL_POOL_SIZE=4 (the
-            // config the comments say wedges a 6 GB card). Matches main.rs's "ML
-            // pool will run at minimum" log on probe failure.
-            tracing::warn!(
-                "VRAM unreadable; clamping ML pool to 1 (fail-safe — pool would otherwise default to {MODEL_POOL_SIZE})"
+            // No dedicated-VRAM reading. This is the EXPECTED, correct state on a
+            // CPU-only box (one all-cores ORT session is optimal for the
+            // compute-bound RAM++ — more pooled sessions just contend), and the
+            // fail-SAFE state on a GPU box whose VRAM probe failed (a single
+            // session beats MODEL_POOL_SIZE=4 wedging a small card). Same outcome
+            // either way, so log it neutrally rather than as a fault.
+            tracing::info!(
+                "no dedicated VRAM detected (CPU-only box, or a GPU present but the VRAM probe failed) — running a single all-cores ML session"
             );
             cap = cap.min(1);
         }
