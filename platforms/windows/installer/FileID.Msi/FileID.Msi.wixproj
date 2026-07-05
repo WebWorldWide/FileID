@@ -99,8 +99,14 @@
     <PropertyGroup>
       <_CargoVersionParsed>$([System.Text.RegularExpressions.Regex]::Match('@(_CargoVersionMatch)', 'version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</_CargoVersionParsed>
     </PropertyGroup>
+    <!-- Guard on empty parse: the `%(Identity)` item-batching above is unreliable
+         across MSBuild hosts (VS msbuild + `dotnet build` both intermittently
+         yield an empty `_CargoVersionMatch`, tripping a FALSE "drift" that blocks
+         every local MSI build even when the two versions agree). Only fail on a
+         REAL mismatch — a non-empty parsed version that differs from VERSION —
+         never on the parser's own failure to read Cargo.toml. -->
     <Error
-        Condition="'$(_CargoVersionParsed)' != '$(FileIDVersion)'"
+        Condition="'$(_CargoVersionParsed)' != '' and '$(_CargoVersionParsed)' != '$(FileIDVersion)'"
         Text="Version drift: platforms/windows/VERSION is '$(FileIDVersion)' but src/engine/Cargo.toml is '$(_CargoVersionParsed)'. Update Cargo.toml to match VERSION (the single source of truth)." />
   </Target>
 

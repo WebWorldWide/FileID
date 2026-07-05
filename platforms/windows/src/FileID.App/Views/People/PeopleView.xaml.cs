@@ -129,7 +129,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     using var cmd = conn.CreateCommand();
                     cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE is_unknown = 1";
                     var v = cmd.ExecuteScalar();
-                    return v is null ? 0 : Convert.ToInt32(v);
+                    return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
                 }
                 catch { return 0; }
             }).ConfigureAwait(true);
@@ -192,7 +192,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     cmd.CommandText =
                         "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL OR first_name IS NOT NULL) AND IFNULL(is_unknown, 0) = 0";
                     var v = cmd.ExecuteScalar();
-                    return v is null ? 0 : Convert.ToInt32(v);
+                    return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
                 }
                 catch { return 0; }
             }).ConfigureAwait(true);

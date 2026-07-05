@@ -624,7 +624,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             cmd.CommandText =
                 "SELECT COUNT(*) FROM files WHERE vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
             var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            return result is null ? 0 : Convert.ToInt32(result);
+            return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
         }
         finally { _gate.Release(); }
     }
