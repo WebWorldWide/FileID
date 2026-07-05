@@ -8,6 +8,15 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-05 (cont.) — 0.0.1 SHIPPED: adversarial audit + dead-code sweep + macOS parity mirror → first public pre-release
+
+Cut **[v0.0.1](https://github.com/WebWorldWide/FileID/releases/tag/v0.0.1)** (pre-release) after a release-hardening pass (PR #85, merged `d4d15ed`, all main CI green: engine x64/arm64/cross, .NET app x64/arm64, macOS SwiftPM, Linux, Flatpak).
+
+- **Adversarial pre-release audit** (3 parallel review agents + a Restructure-tab review). Restructure verdict: release-ready (butler-grade clobber-proof apply/undo, survived prior data-loss audits; UI fully wired). Findings fixed: (1) the `[THUMB]` log firehose was only half-gated — 8 hot per-tile lines in `LibraryView` still did synchronous UI-thread disk I/O on scroll at Debug → moved to Trace + `PathRedactor.Redact`; (2) `SankeyFlowControl` had no UI-Automation surface → added accessible Name/HelpText + `IsTabStop`; (3) engine env hardening — reject non-finite (NaN/inf) env values + clamp cosine knobs to [0,1]; (4) stale doc comments (mutual-kNN default-on).
+- **Dead-code sweep** (~1,968 lines, survey-driven, each removal grep-verified). Engine: removed unwired future-phase scaffolding (`cluster_suggestions`, `usn`, `elevation`, `florence2`, the YuNet-superseded SCRFD detector, a dead field) — tracked in NEXT.md; kept everything verified WIRED (job_queue, keywords, wordpiece_tokenizer, doc_extract, audio_meta). C#/Swift: removed accidental orphans + unused visual primitives (IridescentBorder, CompletionRipple, BadgePill, ThemedTogglePicker, dead SpringEasing helpers, EmptyStateView action subsystem, etc.); kept GlassCard (foundational glass surface the design system anchors to), ThemedSegmentedControl, ShimmerView, Swift BadgePill.
+- **macOS parity mirror** (UNVERIFIED-UNTIL-MAC; macos.yml compile-verified green): added the mutual-kNN + pre-clustering quality-gate MECHANISMS to the Swift engine, both DEFAULT-OFF (zero behaviour change). The Rust VALUES can't transfer blind (Apple Vision quality scale + FaceAlign unwired) — macOS still needs its own on-Mac label-calibration pass (the face-labeler tool works there). Documented in MACOS_LOCKSTEP_NOTES + SHIP.
+- **Release artifacts** (unsigned, built here): Windows app (self-contained x64 zip) + Windows tools (engine/CLI/TUI) + Linux (GTK app + engine + CLI/TUI tar.gz). No macOS binary (needs a Mac) and no signed installer (needs EV cert) — both noted in the release.
+
 ## 2026-07-05 (cont.) — Face clustering: LABEL-DRIVEN retune (People-tab F1 → 1.0 on the owner's labelled set)
 
 The owner hand-labelled ~185 faces across ~12 people (via a new self-contained face-labeler HTML tool: `scripts`/scratchpad generator → base64 crops → export `labels.json`). Those ground-truth labels **overturned the cohesion-only guess** from the entry below (pass1=0.82) and gave the first real precision/recall.

@@ -1,5 +1,12 @@
 # NEXT — resume here
 
+## Post-0.0.1 follow-ups (from the release-hardening pass, 2026-07-05)
+
+- **macOS face-clustering calibration (needs a Mac).** The Swift engine now carries the mutual-kNN + pre-clustering quality-gate MECHANISMS but DEFAULT-OFF; the Rust-calibrated values (pass1 0.50, gate 0.35) do NOT transfer (Apple Vision quality is a different scale + `FaceAlign` is not wired into detection). To reach Windows-level People-tab quality on macOS: (1) wire `FaceAlign` into the Vision detection pass (MACOS_LOCKSTEP_NOTES Part 2 #1), (2) run a label-calibration pass on the Mac (the face-labeler HTML tool works on the Mac's DB + `face_crops`), (3) bake the winning pass1/pass2/gate + flip `FILEID_FACE_MUTUAL_KNN` on. Until then macOS keeps its current thresholds.
+- **README screenshots.** The single biggest README win for a visual app — capture the six tabs on a real library (owner-curated) and embed under `shared/docs/assets/`.
+- **Signed installers.** `release.yml` + `publish-bundle.ps1` are ready but dormant — need an EV code-signing cert. 0.0.1 shipped unsigned convenience binaries; a signed `FileIDSetup.exe` (WiX Burn bundle) is the real Windows installer.
+- **macOS release binary.** 0.0.1 shipped Windows + Linux binaries only; a macOS `.app` needs a Mac build (`./build.sh -mac`).
+
 ## Deferred features removed at 0.0.1 (re-add when the phase is built)
 
 Dead/planned scaffolding cut from the Windows Rust engine for the 0.0.1 release (branch `release-hardening-0.0.1`). Nothing was wired to a runtime path; each is a future-phase feature to re-add when that phase is actually built:
