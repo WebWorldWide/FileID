@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SidebarRecentChanges — the "Recent changes" entry point for the session
+    change log. Shows a count badge while undoable changes exist; clicking
+    opens SessionChangesSheet in a ContentDialog. Hidden entirely until the
+    first change lands so a fresh session's sidebar stays uncluttered.
+-->
+<UserControl
+    x:Class="FileID.Views.Sidebar.SidebarRecentChanges"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Visibility="Collapsed">
+
+    <Button x:Name="OpenButton"
+            HorizontalAlignment="Stretch"
+            HorizontalContentAlignment="Left"
+            Background="Transparent"
+            BorderThickness="0"
+            Click="OnOpenClicked"
+            AutomationProperties.Name="Recent changes"
+            ToolTipService.ToolTip="Review and undo changes made this session">
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <FontIcon Glyph="&#xE81C;" FontSize="14" />
+            <TextBlock Text="Recent changes" />
+            <Border x:Name="CountBadge"
+                    CornerRadius="8"
+                    Padding="7,1,7,1"
+                    VerticalAlignment="Center"
+                    Background="#FFCC00"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="CountText"
+                           FontSize="11"
+                           FontWeight="SemiBold"
+                           Foreground="Black" />
+            </Border>
+        </StackPanel>
+    </Button>
+</UserControl>

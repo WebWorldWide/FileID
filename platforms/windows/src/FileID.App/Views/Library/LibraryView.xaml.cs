@@ -1125,7 +1125,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
-            async batchId =>
+            kind: Services.ChangeKind.Trash,
+            reverse: async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try

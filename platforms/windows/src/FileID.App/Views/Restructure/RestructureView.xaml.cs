@@ -741,7 +741,28 @@ public sealed partial class RestructureView : UserControl
             ApplyStatusText.Text = "Undoing the last restructure…";
             try
             {
-                await EngineClient.Instance.UndoRestructureAsync(root!);
+                // Route through the session change log entry when one exists so
+                // the changes sheet shows this apply as Undone (the engine
+                // journal persists across launches, so the log may be empty —
+                // fall back to the direct command then).
+                Services.ChangeLogEntry? logEntry = null;
+                foreach (var candidate in Services.ChangeLog.Instance.Snapshot())
+                {
+                    if (candidate.Kind == Services.ChangeKind.Restructure
+                        && candidate.Status == Services.ChangeStatus.Undoable)
+                    {
+                        logEntry = candidate;
+                        break;
+                    }
+                }
+                if (logEntry is not null)
+                {
+                    await Services.ChangeLog.Instance.UndoAsync(logEntry);
+                }
+                else
+                {
+                    await EngineClient.Instance.UndoRestructureAsync(root!);
+                }
             }
             catch (Exception ex)
             {
@@ -768,6 +789,32 @@ public sealed partial class RestructureView : UserControl
         // moved, release it now so the user can retry.
         if (r.Applied > 0)
         {
+            // Session change log: a confirmed apply is undoable via the
+            // engine's inverse-move journal. Pushing a Restructure entry
+            // auto-marks any older restructure entry "superseded" (the
+            // journal is truncate-per-batch — only the latest replays).
+            var undoRoot = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
+                           ?? AppViewModel.Instance.FolderPath;
+            if (!string.IsNullOrEmpty(undoRoot))
+            {
+                Services.UndoStack.Instance.Push(
+                    $"reorganize {r.Applied:N0} file{(r.Applied == 1 ? "" : "s")}",
+                    Services.ChangeKind.Restructure,
+                    async () =>
+                    {
+                        try
+                        {
+                            await EngineClient.Instance.UndoRestructureAsync(undoRoot!);
+                            return true;
+                        }
+                        catch (Exception ex)
+                        {
+                            DebugLog.Warn("Undo restructure send failed: " + ex.Message);
+                            return false;
+                        }
+                    });
+            }
+
             var folder = AppViewModel.Instance.FolderPath;
             if (!string.IsNullOrEmpty(folder))
             {

@@ -133,10 +133,13 @@ public class SchemaConformanceTests
     // app constructs them. Optional fields are set so the serialized keys
     // exercise the variant's full schema property surface.
 
+    private static readonly string[] s_exemplarExcludedPaths =
+        { @"C:\Users\adam\Pictures\node_backups" };
+
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true,
-            ExcludedPaths: new[] { @"C:\Users\adam\Pictures\node_backups" }),
+            ExcludedPaths: s_exemplarExcludedPaths),
         new PauseScanCommand(),
         new ResumeScanCommand(),
         new CancelScanCommand(),
@@ -170,7 +173,7 @@ public class SchemaConformanceTests
         new RestoreFromTrashCommand("00000000-0000-0000-0000-000000000000"),
         new RevertMergeCommand(1, 2, _exampleFaceIds),
         new WipeLibraryCommand(),
-        new PurgeExcludedCommand(new[] { @"C:\Users\adam\Pictures\node_backups" }),
+        new PurgeExcludedCommand(s_exemplarExcludedPaths),
     };
 
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]

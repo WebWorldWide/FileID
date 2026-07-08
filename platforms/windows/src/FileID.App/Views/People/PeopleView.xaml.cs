@@ -566,7 +566,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             XamlRoot = XamlRoot,
             Title = "Merge clusters?",
-            Content = $"Move all faces from #{sourceId} into #{destId}? This can't be auto-undone.",
+            Content = $"Move all faces from #{sourceId} into #{destId}? You can undo this from Recent changes.",
             PrimaryButtonText = "Merge",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
@@ -576,6 +576,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         try
         {
+            // revertMerge needs the exact face ids that moved and the merge
+            // reply doesn't carry them — snapshot BEFORE the merge.
+            var movedFaceIds = await ReadFaceIdsForPersonAsync(sourceId);
             // Await the engine's bulkActionResult instead of fire-and-forget:
             // a swallowed merge made the user think the merge happened, then
             // the refresh re-showed the old state. Surface any failure.
@@ -590,6 +593,11 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                              ?? "The engine did not confirm the merge.";
                 await ShowAlertAsync("Merge failed",
                     $"Couldn't merge #{sourceId} into #{destId} — {detail}");
+            }
+            else
+            {
+                PushMergeUndo(sourceId, destId, movedFaceIds,
+                    $"merge people #{sourceId} into #{destId}");
             }
         }
         catch (Exception ex)
@@ -729,6 +737,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 try
                 {
+                    // Snapshot the source's face ids for revertMerge before they move.
+                    var movedFaceIds = await ReadFaceIdsForPersonAsync(ids[i]);
                     // Await each merge's bulkActionResult so a swallowed failure
                     // can't masquerade as success (the refresh would then re-show
                     // the unmerged clusters with no explanation).
@@ -746,6 +756,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     else
                     {
                         merged++;
+                        PushMergeUndo(ids[i], dest, movedFaceIds,
+                            $"merge people #{ids[i]} into #{dest}");
                     }
                 }
                 catch (Exception ex)
@@ -858,4 +870,63 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    // ─── Session change log: merge undo capture ─────────────────────────
+    // Engine `revertMerge` recreates the merged-away person and moves the
+    // given face ids back, but it needs the exact ids that moved — and the
+    // mergeClusters reply doesn't carry them. Snapshot them from the
+    // read-only DB BEFORE the merge (same ad-hoc connection pattern as
+    // PersonDetailSheet.Load). Shared by PeopleView drag/bulk merges and
+    // SuggestedMergesSheet.
+
+    internal static async Task<System.Collections.Generic.List<long>> ReadFaceIdsForPersonAsync(long personId)
+        => await Task.Run(() =>
+        {
+            var ids = new System.Collections.Generic.List<long>();
+            try
+            {
+                var connStr = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                {
+                    DataSource = AppPaths.DbPath,
+                    Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                }.ToString();
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id";
+                cmd.Parameters.AddWithValue("@id", personId);
+                using var r = cmd.ExecuteReader();
+                while (r.Read()) ids.Add(r.GetInt64(0));
+            }
+            catch (Exception ex)
+            {
+                // No snapshot → the merge simply won't be undoable; never
+                // block the merge itself on this read.
+                DebugLog.Warn("ReadFaceIdsForPersonAsync failed: " + ex.Message);
+                ids.Clear();
+            }
+            return ids;
+        }).ConfigureAwait(true);
+
+    internal static void PushMergeUndo(
+        long sourceId, long destId, System.Collections.Generic.List<long> movedFaceIds, string label)
+    {
+        if (movedFaceIds.Count == 0) return; // no snapshot → not undoable
+        UndoStack.Instance.Push(label, ChangeKind.PeopleMerge, async () =>
+        {
+            try
+            {
+                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "revertMerge",
+                    () => EngineClient.Instance.RevertMergeAsync(sourceId, destId, movedFaceIds),
+                    TimeSpan.FromSeconds(30));
+                return r.Failed == 0 && r.Succeeded > 0;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Revert merge failed: " + ex.Message);
+                return false;
+            }
+        });
+    }
 }
