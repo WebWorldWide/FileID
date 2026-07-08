@@ -197,6 +197,82 @@ pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Canonical comparison form for user folder-exclusion matching: strip any
+/// "\\?\" verbatim prefix, unify '/'→'\', trim trailing separators, and
+/// lowercase (NTFS is case-insensitive). On non-Windows only trailing '/'
+/// are trimmed — Linux filesystems are case-sensitive and '\' is a legal
+/// filename character there, so folding either would corrupt paths.
+pub(crate) fn normalize_for_exclusion(p: &Path) -> String {
+    let stripped = strip_extended_length(p);
+    let s = stripped.as_os_str().to_string_lossy();
+    if cfg!(windows) {
+        let unified: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+        unified.trim_end_matches('\\').to_lowercase()
+    } else {
+        let t = s.trim_end_matches('/');
+        if t.is_empty() { "/".to_string() } else { t.to_string() }
+    }
+}
+
+/// A user exclusion validated against a scan root. `original` keeps the
+/// caller's casing (verbatim-stripped, separators unified, trailing
+/// separators trimmed) for BINARY-collating `path_text` range scans;
+/// `normalized` is the case-folded form the walker compares against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedExclusion {
+    pub original: String,
+    pub normalized: String,
+}
+
+/// Resolve a single absolute path with no root-containment check — used by
+/// the `purgeExcluded` command, where any absolute folder is a valid purge
+/// target. Returns None for relative paths.
+pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> {
+    if !p.is_absolute() {
+        return None;
+    }
+    let normalized = normalize_for_exclusion(p);
+    let stripped = strip_extended_length(p);
+    let s = stripped.as_os_str().to_string_lossy();
+    let original = if cfg!(windows) {
+        let unified: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+        unified.trim_end_matches('\\').to_string()
+    } else {
+        s.trim_end_matches('/').to_string()
+    };
+    Some(ResolvedExclusion { original, normalized })
+}
+
+/// Filter + normalize raw exclusion strings against a scan root: drops
+/// relative paths, paths not strictly under the root, duplicates, and the
+/// root itself (excluding the root would exclude everything — warn instead).
+pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExclusion> {
+    let norm_root = normalize_for_exclusion(root);
+    let sep = if cfg!(windows) { '\\' } else { '/' };
+    let mut child_prefix = norm_root.clone();
+    if !child_prefix.ends_with(sep) {
+        child_prefix.push(sep);
+    }
+    let mut out: Vec<ResolvedExclusion> = Vec::new();
+    for r in raw {
+        let Some(res) = resolve_exclusion_unrooted(Path::new(r)) else {
+            continue;
+        };
+        if res.normalized == norm_root {
+            tracing::warn!("exclusion equal to the scan root ignored");
+            continue;
+        }
+        if !res.normalized.starts_with(&child_prefix) {
+            continue;
+        }
+        if out.iter().any(|e| e.normalized == res.normalized) {
+            continue;
+        }
+        out.push(res);
+    }
+    out
+}
+
 /// Map an arbitrary string to a filename component safe on Windows NTFS, Linux,
 /// and BSD — byte-faithful with macOS `FilesystemNameSafe.componentSafe` so the
 /// restructure planner produces IDENTICAL folder names on every platform
@@ -245,6 +321,53 @@ pub fn safe_filename_component(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn normalize_for_exclusion_windows_forms() {
+        let n = |s: &str| normalize_for_exclusion(Path::new(s));
+        assert_eq!(n(r"C:\Pics\Raw"), r"c:\pics\raw");
+        assert_eq!(n(r"C:\Pics\Raw\"), r"c:\pics\raw");
+        assert_eq!(n(r"C:/Pics/Raw"), r"c:\pics\raw");
+        assert_eq!(n(r"\\?\C:\Pics\Raw"), r"c:\pics\raw");
+        assert_eq!(n(r"\\?\UNC\srv\share\Raw"), r"\\srv\share\raw");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn normalize_for_exclusion_unix_forms() {
+        let n = |s: &str| normalize_for_exclusion(Path::new(s));
+        assert_eq!(n("/pics/Raw/"), "/pics/Raw"); // case preserved
+        assert_eq!(n("/pics/with\\backslash"), "/pics/with\\backslash");
+        assert_eq!(n("/"), "/");
+    }
+
+    #[test]
+    fn resolve_exclusions_containment() {
+        let (root, inside, inside_dup, outside) = if cfg!(windows) {
+            (r"C:\Pics", r"C:\Pics\Raw\", r"c:\pics\RAW", r"D:\Other")
+        } else {
+            ("/pics", "/pics/raw/", "/pics/RAW", "/other")
+        };
+        let raw = vec![
+            inside.to_string(),
+            inside_dup.to_string(),
+            outside.to_string(),
+            root.to_string(),        // root-equal → dropped
+            "relative/x".to_string(), // relative → dropped
+        ];
+        let resolved = resolve_exclusions(Path::new(root), &raw);
+        // On Unix the "dup" differs by case and is a genuinely distinct dir.
+        let expected = if cfg!(windows) { 1 } else { 2 };
+        assert_eq!(resolved.len(), expected);
+        assert_eq!(
+            resolved[0].original,
+            if cfg!(windows) { r"C:\Pics\Raw" } else { "/pics/raw" }
+        );
+        // Prefix-boundary: excluding \Pics must not match \PicsBackup.
+        let sibling = if cfg!(windows) { r"C:\PicsBackup" } else { "/picsBackup" };
+        assert!(resolve_exclusions(Path::new(root), &[sibling.to_string()]).is_empty());
+    }
 
     #[test]
     fn component_safe_matches_macos_rules() {

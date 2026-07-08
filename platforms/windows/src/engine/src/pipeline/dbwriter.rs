@@ -1002,7 +1002,7 @@ fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
 /// Best-effort removal of a face crop JPEG (face_crops/<face_id>.jpg) orphaned
 /// by a faces_evaluated re-process. Silent on any error — a leftover crop is
 /// cosmetic disk use, never a correctness issue.
-fn remove_face_crop(face_id: i64) {
+pub(crate) fn remove_face_crop(face_id: i64) {
     if let Ok(dir) = crate::paths::faces_dir() {
         let _ = std::fs::remove_file(dir.join(format!("{face_id}.jpg")));
     }

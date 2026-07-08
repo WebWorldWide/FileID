@@ -41,7 +41,8 @@
               "properties": {
                 "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
                 "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." },
-                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." }
+                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." },
+                "excludedPaths": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional absolute folder paths to prune from the walk. Compared case-insensitively after trimming trailing separators and stripping any \\\\?\\ prefix. Entries outside rootPath (or equal to it) are ignored. Rows already cataloged under an excluded path are purged at scan start. Omitted/null = no exclusions. Additive optional field — clients/engines that omit or ignore it remain conformant." }
               }
             }
           }
@@ -257,7 +258,13 @@
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
             } } } },
 
-        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } }
+        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } },
+
+        { "type": "object", "required": ["purgeExcluded"], "additionalProperties": false,
+          "properties": { "purgeExcluded": { "type": "object", "additionalProperties": false,
+            "description": "Remove cataloged rows under the given excluded folders immediately (files on disk untouched; cascades tags/faces/captions/embeddings). Sent when the user adds an exclusion so the Library reflects it without waiting for a rescan. Replies with a bulkActionResult (action 'purgeExcluded', succeeded = purged row count).",
+            "required": ["excludedPaths"],
+            "properties": { "excludedPaths": { "type": "array", "items": { "type": "string" } } } } } }
       ]
     },
 
@@ -687,7 +694,7 @@
       },
 
       "BulkActionResult": {
-        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
+        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
@@ -697,7 +704,7 @@
             "additionalProperties": false,
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
-              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge)(:[0-9a-fA-F-]+)?$" },
+              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,

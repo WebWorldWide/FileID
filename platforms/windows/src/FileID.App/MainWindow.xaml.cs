@@ -465,7 +465,8 @@ public sealed partial class MainWindow : Window
             if (!vm.HasFolder) return;
             try
             {
-                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay,
+                    excludedPaths: vm.Settings.ExcludedFolders);
             }
             catch (Exception ex)
             {
