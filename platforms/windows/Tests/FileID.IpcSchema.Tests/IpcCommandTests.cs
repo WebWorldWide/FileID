@@ -48,18 +48,21 @@ public class IpcCommandTests
         Assert.Null(p.RootDisplay);
     }
 
+    private static readonly string[] s_excludedPair = { @"C:\pics\raw", @"C:\pics\tmp" };
+    private static readonly string[] s_excludedSingle = { @"C:\pics\raw" };
+
     [Fact]
     public void StartScan_ExcludedPaths_RoundTripsAndLegacyJsonDecodes()
     {
         // Populated list round-trips verbatim.
         var cmd = new IpcCommand("t-ex", new StartScanCommand(
-            @"C:\pics", null, Rescan: true, ExcludedPaths: new[] { @"C:\pics\raw", @"C:\pics\tmp" }));
+            @"C:\pics", null, Rescan: true, ExcludedPaths: s_excludedPair));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"excludedPaths\":[", json);
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<StartScanCommand>(rt.Payload);
         Assert.NotNull(p.ExcludedPaths);
-        Assert.Equal(new[] { @"C:\pics\raw", @"C:\pics\tmp" }, p.ExcludedPaths);
+        Assert.Equal(s_excludedPair, p.ExcludedPaths);
 
         // Legacy JSON without the key (pre-exclusions engine/app) decodes to null.
         const string legacy = "{\"id\":\"t-old\",\"payload\":{\"startScan\":{\"rootPath\":\"C:\\\\pics\",\"rootDisplay\":null,\"rescan\":false}}}";
@@ -71,13 +74,13 @@ public class IpcCommandTests
     [Fact]
     public void PurgeExcluded_RoundTrips()
     {
-        var cmd = new IpcCommand("t-purge", new PurgeExcludedCommand(new[] { @"C:\pics\raw" }));
+        var cmd = new IpcCommand("t-purge", new PurgeExcludedCommand(s_excludedSingle));
         var json = IpcCoder.Encode(cmd);
         Assert.Contains("\"purgeExcluded\"", json);
         Assert.Contains("\"excludedPaths\":[\"C:\\\\pics\\\\raw\"]", json);
         var rt = IpcCoder.Decode<IpcCommand>(json);
         var p = Assert.IsType<PurgeExcludedCommand>(rt.Payload);
-        Assert.Equal(new[] { @"C:\pics\raw" }, p.ExcludedPaths);
+        Assert.Equal(s_excludedSingle, p.ExcludedPaths);
     }
 
     [Theory]

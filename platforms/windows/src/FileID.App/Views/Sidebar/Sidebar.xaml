@@ -42,6 +42,7 @@
                 <local:SidebarProcessingControl />
                 <local:SidebarPipelineProgress />
                 <local:SidebarQueueList />
+                <local:SidebarRecentChanges />
             </StackPanel>
         </ScrollViewer>
 

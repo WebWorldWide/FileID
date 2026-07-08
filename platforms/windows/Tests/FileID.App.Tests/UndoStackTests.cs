@@ -63,10 +63,13 @@ public class UndoStackTests
     }
 
     [Fact]
-    public async Task Capacity_DropsOldestEntriesPast16()
+    public async Task Capacity_KeepsEveryEntryUndoableUpToTheLogCap()
     {
         await DrainAsync();
-        // Push 20; only the most recent 16 should remain.
+        ChangeLog.Instance.Clear();
+        // The old 16-entry stack silently dropped older undoables; the
+        // session change log keeps all of them (cap 500 — pinned in
+        // ChangeLogTests.CapacityBound_DropsOldestHistory).
         for (int i = 0; i < 20; i++)
         {
             int captured = i;
@@ -78,6 +81,7 @@ public class UndoStackTests
             await UndoStack.Instance.UndoAsync();
             count++;
         }
-        Assert.Equal(16, count);
+        Assert.Equal(20, count);
+        ChangeLog.Instance.Clear();
     }
 }

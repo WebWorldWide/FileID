@@ -101,6 +101,9 @@ public sealed partial class SuggestedMergesSheet : UserControl
         vm.IsBusy = true;
         try
         {
+            // Snapshot the source's face ids for revertMerge before they move
+            // (session change log undo; the merge reply doesn't carry them).
+            var movedFaceIds = await PeopleView.ReadFaceIdsForPersonAsync(vm.SourcePersonId);
             // Await the engine's bulkActionResult BEFORE dimming the row.
             // Previously the row was marked resolved on a fire-and-forget
             // send, so an engine-side merge failure left the pair greyed-out
@@ -114,6 +117,8 @@ public sealed partial class SuggestedMergesSheet : UserControl
                 StatusText.Text = $"Merge failed: {FirstFailureMessage(r) ?? "the engine did not confirm the merge."}";
                 return;
             }
+            PeopleView.PushMergeUndo(vm.SourcePersonId, vm.DestinationPersonId, movedFaceIds,
+                $"merge people #{vm.SourcePersonId} into #{vm.DestinationPersonId}");
             vm.IsResolved = true;
             // The merged-away source person no longer exists; resolve any other
             // visible pair that references it so the user can't act on a

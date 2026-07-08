@@ -212,7 +212,7 @@ public sealed partial class BulkTagSheet : UserControl
     {
         var groups = GroupByTagSet(fileIds, priorUserTags);
         var label = fileIds.Count == 1 ? "replace tags" : $"replace tags on {fileIds.Count} files";
-        Services.UndoStack.Instance.Push(label, async () =>
+        Services.UndoStack.Instance.Push(label, Services.ChangeKind.Tags, async () =>
         {
             try
             {

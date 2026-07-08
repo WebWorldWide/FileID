@@ -123,6 +123,7 @@ public sealed partial class MainWindow : Window
 
         Activated += OnActivated;
         Closed += OnClosed;
+        Step("AppWindow.Closing subscribe", () => AppWindow.Closing += OnAppWindowClosing);
         Step("ThemeChanged subscribe", () => ((FrameworkElement)Content).ActualThemeChanged += OnThemeChanged);
 
         Step("AppViewModel subscribe", () => AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged);
@@ -549,6 +550,122 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // Close is intercepted at AppWindow.Closing (cancelable) so we can
+    // (a) offer a review of still-undoable session changes and (b) actually
+    // AWAIT the engine's shutdown/WAL checkpoint before the process dies —
+    // the old fire-and-forget ShutdownAsync in OnClosed raced process exit.
+    // _closeFinalized marks the deliberate second Close() that must sail
+    // through; _closeSequenceRunning makes repeated close clicks no-ops
+    // while the sequence (dialog / engine stop) is in flight.
+    private bool _closeFinalized;
+    private bool _closeSequenceRunning;
+
+    private void OnAppWindowClosing(
+        Microsoft.UI.Windowing.AppWindow sender,
+        Microsoft.UI.Windowing.AppWindowClosingEventArgs e)
+    {
+        if (_closeFinalized) return;
+        // Must be set synchronously — the handler can't await.
+        e.Cancel = true;
+        if (_closeSequenceRunning) return;
+        _closeSequenceRunning = true;
+        DispatcherQueue.TryEnqueue(async () =>
+            await DebugLog.SafeRunAsync(nameof(RunCloseSequenceAsync), RunCloseSequenceAsync));
+    }
+
+    private async Task RunCloseSequenceAsync()
+    {
+        try
+        {
+            if (!await ConfirmCloseWithPendingChangesAsync())
+            {
+                return; // user chose Review or Cancel — stay open
+            }
+        }
+        catch (Exception ex)
+        {
+            // The confirm dialog is best-effort; a failure to show it must
+            // never make the window unclosable. Fall through to shutdown.
+            DebugLog.Warn("Close-confirm dialog failed: " + ex.Message);
+        }
+
+        // Stop the engine and WAIT so the WAL checkpoint lands before
+        // process exit (bounded — a hung engine can't wedge close).
+        try
+        {
+            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine stop during close failed: " + ex.Message);
+        }
+        try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
+        _closeFinalized = true;
+        Close();
+    }
+
+    /// <summary>Returns true when the close should proceed; false to stay
+    /// open (the user picked Review or Cancel). Resets
+    /// _closeSequenceRunning on the stay-open paths.</summary>
+    private async Task<bool> ConfirmCloseWithPendingChangesAsync()
+    {
+        {
+            var settings = AppViewModel.Instance.Settings;
+            if (Services.ChangeLog.Instance.UndoableCount > 0
+                && settings.ConfirmCloseOnPendingChanges
+                && !Program.AutoExitAfterScan)
+            {
+                var n = Services.ChangeLog.Instance.UndoableCount;
+                var dontAsk = new CheckBox { Content = "Don't ask me again" };
+                var body = new StackPanel { Spacing = 12 };
+                body.Children.Add(new TextBlock
+                {
+                    Text = $"You made {n} change{(n == 1 ? "" : "s")} this session that can still be undone. "
+                        + "Once FileID closes, they become permanent.",
+                    TextWrapping = TextWrapping.Wrap,
+                });
+                body.Children.Add(dontAsk);
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+                    Title = "Review changes before closing?",
+                    Content = body,
+                    PrimaryButtonText = "Review changes",
+                    SecondaryButtonText = "Close anyway",
+                    CloseButtonText = "Cancel",
+                    DefaultButton = ContentDialogButton.Primary,
+                };
+                var choice = await dialog.ShowAsync();
+                if (dontAsk.IsChecked == true)
+                {
+                    settings.ConfirmCloseOnPendingChanges = false;
+                    settings.Save();
+                }
+                if (choice == ContentDialogResult.Primary)
+                {
+                    _closeSequenceRunning = false;
+                    var sheet = new ContentDialog
+                    {
+                        XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+                        Title = "Changes this session",
+                        Content = new Views.SessionChangesSheet(),
+                        CloseButtonText = "Close",
+                        DefaultButton = ContentDialogButton.Close,
+                    };
+                    await sheet.ShowAsync();
+                    return false; // stay open; the user closes again when ready
+                }
+                if (choice == ContentDialogResult.None)
+                {
+                    _closeSequenceRunning = false;
+                    return false; // Cancel — abort the close entirely
+                }
+                // Secondary (Close anyway) proceeds.
+            }
+            return true;
+        }
+    }
+
     private void OnClosed(object sender, WindowEventArgs e)
     {
         if (_micaController is not null) { _micaController.Dispose(); _micaController = null; }
@@ -557,8 +674,13 @@ public sealed partial class MainWindow : Window
         try { RemoveDpiHook(); } catch { /* swallow */ }
         AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
 
-        // Tell the engine to wrap up so the WAL gets checkpointed cleanly.
-        try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
+        // Normal closes ran the full RunCloseSequenceAsync (awaited engine
+        // stop + settings flush). This fallback covers paths that bypass
+        // AppWindow.Closing (e.g. WM_ENDSESSION) — best-effort only.
+        if (!_closeFinalized)
+        {
+            try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
+        }
 
         // flush the debounced AppSettings.Save so pending edits
         // (e.g. the user toggled sidebar then immediately closed the

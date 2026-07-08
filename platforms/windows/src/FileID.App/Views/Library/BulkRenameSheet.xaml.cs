@@ -129,6 +129,7 @@ public sealed partial class BulkRenameSheet : UserControl
                 .ToArray();
             Services.UndoStack.Instance.Push(
                 $"rename {entries.Length} file{(entries.Length == 1 ? "" : "s")}",
+                Services.ChangeKind.Rename,
                 async () =>
                 {
                     try
