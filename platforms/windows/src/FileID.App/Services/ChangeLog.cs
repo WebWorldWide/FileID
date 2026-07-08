@@ -1,4 +1,4 @@
-// ChangeLog — the session-wide record of every applied file mutation
+﻿// ChangeLog — the session-wide record of every applied file mutation
 // (renames, trash, restructure applies, people merges, tag writes), each
 // with an inverse-action closure so the user can undo anything they didn't
 // mean before closing the app.
