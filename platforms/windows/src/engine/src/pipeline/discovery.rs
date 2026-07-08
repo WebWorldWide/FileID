@@ -140,6 +140,10 @@ pub struct Discovery {
     /// turning a re-run of a 1M-file corpus into a near-instant no-op.
     /// Empty = classic full-scan.
     skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
+    /// User-excluded folders in `normalize_for_exclusion` form. The walk
+    /// prunes an excluded directory at its parent's read_dir, so equality
+    /// matching suffices — nothing beneath it is ever visited.
+    exclusions: Arc<Vec<String>>,
 }
 
 /// Handle returned from `Discovery::spawn`. `count` is a live counter the
@@ -161,15 +165,19 @@ impl Discovery {
     /// Incremental-rescan-aware constructor. The caller loads the
     /// "already current" path set from the DB before spawning Discovery.
     /// Honors a `rescan: true` IPC flag by passing an empty set here.
-    pub fn new_with_skip(
+    /// `exclusions` are user-excluded folders already resolved against the
+    /// root (see `path_safety::resolve_exclusions`), normalized form.
+    pub fn new_with_skip_and_exclusions(
         root: impl Into<PathBuf>,
         coordinator: ScanCoordinator,
         skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
+        exclusions: Arc<Vec<String>>,
     ) -> Self {
         Self {
             root: root.into(),
             coordinator,
             skip_paths,
+            exclusions,
         }
     }
 
@@ -182,6 +190,7 @@ impl Discovery {
         let root = self.root.clone();
         let coordinator = self.coordinator.clone();
         let skip_paths = self.skip_paths.clone();
+        let exclusions = self.exclusions.clone();
         let count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
@@ -236,6 +245,7 @@ impl Discovery {
             // order regardless of which thread filled each client_state.
             let coord_for_dir = coordinator.clone();
             let skip_for_dir = skip_paths.clone();
+            let excl_for_dir = exclusions.clone();
             let err_for_dir = error_count_inner.clone();
             // Walk a verbatim ("\\?\") root so directories whose full path
             // exceeds MAX_PATH (260) are traversable — std/jwalk silently
@@ -257,7 +267,7 @@ impl Discovery {
                 .follow_links(false)
                 .skip_hidden(false)   // we do our own dot-file filter to also catch thumbs.db etc.
                 .parallelism(jwalk::Parallelism::RayonNewPool(walk_threads))
-                .process_read_dir(move |_depth, _dir_path, _state, children| {
+                .process_read_dir(move |_depth, dir_path, _state, children| {
                     if coord_for_dir.is_cancelled() {
                         children.clear();
                         return;
@@ -296,6 +306,18 @@ impl Discovery {
                         if file_type.is_dir() {
                             if is_noise_directory(&name) {
                                 return false;
+                            }
+                            // User exclusions: normalized-equality on the
+                            // child's full path. dir_path carries the walk
+                            // root's "\\?\" prefix when present; normalize
+                            // strips it, so verbatim and plain roots match
+                            // the same stored exclusion.
+                            if !excl_for_dir.is_empty() {
+                                let full = dir_path.join(entry.file_name());
+                                let norm = crate::util::path_safety::normalize_for_exclusion(&full);
+                                if excl_for_dir.contains(&norm) {
+                                    return false;
+                                }
                             }
                             // Prune generic build dirs only inside a dev tree.
                             if is_ambiguous_build_directory(&name) {
@@ -705,7 +727,7 @@ mod tests {
             .unwrap();
         let (got, count) = rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
+            let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let mut got = Vec::new();
@@ -719,6 +741,75 @@ mod tests {
         assert!(got.iter().all(|p| !p.to_string_lossy().contains("node_modules")));
         assert!(got.iter().all(|p| !p.to_string_lossy().contains(".git")));
         assert_eq!(count, 30);
+    }
+
+    /// User folder exclusions prune the excluded subtree at its parent's
+    /// read_dir: nothing beneath an excluded dir is emitted, siblings are
+    /// untouched, and exclusion strings match after normalization
+    /// (trailing separator; case-flip on Windows). An exclusion outside
+    /// the root is dropped by resolve_exclusions and changes nothing.
+    #[test]
+    fn synthetic_tree_walk_honors_user_exclusions() {
+        use std::fs;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+
+        fs::create_dir_all(root.join("keep")).unwrap();
+        fs::create_dir_all(root.join("skipme").join("nested")).unwrap();
+        fs::create_dir_all(root.join("skipme2")).unwrap();
+        fs::create_dir_all(root.join("skipme_not")).unwrap();
+        for i in 0..5 {
+            fs::write(root.join("keep").join(format!("k{i}.jpg")), b"jpeg").unwrap();
+        }
+        fs::write(root.join("skipme").join("s.jpg"), b"jpeg").unwrap();
+        fs::write(root.join("skipme").join("nested").join("n.jpg"), b"jpeg").unwrap();
+        fs::write(root.join("skipme2").join("s2.jpg"), b"jpeg").unwrap();
+        fs::write(root.join("skipme_not").join("boundary.jpg"), b"jpeg").unwrap();
+
+        // Trailing separator + (on Windows) case-flip both normalize away.
+        let sep = std::path::MAIN_SEPARATOR;
+        let excl_1 = if cfg!(windows) {
+            root.join("SKIPME").to_string_lossy().into_owned()
+        } else {
+            root.join("skipme").to_string_lossy().into_owned()
+        };
+        let excl_2 = format!("{}{sep}", root.join("skipme2").to_string_lossy());
+        let outside = if cfg!(windows) { r"C:\definitely\not\here".to_string() } else { "/definitely/not/here".to_string() };
+        let resolved = crate::util::path_safety::resolve_exclusions(
+            root,
+            &[excl_1, excl_2, outside],
+        );
+        assert_eq!(resolved.len(), 2);
+        let normalized: Vec<String> = resolved.iter().map(|e| e.normalized.clone()).collect();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let got = rt.block_on(async {
+            let coord = ScanCoordinator::new();
+            let disc = Discovery::new_with_skip_and_exclusions(
+                root,
+                coord,
+                Arc::new(HashMap::new()),
+                Arc::new(normalized),
+            );
+            let handle = disc.spawn();
+            let mut rx = handle.rx;
+            let mut got = Vec::new();
+            while let Some(f) = rx.recv().await {
+                got.push(f.path);
+            }
+            got
+        });
+
+        let names: Vec<String> = got.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        assert_eq!(got.len(), 6, "5 keepers + skipme_not boundary file; got {names:?}");
+        assert!(names.iter().all(|p| !p.contains("nested")));
+        assert!(
+            names.iter().any(|p| p.contains("boundary.jpg")),
+            "exclusion of 'skipme' must not swallow sibling 'skipme_not'"
+        );
     }
 
     /// `count` MUST be incremented for every file BEFORE the channel send,
@@ -740,7 +831,7 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
+            let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let count = handle.count.clone();
@@ -838,7 +929,7 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
+            let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
             let handle = disc.spawn();
             let mut rx = handle.rx;
             let done = handle.done.clone();

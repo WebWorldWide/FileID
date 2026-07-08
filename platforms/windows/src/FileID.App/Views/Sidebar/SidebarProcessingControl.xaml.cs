@@ -193,7 +193,8 @@ public sealed partial class SidebarProcessingControl : UserControl
                 // the catch block surfaces an alert and the failure pill takes
                 // over via the Sync() Failed branch.
                 EngineClient.Instance.SetOptimisticScanningPhase();
-                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay,
+                    excludedPaths: vm.Settings.ExcludedFolders);
                 DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
             }
             catch (Exception ex)

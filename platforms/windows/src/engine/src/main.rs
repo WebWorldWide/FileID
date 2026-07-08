@@ -1125,6 +1125,17 @@ async fn handle_line(
                 commands::thumbnail::handle_generate_video_thumbnail(sink_c, payload).await;
             });
         }
+        CommandPayload::PurgeExcluded(payload) => {
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "purgeExcluded").await;
+                return;
+            };
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            tokio::spawn(async move {
+                commands::scan::handle_purge_excluded(sink_c, db_c, payload).await;
+            });
+        }
     }
 }
 
