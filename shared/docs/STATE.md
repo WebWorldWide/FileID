@@ -8,6 +8,22 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-09 — windows-prod-hardening landed (PR #89); FileIDSetup.exe installer working; v0.0.1 assets refreshed
+
+Landed the in-flight `windows-prod-hardening` branch to `main` after full local verification + an adversarial review pass, then produced the first working single-EXE installer and refreshed the v0.0.1 release assets. All real CI green (engine x64/arm64-native/arm64-cross, .NET app x64/arm64, macOS SwiftPM, Linux CLI/TUI/GTK/engine); the lone red is the known Flatpak advisory.
+
+**Engine perf** (deferred NEXT.md levers, now on-hardware-measured on RTX 5080/CUDA): EP-aware CLIP dispatch (CUDA/TensorRT → Session pool, measured 40.96s vs 50.68s batched, identical assertions; DirectML keeps batching); planar CHW preprocessing (MobileCLIP + RAM++) with a byte-identity golden test; RAM++ takes the batch coordinator only when the ONNX exposes a dynamic batch axis, else falls back to the single-image pool.
+
+**Engine robustness** (audit 2026-07-08): trash restore recovers the physical extension when Explorer hides known extensions (the batch silently restored nothing before) + O(1) reconciliation off the writer lock; bulk rename does its filesystem moves with no writer lock held; restructure undo keeps its journal on partial failure.
+
+**macOS/Linux lockstep**: mirrored the Windows user-folder-exclusions feature (`startScan.excludedPaths` + `purgeExcluded`) across the Swift + Linux engine clients + schema round-trip tests. Review find (fixed): the macOS immediate purge compared `lower(path_text)` (NFD on disk) against an NFC needle → accented excluded folders purged nothing; now queries the NFC `path_search` column.
+
+**CI drove out three real breakers** (the "loop until green" paid off): (1) CLI/TUI didn't set the new `StartScanPayload.excluded_paths` (missing-field compile error); (2) `crossbeam-epoch` <0.9.20 newly flagged by RUSTSEC-2026-0204 → bumped to 0.9.20 (MSRV-1.90-safe, cargo-deny green); (3) two session-changes `.xaml` views lacked the UTF-8 BOM the charset gate requires. Also reverted a local-only Cargo.toml lint rename (`unchecked_time_subtraction`) that would have failed CI's pinned 1.90 (this box's on-PATH clippy is 1.96, which masked it).
+
+**Installer**: fixed the Burn bundle theme (`hyperlinkLicense` → `rtfLicense`; the former needed a nonexistent `WixStdbaLicenseUrl` and blocked every clean build) — `publish-bundle.ps1 -SkipSign -SkipArm64` now produces `FileIDSetup.exe` (x64 single-EXE bootstrapper, ~83.5 MB) + `FileID-x64.msi` end-to-end, privacy gate green. Directory.Build.props VS18 AppxPackage probes are what let `dotnet publish/build` (hence the whole installer) run on a VS18-only box.
+
+**Release**: per owner, kept VERSION/ProductVersion at 0.1.0 and the `v0.0.1` tag (a 0.0.2 MSI would be a lower ProductVersion and wouldn't in-place upgrade the shipped 0.1.0 install). Refreshed the v0.0.1 pre-release assets with the rebuilt MSI and added the new `FileID-0.0.1-Setup-x64.exe`. Both UNSIGNED (no EV cert) — SmartScreen will warn on first run.
+
 ## 2026-07-05 (cont.) — 5 on-hardware Windows-app bug fixes (PR #88); 0.0.2 pending owner test
 
 Owner ran the installed 0.0.1 app and reported 5 bugs; all fixed + merged (PR #88, CI green). NOT runtime-verified here (no WinUI runtime) — owner testing the rebuilt MSI (`~/Desktop/FileID-bugfix-test-x64.msi`) before a 0.0.2 release.

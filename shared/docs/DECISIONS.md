@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-09 — The `.exe` installer refreshes v0.0.1 in place (ProductVersion stays 0.1.0); Burn bundle uses the `rtfLicense` theme
+
+Two installer/release calls from the prod-hardening session (PR #89).
+
+**Version / release identity.** The shipped **v0.0.1** MSI carries `ProductVersion` **0.1.0** (the internal `platforms/windows/VERSION`, which never matched the owner's `v0.0.1` tag name). The natural next tag under the owner's 0.0.x scheme is `v0.0.2`, but a `0.0.2` MSI is a *lower* `ProductVersion` than the already-installed `0.1.0`, so Windows Installer would **refuse the in-place major upgrade** (existing users would have to uninstall first). Options weighed: (a) bump to `0.1.1`+ so the ProductVersion increments and upgrades cleanly, (b) ship `0.0.2` and accept the no-upgrade, (c) refresh the existing `v0.0.1` assets in place. **Owner chose (c):** keep `VERSION`/`ProductVersion` at `0.1.0` and the `v0.0.1` tag, and replace the release's MSI while adding the new `FileID-0.0.1-Setup-x64.exe`. No version bump, no new tag; the upgrade-path question is deferred to whenever a signed, properly-versioned 0.1.x/1.0 release is cut.
+
+**Burn bundle license theme.** `installer/FileID.Bundle/Bundle.wxs` paired `bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"` with `LicenseFile="theme/license.rtf"`. In WiX v4 the `hyperlinkLicense` theme renders the license as a hyperlink and requires a `WixStdbaLicenseUrl` bind variable — which was never defined — so `dotnet build FileID.Bundle` failed `WIX0197` and **no `FileIDSetup.exe` could be produced from a clean tree** (the earlier 0.0.1 bundle was only ever built via a temporary local edit). Switched to `Theme="rtfLicense"`, which renders the provided RTF `LicenseFile` with no URL — matching the intended embedded-license UX. The bundle now builds x64-only end-to-end via `publish-bundle.ps1 -SkipSign -SkipArm64` (arm64 was dropped from the chain in `86d99ba`; ARM64 needs the MSVC ARM64 C++ tools, still not installed).
+
 ## 2026-07-05 — Shared `FILEID_FACE_*` env names carry per-platform defaults (a documented foot-gun)
 
 `FILEID_FACE_SOLO_QUALITY` and `FILEID_FACE_MIN_CLUSTER_SIZE` (and the pass1/pass2/gate cosine knobs) use the **same env-var names** on the Windows/Linux Rust engine and the macOS Swift engine, but their **calibrated defaults differ** because face *quality* is on different scales: Windows/Linux `face_quality` = YuNet `det.score × landmark-geometry` (compressed ~0.23–0.42), so the solo-suppression floor default is **0.40**; macOS uses Apple Vision `faceCaptureQuality` (0–1), so its floor default is **0.12**. Cosine knobs (pass1 0.50 / pass2 0.45, mutual-kNN, gate 0.35) are calibrated on the Rust side; macOS carries the mechanisms but keeps them opt-in pending its own on-Mac label calibration (see MACOS_LOCKSTEP_NOTES).
