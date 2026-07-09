@@ -14,7 +14,9 @@
 [CmdletBinding()]
 param(
     [string]$Corpus = "F:\TrueNAS\iMac Documents",
-    [int]$ScanTimeoutMin = 25
+    [int]$ScanTimeoutMin = 25,
+    [int]$FileCap = 0,
+    [string]$ArtifactDir = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -83,9 +85,28 @@ $psi.Environment["LOCALAPPDATA"]   = $Temp
 $psi.Environment["FILEID_LOG"]     = "info"
 $psi.Environment["FILEID_PERF_TRACE"] = "1"
 $psi.Environment["ORT_DYLIB_PATH"] = Join-Path $outDir "onnxruntime.dll"
-# Forward the RAM++ batch-size toggle so a measurement run can A/B single
-# (unset/0) vs batched (>1) without editing this script.
-if ($env:FILEID_RAMPLUS_BATCH_SIZE) { $psi.Environment["FILEID_RAMPLUS_BATCH_SIZE"] = $env:FILEID_RAMPLUS_BATCH_SIZE }
+# Forward supported perf toggles so on-hardware A/B runs can use the same
+# script without editing production defaults.
+foreach ($name in @(
+    "FILEID_RAMPLUS_BATCH_SIZE",
+    "FILEID_RAMPLUS_BATCH_TIMEOUT_MS",
+    "FILEID_CLIP_USE_BATCH",
+    "FILEID_CLIP_BATCH_SIZE",
+    "FILEID_CLIP_BATCH_TIMEOUT_MS",
+    "FILEID_MODEL_POOL_SIZE"
+)) {
+    $value = [Environment]::GetEnvironmentVariable($name, "Process")
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        $psi.Environment[$name] = $value
+    }
+}
+# Bound on-hardware validation runs without editing the harness. Unset/0 means
+# full corpus, matching production behavior.
+if ($FileCap -gt 0) {
+    $psi.Environment["FILEID_TEST_FILE_CAP"] = [string]$FileCap
+} elseif ($env:FILEID_TEST_FILE_CAP) {
+    $psi.Environment["FILEID_TEST_FILE_CAP"] = $env:FILEID_TEST_FILE_CAP
+}
 
 $proc = New-Object System.Diagnostics.Process
 $proc.StartInfo = $psi
@@ -179,7 +200,14 @@ if ($errLines) { Bad "ENGINE ERRORS:"; $errLines | Select-Object -First 20 | For
 else { OK "no panic/fatal/crash lines" }
 
 Step "EP / perf / restructure lines from log"
-Get-Content $eventLog | Where-Object { $_ -match '\[EP' -or $_ -match 'ExecutionProvider' -or $_ -match '\[PERF\]' -or $_ -match '\[STATS\]' -or $_ -match 'DirectML' -or $_ -match 'CUDA' -or $_ -match '"restructurePlan"' -or $_ -match '"mergeSuggestions"' } | Select-Object -First 40 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+Get-Content $eventLog |
+    Where-Object { $_ -match '\[EP' -or $_ -match 'ExecutionProvider' -or $_ -match '\[PERF\]' -or $_ -match '\[STATS\]' -or $_ -match 'DirectML' -or $_ -match 'CUDA' -or $_ -match '"restructurePlan"' -or $_ -match '"mergeSuggestions"' } |
+    Select-Object -First 40 |
+    ForEach-Object {
+        $line = [string]$_
+        if ($line.Length -gt 1000) { $line = $line.Substring(0, 1000) + " ... [truncated; full line preserved in events.jsonl]" }
+        Write-Host "    $line" -ForegroundColor DarkGray
+    }
 
 Step "DB assertions (scan_assertions.py)"
 $py = $null; foreach ($c in @('python','py')) { if (Get-Command $c -ErrorAction SilentlyContinue) { $py=$c; break } }
@@ -187,6 +215,14 @@ if ($py) { $env:ASSERT_MIN_FILES = "1"; & $py (Join-Path $BuildDir "scan_asserti
 else { Warn "python not found; skipping DB assertions" }
 
 # --- cleanup ----------------------------------------------------------
+if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+    Step "Preserving audit artifacts"
+    New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
+    Copy-Item -LiteralPath $eventLog -Destination (Join-Path $ArtifactDir "events.jsonl") -Force
+    if (Test-Path $dbPath) { Copy-Item -LiteralPath $dbPath -Destination (Join-Path $ArtifactDir "fileid.sqlite") -Force }
+    OK "artifacts copied to $ArtifactDir"
+}
+
 Step "Cleanup (removing junction + temp; user library untouched)"
 $j = Join-Path $State "Models"
 if (Test-Path $j) { cmd /c rmdir "$j" 2>$null }
