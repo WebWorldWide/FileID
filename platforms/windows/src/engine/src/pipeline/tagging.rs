@@ -42,7 +42,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 }
 
 use crate::coordinator::ScanCoordinator;
-use crate::models::runtime::error_has_device_removed_marker;
+use crate::models::runtime::{active_provider, error_has_device_removed_marker, ExecutionProvider};
 use crate::models::{bge_text::BgeText, face_align, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
@@ -460,6 +460,16 @@ fn ep_clip_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size:
     }
 }
 
+fn default_clip_use_batch(ep: ExecutionProvider) -> bool {
+    !matches!(ep, ExecutionProvider::Cuda | ExecutionProvider::TensorRt)
+}
+
+fn resolve_clip_use_batch(ep: ExecutionProvider, env_override: Option<&str>) -> bool {
+    env_override
+        .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
+        .unwrap_or_else(|| default_clip_use_batch(ep))
+}
+
 impl ModelStack {
     /// Load whatever model files are installed at the canonical paths.
     /// Each present model gets loaded `pool_size` times so workers can
@@ -469,19 +479,25 @@ impl ModelStack {
         let arcface = load_pool("SFace", pool_size, crate::models::sface::default_weights_path(), SFace::load);
         let scrfd = load_pool("YuNet", pool_size, crate::models::yunet::default_weights_path(), YuNet::load);
 
-        // Batch path is the default. Rationale: the VRAM clamp drops the pool
-        // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
-        // semaphore caps concurrent CLIP inferences regardless, so a pool
-        // larger than 2 is partly wasted. The batch coordinator drives ONE
-        // Session with batched (N, 3, 224, 224) tensors, amortizing per-call
-        // DirectML dispatch overhead. This default is PENDING hardware
-        // confirmation — run the A/B (default vs `FILEID_CLIP_USE_BATCH=0`) and
-        // compare clip_p95_ms + files_per_second. Set `FILEID_CLIP_USE_BATCH=0`
-        // to fall back to the pool path.
-        let use_batch = std::env::var("FILEID_CLIP_USE_BATCH")
-            .ok()
-            .map(|s| !(s == "0" || s.eq_ignore_ascii_case("false")))
-            .unwrap_or(true);
+        // MobileCLIP has two viable dispatch modes:
+        // - DirectML keeps the batch-coordinator default; this was introduced
+        //   for small-NVIDIA/DirectML boxes where fewer ORT dispatches beat a
+        //   VRAM-clamped Session pool.
+        // - CUDA/TensorRT default to the pool path. The Adlon 1K A/B on RTX
+        //   5080 + CUDA measured 50.68s with batching vs 40.96s unbatched,
+        //   with identical DB assertions.
+        //
+        // FILEID_CLIP_USE_BATCH remains an explicit override: 0/false selects
+        // the pool path, any other non-empty value selects batching.
+        let clip_ep = active_provider();
+        let clip_batch_override = std::env::var("FILEID_CLIP_USE_BATCH").ok();
+        let use_batch = resolve_clip_use_batch(clip_ep, clip_batch_override.as_deref());
+        tracing::info!(
+            model = "MobileCLIP",
+            ep = %clip_ep.as_str(),
+            use_batch,
+            "dispatch mode selected"
+        );
 
         // The scene labeler matrix is loaded from precomputed embeddings
         // (scene_embeddings_precomputed.rs) and is the canonical auto-tagger.
@@ -500,7 +516,7 @@ impl ModelStack {
             // embedding and no semantic search.
             (None, None)
         } else if use_batch {
-            // Batch-coordinator path (DEFAULT; opt out with FILEID_CLIP_USE_BATCH=0).
+            // Batch-coordinator path (default for DirectML; opt in on CUDA/TensorRT with FILEID_CLIP_USE_BATCH=1).
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {
                     Ok(model) => {
@@ -523,7 +539,7 @@ impl ModelStack {
             };
             (None, coord)
         } else {
-            // Pool path (default — empirically faster for MobileCLIP-S2 on DirectML).
+            // Pool path (default for CUDA/TensorRT; opt out on DirectML with FILEID_CLIP_USE_BATCH=0).
             let pool = load_pool(
                 "MobileCLIP",
                 pool_size,
@@ -572,15 +588,37 @@ impl ModelStack {
         // two paths are mutually exclusive.
         let ram_batch_size =
             crate::models::ram_plus_batch::RamPlusBatchCoordinator::configured_batch_size();
+        let load_ram_plus_pool = |
+            tags_path: PathBuf,
+            seed: Option<crate::models::ram_plus::RamPlusTagger>,
+        | {
+            load_pool_with_seed(
+                "RAM++",
+                pool_size,
+                crate::models::ram_plus::default_onnx_path(),
+                move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
+                seed,
+            )
+        };
         let (ram_plus, ram_plus_batch) = match crate::models::ram_plus::default_tags_path() {
             Ok(tags_path) if ram_batch_size > 1 => {
                 match crate::models::ram_plus::default_onnx_path() {
                     Ok(p) if p.exists() => {
-                        match crate::models::ram_plus::RamPlusTagger::load(p.clone(), tags_path) {
+                        match crate::models::ram_plus::RamPlusTagger::load(p.clone(), tags_path.clone()) {
                             Ok(tagger) => {
-                                tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
-                                let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
-                                (None, coord)
+                                if tagger.supports_dynamic_batch() {
+                                    tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
+                                    let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
+                                    (None, coord)
+                                } else {
+                                    tracing::warn!(
+                                        model = "RAM++",
+                                        path = %p.display(),
+                                        batch_size = ram_batch_size,
+                                        "FILEID_RAMPLUS_BATCH_SIZE requested but installed ONNX does not expose a dynamic batch axis; using single-image pool"
+                                    );
+                                    (load_ram_plus_pool(tags_path, Some(tagger)), None)
+                                }
                             }
                             Err(err) => {
                                 tracing::warn!(model = "RAM++", ?err, "batch load failed; tagging falls back to CLIP scene-tags");
@@ -595,13 +633,7 @@ impl ModelStack {
                 }
             }
             Ok(tags_path) => {
-                let pool = load_pool(
-                    "RAM++",
-                    pool_size,
-                    crate::models::ram_plus::default_onnx_path(),
-                    move |p| crate::models::ram_plus::RamPlusTagger::load(p, tags_path.clone()),
-                );
-                (pool, None)
+                (load_ram_plus_pool(tags_path, None), None)
             }
             Err(err) => {
                 tracing::warn!(model = "RAM++", ?err, "tag-list path unresolved; tagging falls back to CLIP scene-tags");
@@ -631,6 +663,13 @@ fn load_pool<T, F>(label: &str, pool_size: usize, path: anyhow::Result<PathBuf>,
 where
     F: Fn(PathBuf) -> anyhow::Result<T>,
 {
+    load_pool_with_seed(label, pool_size, path, loader, None)
+}
+
+fn load_pool_with_seed<T, F>(label: &str, pool_size: usize, path: anyhow::Result<PathBuf>, loader: F, seed: Option<T>) -> Option<Vec<Mutex<T>>>
+where
+    F: Fn(PathBuf) -> anyhow::Result<T>,
+{
     let p = match path {
         Ok(p) => p,
         Err(err) => {
@@ -643,8 +682,12 @@ where
         return None;
     }
     let mut pool = Vec::with_capacity(pool_size);
-    for idx in 0..pool_size {
-        // Stagger each Session allocation by 250 ms so a 6-session pool
+    if let Some(model) = seed {
+        pool.push(Mutex::new(model));
+    }
+    for idx in pool.len()..pool_size {
+        // Stagger each post-first Session allocation by 250 ms so a 6-session
+        // pool
         // (2 × 3 models) doesn't burst DirectML's command queue at engine
         // startup — the riskiest TDR window.
         if idx > 0 {
@@ -2368,6 +2411,28 @@ mod tests {
             crop_rgb_112: None,
         };
         assert!(f.crop_rgb_112.is_none());
+    }
+
+    #[test]
+    fn clip_batch_default_is_provider_aware() {
+        use ExecutionProvider as Ep;
+
+        assert!(!default_clip_use_batch(Ep::Cuda));
+        assert!(!default_clip_use_batch(Ep::TensorRt));
+        assert!(default_clip_use_batch(Ep::DirectMl));
+        assert!(default_clip_use_batch(Ep::OpenVino));
+        assert!(default_clip_use_batch(Ep::Qnn));
+        assert!(default_clip_use_batch(Ep::Cpu));
+    }
+
+    #[test]
+    fn clip_batch_env_override_wins() {
+        use ExecutionProvider as Ep;
+
+        assert!(!resolve_clip_use_batch(Ep::DirectMl, Some("0")));
+        assert!(!resolve_clip_use_batch(Ep::DirectMl, Some("FALSE")));
+        assert!(resolve_clip_use_batch(Ep::Cuda, Some("1")));
+        assert!(resolve_clip_use_batch(Ep::Cuda, Some("true")));
     }
 
     #[test]
