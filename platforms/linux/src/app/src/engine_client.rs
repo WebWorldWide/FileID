@@ -195,6 +195,7 @@ impl EngineClient {
             root_path: root_path.to_string(),
             root_display: None,
             rescan,
+            excluded_paths: None,
         });
         self.send(payload)
     }

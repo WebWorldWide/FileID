@@ -119,9 +119,11 @@ public actor Discovery {
         forceReprocess: Bool = false,
         skipHidden: Bool = true,
         maxSizeMB: Int = 500,
+        excludedPaths: [String]? = nil,
         cancelCheck: @Sendable () -> Bool = { false },
         progress: @Sendable (Int) -> Void = { _ in }
     ) async -> [DiscoveredFile] {
+        let exclusions = Self.resolvedExclusions(root: root, rawPaths: excludedPaths)
         let skip = await Self.buildSkipSet(
             root: root, database: database, forceReprocess: forceReprocess)
         var collected: [DiscoveredFile] = []
@@ -129,7 +131,7 @@ public actor Discovery {
         await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
-            cancelCheck: cancelCheck, progress: progress
+            exclusions: exclusions, cancelCheck: cancelCheck, progress: progress
         ) { file in
             collected.append(file)
         }
@@ -150,23 +152,81 @@ public actor Discovery {
         forceReprocess: Bool = false,
         skipHidden: Bool = true,
         maxSizeMB: Int = 500,
+        excludedPaths: [String]? = nil,
         cancelCheck: @Sendable () -> Bool = { false },
         progress: @Sendable (Int) -> Void = { _ in },
         onFile: (DiscoveredFile) async -> Void
     ) async {
+        let exclusions = Self.resolvedExclusions(root: root, rawPaths: excludedPaths)
         let skip = await Self.buildSkipSet(
             root: root, database: database, forceReprocess: forceReprocess)
         await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
+            exclusions: exclusions,
             cancelCheck: cancelCheck, progress: progress, emit: onFile)
     }
 
     // MARK: - Enumeration core
 
+    private struct Exclusion: Sendable {
+        let path: String
+        let prefix: String
+    }
+
     private struct SkipEntry: Sendable {
         let modifiedAt: Double?
         let size: Int64
+    }
+
+    public static func resolvedExclusionPaths(root: URL, rawPaths: [String]?) -> [String] {
+        resolvedExclusions(root: root, rawPaths: rawPaths).map(\.path)
+    }
+
+    private static func resolvedExclusions(root: URL, rawPaths: [String]?) -> [Exclusion] {
+        guard let rawPaths, !rawPaths.isEmpty else { return [] }
+        let rootPath = normalizedExclusionPath(root)
+        let rootPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        var seen = Set<String>()
+        var result: [Exclusion] = []
+        for raw in rawPaths {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let path = normalizedExclusionPath(URL(fileURLWithPath: trimmed))
+            guard path != rootPath, path.hasPrefix(rootPrefix), !seen.contains(path) else {
+                continue
+            }
+            seen.insert(path)
+            result.append(Exclusion(path: path, prefix: path + "/"))
+        }
+        return result
+    }
+
+    private static func normalizedExclusionPath(_ url: URL) -> String {
+        stripTrailingSlashes(
+            url.resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+                .precomposedStringWithCanonicalMapping
+                .lowercased()
+        )
+    }
+
+    private static func stripTrailingSlashes(_ path: String) -> String {
+        guard path.count > 1 else { return path }
+        var p = path
+        while p.count > 1, p.hasSuffix("/") {
+            p.removeLast()
+        }
+        return p
+    }
+
+    private static func isExcluded(_ path: String, by exclusions: [Exclusion]) -> Bool {
+        guard !exclusions.isEmpty else { return false }
+        let normalized = normalizedExclusionPath(URL(fileURLWithPath: path))
+        return exclusions.contains { exclusion in
+            normalized == exclusion.path || normalized.hasPrefix(exclusion.prefix)
+        }
     }
 
     /// Shared tree walk used by both `walk` and `walkStreaming`. `emit` receives
@@ -178,6 +238,7 @@ public actor Discovery {
         maxSizeMB: Int,
         skip: [String: SkipEntry]?,
         database: Database?,
+        exclusions: [Exclusion],
         cancelCheck: @Sendable () -> Bool,
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
@@ -226,7 +287,13 @@ public actor Discovery {
             if cancelCheck() { break }
             let values = try? url.resourceValues(forKeys: Set(resourceKeys))
             // Skip directories (enumerator yields both; we want files).
-            if values?.isDirectory == true { continue }
+            if values?.isDirectory == true {
+                if Self.isExcluded(url.path, by: exclusions) {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            if Self.isExcluded(url.path, by: exclusions) { continue }
             if values?.isRegularFile != true { continue }
             let ext = url.pathExtension
             guard FileTypes.isTaggable(ext) else { continue }

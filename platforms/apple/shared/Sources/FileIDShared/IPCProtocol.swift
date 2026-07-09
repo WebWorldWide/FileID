@@ -17,11 +17,12 @@ public struct IPCCommand: Codable, Sendable {
 
     public enum Payload: Codable, Sendable {
         /// Absolute filesystem `rootPath`, an optional human-readable
-        /// `rootDisplay` (defaults to `rootPath` when nil), and `rescan`
-        /// (force every file to be reprocessed even when already current).
-        /// Mirrors the schema's StartScan shape byte-for-byte — the app
-        /// resolves the security-scoped bookmark to a path before sending.
-        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool)
+        /// `rootDisplay` (defaults to `rootPath` when nil), `rescan` (force
+        /// every file through the pipeline), and optional `excludedPaths`
+        /// (folders to prune from the walk). Mirrors the schema's StartScan
+        /// shape byte-for-byte — the app resolves the security-scoped bookmark
+        /// to a path before sending.
+        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool, excludedPaths: [String]?)
         case pauseScan
         case resumeScan
         case cancelScan
@@ -58,9 +59,9 @@ public struct IPCCommand: Codable, Sendable {
         // ── Windows-originated commands ───────────────────────────
         // These land on mac only when the schema needs to round-trip
         // them (cross-platform tooling, shared test corpus). The mac
-        // engine dispatcher returns a structured "not_implemented_yet"
-        // error for each; equivalent flows on macOS go through their
-        // pre-existing per-tab actions.
+        // engine implements the subset with equivalent engine-side semantics
+        // and returns structured "not_implemented_yet" errors for UI-owned
+        // flows that remain app-side on macOS.
         case planRestructure(libraryRoot: String)
         case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool)
         /// Reverse the most recent applyRestructure: move every file the last run
@@ -70,6 +71,7 @@ public struct IPCCommand: Codable, Sendable {
         case undoRestructure(libraryRoot: String)
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
+        case purgeExcluded(excludedPaths: [String])
         case trashFiles(fileIDs: [Int64])
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         case embedTextQuery(query: String, queryID: String)

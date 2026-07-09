@@ -850,7 +850,8 @@ public final class EngineClient {
                 resolvedPath = displayPath
             }
             await MainActor.run {
-                self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath, rescan: false))
+                self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
+                                      rescan: false, excludedPaths: nil))
             }
         }
     }
