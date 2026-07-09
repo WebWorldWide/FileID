@@ -3,14 +3,16 @@
 //! A file's path is not a stable identity — a rename or move orphans its
 //! catalog row (tags, embeddings, faces) and forces a full recompute on the
 //! next scan. A content hash is stable across moves, so a moved file can be
-//! re-bound to its existing row. BLAKE3 is faster than SHA-256 on commodity
-//! CPUs and pure-Rust (no C/C++ build dep). For large files we hash a
-//! composite of head + interior samples + tail + size rather than read
-//! gigabytes per file.
+//! re-bound to its existing row. The canonical recipe is SHA-256 so databases
+//! written by the Rust engine and the macOS Swift engine agree byte-for-byte.
+//! For large files we hash a composite of head + interior samples + tail + size
+//! rather than read gigabytes per file.
 #![allow(dead_code)] // wired into the rename/move rebind path within Phase 3.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+
+use sha2::Digest;
 
 /// Files at or below this size are hashed in full; larger files use the
 /// head+tail+size composite (reads 2 MB instead of the whole file). 16 MB
@@ -19,38 +21,71 @@ pub(crate) const FULL_HASH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes read from the head and (separately) the tail for the composite.
 const CHUNK: usize = 1024 * 1024;
 
-/// 32-byte BLAKE3 content identity for `path` (whose length is `size`). Same
+/// 32-byte SHA-256 content identity for `path` (whose length is `size`). Same
 /// bytes -> same hash, so a moved/renamed file re-binds to its existing
 /// catalog row instead of being recomputed. Opens long paths safely.
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
     hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, true)
 }
 
-/// Recipe-v1 composite: blake3(head ‖ tail ‖ size_le), NO interior samples.
-/// Kept for rename-heal compatibility — rows stamped by pre-interior-sample
-/// builds carry this digest for files above `FULL_HASH_MAX_BYTES`, so the
-/// heal lookup must be able to reproduce it or every over-cap file in an
-/// upgraded DB loses its row on its first post-upgrade move. New writes
-/// always use `content_hash`; the heal upsert re-stamps the current recipe.
-/// (At or below the threshold both recipes are the identical full hash.)
+/// Legacy Rust recipe: BLAKE3, and for over-cap files head ‖ tail ‖ size_le
+/// with no interior samples. Kept for rename-heal compatibility — rows stamped
+/// before the cross-platform SHA-256 switch carry this digest, so the heal lookup
+/// must be able to reproduce it or upgraded DBs lose rows on first post-upgrade
+/// move. New writes always use `content_hash`; the heal upsert re-stamps the
+/// current SHA-256 recipe.
 pub(crate) fn legacy_content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, false)
+    legacy_hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, false)
 }
 
-/// Testable core: `content_hash` with the full-vs-composite threshold
-/// injected so the composite path can be exercised on small fixtures.
-/// `interior_samples` selects the current recipe (true) or the recipe-v1
-/// head+tail+size composite (false) — see `legacy_content_hash`.
+/// Testable core: `content_hash` with the full-vs-composite threshold injected
+/// so the composite path can be exercised on small fixtures. `interior_samples`
+/// selects the current composite recipe; `legacy_blake3` reproduces the old Rust
+/// BLAKE3 digests for move-heal compatibility.
 fn hash_with_threshold(
     path: &Path,
     size: u64,
     full_max: u64,
     interior_samples: bool,
 ) -> std::io::Result<[u8; 32]> {
+    hash_with_threshold_impl(path, size, full_max, interior_samples, false)
+}
+
+fn legacy_hash_with_threshold(
+    path: &Path,
+    size: u64,
+    full_max: u64,
+    interior_samples: bool,
+) -> std::io::Result<[u8; 32]> {
+    hash_with_threshold_impl(path, size, full_max, interior_samples, true)
+}
+
+fn hash_with_threshold_impl(
+    path: &Path,
+    size: u64,
+    full_max: u64,
+    interior_samples: bool,
+    legacy_blake3: bool,
+) -> std::io::Result<[u8; 32]> {
     let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
-    let mut hasher = blake3::Hasher::new();
+    let mut sha = sha2::Sha256::new();
+    let mut blake = blake3::Hasher::new();
+    let mut update = |bytes: &[u8]| {
+        if legacy_blake3 {
+            blake.update(bytes);
+        } else {
+            sha.update(bytes);
+        }
+    };
     if size <= full_max {
-        std::io::copy(&mut f, &mut hasher)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            update(&buf[..n]);
+        }
     } else {
         // Clamp to the file size so a file between `full_max` and CHUNK
         // doesn't seek before the start (the head+tail overlap on such files
@@ -59,7 +94,7 @@ fn hash_with_threshold(
 
         let mut head = vec![0u8; span];
         let n = read_fill(&mut f, &mut head)?;
-        hasher.update(&head[..n]);
+        update(&head[..n]);
 
         // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
         // same-size files that happen to share their head+tail (camera bursts,
@@ -79,7 +114,7 @@ fn hash_with_threshold(
                 if f.seek(SeekFrom::Start(off)).is_ok() {
                     let mut mid = vec![0u8; INTERIOR_CHUNK];
                     let n = read_fill(&mut f, &mut mid)?;
-                    hasher.update(&mid[..n]);
+                    update(&mid[..n]);
                 }
             }
         }
@@ -87,12 +122,19 @@ fn hash_with_threshold(
         f.seek(SeekFrom::End(-(span as i64)))?;
         let mut tail = vec![0u8; span];
         let n = read_fill(&mut f, &mut tail)?;
-        hasher.update(&tail[..n]);
+        update(&tail[..n]);
 
         // Size disambiguates files that share head+tail but differ in the middle.
-        hasher.update(&size.to_le_bytes());
+        update(&size.to_le_bytes());
     }
-    Ok(*hasher.finalize().as_bytes())
+    if legacy_blake3 {
+        Ok(*blake.finalize().as_bytes())
+    } else {
+        let digest = sha.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        Ok(out)
+    }
 }
 
 /// Read until `buf` is full or EOF; returns bytes filled. A single `read`
@@ -124,6 +166,16 @@ mod tests {
         ));
         std::fs::write(&p, bytes).unwrap();
         p
+    }
+
+    #[test]
+    fn full_hash_is_sha256_for_cross_platform_parity() {
+        let p = tmp_with(b"abc");
+        assert_eq!(
+            hex::encode(content_hash(&p, 3).unwrap()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

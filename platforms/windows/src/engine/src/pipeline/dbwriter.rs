@@ -345,8 +345,9 @@ impl DbWriter {
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
                     // Recipe-v1 fallback (?4): over-cap rows stamped by builds
-                    // before the composite hash gained interior samples hold
-                    // blake3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
+                    // before the cross-platform SHA-256 recipe (and before the
+                    // composite hash gained interior samples) hold legacy
+                    // BLAKE3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
                     // those rows still heal; the upsert below re-stamps the
                     // current recipe. The read was hoisted out of the writer lock
                     // (computed into `legacy_hashes` before `conn.lock()`). (F-C1-025)
@@ -824,7 +825,7 @@ const HEAL_UPDATE_SQL: &str = r#"
 /// Heal ONLY when the candidate's previous path no longer exists on disk — a
 /// genuine rename/move always leaves its old path gone. This single gate is
 /// required for BOTH match kinds. A `content_hash`-only match also fires for a
-/// COEXISTING byte-identical COPY (two distinct files share one BLAKE3). A
+/// COEXISTING byte-identical COPY (two distinct files share one content hash). A
 /// `file_ref` (NTFS MFT id) match is only VOLUME-LOCAL, so two distinct files
 /// on different volumes (an external / SD / NAS drive scanned into the same
 /// library), or two hardlinks to one file, can collide on the same ref — the

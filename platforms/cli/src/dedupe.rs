@@ -90,10 +90,11 @@ type HashBuckets = Vec<(String, Vec<(i64, String, i64)>)>;
 /// `Some(empty)` (hashes present, no duplicate groups) — callers rely on that
 /// split. Buckets are hash-sorted, only >1-member groups, members in path order.
 fn exact_buckets(conn: &rusqlite::Connection) -> Result<Option<HashBuckets>> {
-    let total: i64 =
-        conn.query_row("SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL", [], |r| {
-            r.get(0)
-        })?;
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
     if total == 0 {
         return Ok(None);
     }
@@ -103,12 +104,22 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<Option<HashBuckets>> {
     )?;
     let mut buckets: BTreeMap<String, Vec<(i64, String, i64)>> = BTreeMap::new();
     let rows = stmt.query_map(params![], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
     })?;
     for row in rows.flatten() {
-        buckets.entry(row.0).or_default().push((row.1, row.2, row.3));
+        buckets
+            .entry(row.0)
+            .or_default()
+            .push((row.1, row.2, row.3));
     }
-    Ok(Some(buckets.into_iter().filter(|(_, v)| v.len() > 1).collect()))
+    Ok(Some(
+        buckets.into_iter().filter(|(_, v)| v.len() > 1).collect(),
+    ))
 }
 
 fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> {
@@ -117,7 +128,10 @@ fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> 
             .into_iter()
             .map(|(hash, members)| ExactGroup {
                 hash,
-                files: members.into_iter().map(|(_, path, size)| (path, size)).collect(),
+                files: members
+                    .into_iter()
+                    .map(|(_, path, size)| (path, size))
+                    .collect(),
             })
             .collect()
     }))
@@ -141,7 +155,11 @@ fn render_exact(ctx: &Ctx, groups: &Option<Vec<ExactGroup>>) {
                 println!(
                     "  {} {}",
                     ctx.bold(&format!("[{}]", &g.hash[..g.hash.len().min(12)])),
-                    ctx.dim(&format!("{} copies, {}", g.files.len(), human_size(g.files[0].1)))
+                    ctx.dim(&format!(
+                        "{} copies, {}",
+                        g.files.len(),
+                        human_size(g.files[0].1)
+                    ))
                 );
                 for (path, _) in &g.files {
                     println!("      {}", display_path(path));
@@ -173,7 +191,10 @@ struct SimilarGroup {
     files: Vec<(i64, String)>, // (id, path)
 }
 
-fn similar_groups(conn: &rusqlite::Connection, threshold: u32) -> Result<Option<Vec<SimilarGroup>>> {
+fn similar_groups(
+    conn: &rusqlite::Connection,
+    threshold: u32,
+) -> Result<Option<Vec<SimilarGroup>>> {
     let mut stmt =
         conn.prepare("SELECT id, path_text, phash FROM files WHERE phash IS NOT NULL")?;
     let rows: Vec<(i64, String, i64)> = stmt
@@ -201,10 +222,17 @@ fn similar_groups(conn: &rusqlite::Connection, threshold: u32) -> Result<Option<
         for b in 0..blocks {
             let lo = (b * 64) / blocks;
             let width = ((b + 1) * 64) / blocks - lo;
-            let mask: u64 = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+            let mask: u64 = if width == 64 {
+                u64::MAX
+            } else {
+                (1u64 << width) - 1
+            };
             let mut by_block: HashMap<u64, Vec<usize>> = HashMap::new();
             for (idx, row) in rows.iter().enumerate() {
-                by_block.entry(((row.2 as u64) >> lo) & mask).or_default().push(idx);
+                by_block
+                    .entry(((row.2 as u64) >> lo) & mask)
+                    .or_default()
+                    .push(idx);
             }
             for bucket in by_block.values() {
                 for (a, &i) in bucket.iter().enumerate() {
@@ -261,9 +289,16 @@ fn render_similar(ctx: &Ctx, groups: &Option<Vec<SimilarGroup>>, threshold: u32)
             println!("Near-duplicates (≤{threshold} bits): none.");
         }
         Some(groups) => {
-            println!("{} near-duplicate group(s) (≤{threshold} bits):", groups.len());
+            println!(
+                "{} near-duplicate group(s) (≤{threshold} bits):",
+                groups.len()
+            );
             for (i, g) in groups.iter().enumerate() {
-                println!("  {} {}", ctx.bold(&format!("group {}", i + 1)), ctx.dim(&format!("{} files", g.files.len())));
+                println!(
+                    "  {} {}",
+                    ctx.bold(&format!("group {}", i + 1)),
+                    ctx.dim(&format!("{} files", g.files.len()))
+                );
                 for (_, path) in &g.files {
                     println!("      {}", display_path(path));
                 }
@@ -330,7 +365,11 @@ fn apply_run(
     } else {
         exact_victims(&conn)?
     };
-    let signal = if use_similar { "perceptual hashes" } else { "content hashes" };
+    let signal = if use_similar {
+        "perceptual hashes"
+    } else {
+        "content hashes"
+    };
 
     if !set.available {
         if ctx.json {
@@ -363,7 +402,11 @@ fn apply_run(
         return Ok(());
     }
 
-    let method = if delete { "delete permanently" } else { "move to Trash/Recycle Bin" };
+    let method = if delete {
+        "delete permanently"
+    } else {
+        "move to Trash/Recycle Bin"
+    };
     if ctx.json && dry_run {
         print_json(&serde_json::json!({
             "command": "dedupe", "mode": "apply", "dryRun": true, "available": true,
@@ -384,13 +427,21 @@ fn apply_run(
     if !ctx.json {
         println!(
             "{} {} file(s) would {} ({} reclaimable):",
-            if dry_run { ctx.bold("DRY RUN —") } else { ctx.bold("Will") },
+            if dry_run {
+                ctx.bold("DRY RUN —")
+            } else {
+                ctx.bold("Will")
+            },
             victims.len(),
             method,
             human_size(total_bytes),
         );
         for v in &victims {
-            println!("  {}  {}", display_path(&v.path), ctx.dim(&human_size(v.size)));
+            println!(
+                "  {}  {}",
+                display_path(&v.path),
+                ctx.dim(&human_size(v.size))
+            );
         }
     }
 
@@ -408,7 +459,10 @@ fn apply_run(
     if use_similar {
         if !ctx.json {
             println!();
-            println!("{}", ctx.bold("WARNING: --similar --apply can over-delete."));
+            println!(
+                "{}",
+                ctx.bold("WARNING: --similar --apply can over-delete.")
+            );
             println!(
                 "  Near-duplicate groups are built by {} of perceptual-hash neighbors:",
                 ctx.bold("transitive chaining")
@@ -440,12 +494,40 @@ fn apply_run(
         }
     }
 
+    if !delete && trash_unavailable_on_this_platform() {
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "dedupe", "mode": "apply", "aborted": true,
+                "reason": "trash_unavailable_on_platform",
+                "message": "recoverable trash is unavailable for the Rust engine on this platform; re-run with --delete for permanent removal",
+            }));
+        } else {
+            println!(
+                "{} Recoverable Trash is unavailable for the Rust engine on this platform.",
+                ctx.bold("Refusing:")
+            );
+            println!(
+                "  Re-run with {} only if you want permanent deletion.",
+                ctx.bold("--delete")
+            );
+        }
+        return Ok(());
+    }
+
     let prompt = format!(
         "{} {} file(s) ({})? {}",
-        if delete { "Permanently delete" } else { "Trash" },
+        if delete {
+            "Permanently delete"
+        } else {
+            "Trash"
+        },
         victims.len(),
         human_size(total_bytes),
-        if delete { "This CANNOT be undone." } else { "(recoverable from Trash)" },
+        if delete {
+            "This CANNOT be undone."
+        } else {
+            "(recoverable from Trash)"
+        },
     );
     if !ctx.confirm(&prompt, yes) {
         if ctx.json {
@@ -454,7 +536,10 @@ fn apply_run(
                 "reason": "not_confirmed",
             }));
         } else {
-            println!("Aborted — no files removed. {}", ctx.dim("(pass --yes to skip the prompt)"));
+            println!(
+                "Aborted — no files removed. {}",
+                ctx.dim("(pass --yes to skip the prompt)")
+            );
         }
         return Ok(());
     }
@@ -508,6 +593,16 @@ struct ApplyResult {
     reclaimed: i64,
 }
 
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn trash_unavailable_on_this_platform() -> bool {
+    true
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn trash_unavailable_on_this_platform() -> bool {
+    false
+}
+
 /// Trash (default) or permanently delete each victim, then drop its `files`
 /// row (mirroring the engine's `trashFiles` handler: filesystem op first, DB
 /// row removed only for the ones that actually left disk). FTS / embedding rows
@@ -527,7 +622,12 @@ fn remove_victims(
         fileid_engine::shell::trash::trash(&paths)
     };
 
-    let mut result = ApplyResult { removed: 0, failed: 0, unsupported: 0, reclaimed: 0 };
+    let mut result = ApplyResult {
+        removed: 0,
+        failed: 0,
+        unsupported: 0,
+        reclaimed: 0,
+    };
     let tx = conn.transaction()?;
     for (v, ok) in victims.iter().zip(outcomes) {
         if ok {
@@ -548,14 +648,20 @@ fn remove_victims(
 /// (kept) one. Keeper = lexicographically-first path (deterministic).
 fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
     let Some(buckets) = exact_buckets(conn)? else {
-        return Ok(VictimSet { available: false, victims: Vec::new() });
+        return Ok(VictimSet {
+            available: false,
+            victims: Vec::new(),
+        });
     };
     let victims = buckets
         .into_iter()
         .flat_map(|(_, members)| members.into_iter().skip(1)) // keep first, remove the rest
         .map(|(id, path, size)| Victim { id, path, size })
         .collect();
-    Ok(VictimSet { available: true, victims })
+    Ok(VictimSet {
+        available: true,
+        victims,
+    })
 }
 
 /// Near-duplicate victims: every member of each phash-connected component
@@ -563,11 +669,16 @@ fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
 fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<VictimSet> {
     let set = similar_groups(conn, threshold)?;
     let Some(groups) = set else {
-        return Ok(VictimSet { available: false, victims: Vec::new() });
+        return Ok(VictimSet {
+            available: false,
+            victims: Vec::new(),
+        });
     };
     let mut size_stmt = conn.prepare("SELECT id, size_bytes FROM files WHERE phash IS NOT NULL")?;
     let sizes: BTreeMap<i64, i64> = size_stmt
-        .query_map(params![], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .query_map(params![], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?
         .filter_map(Result::ok)
         .collect();
     let victims = groups
@@ -582,5 +693,8 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
             Victim { id, path, size }
         })
         .collect();
-    Ok(VictimSet { available: true, victims })
+    Ok(VictimSet {
+        available: true,
+        victims,
+    })
 }

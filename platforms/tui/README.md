@@ -1,8 +1,8 @@
 # FileID TUI (`fileid-tui`)
 
 A cross-platform **terminal UI** for FileID — browse your indexed library,
-inspect file detail, view person clusters, duplicate groups, and a read-only
-restructure plan, all from the terminal. No cloud, no telemetry. Built with
+inspect file detail, view person clusters, duplicate groups, Deep Analyze status,
+and a read-only restructure plan, all from the terminal. No cloud, no telemetry. Built with
 [ratatui](https://ratatui.rs) + [crossterm](https://crates.io/crates/crossterm)
 (pure-Rust, no system libraries).
 
@@ -75,7 +75,7 @@ signature gold/lavender/cyan/pink accent palette.
 | **Cleanup** | ✅ working | exact-duplicate groups by BLAKE3 `content_hash`, master/detail (group → member paths) |
 | **Restructure** | ✅ working (read-only) | in-process `restructure::classify` preview — proposed source → destination, category, confidence tier |
 | **Settings** | ✅ working | resolved DB path, row/tag/people/dup counts, engine wiring, stubbed-feature notes |
-| _(People/Cleanup/Restructure are also a single tab strip — no 6th screen; "Deep Analyze" is folded into Settings notes for the MVP)_ | | |
+| **Deep Analyze** | ⚠️ companion-only | explains the desktop VLM review workflow; model install remains available from the TUI |
 
 The status line at the bottom is driven by a **live event stream**: a
 background thread streams progress messages over an `mpsc` channel into the
@@ -126,8 +126,8 @@ model-dependent operations are intentionally deferred and labelled in Settings.
   people is a separate `runFaceClustering` engine command — not yet triggerable
   in-TUI.
 - **Restructure apply.** The plan is a **read-only preview**; nothing is moved.
-- **Semantic search, people merge/rename, Deep Analyze.** App-side / model
-  features not in the terminal MVP.
+- **Semantic search, people merge/rename, Deep Analyze apply/review.** App-side / model
+  features not in the terminal MVP; the Deep Analyze tab is currently a companion handoff.
 
 ## Verify (same gate as CI)
 

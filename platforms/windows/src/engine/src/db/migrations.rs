@@ -436,8 +436,8 @@ CREATE TABLE IF NOT EXISTS usn_state (
 );
 "#;
 
-// v8: rename / move identity. `content_hash` is BLAKE3 (full for ≤16 MB; a
-// head+interior-samples+tail+size composite above — see util::content_hash.
+// v8: rename / move identity. `content_hash` is the cross-platform SHA-256
+// recipe (full for ≤16 MB; head+interior-samples+tail+size composite above) — see util::content_hash.
 // The rename-heal also matches the recipe-v1 head+tail+size digest stamped by
 // pre-interior-sample builds, then re-stamps the current recipe). `file_ref`
 // is the platform's volume-local file id (NTFS MFT reference on Windows via
