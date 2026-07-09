@@ -301,6 +301,7 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
             root_path: root.to_string_lossy().into_owned(),
             root_display: None,
             rescan,
+            excluded_paths: None,
         }),
     };
     let line = serde_json::to_string(&cmd).context("serialize startScan command")?;
