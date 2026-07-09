@@ -9,9 +9,10 @@
 //! the AI-model download (`fileid models download`): models are the weights, the
 //! runtime is the inference library that loads them.
 //!
-//! Commercial-clean: ONNX Runtime is MIT-licensed. The install downloads through
-//! the engine's single audited, CA-pinned network path (egress restricted to its
-//! redirect allow-list) — see `shared/docs/RUNTIME.md` + `shared/docs/DECISIONS.md`.
+//! Commercial-clean: ONNX Runtime is MIT-licensed. FileID does not ship a
+//! default third-party runtime download URL here; install via Homebrew or a
+//! user-supplied HuggingFace mirror (`FILEID_ORT_DYLIB_URL`) so network egress
+//! stays within the project privacy rule.
 
 use anyhow::Result;
 
@@ -20,31 +21,13 @@ use crate::context::{print_json, Ctx};
 // ── Pinned ONNX Runtime source (macOS arm64) ────────────────────────────────
 //
 // `ort 2.0.0-rc.10` targets ONNX Runtime 1.22.0 (ort-sys `ONNXRUNTIME_VERSION`)
-// and hard-panics if the loaded dylib's minor version is < 22, so the runtime we
-// install must be 1.22.x. We fetch the official, MIT-licensed ONNX Runtime macOS
-// arm64 release `.tgz` from github.com — already on the downloader's source +
-// redirect allow-list, so this is NOT a new egress host — through the engine's
-// audited, CA-pinned client, SHA256-verify the archive, extract it with the
-// system `tar` (no tar/gzip crate added), and install the contained
-// `libonnxruntime.<ver>.dylib` as `runtime_dir()/libonnxruntime.dylib`.
-//
-// HF-SWAP HOOK: to keep egress HuggingFace-only, mirror the SAME artifact on
-// huggingface.co and change `PINNED_DYLIB_URL` (+ the matching `PINNED_*_SHA256`)
-// to that URL — nothing else changes (huggingface.co is already allow-listed,
-// and a bare `.dylib` mirror also works: the installer branches on the URL
-// extension, see `url_is_tarball`).
-//
-// The `FILEID_ORT_DYLIB_URL` (+ optional `FILEID_ORT_DYLIB_SHA256`) env override
-// still wins over these pins for a self-hoster; the host must be allow-listed.
-//
-// Pinned only on macOS arm64 (the arch where `ort`'s `download-binaries` ships a
-// static-only lib); other macOS arches keep `None` and fall back to the env
-// override / a local Homebrew copy — kept `None`, not absent, so they're not
-// dead constants on those targets.
+// and hard-panics if the loaded dylib's minor version is < 22, so any runtime
+// installed here must be 1.22.x or newer. The project privacy rule allows only
+// user-initiated model/runtime egress to huggingface.co; no GitHub fallback is
+// hardcoded. Self-hosters can set `FILEID_ORT_DYLIB_URL` to a HuggingFace-hosted
+// `.tgz` or bare `.dylib` plus `FILEID_ORT_DYLIB_SHA256`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const PINNED_DYLIB_URL: Option<&str> = Some(
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz",
-);
+const PINNED_DYLIB_URL: Option<&str> = None;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const PINNED_DYLIB_SHA256: Option<&str> =
     Some("cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07");
@@ -76,6 +59,7 @@ struct RuntimeSource {
 
 /// The download source `install` uses: the `FILEID_ORT_DYLIB_URL` env override
 /// (with optional `FILEID_ORT_DYLIB_SHA256`) wins over the pinned constants.
+/// Downloads are still refused unless the URL host is HuggingFace-owned.
 #[cfg(target_os = "macos")]
 fn configured_source() -> Option<RuntimeSource> {
     if let Some(url) = std::env::var_os("FILEID_ORT_DYLIB_URL") {
@@ -149,16 +133,12 @@ pub fn status(ctx: &Ctx) -> Result<()> {
                 ctx.dim("Full-ML `fileid scan --models` can't load models until it's installed.")
             );
             println!("  {}", ctx.bold("To install (any one):"));
-            println!("    {}", ctx.bold(rt::INSTALL_COMMAND));
             println!("    brew install onnxruntime");
-            println!("    shared/scripts/install_onnxruntime_macos.sh");
+            println!("    set FILEID_ORT_DYLIB_URL to a HuggingFace-hosted ONNX Runtime dylib/archive, then run {}", ctx.bold(rt::INSTALL_COMMAND));
         }
     }
     if let Some(s) = &source {
-        println!(
-            "  {}",
-            ctx.dim(&format!("Download source: {}", s.url))
-        );
+        println!("  {}", ctx.dim(&format!("Download source: {}", s.url)));
         if let Some(sha) = &s.archive_sha256 {
             println!("  {}", ctx.dim(&format!("Pinned SHA256:   {sha}")));
         }
@@ -198,7 +178,12 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
                     ctx.bold("ONNX Runtime already available:"),
                     ctx.dim(&p.display().to_string())
                 );
-                println!("  {}", ctx.dim("Pass --force to reinstall the pinned build into the engine runtime dir."));
+                println!(
+                    "  {}",
+                    ctx.dim(
+                        "Pass --force to reinstall the pinned build into the engine runtime dir."
+                    )
+                );
             }
             return Ok(());
         }
@@ -214,7 +199,10 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
     //    overridden runtime via the engine's CA-pinned, allow-listed path. ──
     if let Some(source) = configured_source() {
         if !ctx.confirm(
-            &format!("Download ONNX Runtime from {}? (one-time, ~10 MB)", source.url),
+            &format!(
+                "Download ONNX Runtime from {}? (one-time, ~10 MB)",
+                source.url
+            ),
             yes,
         ) {
             println!("Aborted. (nothing downloaded)");
@@ -223,7 +211,11 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        ctx.progress(&format!("  {} {}", ctx.bold("Downloading ONNX Runtime"), ctx.dim(&source.url)));
+        ctx.progress(&format!(
+            "  {} {}",
+            ctx.bold("Downloading ONNX Runtime"),
+            ctx.dim(&source.url)
+        ));
         provision_from_source(&source, &target)?;
         return report_installed(ctx, &target, "downloaded");
     }
@@ -254,8 +246,7 @@ fn copy_into_place(src: &std::path::Path, target: &std::path::Path) -> Result<()
     let parent = target
         .parent()
         .ok_or_else(|| anyhow::anyhow!("install target {} has no parent", target.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
     let tmp = unique_temp_file(parent);
     std::fs::copy(src, &tmp)
@@ -284,7 +275,11 @@ fn provision_from_source(source: &RuntimeSource, target: &std::path::Path) -> Re
 /// `?query`/`#fragment` so a signed-URL mirror still classifies correctly.
 #[cfg(target_os = "macos")]
 fn url_is_tarball(url: &str) -> bool {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     path.ends_with(".tgz") || path.ends_with(".tar.gz")
 }
 
@@ -297,7 +292,8 @@ fn download_and_extract(source: &RuntimeSource, target: &std::path::Path) -> Res
     use anyhow::Context as _;
 
     let tmp = unique_temp_dir();
-    std::fs::create_dir_all(&tmp).with_context(|| format!("creating temp dir {}", tmp.display()))?;
+    std::fs::create_dir_all(&tmp)
+        .with_context(|| format!("creating temp dir {}", tmp.display()))?;
 
     let outcome = (|| -> Result<()> {
         let archive = tmp.join("onnxruntime.tgz");
@@ -311,7 +307,8 @@ fn download_and_extract(source: &RuntimeSource, target: &std::path::Path) -> Res
         })?;
 
         if let Some(expected) = source.extracted_dylib_sha256.as_deref() {
-            verify_sha256(&dylib, expected).context("verifying the extracted ONNX Runtime dylib")?;
+            verify_sha256(&dylib, expected)
+                .context("verifying the extracted ONNX Runtime dylib")?;
         }
 
         copy_into_place(&dylib, target)
@@ -360,7 +357,9 @@ fn locate_extracted_dylib(root: &std::path::Path) -> Option<std::path::PathBuf> 
         if path_has_dsym_component(path) {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !(name.starts_with("libonnxruntime.") && name.ends_with(".dylib")) {
             continue;
         }
@@ -383,11 +382,30 @@ fn path_has_dsym_component(path: &std::path::Path) -> bool {
         .any(|c| c.as_os_str().to_str().is_some_and(|s| s.ends_with(".dSYM")))
 }
 
+#[cfg(target_os = "macos")]
+fn is_huggingface_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "huggingface.co"
+        || host.ends_with(".huggingface.co")
+        || host == "hf.co"
+        || host.ends_with(".hf.co")
+}
+
 /// Download a file to `dest` through the engine's audited, CA-pinned downloader,
 /// rendering a simple stderr progress line. `sha256` (when set) is verified by
 /// the downloader before the atomic rename, so a mismatched artifact never lands.
 #[cfg(target_os = "macos")]
 fn download_artifact(url: &str, sha256: Option<&str>, dest: &std::path::Path) -> Result<()> {
+    if !is_huggingface_url(url) {
+        anyhow::bail!("runtime downloads must come from huggingface.co or hf.co; got {url}");
+    }
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -493,7 +511,10 @@ fn report_installed(ctx: &Ctx, target: &std::path::Path, how: &str) -> Result<()
             ctx.dim(&format!("({how})")),
             ctx.dim(&target.display().to_string()),
         );
-        println!("  {}", ctx.dim("Run `fileid scan <folder> --models` for a full AI scan."));
+        println!(
+            "  {}",
+            ctx.dim("Run `fileid scan <folder> --models` for a full AI scan.")
+        );
     }
     Ok(())
 }
@@ -504,11 +525,10 @@ fn no_source_guidance(ctx: &Ctx) {
         print_json(&serde_json::json!({
             "command": "runtime", "action": "install",
             "installed": false, "error": "no_source_configured",
-            "message": "no pinned download source yet; install via Homebrew or the shell script",
+            "message": "no HuggingFace runtime source configured; install via Homebrew or set FILEID_ORT_DYLIB_URL",
             "options": [
                 "brew install onnxruntime",
-                "shared/scripts/install_onnxruntime_macos.sh",
-                "set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a 1.22.x .tgz or bare dylib",
+                "set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a HuggingFace-hosted 1.22.x .tgz or bare dylib",
             ],
         }));
         return;
@@ -520,13 +540,8 @@ fn no_source_guidance(ctx: &Ctx) {
         ctx.dim("(simplest; the engine finds /opt/homebrew/lib/libonnxruntime.dylib)")
     );
     println!(
-        "  {}   {}",
-        ctx.bold("shared/scripts/install_onnxruntime_macos.sh"),
-        ctx.dim("(downloads the official MIT ONNX Runtime 1.22.0, verifies, installs)")
-    );
-    println!(
         "  {}",
-        ctx.dim("or set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a 1.22.x .tgz or bare dylib")
+        ctx.dim("or set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a HuggingFace-hosted 1.22.x .tgz or bare dylib")
     );
     println!(
         "  {}",
@@ -624,7 +639,11 @@ mod tests {
             .join("Resources")
             .join("DWARF");
         std::fs::create_dir_all(&dwarf).unwrap();
-        std::fs::write(dwarf.join("libonnxruntime.1.22.0.dylib"), b"dwarf-not-the-real-dylib").unwrap();
+        std::fs::write(
+            dwarf.join("libonnxruntime.1.22.0.dylib"),
+            b"dwarf-not-the-real-dylib",
+        )
+        .unwrap();
 
         let found = locate_extracted_dylib(&dir).expect("a core dylib must be located");
         assert_eq!(
@@ -666,7 +685,11 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "a successful install must leave no temp file: {names:?}");
+        assert_eq!(
+            names.len(),
+            2,
+            "a successful install must leave no temp file: {names:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -691,7 +714,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert!(leftovers.is_empty(), "a failed install must clean up its temp file: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "a failed install must clean up its temp file: {leftovers:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -699,10 +725,34 @@ mod tests {
     #[test]
     fn url_is_tarball_detects_archives_vs_bare_dylib() {
         assert!(url_is_tarball(
-            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz"
+            "https://huggingface.co/fileid/runtime/resolve/main/onnxruntime-osx-arm64-1.22.0.tgz"
         ));
         assert!(url_is_tarball("https://example.test/foo.tar.gz"));
-        assert!(url_is_tarball("https://example.test/foo.TGZ?token=abc#frag"));
-        assert!(!url_is_tarball("https://example.test/libonnxruntime.dylib"));
+        assert!(url_is_tarball(
+            "https://example.test/foo.TGZ?token=abc#frag"
+        ));
+        assert!(!url_is_tarball(
+            "https://huggingface.co/fileid/runtime/resolve/main/libonnxruntime.dylib"
+        ));
+    }
+
+    #[test]
+    fn runtime_download_hosts_are_huggingface_only() {
+        assert!(is_huggingface_url(
+            "https://huggingface.co/fileid/runtime/resolve/main/libonnxruntime.dylib"
+        ));
+        assert!(is_huggingface_url(
+            "https://cdn-lfs.huggingface.co/repos/foo"
+        ));
+        assert!(is_huggingface_url(
+            "https://hf.co/fileid/runtime/resolve/main/runtime.tgz"
+        ));
+        assert!(!is_huggingface_url(
+            "http://huggingface.co/fileid/runtime.tgz"
+        ));
+        assert!(!is_huggingface_url(
+            "https://github.com/microsoft/onnxruntime/releases/foo.tgz"
+        ));
+        assert!(!is_huggingface_url("https://evilhuggingface.co/foo.tgz"));
     }
 }

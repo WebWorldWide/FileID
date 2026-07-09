@@ -103,7 +103,9 @@ public enum DeepAnalyzeRunner {
         database: Database,
         sink: IPCSink,
         scope: DeepAnalyzeScope,
-        modelKind: AIModelKind
+        modelKind: AIModelKind,
+        tagsOnly: Bool = false,
+        proposeRenames: Bool = true
     ) async {
         let started = Date()
         let modelKey = modelKind.rawValue
@@ -306,15 +308,15 @@ public enum DeepAnalyzeRunner {
                 do {
                     try await persist(database: database,
                                       fileID: target.id,
-                                      description: result.description,
-                                      proposedName: result.proposedName,
+                                      description: tagsOnly ? nil : result.description,
+                                      proposedName: proposeRenames && !tagsOnly ? result.proposedName : nil,
                                       tags: result.tags,
                                       modelKey: modelKey)
                     processed += 1
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
                         description: result.description,
-                        proposedName: result.proposedName,
+                        proposedName: proposeRenames && !tagsOnly ? result.proposedName : nil,
                         modelKind: modelKey
                     )))
                 } catch {

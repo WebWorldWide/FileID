@@ -106,7 +106,10 @@ pub fn render(f: &mut Frame, app: &App) {
 /// the terminal stand-in for the mockup's `border-bottom:2px solid #FFCC00`.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let mut spans: Vec<Span> = Vec::with_capacity(Tab::ALL.len() * 2 + 2);
-    spans.push(Span::styled("FileID", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(
+        "FileID",
+        Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+    ));
     spans.push(Span::raw("   "));
     let mut col = area.x.saturating_add(9); // "FileID" (6) + 3-space gap
     let mut active: Option<(u16, u16)> = None;
@@ -114,7 +117,10 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         let label = format!("{} {}", i + 1, t.title());
         let w = label.chars().count() as u16;
         if *t == app.tab {
-            spans.push(Span::styled(label, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                label,
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
             active = Some((col, w));
         } else {
             spans.push(Span::styled(label, Style::default().fg(TAB_OFF)));
@@ -125,22 +131,40 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
             col = col.saturating_add(3);
         }
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), Rect { height: 1, ..area });
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect { height: 1, ..area },
+    );
 
     if area.height < 2 {
         return;
     }
-    let row1 = Rect { y: area.y + 1, height: 1, ..area };
+    let row1 = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
     let rule = "─".repeat(area.width as usize);
-    f.render_widget(Paragraph::new(Span::styled(rule, Style::default().fg(DIVIDER))), row1);
+    f.render_widget(
+        Paragraph::new(Span::styled(rule, Style::default().fg(DIVIDER))),
+        row1,
+    );
     if let Some((sx, w)) = active {
         let right = area.x.saturating_add(area.width);
         if w > 0 && sx < right {
             let seg_w = w.min(right - sx);
-            let seg = Rect { x: sx, y: area.y + 1, width: seg_w, height: 1 };
+            let seg = Rect {
+                x: sx,
+                y: area.y + 1,
+                width: seg_w,
+                height: 1,
+            };
             let bar = "─".repeat(seg_w as usize);
             f.render_widget(
-                Paragraph::new(Span::styled(bar, Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
+                Paragraph::new(Span::styled(
+                    bar,
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                )),
                 seg,
             );
         }
@@ -163,6 +187,7 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
         Tab::Library => render_library(f, app, area),
         Tab::People => render_people(f, app, area),
         Tab::Cleanup => render_cleanup(f, app, area),
+        Tab::DeepAnalyze => render_deep_analyze(f, app, area),
         Tab::Restructure => render_restructure(f, app, area),
         Tab::Settings => render_settings(f, app, area),
     }
@@ -187,14 +212,26 @@ fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
         return area;
     }
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    let pill = Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD);
+    let pill = Style::default()
+        .fg(Color::Black)
+        .bg(GOLD)
+        .add_modifier(Modifier::BOLD);
     let line = Line::from(vec![
         Span::styled(" ⚠ ", pill),
-        Span::styled("  AI models not installed — press ", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  AI models not installed — press ",
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" D ", pill),
-        Span::styled(" to download (~1.6 GB). Tags, faces & search need them.", Style::default().fg(FG)),
+        Span::styled(
+            " to download (~1.6 GB). Tags, faces & search need them.",
+            Style::default().fg(FG),
+        ),
     ]);
-    f.render_widget(Paragraph::new(line).style(Style::default().bg(SEL_BG)), rows[0]);
+    f.render_widget(
+        Paragraph::new(line).style(Style::default().bg(SEL_BG)),
+        rows[0],
+    );
     rows[1]
 }
 
@@ -215,31 +252,66 @@ fn render_download_gauge(f: &mut Frame, dl: &DownloadState, area: Rect) -> Rect 
     f.render_widget(Block::default().style(Style::default().bg(SEL_BG)), band);
 
     let inner = if band_h == 3 {
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)]).split(band)
+        Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(band)
     } else {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(band)
     };
 
     let title = if dl.done {
         Line::from(vec![
-            Span::styled(" ✓ ", Style::default().fg(Color::Black).bg(GREEN).add_modifier(Modifier::BOLD)),
-            Span::styled("  AI models installed — press ", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
-            Span::styled(" s ", Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ✓ ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  AI models installed — press ",
+                Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " s ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(GOLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to scan with full AI", Style::default().fg(GREEN)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" ⟳ ", Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled("  Installing AI models…", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ⟳ ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(GOLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Installing AI models…",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
         ])
     };
-    f.render_widget(Paragraph::new(title).style(Style::default().bg(SEL_BG)), inner[0]);
+    f.render_widget(
+        Paragraph::new(title).style(Style::default().bg(SEL_BG)),
+        inner[0],
+    );
 
     let bar = if dl.done { GREEN } else { GOLD };
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(bar).bg(GAUGE_TRACK))
         .percent(pct)
-        .label(Span::styled(format!("{pct}%"), Style::default().fg(FG).add_modifier(Modifier::BOLD)));
+        .label(Span::styled(
+            format!("{pct}%"),
+            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        ));
     f.render_widget(gauge, inner[1]);
 
     if band_h == 3 {
@@ -259,15 +331,24 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
     let step = |n: &'static str, color: Color, head: &'static str, sub: &'static str| {
         vec![
             Line::from(vec![
-                Span::styled(format!("  {n}  "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {n}  "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(head, Style::default().fg(FG)),
             ]),
-            Line::from(Span::styled(format!("     {sub}"), Style::default().fg(FAINT))),
+            Line::from(Span::styled(
+                format!("     {sub}"),
+                Style::default().fg(FAINT),
+            )),
         ]
     };
 
     let mut lines = vec![
-        Line::from(Span::styled("Welcome to FileID", Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Welcome to FileID",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "Point FileID at a folder and it builds one searchable library that",
@@ -276,17 +357,38 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("understands what's ", Style::default().fg(DIM)),
             Span::styled("inside", Style::default().fg(SECONDARY)),
-            Span::styled(" your files — photos, PDFs, videos, docs.", Style::default().fg(DIM)),
+            Span::styled(
+                " your files — photos, PDFs, videos, docs.",
+                Style::default().fg(DIM),
+            ),
         ]),
         Line::from(""),
     ];
-    lines.extend(step("1", GOLD, "Press  s  to pick a folder to scan", "a file browser opens — no typing needed"));
-    lines.extend(step("2", CYAN, "Wait while it reads your files", "progress shows on the status line below"));
-    lines.extend(step("3", LAVENDER, "Browse, search, and tidy up", "switch tabs with Tab or the number keys"));
+    lines.extend(step(
+        "1",
+        GOLD,
+        "Press  s  to pick a folder to scan",
+        "a file browser opens — no typing needed",
+    ));
+    lines.extend(step(
+        "2",
+        CYAN,
+        "Wait while it reads your files",
+        "progress shows on the status line below",
+    ));
+    lines.extend(step(
+        "3",
+        LAVENDER,
+        "Browse, search, and tidy up",
+        "switch tabs with Tab or the number keys",
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("● ", Style::default().fg(GREEN)),
-        Span::styled("Everything stays on this computer. No cloud, no telemetry.", Style::default().fg(DIM)),
+        Span::styled(
+            "Everything stays on this computer. No cloud, no telemetry.",
+            Style::default().fg(DIM),
+        ),
     ]));
 
     if app.scratch {
@@ -299,17 +401,25 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             "what you scan here. Open another with  --db <path>  (e.g. the desktop app's).",
             Style::default().fg(FAINT),
         )));
-        lines.push(Line::from(Span::styled(format!("scratch: {}", app.db_label), Style::default().fg(FAINT))));
+        lines.push(Line::from(Span::styled(
+            format!("scratch: {}", app.db_label),
+            Style::default().fg(FAINT),
+        )));
     } else {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(format!("Resolved path: {}", app.db_label), Style::default().fg(FAINT))));
+        lines.push(Line::from(Span::styled(
+            format!("Resolved path: {}", app.db_label),
+            Style::default().fg(FAINT),
+        )));
         lines.push(Line::from(Span::styled(
             "Or index from the CLI:  fileid scan <path> --models  …then reload with  r",
             Style::default().fg(FAINT),
         )));
     }
 
-    let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(focus_block("FileID"));
+    let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(focus_block("FileID"));
     f.render_widget(p, area);
 }
 
@@ -342,15 +452,26 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
             vec![
                 Span::styled("⌕ ", Style::default().fg(CYAN)),
                 Span::styled(format!("/{}", app.search), Style::default().fg(FG)),
-                Span::styled(format!("   {}", plural(visible.len(), "match", "matches")), Style::default().fg(DIM)),
+                Span::styled(
+                    format!("   {}", plural(visible.len(), "match", "matches")),
+                    Style::default().fg(DIM),
+                ),
             ]
         } else {
             vec![
                 Span::styled("⌕ ", Style::default().fg(CYAN)),
-                Span::styled("Type to search by name or what's inside…", Style::default().fg(FAINT)),
+                Span::styled(
+                    "Type to search by name or what's inside…",
+                    Style::default().fg(FAINT),
+                ),
             ]
         };
-        render_context(f, rows[0], left, Some(plural(visible.len(), "file", "files")));
+        render_context(
+            f,
+            rows[0],
+            left,
+            Some(plural(visible.len(), "file", "files")),
+        );
     }
 
     // Empty / no-match state: a full-width panel that says what to do, instead of
@@ -363,7 +484,10 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
                 rows[1],
                 "Files",
                 "No matches.",
-                &format!("Nothing in this library matches \u{201c}{}\u{201d}.", app.search),
+                &format!(
+                    "Nothing in this library matches \u{201c}{}\u{201d}.",
+                    app.search
+                ),
                 Some(cta("Esc", "clear the search")),
             );
         } else {
@@ -380,7 +504,8 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let cursor = app.cursor_clamped(visible.len());
-    let cols = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
     let cw = content_width(cols[0]);
     render_calm_list(f, cols[0], "Files", &visible, cursor, |fr| file_row(cw, fr));
     render_file_detail(f, app, cols[1], visible.get(cursor).copied());
@@ -389,21 +514,40 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
 fn render_file_detail(f: &mut Frame, app: &App, area: Rect, file: Option<&crate::data::FileRow>) {
     let block = titled_block("Preview", CYAN);
     let Some(fr) = file else {
-        let p = Paragraph::new(Span::styled("Select a file to see its details.", Style::default().fg(DIM)))
-            .block(block);
+        let p = Paragraph::new(Span::styled(
+            "Select a file to see its details.",
+            Style::default().fg(DIM),
+        ))
+        .block(block);
         f.render_widget(p, area);
         return;
     };
 
     let mut lines = vec![
-        Line::from(Span::styled("▦  no inline preview in the terminal", Style::default().fg(FAINT))),
+        Line::from(Span::styled(
+            "▦  no inline preview in the terminal",
+            Style::default().fg(FAINT),
+        )),
         Line::from(""),
-        Line::from(Span::styled(basename(&fr.path), Style::default().fg(GOLD).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            basename(&fr.path),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        )),
         Line::from(Span::styled(short(&fr.path), Style::default().fg(FAINT))),
         Line::from(""),
-        kv("Kind", &format!("{} · {}", friendly_kind(&fr.kind), fr.extension.to_uppercase())),
+        kv(
+            "Kind",
+            &format!(
+                "{} · {}",
+                friendly_kind(&fr.kind),
+                fr.extension.to_uppercase()
+            ),
+        ),
         kv("Size", &human_size(fr.size)),
-        kv("Modified", &fr.modified.map_or_else(|| "—".into(), fmt_date)),
+        kv(
+            "Modified",
+            &fr.modified.map_or_else(|| "—".into(), fmt_date),
+        ),
     ];
     let contains = match (fr.has_text, fr.has_faces) {
         (true, true) => Some("text · faces"),
@@ -418,17 +562,28 @@ fn render_file_detail(f: &mut Frame, app: &App, area: Rect, file: Option<&crate:
     lines.push(Line::from(""));
     lines.push(section("Tags"));
     match app.data.tags.get(&fr.id).filter(|t| !t.is_empty()) {
-        Some(tags) => lines.push(Line::from(Span::styled(tags.join("  ·  "), Style::default().fg(LAVENDER)))),
-        None => lines.push(Line::from(Span::styled("none yet", Style::default().fg(FAINT)))),
+        Some(tags) => lines.push(Line::from(Span::styled(
+            tags.join("  ·  "),
+            Style::default().fg(LAVENDER),
+        ))),
+        None => lines.push(Line::from(Span::styled(
+            "none yet",
+            Style::default().fg(FAINT),
+        ))),
     }
 
     if let Some(snip) = app.data.snippets.get(&fr.id) {
         lines.push(Line::from(""));
         lines.push(section("What's in it"));
-        lines.push(Line::from(Span::styled(snip.clone(), Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled(
+            snip.clone(),
+            Style::default().fg(DIM),
+        )));
     }
 
-    let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(block);
+    let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(block);
     f.render_widget(p, area);
 }
 
@@ -438,7 +593,10 @@ fn render_people(f: &mut Frame, app: &App, area: Rect) {
         render_context(
             f,
             rows[0],
-            vec![Span::styled("People — faces the engine grouped automatically.", Style::default().fg(DIM))],
+            vec![Span::styled(
+                "People — faces the engine grouped automatically.",
+                Style::default().fg(DIM),
+            )],
             None,
         );
         render_empty(
@@ -455,13 +613,18 @@ fn render_people(f: &mut Frame, app: &App, area: Rect) {
         f,
         rows[0],
         vec![Span::styled(
-            format!("FileID grouped the faces it found into {}.", plural(app.data.people.len(), "group", "groups")),
+            format!(
+                "FileID grouped the faces it found into {}.",
+                plural(app.data.people.len(), "group", "groups")
+            ),
             Style::default().fg(DIM),
         )],
         None,
     );
     let cw = content_width(rows[1]);
-    render_calm_list(f, rows[1], "Groups", &app.data.people, app.cursor(), |p| person_row(cw, p));
+    render_calm_list(f, rows[1], "Groups", &app.data.people, app.cursor(), |p| {
+        person_row(cw, p)
+    });
 }
 
 fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
@@ -470,7 +633,10 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
         render_context(
             f,
             rows[0],
-            vec![Span::styled("Cleanup — files saved more than once.", Style::default().fg(DIM))],
+            vec![Span::styled(
+                "Cleanup — files saved more than once.",
+                Style::default().fg(DIM),
+            )],
             None,
         );
         render_empty(
@@ -489,15 +655,21 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
         vec![
             Span::styled("Same file saved more than once. ", Style::default().fg(DIM)),
             Span::styled("This is a read-only preview", Style::default().fg(GREEN)),
-            Span::styled(" — the first copy is the one worth keeping.", Style::default().fg(DIM)),
+            Span::styled(
+                " — the first copy is the one worth keeping.",
+                Style::default().fg(DIM),
+            ),
         ],
         None,
     );
 
-    let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
+    let cols =
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
     let cursor = app.cursor();
     let cw = content_width(cols[0]);
-    render_calm_list(f, cols[0], "Duplicate sets", &app.data.dupes, cursor, |g| dup_row(cw, g));
+    render_calm_list(f, cols[0], "Duplicate sets", &app.data.dupes, cursor, |g| {
+        dup_row(cw, g)
+    });
 
     // Detail: the copies in the selected set — the first marked KEEP (green), the
     // rest flagged as duplicates. Read-only: FileID never deletes here.
@@ -505,13 +677,19 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
     let detail = match app.data.dupes.get(cursor) {
         Some(g) => {
             let mut lines = vec![
-                section(&format!("{} of this file", plural(g.paths.len(), "copy", "copies"))),
+                section(&format!(
+                    "{} of this file",
+                    plural(g.paths.len(), "copy", "copies")
+                )),
                 Line::from(""),
             ];
             for (i, p) in g.paths.iter().enumerate() {
                 if i == 0 {
                     lines.push(Line::from(vec![
-                        Span::styled("keep ", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "keep ",
+                            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(short(p), Style::default().fg(SECONDARY)),
                     ]));
                 } else {
@@ -533,13 +711,37 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(detail.block(block), cols[1]);
 }
 
+fn render_deep_analyze(f: &mut Frame, _app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    render_context(
+        f,
+        rows[0],
+        vec![Span::styled(
+            "Deep Analyze — VLM captions and smart names.",
+            Style::default().fg(DIM),
+        )],
+        None,
+    );
+    render_empty(
+        f,
+        rows[1],
+        "Deep Analyze",
+        "Use the desktop app for VLM review.",
+        "The terminal client can install the required AI models and scan folders, but the rich Deep Analyze review/rename workflow still lives in the native desktop app.",
+        Some(cta("D", "download models, then use FileID.app for Deep Analyze")),
+    );
+}
+
 fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     if app.data.plan.is_empty() {
         render_context(
             f,
             rows[0],
-            vec![Span::styled("Restructure — a suggested tidy-up.", Style::default().fg(DIM))],
+            vec![Span::styled(
+                "Restructure — a suggested tidy-up.",
+                Style::default().fg(DIM),
+            )],
             None,
         );
         render_empty(
@@ -556,7 +758,10 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
         f,
         rows[0],
         vec![
-            Span::styled("Suggested tidy-up — read-only preview, nothing moves.   ", Style::default().fg(DIM)),
+            Span::styled(
+                "Suggested tidy-up — read-only preview, nothing moves.   ",
+                Style::default().fg(DIM),
+            ),
             Span::styled("● ", Style::default().fg(GREEN)),
             Span::styled("auto  ", Style::default().fg(DIM)),
             Span::styled("◐ ", Style::default().fg(GOLD)),
@@ -565,7 +770,14 @@ fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
         None,
     );
     let cw = content_width(rows[1]);
-    render_calm_list(f, rows[1], "Suggested moves", &app.data.plan, app.cursor(), |m| plan_row(cw, m));
+    render_calm_list(
+        f,
+        rows[1],
+        "Suggested moves",
+        &app.data.plan,
+        app.cursor(),
+        |m| plan_row(cw, m),
+    );
 }
 
 /// The live AI-model status line for Settings: a green "all installed", an
@@ -582,14 +794,20 @@ fn model_status_line(app: &App) -> Line<'static> {
         } else {
             Line::from(vec![
                 Span::styled("● ", Style::default().fg(GOLD)),
-                Span::styled(format!("Installing… {}%", dl.percent.min(100)), Style::default().fg(FG)),
+                Span::styled(
+                    format!("Installing… {}%", dl.percent.min(100)),
+                    Style::default().fg(FG),
+                ),
             ])
         };
     }
     if app.missing_models.is_empty() {
         Line::from(vec![
             Span::styled("● ", Style::default().fg(GREEN)),
-            Span::styled("Status: all required models installed.", Style::default().fg(FG)),
+            Span::styled(
+                "Status: all required models installed.",
+                Style::default().fg(FG),
+            ),
         ])
     } else {
         Line::from(vec![
@@ -663,7 +881,9 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
             )),
         );
     }
-    let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(titled_block("Settings", CYAN));
+    let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(titled_block("Settings", CYAN));
     f.render_widget(p, area);
 }
 
@@ -682,7 +902,10 @@ fn render_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let line = Line::from(vec![
         Span::styled(format!("{icon} "), Style::default().fg(color)),
-        Span::styled(truncate(&app.status, area.width.saturating_sub(3) as usize), Style::default().fg(DIM)),
+        Span::styled(
+            truncate(&app.status, area.width.saturating_sub(3) as usize),
+            Style::default().fg(DIM),
+        ),
     ]);
     f.render_widget(Paragraph::new(line).style(Style::default().bg(BG)), area);
 }
@@ -704,7 +927,10 @@ fn render_key_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(Span::styled(
             format!(" {key} "),
-            Style::default().fg(GOLD).bg(PILL_BG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(GOLD)
+                .bg(PILL_BG)
+                .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(format!(" {label}"), Style::default().fg(DIM)));
     }
@@ -714,11 +940,18 @@ fn render_key_bar(f: &mut Frame, app: &App, area: Rect) {
     let modal = app.show_help || app.input_active || app.browser.is_some() || app.search_active;
     const TAIL_W: u16 = 22;
     if !modal && area.width > 40 + TAIL_W {
-        let parts = Layout::horizontal([Constraint::Min(0), Constraint::Length(TAIL_W)]).split(area);
+        let parts =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(TAIL_W)]).split(area);
         f.render_widget(Paragraph::new(Line::from(spans)), parts[0]);
         let tail = Line::from(vec![
             Span::styled("press ", Style::default().fg(FAINT)),
-            Span::styled(" ? ", Style::default().fg(GOLD).bg(PILL_BG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ? ",
+                Style::default()
+                    .fg(GOLD)
+                    .bg(PILL_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" for all keys", Style::default().fg(FAINT)),
         ]);
         f.render_widget(Paragraph::new(tail).alignment(Alignment::Right), parts[1]);
@@ -735,12 +968,20 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
         return vec![("?", "close help"), ("q", "quit")];
     }
     if app.input_active {
-        return vec![("a-z", "type a path"), ("Enter", "confirm"), ("Esc", "cancel")];
+        return vec![
+            ("a-z", "type a path"),
+            ("Enter", "confirm"),
+            ("Esc", "cancel"),
+        ];
     }
     if let Some(b) = &app.browser {
         // `hidden off`/`hidden on` are both static, so the bar stays a Vec of
         // `&'static str` while still reflecting the toggle state (FEATURE 2).
-        let hidden = if b.show_hidden { "hidden on" } else { "hidden off" };
+        let hidden = if b.show_hidden {
+            "hidden on"
+        } else {
+            "hidden off"
+        };
         return vec![
             ("↑↓", "move"),
             ("Bksp", "up"),
@@ -775,7 +1016,10 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
 /// runtime download notes. Kept compact enough to fit a 24-row terminal.
 fn render_help(f: &mut Frame, area: Rect) {
     let header = |s: &'static str| {
-        Line::from(Span::styled(s, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        Line::from(Span::styled(
+            s,
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
     };
     let note = |s: &'static str| Line::from(Span::styled(s, Style::default().fg(LAVENDER)));
     let lines = vec![
@@ -804,7 +1048,9 @@ fn render_help(f: &mut Frame, area: Rect) {
     let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let popup = centered(area, w, h);
     overlay_bg(f, popup);
-    let p = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(overlay_block("Keys"));
+    let p = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .block(overlay_block("Keys"));
     f.render_widget(p, popup);
 }
 
@@ -822,8 +1068,16 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
-    let files_h: u16 = if browser.files.is_empty() { 0 } else { (browser.files.len() as u16 + 1).min(7) };
-    let mut constraints = vec![Constraint::Length(1), Constraint::Length(2), Constraint::Min(3)];
+    let files_h: u16 = if browser.files.is_empty() {
+        0
+    } else {
+        (browser.files.len() as u16 + 1).min(7)
+    };
+    let mut constraints = vec![
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(3),
+    ];
     if files_h > 0 {
         constraints.push(Constraint::Length(files_h));
     }
@@ -839,10 +1093,19 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 " → Scan this folder ",
-                Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(GOLD)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  press ", Style::default().fg(DIM)),
-            Span::styled(" s ", Style::default().fg(GOLD).bg(PILL_BG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " s ",
+                Style::default()
+                    .fg(GOLD)
+                    .bg(PILL_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])),
         rows[0],
     );
@@ -852,8 +1115,14 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     let here = truncate(&short(&browser.cwd.to_string_lossy()), inner.width as usize);
     f.render_widget(
         Paragraph::new(Text::from(vec![
-            Line::from(Span::styled(here, Style::default().fg(CYAN).add_modifier(Modifier::BOLD))),
-            Line::from(Span::styled(count_summary(&browser.here), Style::default().fg(DIM))),
+            Line::from(Span::styled(
+                here,
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                count_summary(&browser.here),
+                Style::default().fg(DIM),
+            )),
         ])),
         rows[1],
     );
@@ -864,7 +1133,11 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     let list_area = rows[2];
     let total = browser.rows.len();
     let vh = (list_area.height as usize).max(1);
-    let offset = if total <= vh { 0 } else { browser.selected.saturating_sub(vh / 2).min(total - vh) };
+    let offset = if total <= vh {
+        0
+    } else {
+        browser.selected.saturating_sub(vh / 2).min(total - vh)
+    };
     let end = (offset + vh).min(total);
     let cw = list_area.width.saturating_sub(2) as usize; // 2-char selection gutter
     let items: Vec<ListItem> = browser.rows[offset..end]
@@ -873,7 +1146,10 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
         .map(|(i, row)| {
             let selected = offset + i == browser.selected;
             let content = match row {
-                BrowseRow::Parent => vec![Span::styled("..   (up a level)", Style::default().fg(LAVENDER))],
+                BrowseRow::Parent => vec![Span::styled(
+                    "..   (up a level)",
+                    Style::default().fg(LAVENDER),
+                )],
                 BrowseRow::Dir(p) => {
                     let counts = browser.count_for(p).map(|c| count_summary(&c));
                     dir_row(&format!("{}/", dir_label(p)), counts.as_deref(), cw)
@@ -882,7 +1158,8 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
             calm_item(selected, content)
         })
         .collect();
-    let list = List::new(items).highlight_style(Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD));
+    let list =
+        List::new(items).highlight_style(Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD));
     let mut state = ListState::default();
     if total > 0 {
         state.select(Some(browser.selected.saturating_sub(offset)));
@@ -896,17 +1173,26 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     }
     if let Some(notice) = &browser.notice {
         f.render_widget(
-            Paragraph::new(Span::styled(truncate(notice, inner.width as usize), Style::default().fg(PINK))),
+            Paragraph::new(Span::styled(
+                truncate(notice, inner.width as usize),
+                Style::default().fg(PINK),
+            )),
             rows[idx],
         );
         idx += 1;
     }
-    let hidden_state = if browser.show_hidden { "hidden:on" } else { "hidden:off" };
-    let hint = format!(
-        "↑↓ move · Enter open · ← up · d drives · . {hidden_state} · s scan · Esc cancel"
-    );
+    let hidden_state = if browser.show_hidden {
+        "hidden:on"
+    } else {
+        "hidden:off"
+    };
+    let hint =
+        format!("↑↓ move · Enter open · ← up · d drives · . {hidden_state} · s scan · Esc cancel");
     f.render_widget(
-        Paragraph::new(Span::styled(truncate(&hint, inner.width as usize), Style::default().fg(DIM))),
+        Paragraph::new(Span::styled(
+            truncate(&hint, inner.width as usize),
+            Style::default().fg(DIM),
+        )),
         rows[idx],
     );
 }
@@ -916,25 +1202,46 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
 /// a `+N more` line.
 fn render_file_preview(f: &mut Frame, browser: &Browser, area: Rect) {
     let width = area.width as usize;
-    let header = format!("Files here ({}{}):", browser.files_total, if browser.here.capped { "+" } else { "" });
-    let mut lines = vec![Line::from(Span::styled(header, Style::default().fg(DIM).add_modifier(Modifier::BOLD)))];
+    let header = format!(
+        "Files here ({}{}):",
+        browser.files_total,
+        if browser.here.capped { "+" } else { "" }
+    );
+    let mut lines = vec![Line::from(Span::styled(
+        header,
+        Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+    ))];
 
     let body_cap = (area.height as usize).saturating_sub(1);
     let kept = browser.files.len();
     let need_more = kept > body_cap || browser.files_total > kept || browser.here.capped;
-    let show = if need_more { body_cap.saturating_sub(1) } else { body_cap };
+    let show = if need_more {
+        body_cap.saturating_sub(1)
+    } else {
+        body_cap
+    };
 
     for fe in browser.files.iter().take(show) {
-        let (marker, color) = if fe.is_image { ("▪ ", CYAN) } else { ("· ", FAINT) };
+        let (marker, color) = if fe.is_image {
+            ("▪ ", CYAN)
+        } else {
+            ("· ", FAINT)
+        };
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(color)),
-            Span::styled(truncate(&fe.name, width.saturating_sub(2)), Style::default().fg(DIM)),
+            Span::styled(
+                truncate(&fe.name, width.saturating_sub(2)),
+                Style::default().fg(DIM),
+            ),
         ]));
     }
     if need_more {
         let remaining = browser.files_total.saturating_sub(show);
         let plus = if browser.here.capped { "+" } else { "" };
-        lines.push(Line::from(Span::styled(format!("  … and {remaining}{plus} more"), Style::default().fg(FAINT))));
+        lines.push(Line::from(Span::styled(
+            format!("  … and {remaining}{plus} more"),
+            Style::default().fg(FAINT),
+        )));
     }
     f.render_widget(Paragraph::new(Text::from(lines)), area);
 }
@@ -981,10 +1288,16 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
 
     let field_max = w.saturating_sub(5) as usize; // borders + "> " + cursor
     let mut lines = vec![
-        Line::from(Span::styled("Folder to scan", Style::default().fg(CYAN).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Folder to scan",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        )),
         Line::from(vec![
             Span::styled("> ", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{}\u{2588}", input_tail(&app.input, field_max)), Style::default().fg(FG)),
+            Span::styled(
+                format!("{}\u{2588}", input_tail(&app.input, field_max)),
+                Style::default().fg(FG),
+            ),
         ]),
     ];
     match &app.input_error {
@@ -992,10 +1305,19 @@ fn render_input(f: &mut Frame, app: &App, area: Rect) {
             truncate(err, w.saturating_sub(2) as usize),
             Style::default().fg(PINK),
         ))),
-        None => lines.push(Line::from(Span::styled("~ expands to your home folder", Style::default().fg(DIM)))),
+        None => lines.push(Line::from(Span::styled(
+            "~ expands to your home folder",
+            Style::default().fg(DIM),
+        ))),
     }
-    lines.push(Line::from(Span::styled("Enter / Tab confirm · Esc cancel", Style::default().fg(FAINT))));
-    f.render_widget(Paragraph::new(Text::from(lines)).block(overlay_block("Scan folder")), popup);
+    lines.push(Line::from(Span::styled(
+        "Enter / Tab confirm · Esc cancel",
+        Style::default().fg(FAINT),
+    )));
+    f.render_widget(
+        Paragraph::new(Text::from(lines)).block(overlay_block("Scan folder")),
+        popup,
+    );
 }
 
 // ── shared builders ──────────────────────────────────────────────────────────
@@ -1006,10 +1328,12 @@ fn render_context(f: &mut Frame, area: Rect, left: Vec<Span<'static>>, right: Op
     match right {
         Some(r) if area.width > 20 => {
             let rw = r.chars().count() as u16 + 1;
-            let parts = Layout::horizontal([Constraint::Min(0), Constraint::Length(rw)]).split(area);
+            let parts =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(rw)]).split(area);
             f.render_widget(Paragraph::new(Line::from(left)), parts[0]);
             f.render_widget(
-                Paragraph::new(Span::styled(r, Style::default().fg(DIM))).alignment(Alignment::Right),
+                Paragraph::new(Span::styled(r, Style::default().fg(DIM)))
+                    .alignment(Alignment::Right),
                 parts[1],
             );
         }
@@ -1032,7 +1356,11 @@ fn render_calm_list<T>(
     let len = data.len();
     let viewport = area.height.saturating_sub(2) as usize;
     let cursor = cursor.min(len.saturating_sub(1));
-    let offset = if viewport == 0 || cursor < viewport { 0 } else { cursor - viewport + 1 };
+    let offset = if viewport == 0 || cursor < viewport {
+        0
+    } else {
+        cursor - viewport + 1
+    };
     let end = (offset + viewport).min(len);
     let items: Vec<ListItem> = data[offset..end]
         .iter()
@@ -1040,7 +1368,9 @@ fn render_calm_list<T>(
         .map(|(i, d)| calm_item(offset + i == cursor, row(d)))
         .collect();
     let block = focus_block(title);
-    let list = List::new(items).block(block).highlight_style(Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD));
     let mut state = ListState::default();
     if len > 0 {
         state.select(Some(cursor - offset));
@@ -1065,9 +1395,19 @@ fn calm_item(selected: bool, content: Vec<Span<'static>>) -> ListItem<'static> {
 /// An empty-state panel: a bold headline, a dim explanation of what the tab does
 /// and where its data comes from, and — crucially — a gold call-to-action keycap
 /// so "how do I actually fill this?" is answered on every empty screen.
-fn render_empty(f: &mut Frame, area: Rect, title: &str, head: &str, sub: &str, action: Option<Vec<Span<'static>>>) {
+fn render_empty(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    head: &str,
+    sub: &str,
+    action: Option<Vec<Span<'static>>>,
+) {
     let mut lines = vec![
-        Line::from(Span::styled(head.to_string(), Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            head.to_string(),
+            Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(Span::styled(sub.to_string(), Style::default().fg(DIM))),
     ];
@@ -1075,14 +1415,25 @@ fn render_empty(f: &mut Frame, area: Rect, title: &str, head: &str, sub: &str, a
         lines.push(Line::from(""));
         lines.push(Line::from(action));
     }
-    f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }).block(focus_block(title)), area);
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: true })
+            .block(focus_block(title)),
+        area,
+    );
 }
 
 /// A gold call-to-action line: a black-on-gold key chip + a plain-language
 /// instruction. The terminal stand-in for "click here to get started".
 fn cta(key: &str, text: &str) -> Vec<Span<'static>> {
     vec![
-        Span::styled(format!(" {key} "), Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {key} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(GOLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("  {text}"), Style::default().fg(FG)),
     ]
 }
@@ -1097,7 +1448,10 @@ fn focus_block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(GOLD_DIM))
-        .title(Span::styled(format!(" {title} "), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
 }
 
 /// A secondary panel: dim border + accent title.
@@ -1105,7 +1459,10 @@ fn titled_block(title: &str, accent: Color) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(BORDER))
-        .title(Span::styled(format!(" {title} "), Style::default().fg(accent).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
 }
 
 /// An overlay panel: gold border + gold title on the elevated surface.
@@ -1114,7 +1471,10 @@ fn overlay_block(title: &str) -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(GOLD))
         .style(Style::default().bg(SURFACE))
-        .title(Span::styled(format!(" {title} "), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ))
 }
 
 /// Centered sub-rect, clamped to `area`.
@@ -1133,7 +1493,10 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 /// surface bg over the popup so overlays stay legible on light terminals too.
 fn overlay_bg(f: &mut Frame, area: Rect) {
     f.render_widget(Clear, area);
-    f.render_widget(Block::default().style(Style::default().bg(SURFACE).fg(FG)), area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(SURFACE).fg(FG)),
+        area,
+    );
 }
 
 /// Show the END of a path field (what the user is typing) when it overflows,
@@ -1150,7 +1513,14 @@ fn input_tail(s: &str, max: usize) -> String {
 /// Truncate `name` to the room left after the fixed `lead`/`trail` column widths
 /// (reserving `gap` between name and trailing column, never below `name_floor`),
 /// then return that name plus the run of spaces that pushes `trail` flush right.
-fn name_pad(total: usize, lead: usize, trail: usize, name: &str, gap: usize, name_floor: usize) -> (String, usize) {
+fn name_pad(
+    total: usize,
+    lead: usize,
+    trail: usize,
+    name: &str,
+    gap: usize,
+    name_floor: usize,
+) -> (String, usize) {
     let name_room = total.saturating_sub(lead + trail + gap).max(name_floor);
     let name_t = truncate(name, name_room);
     let used = lead + name_t.chars().count() + trail;
@@ -1185,7 +1555,10 @@ fn person_row(content_w: usize, p: &crate::data::PersonRow) -> Vec<Span<'static>
     let (name, pad) = name_pad(content_w, 2, tw, &p.name, 1, 4);
     vec![
         Span::styled("● ", Style::default().fg(dot_color)),
-        Span::styled(name, Style::default().fg(if named { SECONDARY } else { FAINT })),
+        Span::styled(
+            name,
+            Style::default().fg(if named { SECONDARY } else { FAINT }),
+        ),
         Span::raw(" ".repeat(pad)),
         Span::styled(tally, Style::default().fg(DIM)),
     ]
@@ -1235,7 +1608,10 @@ fn plan_row(content_w: usize, m: &crate::data::PlanRow) -> Vec<Span<'static>> {
 /// A dim, uppercase, letter-spaced section header (the mockup's `TAGS`, `PREVIEW`
 /// captions).
 fn section(s: &str) -> Line<'static> {
-    Line::from(Span::styled(s.to_uppercase(), Style::default().fg(FAINT).add_modifier(Modifier::BOLD)))
+    Line::from(Span::styled(
+        s.to_uppercase(),
+        Style::default().fg(FAINT).add_modifier(Modifier::BOLD),
+    ))
 }
 
 /// A key/value detail row: dim padded key + body-coloured value.
@@ -1336,14 +1712,19 @@ mod tests {
 
     #[test]
     fn frame_chunks_splits_header_body_status_keybar() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
         let c = frame_chunks(area);
         assert_eq!(c.len(), 4);
         assert_eq!(c[0].height, 2); // header: brand+tabs row, then the underline divider
         assert_eq!(c[2].height, 1); // status line
         assert_eq!(c[3].height, 1); // always-visible key bar
         assert_eq!(c[1].height, 20); // body gets the rest
-        // chunks tile the area with no gap
+                                     // chunks tile the area with no gap
         assert_eq!(c[0].height + c[1].height + c[2].height + c[3].height, 24);
     }
 
@@ -1451,18 +1832,30 @@ mod tests {
         let mut app = App::new("/tmp/x.sqlite".into());
         // Settle the loader to an empty, not-yet-created library so the welcome
         // screen renders (loading=false, db_exists=false) — the all-BG body.
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: false,
+            ..Snapshot::default()
+        })));
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| render(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
 
         // Body chunk = rows [2, h-2): every cell painted with the brand dark bg,
         // never left on the terminal's default (which would vanish on light bg).
-        let body = frame_chunks(Rect { x: 0, y: 0, width: w, height: h })[1];
+        let body = frame_chunks(Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        })[1];
         for y in body.top()..body.bottom() {
             for x in 0..w {
                 let bg = buf[(x, y)].bg;
-                assert_ne!(bg, Color::Reset, "cell ({x},{y}) left on terminal-default bg");
+                assert_ne!(
+                    bg,
+                    Color::Reset,
+                    "cell ({x},{y}) left on terminal-default bg"
+                );
                 assert_eq!(bg, BG, "cell ({x},{y}) not painted with brand dark bg");
             }
         }
@@ -1521,19 +1914,34 @@ mod tests {
         // The bottom row (the key bar) must carry the headline action labels.
         let bar = lib.lines().last().unwrap_or("");
         assert!(bar.contains("scan"), "key bar missing scan: {bar:?}");
-        assert!(bar.contains("search"), "Library bar missing search: {bar:?}");
+        assert!(
+            bar.contains("search"),
+            "Library bar missing search: {bar:?}"
+        );
         assert!(bar.contains("quit"), "key bar missing quit: {bar:?}");
-        assert!(bar.contains("for all keys"), "key bar missing the help tail: {bar:?}");
+        assert!(
+            bar.contains("for all keys"),
+            "key bar missing the help tail: {bar:?}"
+        );
         // Everything fits an 80-col row: no glyph is lost off the edge.
-        assert!(bar.trim_end().chars().count() <= 80, "key bar overflows 80 cols: {bar:?}");
+        assert!(
+            bar.trim_end().chars().count() <= 80,
+            "key bar overflows 80 cols: {bar:?}"
+        );
 
         // People tab: search is Library-only, so it drops from the bar.
         let mut app2 = App::new("/tmp/x.sqlite".into());
         app2.tab = Tab::People;
         let ppl = frame_text(80, 24, &app2);
         let bar = ppl.lines().last().unwrap_or("");
-        assert!(bar.contains("scan"), "key bar missing scan off-Library: {bar:?}");
-        assert!(!bar.contains("search"), "search hint must be Library-only: {bar:?}");
+        assert!(
+            bar.contains("scan"),
+            "key bar missing scan off-Library: {bar:?}"
+        );
+        assert!(
+            !bar.contains("search"),
+            "search hint must be Library-only: {bar:?}"
+        );
     }
 
     /// The folder browser overlay paints the current folder, its subdirectories
@@ -1552,7 +1960,10 @@ mod tests {
         app.browser = Some(Browser::open(base.clone()));
         let text = frame_text(100, 30, &app);
 
-        assert!(text.contains("Pick a folder to scan"), "browser title missing");
+        assert!(
+            text.contains("Pick a folder to scan"),
+            "browser title missing"
+        );
         assert!(text.contains("Scan this folder"), "scan affordance missing");
         assert!(text.contains("Pictures/"), "subdir Pictures not listed");
         assert!(text.contains("Documents/"), "subdir Documents not listed");
@@ -1563,7 +1974,10 @@ mod tests {
         // The hint line advertises the new drives jump + hidden toggle (with its
         // current state), alongside the scan/cancel affordances.
         assert!(text.contains("d drives"), "browser drives hint missing");
-        assert!(text.contains("hidden:off"), "browser hidden-toggle hint missing");
+        assert!(
+            text.contains("hidden:off"),
+            "browser hidden-toggle hint missing"
+        );
         assert!(text.contains("s scan"), "browser scan hint missing");
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1579,9 +1993,18 @@ mod tests {
         let mut app = App::new("/tmp/x.sqlite".into());
         app.browser = Some(Browser::open(std::env::temp_dir()));
         let text = frame_text(80, 24, &app);
-        assert!(text.contains("d drives"), "drives hint clipped/missing at 80 cols");
-        assert!(text.contains("hidden:off"), "hidden hint clipped/missing at 80 cols");
-        assert!(text.contains("Esc cancel"), "cancel hint clipped at 80 cols");
+        assert!(
+            text.contains("d drives"),
+            "drives hint clipped/missing at 80 cols"
+        );
+        assert!(
+            text.contains("hidden:off"),
+            "hidden hint clipped/missing at 80 cols"
+        );
+        assert!(
+            text.contains("Esc cancel"),
+            "cancel hint clipped at 80 cols"
+        );
     }
 
     /// FEATURE 2: dotfiles are hidden by default, and the browser hint reflects
@@ -1600,14 +2023,26 @@ mod tests {
         app.browser = Some(Browser::open(base.clone()));
         // Default: the dot-entries are filtered, and the hint reads `hidden:off`.
         let text = frame_text(100, 30, &app);
-        assert!(text.contains("hidden:off"), "default state must read hidden:off");
-        assert!(!text.contains(".cache/"), "hidden subdir must not render by default");
+        assert!(
+            text.contains("hidden:off"),
+            "default state must read hidden:off"
+        );
+        assert!(
+            !text.contains(".cache/"),
+            "hidden subdir must not render by default"
+        );
 
         // Press `.` → hidden entries reveal, and the hint flips to `hidden:on`.
         app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let text = frame_text(100, 30, &app);
-        assert!(text.contains("hidden:on"), "toggled state must read hidden:on");
-        assert!(text.contains(".cache/"), "hidden subdir renders once toggled on");
+        assert!(
+            text.contains("hidden:on"),
+            "toggled state must read hidden:on"
+        );
+        assert!(
+            text.contains(".cache/"),
+            "hidden subdir renders once toggled on"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1621,12 +2056,24 @@ mod tests {
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.tab = Tab::Settings;
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            ..Snapshot::default()
+        })));
         let text = frame_text(80, 30, &app);
-        assert!(text.contains("Download all AI models"), "Settings panel missing the download action");
-        assert!(text.contains("get AI models"), "Settings key bar missing the model-download hint");
+        assert!(
+            text.contains("Download all AI models"),
+            "Settings panel missing the download action"
+        );
+        assert!(
+            text.contains("get AI models"),
+            "Settings key bar missing the model-download hint"
+        );
         let bar = text.lines().last().unwrap_or("");
-        assert!(bar.trim_end().chars().count() <= 80, "Settings key bar overflows 80 cols: {bar:?}");
+        assert!(
+            bar.trim_end().chars().count() <= 80,
+            "Settings key bar overflows 80 cols: {bar:?}"
+        );
     }
 
     /// Empty-scratch start: a loaded-but-empty library (db_exists, zero rows on
@@ -1674,7 +2121,10 @@ mod tests {
             let mut app = App::new("/tmp/x.sqlite".into());
             app.missing_models = vec!["CLIP image encoder".to_string()];
             // Resolved-but-not-yet-created library (fresh scratch): db_exists=false.
-            app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+            app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+                db_exists: false,
+                ..Snapshot::default()
+            })));
             app.tab = tab;
             let text = frame_text(100, 30, &app);
             assert!(
@@ -1683,14 +2133,23 @@ mod tests {
             );
             // The banner states the REAL size of the TUI's (non-VLM) model set,
             // never the false ~25 GB that included the Deep-Analyze VLMs.
-            assert!(text.contains("~1.6 GB"), "{tab:?}: banner must state the real ~1.6 GB size");
-            assert!(!text.contains("25 GB"), "{tab:?}: banner must not claim the VLM ~25 GB total");
+            assert!(
+                text.contains("~1.6 GB"),
+                "{tab:?}: banner must state the real ~1.6 GB size"
+            );
+            assert!(
+                !text.contains("25 GB"),
+                "{tab:?}: banner must not claim the VLM ~25 GB total"
+            );
         }
 
         // Settings is reachable on a fresh library: its download action shows even
         // with db_exists=false, while Library still shows the first-run welcome.
         let mut app = App::new("/tmp/x.sqlite".into());
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: false,
+            ..Snapshot::default()
+        })));
         app.tab = Tab::Settings;
         assert!(
             frame_text(100, 30, &app).contains("Download all AI models"),
@@ -1714,7 +2173,10 @@ mod tests {
         use ratatui::Terminal;
 
         let mut app = App::new("/tmp/x.sqlite".into());
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: false,
+            ..Snapshot::default()
+        })));
         app.download = Some(DownloadState {
             percent: 62,
             label: "arcface · 182/271 MB · 3.4 MB/s · model 2/9".to_string(),
@@ -1746,9 +2208,15 @@ mod tests {
         for (w, h) in [(100u16, 30u16), (80, 24), (20, 6), (4, 3), (1, 1)] {
             for (percent, done) in [(0u16, false), (47, false), (100, true)] {
                 let mut app = App::new("/tmp/x.sqlite".into());
-                app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
-                app.download =
-                    Some(DownloadState { percent, label: "arcface · 182/271 MB".to_string(), done });
+                app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+                    db_exists: true,
+                    ..Snapshot::default()
+                })));
+                app.download = Some(DownloadState {
+                    percent,
+                    label: "arcface · 182/271 MB".to_string(),
+                    done,
+                });
                 let _ = frame_text(w, h, &app); // must not panic
             }
         }
@@ -1762,12 +2230,24 @@ mod tests {
         use crate::data::{LoadMsg, Snapshot};
 
         let mut app = App::new("/tmp/x.sqlite".into());
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: false, ..Snapshot::default() })));
-        app.download =
-            Some(DownloadState { percent: 100, label: "done".to_string(), done: true });
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: false,
+            ..Snapshot::default()
+        })));
+        app.download = Some(DownloadState {
+            percent: 100,
+            label: "done".to_string(),
+            done: true,
+        });
         let text = frame_text(100, 30, &app);
-        assert!(text.contains("AI models installed"), "done gauge must confirm install");
-        assert!(text.contains("scan with full AI"), "done gauge must invite a scan");
+        assert!(
+            text.contains("AI models installed"),
+            "done gauge must confirm install"
+        );
+        assert!(
+            text.contains("scan with full AI"),
+            "done gauge must invite a scan"
+        );
         assert!(text.contains("100%"), "done gauge shows 100%");
     }
 
@@ -1779,16 +2259,24 @@ mod tests {
         use crate::data::LoadMsg;
 
         let mut app = App::new("/tmp/x.sqlite".into());
-        app.apply_load(LoadMsg::Error("scan needs AI models not installed".to_string()));
+        app.apply_load(LoadMsg::Error(
+            "scan needs AI models not installed".to_string(),
+        ));
         let text = frame_text(100, 30, &app);
-        assert!(text.contains("⚠"), "an errored status must show the ⚠ marker");
-        assert!(text.contains("scan needs AI models not installed"), "the error text persists");
+        assert!(
+            text.contains("⚠"),
+            "an errored status must show the ⚠ marker"
+        );
+        assert!(
+            text.contains("scan needs AI models not installed"),
+            "the error text persists"
+        );
     }
 
     /// Every tab's empty state now answers "how do I fill this?" instead of
     /// showing a blank panel: Library prompts a scan, a no-hit search shows a
-    /// distinct no-match state, and People/Cleanup/Restructure each explain
-    /// themselves and point at `s`.
+    /// distinct no-match state, and People/Cleanup/Deep Analyze/Restructure each
+    /// explain themselves and point at a next step.
     #[test]
     fn empty_states_explain_the_tab_and_offer_a_next_step() {
         use crate::app::{App, Tab};
@@ -1798,33 +2286,60 @@ mod tests {
         // empty branches rather than the first-run welcome screen.
         let load = || {
             let mut app = App::new("/tmp/x.sqlite".into());
-            app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+            app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+                db_exists: true,
+                ..Snapshot::default()
+            })));
             app
         };
 
         // Library: a headline + the s-to-scan call-to-action.
         let mut lib = load();
         let t = frame_text(100, 30, &lib);
-        assert!(t.contains("No files yet."), "Library empty headline missing");
-        assert!(t.contains("pick a folder and scan it"), "Library empty CTA missing");
+        assert!(
+            t.contains("No files yet."),
+            "Library empty headline missing"
+        );
+        assert!(
+            t.contains("pick a folder and scan it"),
+            "Library empty CTA missing"
+        );
 
         // Library no-match: a search that hits nothing is a DISTINCT state.
         lib.search = "zzz-no-such-thing".to_string();
         let t = frame_text(100, 30, &lib);
-        assert!(t.contains("No matches."), "Library no-match headline missing");
-        assert!(t.contains("clear the search"), "Library no-match CTA missing");
+        assert!(
+            t.contains("No matches."),
+            "Library no-match headline missing"
+        );
+        assert!(
+            t.contains("clear the search"),
+            "Library no-match CTA missing"
+        );
 
-        // People / Cleanup / Restructure: each explains itself + offers a step.
+        // People / Cleanup / Deep Analyze / Restructure: each explains itself + offers a step.
         for (tab, headline, cta_text) in [
             (Tab::People, "No people yet.", "detect & group faces"),
             (Tab::Cleanup, "No duplicates found.", "check for duplicates"),
-            (Tab::Restructure, "No moves to suggest yet.", "this plan fills in"),
+            (
+                Tab::DeepAnalyze,
+                "Use the desktop app for VLM review.",
+                "download models",
+            ),
+            (
+                Tab::Restructure,
+                "No moves to suggest yet.",
+                "this plan fills in",
+            ),
         ] {
             let mut app = load();
             app.tab = tab;
             let t = frame_text(100, 30, &app);
             assert!(t.contains(headline), "{tab:?}: empty headline missing");
-            assert!(t.contains(cta_text), "{tab:?}: empty-state call-to-action missing");
+            assert!(
+                t.contains(cta_text),
+                "{tab:?}: empty-state call-to-action missing"
+            );
         }
     }
 
@@ -1836,13 +2351,22 @@ mod tests {
         use crate::data::{LoadMsg, Snapshot};
 
         let mut app = App::new("/tmp/x.sqlite".into());
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            ..Snapshot::default()
+        })));
         app.tab = Tab::Settings;
 
         app.missing_models = vec!["arcface".to_string(), "MobileCLIP".to_string()];
         let t = frame_text(90, 40, &app);
-        assert!(t.contains("not installed"), "Settings must report missing models");
-        assert!(t.contains("arcface"), "Settings must name the missing models");
+        assert!(
+            t.contains("not installed"),
+            "Settings must report missing models"
+        );
+        assert!(
+            t.contains("arcface"),
+            "Settings must name the missing models"
+        );
 
         app.missing_models.clear();
         let t = frame_text(90, 40, &app);

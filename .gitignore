@@ -137,8 +137,9 @@ shared/test-corpus/files/
 __pycache__/
 *.pyc
 
-# ─── Claude Code session state + local settings ─────────────────────────────
+# ─── Local coding-agent session state ───────────────────────────────────────
 .claude/
+.pi-subagents/
 
 # ─── Zed editor personal settings ───────────────────────────────────────────
 .zed/

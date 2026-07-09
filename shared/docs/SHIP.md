@@ -8,14 +8,16 @@
 ## What FileID is
 
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename
-tens of thousands of files locally. Two platforms ship at v1.0:
+tens of thousands of files locally. The primary v1.0 targets are:
 
 - **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 8 C# app.
 - **macOS** — Swift / SwiftUI app + engine, MLX inference. The visual + UX reference.
+- **Linux** — shared Rust engine + native GTK4/libadwaita app, with packaging and behavioral UAT still hardware-gated.
 
-Linux (GTK4 + libadwaita) ships all six tabs over the shared engine. The two binaries on each platform talk newline-delimited JSON
-over stdio; the engine owns a SQLite WAL DB (migrations v1–v12, byte-faithful
-across the macOS GRDB and Windows rusqlite stores).
+Linux ships all six tabs over the shared engine. The two binaries on each desktop
+platform talk newline-delimited JSON over stdio; the engine owns a SQLite WAL DB
+(migrations v1–v19, byte-faithful across the macOS GRDB and Windows/Linux
+rusqlite stores).
 
 ## Non-negotiables
 

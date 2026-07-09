@@ -47,26 +47,28 @@ pub fn spawn_scan(
     engine_data_home: Option<PathBuf>,
     tx: Sender<LoadMsg>,
 ) {
-    std::thread::spawn(move || match run_scan(&db, &root, engine_data_home.as_deref(), &tx) {
-        Ok(summary) => {
-            let _ = tx.send(LoadMsg::Status(format!("{summary} — reloading library…")));
-            match data::load(&db, &tx) {
-                Ok(snap) => {
-                    let _ = tx.send(LoadMsg::Status(format!(
-                        "{summary} · {} files indexed",
-                        snap.files.len()
-                    )));
-                    let _ = tx.send(LoadMsg::Done(Box::new(snap)));
-                }
-                Err(e) => {
-                    let _ = tx.send(LoadMsg::Error(format!("scan ok, reload failed: {e}")));
+    std::thread::spawn(
+        move || match run_scan(&db, &root, engine_data_home.as_deref(), &tx) {
+            Ok(summary) => {
+                let _ = tx.send(LoadMsg::Status(format!("{summary} — reloading library…")));
+                match data::load(&db, &tx) {
+                    Ok(snap) => {
+                        let _ = tx.send(LoadMsg::Status(format!(
+                            "{summary} · {} files indexed",
+                            snap.files.len()
+                        )));
+                        let _ = tx.send(LoadMsg::Done(Box::new(snap)));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(LoadMsg::Error(format!("scan ok, reload failed: {e}")));
+                    }
                 }
             }
-        }
-        Err(e) => {
-            let _ = tx.send(LoadMsg::Error(e.to_string()));
-        }
-    });
+            Err(e) => {
+                let _ = tx.send(LoadMsg::Error(e.to_string()));
+            }
+        },
+    );
 }
 
 /// Pre-flight, spawn the engine, send `startScan`, and stream events until the
@@ -121,7 +123,10 @@ fn run_scan(
         }
     }
 
-    let _ = tx.send(LoadMsg::Status(format!("Starting engine for {}…", short(&root_abs.to_string_lossy()))));
+    let _ = tx.send(LoadMsg::Status(format!(
+        "Starting engine for {}…",
+        short(&root_abs.to_string_lossy())
+    )));
 
     // stderr → a captured pipe, NOT inherited: the TUI owns the alternate screen,
     // so the engine must never write to the real terminal. stdout carries the
@@ -130,7 +135,10 @@ fn run_scan(
     // IPC `error` event (a crash/panic/dlopen failure), its tail still surfaces in
     // the abort message instead of a blank "exited before the scan completed".
     let mut command = Command::new(&engine_bin);
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // Scratch mode (FIX 1): hand the engine its data home via the SAME env var
     // its `paths::root()` honors, so the scan writes `<home>/FileID/fileid.sqlite`
@@ -182,9 +190,18 @@ fn run_scan(
     let _ = stderr_reader.join();
 
     match outcome {
-        ScanOutcome::Complete { total, processed, failed, seconds } => Ok(format!(
+        ScanOutcome::Complete {
+            total,
+            processed,
+            failed,
+            seconds,
+        } => Ok(format!(
             "Scan complete: {processed}/{total} files{} in {seconds:.1}s",
-            if failed > 0 { format!(", {failed} failed") } else { String::new() }
+            if failed > 0 {
+                format!(", {failed} failed")
+            } else {
+                String::new()
+            }
         )),
         // The engine's own `models_not_installed` (the pre-flight gate didn't
         // catch it — e.g. a pin bump) maps to the SAME actionable TUI message.
@@ -213,8 +230,16 @@ fn run_scan(
 }
 
 enum ScanOutcome {
-    Complete { total: u64, processed: u64, failed: u64, seconds: f64 },
-    Error { kind: String, message: String },
+    Complete {
+        total: u64,
+        processed: u64,
+        failed: u64,
+        seconds: f64,
+    },
+    Error {
+        kind: String,
+        message: String,
+    },
     Aborted,
 }
 
@@ -236,7 +261,11 @@ fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutco
             EventPayload::Progress(w) => {
                 let p = w.inner;
                 let msg = if p.total > 0 {
-                    let failed = if p.failed > 0 { format!(" · {} failed", p.failed) } else { String::new() };
+                    let failed = if p.failed > 0 {
+                        format!(" · {} failed", p.failed)
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "Scanning [{:?}] {}/{} ({:.0} files/s){failed}",
                         p.phase, p.processed, p.total, p.files_per_second
@@ -263,7 +292,10 @@ fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutco
                 }
             }
             EventPayload::DiscoveryComplete(d) => {
-                let _ = tx.send(LoadMsg::Status(format!("Discovered {} files…", d.total_files)));
+                let _ = tx.send(LoadMsg::Status(format!(
+                    "Discovered {} files…",
+                    d.total_files
+                )));
             }
             EventPayload::ScanComplete(w) => {
                 let c = w.inner;
@@ -276,7 +308,10 @@ fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutco
             }
             EventPayload::Error(w) => {
                 let e = w.inner;
-                return ScanOutcome::Error { kind: e.kind, message: e.message };
+                return ScanOutcome::Error {
+                    kind: e.kind,
+                    message: e.message,
+                };
             }
             _ => {}
         }
@@ -358,7 +393,9 @@ fn missing_models_in(root: Option<&Path>) -> Vec<(&'static str, String)> {
 /// unrelated id. Side-effect-free (a pure read), unlike `registry::sentinel_path`.
 fn sentinel_present(root: Option<&Path>, model_id: &str) -> bool {
     let Some(root) = root else { return false };
-    let Ok(entries) = std::fs::read_dir(root.join(".sentinels")) else { return false };
+    let Ok(entries) = std::fs::read_dir(root.join(".sentinels")) else {
+        return false;
+    };
     let prefix = format!("{model_id}-");
     entries.flatten().any(|e| {
         let name = e.file_name();
@@ -389,11 +426,14 @@ fn runtime_missing_message() -> String {
 
 fn message_for_missing(missing: &[(&'static str, String)]) -> String {
     if missing.is_empty() {
-        return "AI models not installed — press D on the Settings tab to download them, then \
-                press s again."
+        return "AI models not installed — press D to download them, then press s again."
             .to_string();
     }
-    let kinds = missing.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(", ");
+    let kinds = missing
+        .iter()
+        .map(|(k, _)| *k)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "AI models not installed — press D to download (~{} for the {} needed: {kinds}), then \
          press s again.",
@@ -428,7 +468,10 @@ fn approx_download_size(missing: &[(&'static str, String)]) -> String {
 const STDERR_CAP: usize = 4 * 1024;
 
 /// Drain `stderr` into `tail`, keeping only the last [`STDERR_CAP`] bytes.
-fn spawn_stderr_capture(stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) -> std::thread::JoinHandle<()> {
+fn spawn_stderr_capture(
+    stderr: ChildStderr,
+    tail: Arc<Mutex<Vec<u8>>>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
         let mut chunk = [0u8; 4096];
@@ -453,14 +496,33 @@ fn spawn_stderr_capture(stderr: ChildStderr, tail: Arc<Mutex<Vec<u8>>>) -> std::
 /// error (the status line is one line): the last couple of non-empty log lines,
 /// joined, length-bounded.
 fn stderr_tail_summary(tail: &Arc<Mutex<Vec<u8>>>) -> String {
-    let Ok(bytes) = tail.lock() else { return String::new() };
+    let Ok(bytes) = tail.lock() else {
+        return String::new();
+    };
     let text = String::from_utf8_lossy(&bytes);
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let joined = lines.iter().rev().take(2).rev().copied().collect::<Vec<_>>().join(" · ");
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let joined = lines
+        .iter()
+        .rev()
+        .take(2)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
     const MAX: usize = 300;
     if joined.chars().count() > MAX {
-        let kept: String =
-            joined.chars().rev().take(MAX - 1).collect::<String>().chars().rev().collect();
+        let kept: String = joined
+            .chars()
+            .rev()
+            .take(MAX - 1)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         format!("…{kept}")
     } else {
         joined
@@ -497,7 +559,10 @@ fn locate_engine_binary() -> Option<PathBuf> {
             // .../platforms/windows/src/engine/target/<profile>/FileIDEngine.
             if let Some(platforms) = dir.ancestors().find(|a| a.ends_with("platforms")) {
                 for profile in ["release", "debug"] {
-                    let cand = platforms.join("windows/src/engine/target").join(profile).join(exe);
+                    let cand = platforms
+                        .join("windows/src/engine/target")
+                        .join(profile)
+                        .join(exe);
                     if cand.is_file() {
                         return Some(cand);
                     }
@@ -511,7 +576,9 @@ fn locate_engine_binary() -> Option<PathBuf> {
 
 fn which_on_path(exe: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(exe)).find(|cand| cand.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|cand| cand.is_file())
 }
 
 /// Best-effort scratch-state setup before a scratch-mode scan (FIX 1). Ensures
@@ -598,14 +665,24 @@ mod tests {
 
         let missing = missing_models_in(Some(&dir));
         let kinds: Vec<&str> = missing.iter().map(|(k, _)| *k).collect();
-        assert!(kinds.contains(&"mobileclip_s2"), "mobileclip_s2 must be missing, got {kinds:?}");
-        assert!(kinds.contains(&"arcface"), "arcface must be missing, got {kinds:?}");
+        assert!(
+            kinds.contains(&"mobileclip_s2"),
+            "mobileclip_s2 must be missing, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"arcface"),
+            "arcface must be missing, got {kinds:?}"
+        );
         assert_eq!(missing.len(), REQUIRED_MODELS.len());
 
         // Drop the engine's revision-keyed sentinels → the gate clears.
         let sentinels = dir.join(".sentinels");
         std::fs::create_dir_all(&sentinels).unwrap();
-        std::fs::write(sentinels.join("mobileclip_s2-deadbeef00000000.installed"), b"x").unwrap();
+        std::fs::write(
+            sentinels.join("mobileclip_s2-deadbeef00000000.installed"),
+            b"x",
+        )
+        .unwrap();
         std::fs::write(sentinels.join("arcface-cafebabe00000000.installed"), b"x").unwrap();
         assert!(
             missing_models_in(Some(&dir)).is_empty(),
@@ -628,14 +705,26 @@ mod tests {
             ("arcface", "Face detection + recognition".to_string()),
         ];
         let msg = message_for_missing(&missing);
-        assert!(msg.contains("press D"), "must tell the user to press D: {msg}");
+        assert!(
+            msg.contains("press D"),
+            "must tell the user to press D: {msg}"
+        );
         assert!(
             msg.contains("the 2 needed: mobileclip_s2, arcface"),
             "must name the gated kinds: {msg}"
         );
-        assert!(msg.contains("370 MB"), "must state the real ~370 MB size: {msg}");
-        assert!(msg.contains("press s again"), "must tell the user to retry: {msg}");
-        assert!(!msg.to_lowercase().contains("welcome"), "no desktop-app wording: {msg}");
+        assert!(
+            msg.contains("370 MB"),
+            "must state the real ~370 MB size: {msg}"
+        );
+        assert!(
+            msg.contains("press s again"),
+            "must tell the user to retry: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("welcome"),
+            "no desktop-app wording: {msg}"
+        );
 
         // Empty list → the generic but still actionable fallback.
         assert!(message_for_missing(&[]).contains("press D"));
