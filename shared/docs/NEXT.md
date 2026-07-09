@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## STATUS 2026-07-09 — prod-hardening landed (PR #89); FileIDSetup.exe works; v0.0.1 assets refreshed
+
+The `windows-prod-hardening` branch is merged to `main`, all real CI green (STATE top entry). The engine perf/robustness work, the macOS/Linux user-folder-exclusions lockstep, and the VS18 installer path all landed. **The single-EXE `.exe` installer now builds end-to-end** (`publish-bundle.ps1 -SkipSign -SkipArm64` → `FileIDSetup.exe` + `FileID-x64.msi`, privacy gate green) after fixing the Burn bundle theme. Per owner, the version stays **0.1.0** and the release stays **v0.0.1** (a 0.0.2 MSI would be a lower ProductVersion than the already-shipped 0.1.0 and wouldn't in-place upgrade); the v0.0.1 assets were refreshed with the rebuilt MSI + the new `FileID-0.0.1-Setup-x64.exe`.
+
+**Still open (unchanged, all blocked off this box):** signed installers (need an EV cert — `release.yml`/`publish-bundle.ps1` are ready but dormant); macOS `.app` release + face-clustering on-Mac calibration (need a Mac); ARM64 installer (needs the MSVC ARM64 C++ tools — the bundle is x64-only, see `86d99ba`); CUDA Performance Pack hosting; full-corpus on-hardware perf/quality re-tune. The on-hardware perf levers (EP-aware CLIP dispatch, planar preprocessing, RAM++ dynamic-batch) are now measured + shipped; re-A/B when the CUDA pack lands. Everything below this line predates 2026-07-09 — skim for the still-blocked items.
+
 ## STATUS 2026-07-05 (later) — 5 on-hardware Windows-app bugs fixed (PR #88); awaiting owner test → 0.0.2
 
 Owner-reported runtime bugs (preview image/nav, library tiles not staying loaded, speech model not on onboarding, no auto-launch on install) are fixed + merged (STATE top). NONE are runtime-verified on this box — the owner is testing `~/Desktop/FileID-bugfix-test-x64.msi`. **Next actions (owner-gated):** (1) owner confirms which fixes work / shares the `FilePreviewSheet` log line if the image is still blank; (2) then cut **0.0.2** — bump `platforms/windows/VERSION` (currently 0.1.0, mismatched with the v0.0.1 tag) + engine Cargo.toml, rebuild MSI + AppImage, publish. If the blank-image fix didn't take, iterate on the shell-thumbnail path.
