@@ -173,7 +173,7 @@ struct FileIDEngineMain {
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
                           sink: IPCSink, database: Database?) async {
         switch cmd.payload {
-        case .startScan(let rootPath, let rootDisplay, let rescan):
+        case .startScan(let rootPath, let rootDisplay, let rescan, let excludedPaths):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -218,6 +218,7 @@ struct FileIDEngineMain {
                 let task = Task.detached(priority: .userInitiated) {
                     await runScan(rootPath: rootPath, displayPath: displayPath,
                                   rescan: rescan, epoch: epoch,
+                                  excludedPaths: excludedPaths,
                                   coordinator: coordinator, sink: sink,
                                   database: database)
                 }
@@ -531,6 +532,26 @@ struct FileIDEngineMain {
             }
             await coordinator.setActiveRestructure(undoTask)
 
+        case .purgeExcluded(let excludedPaths):
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot purge excluded folders."
+                )))
+                return
+            }
+            let normalized = normalizeExcludedPaths(excludedPaths)
+            let deleted = await purgeExcludedRows(database: database, excludedPaths: normalized,
+                                                 sink: sink, sessionID: nil)
+            if deleted >= 0 {
+                await sink.emit(.bulkActionResult(BulkActionResult(
+                    action: "purgeExcluded",
+                    succeeded: deleted,
+                    failed: 0,
+                    messages: []
+                )))
+            }
+
         // ── Windows-originated commands ──────────────────────────
         // The schema keeps these symmetric across platforms. Mac
         // exposes equivalent flows through per-tab UI actions, not
@@ -570,7 +591,7 @@ struct FileIDEngineMain {
     /// per engine process — opening more would trigger SQLITE_BUSY).
     static func runScan(
         rootPath: String, displayPath: String, rescan: Bool, epoch: Int,
-        coordinator: ScanCoordinator, sink: IPCSink,
+        excludedPaths: [String]?, coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
         let url = URL(fileURLWithPath: rootPath)
@@ -588,6 +609,16 @@ struct FileIDEngineMain {
         // system doesn't suspend mid-tag overnight. Released in defer.
         SleepGuard.shared.begin(reason: "Scanning \(url.lastPathComponent)")
         defer { SleepGuard.shared.end() }
+
+        let effectiveExcludedPaths = Discovery.resolvedExclusionPaths(
+            root: url, rawPaths: excludedPaths)
+        if let excludedPaths, !excludedPaths.isEmpty {
+            JSONLog.shared.info(
+                ev: "start_scan_exclusions",
+                path: redactPathForLog(url.path),
+                extra: ["requested": AnyCodable(excludedPaths.count),
+                        "effective": AnyCodable(effectiveExcludedPaths.count)])
+        }
 
         let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent, epoch: epoch)
         await sink.emit(.phaseChanged(.discovering))
@@ -619,6 +650,11 @@ struct FileIDEngineMain {
             return
         }
 
+        if !effectiveExcludedPaths.isEmpty {
+            await purgeExcludedRows(database: database, excludedPaths: effectiveExcludedPaths,
+                                    sink: sink, sessionID: session.id)
+        }
+
         // Stage A — Discovery. Walk the tree, sort by path for I/O locality.
         // cancelCheck reads the cancel mirror (sync, no actor hop) so the
         // enumerator loop bails out immediately on Cancel — the v1-deferred
@@ -633,6 +669,7 @@ struct FileIDEngineMain {
             root: url,
             database: database,
             forceReprocess: rescan,
+            excludedPaths: effectiveExcludedPaths,
             cancelCheck: { ScanCoordinator.isCancelledSync() },
             progress: { count in
                 Task { await coordinator.bumpDiscovered(to: count) }
@@ -875,6 +912,110 @@ struct FileIDEngineMain {
                 message: "Could not delete \(missing.count) orphaned rows: \(error)"
             )))
         }
+    }
+
+    /// Delete already-cataloged rows under user-excluded folders before a scan
+    /// starts. Files on disk are untouched; DB ON DELETE CASCADE removes tags,
+    /// OCR/captions, embeddings, and face rows. Mirrors the Windows exclusion
+    /// semantics and keeps Library from showing newly-excluded files.
+    @discardableResult
+    private static func purgeExcludedRows(
+        database: Database,
+        excludedPaths: [String],
+        sink: IPCSink,
+        sessionID: String?
+    ) async -> Int {
+        guard !excludedPaths.isEmpty else { return 0 }
+        do {
+            let deleted = try await database.pool.write { db -> Int in
+                var ids = Set<Int64>()
+                for excluded in excludedPaths {
+                    let prefix = excluded.hasSuffix("/") ? excluded : excluded + "/"
+                    let upper = prefixUpperBound(prefix)
+                    // Match against path_search (the NFC form of path_text), not
+                    // path_text itself. The excluded-path needle is NFC-normalized
+                    // (normalizeExcludedPaths / Discovery.normalizedExclusionPath both
+                    // apply precomposedStringWithCanonicalMapping), but macOS
+                    // GUI-created accented folder names are commonly NFD on disk, so
+                    // lower(path_text) would byte-mismatch the NFC needle and purge
+                    // zero rows for any excluded folder with non-ASCII characters.
+                    // path_search is the NFC column every writer maintains for exactly
+                    // this normalization-insensitive matching (Database.swift v16).
+                    let rows = try Int64.fetchAll(db, sql: """
+                        SELECT id FROM files
+                        WHERE lower(path_search) = ?
+                           OR (lower(path_search) >= ? AND lower(path_search) < ?)
+                        """, arguments: [excluded, prefix, upper])
+                    ids.formUnion(rows)
+                }
+                guard !ids.isEmpty else { return 0 }
+
+                let sortedIDs = ids.sorted()
+                let chunks = stride(from: 0, to: sortedIDs.count, by: 200).map {
+                    Array(sortedIDs[$0..<min($0 + 200, sortedIDs.count)])
+                }
+                var affectedPersons = Set<Int64>()
+                for chunk in chunks {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    let pids = try Int64.fetchAll(db, sql: """
+                        SELECT DISTINCT person_id FROM face_prints
+                        WHERE person_id IS NOT NULL AND file_id IN (\(placeholders))
+                        """, arguments: StatementArguments(chunk.map { Int($0) }))
+                    affectedPersons.formUnion(pids)
+                }
+                for chunk in chunks {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    try db.execute(
+                        sql: "DELETE FROM files WHERE id IN (\(placeholders))",
+                        arguments: StatementArguments(chunk.map { Int($0) }))
+                }
+                try Self.reconcilePersons(affectedPersons, db: db)
+                return sortedIDs.count
+            }
+            JSONLog.shared.info(ev: "purge_excluded_rows", sess: sessionID,
+                                extra: ["deleted": AnyCodable(deleted),
+                                        "excludedPaths": AnyCodable(excludedPaths.count)])
+            return deleted
+        } catch {
+            JSONLog.shared.warn(ev: "purge_excluded_rows_failed", sess: sessionID,
+                                error: "\(error)")
+            await sink.emit(.error(EngineError(
+                kind: "purge_excluded_failed",
+                message: "Could not remove excluded folders from the library: \(error)"
+            )))
+            return -1
+        }
+    }
+
+    private static func normalizeExcludedPaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for path in paths {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            var normalized = URL(fileURLWithPath: trimmed)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+                .precomposedStringWithCanonicalMapping
+                .lowercased()
+            while normalized.count > 1, normalized.hasSuffix("/") {
+                normalized.removeLast()
+            }
+            guard !seen.contains(normalized) else { continue }
+            seen.insert(normalized)
+            result.append(normalized)
+        }
+        return result
+    }
+
+    private static func prefixUpperBound(_ prefix: String) -> String {
+        var s = prefix
+        guard let last = s.popLast(),
+              let next = UnicodeScalar(last.unicodeScalars.first!.value + 1) else {
+            return prefix
+        }
+        return s + String(next)
     }
 
     /// Recompute persons.file_count and repair a dangling
