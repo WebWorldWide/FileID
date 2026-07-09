@@ -362,7 +362,7 @@ cast_possible_wrap      = "allow"  # u32→i32 conversions for SQLite parameter 
 map_unwrap_or           = "allow"  # `map().unwrap_or()` is at least as readable as `map_or()`
 manual_midpoint         = "allow"  # `(a + b) / 2` is fine where overflow is impossible
 manual_is_multiple_of   = "allow"  # `x % n == 0` is idiomatic Rust
-unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (renamed to unchecked_time_subtraction in clippy 1.96; keep old name for the pinned 1.90 toolchain)
+unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (renamed to unchecked_time_subtraction in clippy 1.96; keep old name for the pinned 1.90 toolchain — CI runs 1.90, where the new name is an unknown lint and `-D warnings` fails)
 redundant_closure       = "allow"  # readability sometimes wins over conciseness
 needless_continue       = "allow"  # explicit continue in long loops aids readability
 needless_range_loop     = "allow"  # range-loop with index is sometimes clearer than iter
