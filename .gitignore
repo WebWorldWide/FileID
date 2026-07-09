@@ -148,3 +148,4 @@ __pycache__/
 *.local.json
 .env
 .env.local
+.tokensave/

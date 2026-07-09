@@ -324,6 +324,7 @@ pub(crate) async fn handle_start_scan(
         sink.clone(),
         models,
         payload.rescan,
+        payload.excluded_paths.clone().unwrap_or_default(),
     );
     let root = PathBuf::from(payload.root_path.clone());
 
@@ -354,4 +355,40 @@ pub(crate) async fn handle_start_scan(
     }
 
     tracing::info!("[SCAN] handle_start_scan exiting normally");
+}
+
+/// `purgeExcluded` handler — immediately remove cataloged rows under the
+/// given excluded folders (files on disk untouched). Sent when the user adds
+/// an exclusion so the Library reflects it without waiting for a rescan; the
+/// same purge also runs at every scan start as the durable backstop.
+pub(crate) async fn handle_purge_excluded(
+    sink: Sink,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    payload: ipc::PurgeExcludedPayload,
+) {
+    let result = tokio::task::spawn_blocking(
+        move || -> anyhow::Result<crate::ipc::BulkActionResult> {
+            const MAX_PATHS: usize = 4096;
+            let resolved: Vec<_> = payload
+                .excluded_paths
+                .iter()
+                .take(MAX_PATHS)
+                .filter_map(|raw| {
+                    crate::util::path_safety::resolve_exclusion_unrooted(std::path::Path::new(raw))
+                })
+                .collect();
+            let purged = {
+                let conn = db.lock();
+                crate::scan_session::purge_excluded_rows(&conn, &resolved)
+            };
+            Ok(crate::ipc::BulkActionResult {
+                action: "purgeExcluded".into(),
+                succeeded: purged.min(u32::MAX as u64) as u32,
+                failed: 0,
+                messages: Vec::new(),
+            })
+        },
+    )
+    .await;
+    crate::commands::bulk::emit_bulk_result(&sink, "purgeExcluded", result).await;
 }

@@ -70,7 +70,7 @@ engine headlessly on Linux, including full-ML `scan --models`.
 - **Engine client** (`engine_client.rs`): spawns the engine, sends commands as
   NDJSON using the engine crate's **real `IpcCommand`/`IpcEvent` types** (no
   hand-rolled wire shape — the old scaffold's flat `{cmd,id,rootPath}` was
-  contract drift; correct shape is `{id, payload:{startScan:{rootPath}}}`).
+  contract drift; correct shape is `{id, payload:{startScan:{rootPath, rootDisplay, rescan, excludedPaths}}}`).
   Events parse on a reader thread and fan out to every UI subscriber on the
   main context. Engine crash → capped backoff respawn.
 - **Library read path**: there is **no file-listing IPC command** — the engine

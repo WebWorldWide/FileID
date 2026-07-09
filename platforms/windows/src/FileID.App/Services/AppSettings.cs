@@ -123,6 +123,18 @@ internal sealed class AppSettings
     /// qwen2_5_vl_3b (Qwen Research License) was removed.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
 
+    /// <summary>Folders excluded from scanning. Absolute paths; the engine
+    /// prunes them from the walk and purges already-cataloged rows under
+    /// them at scan start (plus immediately via purgeExcluded when one is
+    /// added). Sanitize() drops malformed entries, dedupes
+    /// case-insensitively, and caps the list.</summary>
+    public List<string> ExcludedFolders { get; set; } = new();
+
+    /// <summary>Show the "Review changes before closing?" prompt when the
+    /// session change log still has undoable entries at window close.
+    /// Cleared by the dialog's "Don't ask me again" checkbox.</summary>
+    public bool ConfirmCloseOnPendingChanges { get; set; } = true;
+
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
     /// older files (and can't clobber a fresh user's first deliberate pick).</summary>
@@ -179,8 +191,13 @@ internal sealed class AppSettings
     /// Analyze model. v4: SmolVLM removed — CLIP scene tags are the canonical
     /// auto-tagger. v5: non-commercial qwen2_5_vl_3b removed (Qwen Research
     /// License) — RAM++ is the auto-tagger and Qwen2.5-VL-7B (Apache) is the
-    /// default Deep Analyze model; any leftover 3B value migrates to 7B.</summary>
-    private const int CurrentSchemaVersion = 5;
+    /// default Deep Analyze model; any leftover 3B value migrates to 7B.
+    /// v6: ExcludedFolders + ConfirmCloseOnPendingChanges added.</summary>
+    private const int CurrentSchemaVersion = 6;
+
+    /// <summary>Tamper bound for ExcludedFolders — a hand-edited settings.json
+    /// can't make every scan drag a giant exclusion list through IPC.</summary>
+    private const int MaxExcludedFolders = 256;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -242,6 +259,40 @@ internal sealed class AppSettings
         {
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
+        s.ExcludedFolders = SanitizeExcludedFolders(s.ExcludedFolders);
+    }
+
+    /// <summary>Drop null/whitespace/relative/invalid entries, trim trailing
+    /// separators, dedupe case-insensitively (NTFS), cap the list. Also used
+    /// by the Settings UI to normalize a freshly picked folder.</summary>
+    internal static List<string> SanitizeExcludedFolders(IEnumerable<string>? raw)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        foreach (var entry in raw ?? Array.Empty<string>())
+        {
+            if (result.Count >= MaxExcludedFolders) break;
+            if (string.IsNullOrWhiteSpace(entry)) continue;
+            var trimmed = entry.Trim().TrimEnd('\\', '/');
+            if (trimmed.Length == 0) continue;
+            bool valid;
+            try
+            {
+                valid = Path.IsPathFullyQualified(trimmed)
+                    && trimmed.IndexOfAny(Path.GetInvalidPathChars()) < 0;
+            }
+            catch
+            {
+                valid = false;
+            }
+            if (!valid)
+            {
+                DebugLog.Warn("AppSettings: dropping malformed excluded folder entry.");
+                continue;
+            }
+            if (seen.Add(trimmed)) result.Add(trimmed);
+        }
+        return result;
     }
 
     // debounce + offload. The previous implementation ran every
@@ -301,11 +352,14 @@ internal sealed class AppSettings
 
     private AppSettings CloneForWrite()
     {
-        // Settings is value-shaped (all primitive properties). A shallow
-        // copy is enough for serialization — and importantly, the snapshot
-        // captures the state at the moment Save() was called so a setter
-        // mutating the original mid-debounce doesn't corrupt the write.
-        return (AppSettings)MemberwiseClone();
+        // Snapshot at the moment Save() was called so a setter mutating the
+        // original mid-debounce doesn't corrupt the write. MemberwiseClone
+        // copies primitives by value but shares reference-typed members —
+        // clone the list explicitly or a mid-debounce Add/Remove mutates
+        // the snapshot being serialized.
+        var clone = (AppSettings)MemberwiseClone();
+        clone.ExcludedFolders = new List<string>(ExcludedFolders);
+        return clone;
     }
 
     private static async Task WriteAsync(AppSettings snapshot)

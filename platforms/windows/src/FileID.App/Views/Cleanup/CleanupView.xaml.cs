@@ -441,7 +441,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-            async batchId =>
+            kind: Services.ChangeKind.Trash,
+            reverse: async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try
@@ -630,7 +631,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
-            async batchId =>
+            kind: Services.ChangeKind.Trash,
+            reverse: async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }

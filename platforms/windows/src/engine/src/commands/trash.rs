@@ -131,14 +131,20 @@ pub(crate) async fn handle_restore_from_trash(
         // Single bin enumeration WITHOUT DB lock held (T-1 fix).
         restore_batch_from_recycle_bin(&to_restore);
 
+        // O(1) membership for the reconciliation loop below. The old
+        // `to_restore.contains(..)` per item was O(n²) AND ran while holding
+        // the writer lock + an open transaction, so a large restore batch
+        // scaled quadratically under the engine's only writer. (audit 2026-07-08)
+        let attempted_set: std::collections::HashSet<&str> =
+            to_restore.iter().copied().collect();
+
         // Re-acquire DB lock for post-restore inserts.
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
 
         for item in &entry.items {
             // Skip the ones already accounted for above (refused / conflict).
-            let attempted = to_restore.contains(&item.original_path.as_str());
-            if !attempted {
+            if !attempted_set.contains(&item.original_path.as_str()) {
                 continue;
             }
             // C1-003: after the batch restore, success means the file is now
@@ -220,11 +226,25 @@ pub(crate) async fn handle_restore_from_trash(
 const RB_PATH_SEP: &str = "\u{1f}";
 
 /// PowerShell batch-restore script. The wanted set uses an ordinal-IGNORE-CASE
-/// comparer so the bin's reconstructed `Join-Path $loc $i.Name` matches the
-/// DB-stored `original_path` even when their casing diverges (drive-letter /
-/// Shell path normalization). The default parameterless HashSet[string] ctor is
-/// ordinal case-SENSITIVE, which regressed the case-insensitive `-eq` match the
+/// comparer so the bin's reconstructed path matches the DB-stored
+/// `original_path` even when their casing diverges (drive-letter / Shell path
+/// normalization). The default parameterless HashSet[string] ctor is ordinal
+/// case-SENSITIVE, which regressed the case-insensitive `-eq` match the
 /// per-item helper used and silently failed recoverable restores. (R-02)
+///
+/// The match key is reconstructed from `DeletedFrom + name`, but `$i.Name`
+/// follows Explorer's "Hide extensions for known file types" setting and can
+/// return the display name WITHOUT the extension ("document" for
+/// "document.txt") — so `DeletedFrom\document` never matched the DB's
+/// `...\document.txt` and the whole batch silently restored nothing on any box
+/// with the default shell setting. The physical recycled file (`$i.Path` →
+/// `...\$R######.txt`) always keeps the original extension, so we test BOTH the
+/// display-name path AND the display-name-plus-physical-extension path against
+/// the wanted set. Checking two candidates (rather than grafting only when the
+/// name looks extensionless) also covers multi-dot names like `archive.tar.gz`,
+/// where hiding the final ".gz" still leaves an apparent ".tar" extension.
+/// NOTE: this is concatenated into a SINGLE line — no `#` comments (they would
+/// swallow the rest of the script) and statements are `;`-separated. (audit 2026-07-08)
 #[cfg(any(windows, test))]
 const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
@@ -234,10 +254,15 @@ foreach ($w in ($env:FILEID_RB_PATHS -split [char]0x1f)) { if ($w.Length -gt 0) 
 foreach ($i in $bin.Items()) { \
     $loc = $i.ExtendedProperty('System.Recycle.DeletedFrom'); \
     if ($null -eq $loc) { continue } \
-    $full = (Join-Path $loc $i.Name); \
-    if ($wanted.Contains($full)) { \
-        $i.InvokeVerb('Undelete'); \
-        [void]$wanted.Remove($full); \
+    $cands = @(Join-Path $loc $i.Name); \
+    $pext = [System.IO.Path]::GetExtension($i.Path); \
+    if ($pext) { $cands += (Join-Path $loc ($i.Name + $pext)) } \
+    foreach ($full in $cands) { \
+        if ($wanted.Contains($full)) { \
+            $i.InvokeVerb('Undelete'); \
+            [void]$wanted.Remove($full); \
+            break; \
+        } \
     } \
     if ($wanted.Count -eq 0) { break } \
 }";
@@ -444,6 +469,34 @@ mod tests {
         assert!(
             !RESTORE_BATCH_SCRIPT.contains("System.Collections.Generic.HashSet[string];"),
             "must not use the parameterless (ordinal case-sensitive) HashSet ctor"
+        );
+    }
+
+    // audit 2026-07-08: $i.Name follows the "hide extensions for known file
+    // types" shell setting and can drop the extension, so the reconstructed
+    // match key must also try the physical extension from $i.Path — otherwise
+    // the whole batch silently restores nothing on any box with the default
+    // shell setting. Also guard the single-line invariant: a `#` comment or an
+    // unescaped newline would break the concatenated script.
+    #[test]
+    fn restore_batch_script_grafts_physical_extension() {
+        assert!(
+            RESTORE_BATCH_SCRIPT.contains("[System.IO.Path]::GetExtension($i.Path)"),
+            "script must read the physical recycled extension from $i.Path"
+        );
+        assert!(
+            RESTORE_BATCH_SCRIPT.contains("($i.Name + $pext)"),
+            "script must test the display-name-plus-physical-extension candidate"
+        );
+        // Single-line invariant: no PowerShell comment tokens (would swallow the
+        // rest of the script) and no embedded newlines.
+        assert!(
+            !RESTORE_BATCH_SCRIPT.contains('#'),
+            "script is one line — a '#' would comment out everything after it"
+        );
+        assert!(
+            !RESTORE_BATCH_SCRIPT.contains('\n'),
+            "script must remain a single concatenated line"
         );
     }
 

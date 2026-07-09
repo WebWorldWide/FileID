@@ -1,0 +1,53 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    SessionChangesSheet — "Changes this session": every file mutation FileID
+    applied since launch (renames, trash, reorganizes, people merges, tag
+    writes) with per-row Undo. Rows render one of four states:
+      Undoable    → gold-accent Undo button
+      Undone      → dimmed row + "Undone" pill
+      UndoFailed  → warning pill with the reason + Retry
+      NotUndoable → dimmed row + reason (superseded restructure / history cap)
+    Hosted in a ContentDialog (Close only) — same presentation pattern as
+    BulkRenameSheet. Rows are rebuilt from a ChangeLog snapshot on the
+    dispatcher whenever ChangeLog.Changed fires.
+-->
+<UserControl
+    x:Class="FileID.Views.SessionChangesSheet"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    MinWidth="560"
+    MinHeight="360">
+
+    <Grid RowSpacing="12" Padding="4">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Spacing="4">
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Text="Everything FileID changed on disk since launch. Undo anything you didn't mean — trashed files come back from the Recycle Bin, renames and moves are reversed in place." />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1"
+                      HorizontalScrollMode="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock x:Name="EmptyText"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                           Margin="0,24,0,0"
+                           HorizontalAlignment="Center"
+                           TextWrapping="Wrap"
+                           Text="No changes yet — anything FileID renames, moves, or trashes will show up here."
+                           Visibility="Visible" />
+                <ItemsControl x:Name="RowsHost" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

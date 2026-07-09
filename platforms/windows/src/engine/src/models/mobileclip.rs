@@ -32,6 +32,7 @@ pub(crate) const CLIP_EMBED_DIM: usize = 512;
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
+const INV_255: f32 = 1.0 / 255.0;
 
 pub struct MobileClipImage {
     session: Session,
@@ -48,7 +49,7 @@ impl MobileClipImage {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
         let (session, input_name) = commit_chain_session("MobileCLIP image", path)?;
-        // Warmup with a zero 256×256 frame so first-call kernel compile
+        // Warmup with a zero 224x224 frame so first-call kernel compile
         // happens during load.
         let mut model = Self { session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
@@ -61,8 +62,8 @@ impl MobileClipImage {
         Ok(model)
     }
 
-    /// Embed a 224×224 RGB8 image. Caller pre-resizes to 224×224 via
-    /// `tagging::resize_rgb_nearest` (or bilinear when we wire that).
+    /// Embed a 224x224 RGB8 image. Caller pre-resizes to 224x224 via
+    /// `tagging::resize_rgb_quality`.
     /// Single-image embed. Kept for non-batched callers (e.g. interactive
     /// semantic-search query embedding) — main scan pipeline goes through
     /// `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
@@ -77,17 +78,7 @@ impl MobileClipImage {
             );
         }
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
-        for y in 0..n {
-            for x in 0..n {
-                let i = (y * n + x) * 3;
-                let r = rgb_256[i] as f32 / 255.0;
-                let g = rgb_256[i + 1] as f32 / 255.0;
-                let b = rgb_256[i + 2] as f32 / 255.0;
-                chw[[0, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
-                chw[[0, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
-                chw[[0, 2, y, x]] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
-            }
-        }
+        fill_clip_chw(&mut chw, 0, rgb_256, n);
 
         let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
         let input_name = self.input_name.clone();
@@ -114,7 +105,7 @@ impl MobileClipImage {
         Ok(emb)
     }
 
-    /// Batched inference. Takes N pre-resized 224×224 RGB8 buffers, packs
+    /// Batched inference. Takes N pre-resized 224x224 RGB8 buffers, packs
     /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
@@ -143,17 +134,7 @@ impl MobileClipImage {
         }
         let mut chw = Array4::<f32>::zeros((batch, 3, n, n));
         for (b, rgb) in rgb_256_images.iter().enumerate() {
-            for y in 0..n {
-                for x in 0..n {
-                    let i = (y * n + x) * 3;
-                    let r = rgb[i] as f32 / 255.0;
-                    let g = rgb[i + 1] as f32 / 255.0;
-                    let bch = rgb[i + 2] as f32 / 255.0;
-                    chw[[b, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
-                    chw[[b, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
-                    chw[[b, 2, y, x]] = (bch - CLIP_MEAN[2]) / CLIP_STD[2];
-                }
-            }
+            fill_clip_chw(&mut chw, b, rgb, n);
         }
         let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
         let input_name = self.input_name.clone();
@@ -200,6 +181,24 @@ impl MobileClipImage {
     }
 }
 
+fn fill_clip_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: usize) {
+    let plane = n * n;
+    let base = image_index * 3 * plane;
+    let out = chw
+        .as_slice_mut()
+        .expect("fresh Array4 input tensor is contiguous");
+    let mut src = 0usize;
+    for p in 0..plane {
+        let r = rgb[src] as f32 * INV_255;
+        let g = rgb[src + 1] as f32 * INV_255;
+        let b = rgb[src + 2] as f32 * INV_255;
+        out[base + p] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
+        out[base + plane + p] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
+        out[base + (2 * plane) + p] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
+        src += 3;
+    }
+}
+
 fn l2_normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
     for x in v.iter_mut() {
@@ -211,4 +210,40 @@ pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?
         .join("mobileclip")
         .join("mobileclip_s2_image.onnx"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn norm(v: u8, channel: usize) -> f32 {
+        ((v as f32 * INV_255) - CLIP_MEAN[channel]) / CLIP_STD[channel]
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn fill_clip_chw_writes_contiguous_channel_planes() {
+        let rgb = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let mut chw = Array4::<f32>::zeros((1, 3, 2, 2));
+
+        fill_clip_chw(&mut chw, 0, &rgb, 2);
+
+        let out = chw.as_slice().expect("test tensor is contiguous");
+        assert_eq!(out.len(), 12);
+        assert_close(out[0], norm(10, 0));
+        assert_close(out[1], norm(40, 0));
+        assert_close(out[2], norm(70, 0));
+        assert_close(out[3], norm(100, 0));
+        assert_close(out[4], norm(20, 1));
+        assert_close(out[5], norm(50, 1));
+        assert_close(out[6], norm(80, 1));
+        assert_close(out[7], norm(110, 1));
+        assert_close(out[8], norm(30, 2));
+        assert_close(out[9], norm(60, 2));
+        assert_close(out[10], norm(90, 2));
+        assert_close(out[11], norm(120, 2));
+    }
 }

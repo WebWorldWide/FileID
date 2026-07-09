@@ -838,6 +838,37 @@
                 </StackPanel>
             </Border>
 
+            <!-- Excluded folders. User-managed subtrees the scan walk prunes.
+                 Adding one immediately purges its cataloged rows (files on
+                 disk untouched) via purgeExcluded, so the Library reflects
+                 the exclusion without waiting for a rescan. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Excluded folders" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="FileID skips these folders when scanning. Excluding a folder also removes its files from the library right away — nothing is ever deleted from your disk." />
+                    <InfoBar x:Name="ExcludedFoldersInfoBar"
+                             IsOpen="False"
+                             IsClosable="True" />
+                    <TextBlock x:Name="ExcludedFoldersEmptyText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="No folders are excluded."
+                               Visibility="Visible" />
+                    <ItemsControl x:Name="ExcludedFoldersList" />
+                    <Button Content="Add folder…"
+                            Click="OnAddExcludedFolderClicked"
+                            AutomationProperties.Name="Add an excluded folder" />
+                </StackPanel>
+            </Border>
+
             <!-- Recent scans. Most-recent 5 scan_sessions rows: started_at,
                  file count, duration, root path. Refreshes whenever the
                  Settings tab is opened (cheap query against a small table). -->

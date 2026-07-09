@@ -257,70 +257,90 @@ pub(crate) async fn handle_rename_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        // C1-012: every move that landed on disk, tracked so a failed
-        // end-of-batch commit (which rolls back ALL the per-move DB UPDATEs)
-        // can be reconciled via the recovery sidecar — the disk is renamed but
-        // the DB is stale across the whole batch otherwise.
-        let mut on_disk_moves: Vec<(i64, String, String)> = Vec::new();
-        let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
-        for entry in &payload.renames {
-            // Reject anything that isn't a single Normal path component.
-            if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(entry.file_id),
-                    ok: false,
-                    message: Some(
-                        "new name must be a single filename (no slashes, no '..', no '.', no drive)"
-                            .into(),
-                    ),
+
+        // Phase 1 — resolve + validate every rename under a short writer-lock
+        // scope (read-only SELECTs). Collect the moves so the per-file
+        // filesystem work below runs with NO lock held: a large batch must not
+        // wedge the engine's only writer (and any concurrent scan flush) across
+        // every MoveFileExW — the pathology the apply-tags P0 fix removed.
+        // (audit 2026-07-08)
+        struct PlannedRename {
+            file_id: i64,
+            src: PathBuf,
+            dest: PathBuf,
+        }
+        let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
+        {
+            let conn = db.lock();
+            for entry in &payload.renames {
+                // Reject anything that isn't a single Normal path component.
+                if !crate::util::path_safety::is_safe_filename(&entry.new_name) {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: false,
+                        message: Some(
+                            "new name must be a single filename (no slashes, no '..', no '.', no drive)"
+                                .into(),
+                        ),
+                    });
+                    continue;
+                }
+                let path: Result<String, _> = conn.query_row(
+                    "SELECT path_text FROM files WHERE id = ?1",
+                    rusqlite::params![entry.file_id],
+                    |r| r.get::<_, String>(0),
+                );
+                let path = match path {
+                    Ok(p) => PathBuf::from(p),
+                    Err(err) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(entry.file_id),
+                            ok: false,
+                            message: Some(format!("not found: {err}")),
+                        });
+                        continue;
+                    }
+                };
+                let dir = match path.parent() {
+                    Some(d) => d.to_path_buf(),
+                    None => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(entry.file_id),
+                            ok: false,
+                            message: Some("source has no parent".into()),
+                        });
+                        continue;
+                    }
+                };
+                let dest = dir.join(&entry.new_name);
+                planned.push(PlannedRename {
+                    file_id: entry.file_id,
+                    src: path,
+                    dest,
                 });
-                continue;
             }
-            let path: Result<String, _> = tx.query_row(
-                "SELECT path_text FROM files WHERE id = ?1",
-                rusqlite::params![entry.file_id],
-                |r| r.get::<_, String>(0),
-            );
-            let path = match path {
-                Ok(p) => PathBuf::from(p),
-                Err(err) => {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some(format!("not found: {err}")),
-                    });
-                    continue;
-                }
-            };
-            let dir = match path.parent() {
-                Some(d) => d.to_path_buf(),
-                None => {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
-                        ok: false,
-                        message: Some("source has no parent".into()),
-                    });
-                    continue;
-                }
-            };
-            let dest = dir.join(&entry.new_name);
-            // No-clobber rename. The destination existence is re-checked by the
-            // kernel inside the move itself (no MOVEFILE_REPLACE_EXISTING), so a
-            // separate symlink_metadata probe + std::fs::rename — which clobbers
-            // via MoveFileExW(REPLACE_EXISTING) — is a TOCTOU: an external file
-            // materializing in the probe→rename window would be silently
-            // overwritten. Here an occupied destination fails the move (failed++)
-            // rather than destroying data. The un-prefixed `dest` is still used
-            // for DB path_text + user messages so stored paths stay normal-form
-            // (#29). Mirrors restructure_apply.rs::move_file (B3).
-            if let Err(err) = no_clobber_rename(&path, &dest) {
+        }
+
+        // Phase 2 — perform the filesystem moves with NO writer lock held. Each
+        // move is a no-clobber MoveFileExW (no MOVEFILE_REPLACE_EXISTING): the
+        // destination existence is re-checked by the kernel inside the move
+        // itself, so a separate probe + rename would be a TOCTOU — an occupied
+        // destination fails the move (failed++) rather than being silently
+        // overwritten. The un-prefixed dest is used for DB path_text + user
+        // messages so stored paths stay normal-form (#29). Mirrors
+        // restructure_apply.rs::move_file (B3).
+        // C1-012: every move that landed on disk is tracked so a failed per-row
+        // UPDATE or a failed end-of-batch commit (which rolls back ALL the
+        // per-move DB UPDATEs) can be reconciled via the recovery sidecar.
+        let mut on_disk_moves: Vec<(i64, String, String)> = Vec::new();
+        for p in &planned {
+            if let Err(err) = no_clobber_rename(&p.src, &p.dest) {
                 failed += 1;
                 messages.push(BulkActionItem {
-                    file_id: Some(entry.file_id),
+                    file_id: Some(p.file_id),
                     ok: false,
                     message: Some(format!("rename failed: {err}")),
                 });
@@ -329,19 +349,25 @@ pub(crate) async fn handle_rename_files(
             // Move the on-disk tags sidecar to follow the renamed file (#27).
             // Best-effort: a missing sidecar (the common case) or any error is
             // ignored so it never turns a successful rename into a failure.
-            crate::shell::tags::move_sidecar(&path, &dest);
-            let dest_text = dest.to_string_lossy().to_string();
-            let src_text = path.to_string_lossy().to_string();
-            // C1-012: the on-disk move is now committed but the DB row is only
-            // updated below (and the whole tx commits at end-of-batch). Track it
-            // so a failed UPDATE or a failed end-of-batch commit is reconcilable.
-            on_disk_moves.push((entry.file_id, src_text, dest_text.clone()));
+            crate::shell::tags::move_sidecar(&p.src, &p.dest);
+            on_disk_moves.push((
+                p.file_id,
+                p.src.to_string_lossy().to_string(),
+                p.dest.to_string_lossy().to_string(),
+            ));
+        }
+
+        // Phase 3 — persist the DB row updates for the moves that landed on
+        // disk, in one short transaction under the writer lock.
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        for (file_id, src_text, dest_text) in &on_disk_moves {
             // ENG-91: keep path_hash in sync with path_text (lookups/dedup key
             // on it). ENG-92: do NOT swallow the UPDATE error and still claim
             // success — a file renamed on disk but with a failed DB write must
             // be reported as failed (the next scan's rename-heal rebinds it via
             // content_hash/file_ref).
-            let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
+            let dest_hash = crate::util::path_safety::stable_path_hash(dest_text);
             match tx.execute(
                 // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
                 // renamed/moved file stays findable by its accented name. (audit parity)
@@ -355,26 +381,26 @@ pub(crate) async fn handle_rename_files(
                 rusqlite::params![
                     dest_text,
                     dest_hash,
-                    entry.file_id,
-                    crate::pipeline::dbwriter::nfc_path_search(&dest_text)
+                    file_id,
+                    crate::pipeline::dbwriter::nfc_path_search(dest_text)
                 ],
             ) {
                 Ok(_) => {
                     succeeded += 1;
                     messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
+                        file_id: Some(*file_id),
                         ok: true,
-                        message: Some(dest_text),
+                        message: Some(dest_text.clone()),
                     });
                 }
                 Err(err) => {
                     // C1-012: file is renamed on disk but its row update failed.
                     // Record it to the recovery sidecar so the disk/DB desync is
                     // reconcilable even if the next scan never runs.
-                    record_rename_recovery(entry.file_id, &path.to_string_lossy(), &dest_text);
+                    record_rename_recovery(*file_id, src_text, dest_text);
                     failed += 1;
                     messages.push(BulkActionItem {
-                        file_id: Some(entry.file_id),
+                        file_id: Some(*file_id),
                         ok: false,
                         message: Some(format!("renamed on disk but DB update failed: {err}")),
                     });
@@ -428,19 +454,33 @@ pub(crate) async fn handle_trash_files(
         {
             let conn = db.lock();
             for fid in &payload.file_ids {
-                if let Ok(p) = conn.query_row(
+                match conn.query_row(
                     "SELECT path_text FROM files WHERE id = ?1",
                     rusqlite::params![fid],
                     |r| r.get::<_, String>(0),
                 ) {
-                    let path = PathBuf::from(p);
-                    // Verbatim (\\?\) probe so a >260-char file is classified as
-                    // present (and trashed) instead of "already missing" (#28).
-                    let existed = std::fs::symlink_metadata(
-                        crate::util::path_safety::to_extended_length(&path),
-                    )
-                    .is_ok();
-                    path_for_id.push((*fid, path, existed));
+                    Ok(p) => {
+                        let path = PathBuf::from(p);
+                        // Verbatim (\\?\) probe so a >260-char file is classified as
+                        // present (and trashed) instead of "already missing" (#28).
+                        let existed = std::fs::symlink_metadata(
+                            crate::util::path_safety::to_extended_length(&path),
+                        )
+                        .is_ok();
+                        path_for_id.push((*fid, path, existed));
+                    }
+                    // A file_id with no DB row was silently dropped before, so
+                    // succeeded+failed didn't sum to the request and the app got
+                    // no per-item reason. Report it as failed, matching
+                    // handle_apply_tags / handle_rename_files. (audit 2026-07-08)
+                    Err(err) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(*fid),
+                            ok: false,
+                            message: Some(format!("not found: {err}")),
+                        });
+                    }
                 }
             }
         }

@@ -16,6 +16,19 @@ public class AppSettingsTests
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
+    private static readonly string[] s_excludedFoldersWithMalformed =
+    [
+        @"C:\Pics\Raw\",
+        @"c:\pics\raw",
+        "relative\\path",
+        "   ",
+        @"C:\Pics\Other",
+    ];
+
+    private static readonly string[] s_sanitizedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
+
+    private static readonly string[] s_cloneExpectedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
+
     [Fact]
     public void NewInstance_HasDocumentedDefaults()
     {
@@ -35,7 +48,9 @@ public class AppSettingsTests
         Assert.False(s.DisableAutoInstallVulkanRuntime);
         Assert.False(s.DisableAutoInstallCudnn);
         Assert.Equal("qwen2_5_vl_7b", s.SelectedVlmModelKind);
-        Assert.Equal(5, s.SchemaVersion);
+        Assert.Empty(s.ExcludedFolders);
+        Assert.True(s.ConfirmCloseOnPendingChanges);
+        Assert.Equal(6, s.SchemaVersion);
     }
 
     [Fact]
@@ -142,7 +157,47 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        // "{}" carries no schemaVersion → property default (current schema, v5).
-        Assert.Equal(5, decoded.SchemaVersion);
+        // "{}" carries no schemaVersion → property default (current schema, v6).
+        Assert.Equal(6, decoded.SchemaVersion);
+        // v6 fields absent from an old settings.json take their safe defaults.
+        Assert.Empty(decoded.ExcludedFolders);
+        Assert.True(decoded.ConfirmCloseOnPendingChanges);
+    }
+
+    [Fact]
+    public void SanitizeExcludedFolders_DropsMalformedAndDedupes()
+    {
+        var result = AppSettings.SanitizeExcludedFolders(s_excludedFoldersWithMalformed);
+        Assert.Equal(s_sanitizedExcludedFolders, result);
+    }
+
+    [Fact]
+    public void SanitizeExcludedFolders_CapsAtBound()
+    {
+        var many = new List<string>();
+        for (int i = 0; i < 400; i++) many.Add($@"C:\x\{i}");
+        var result = AppSettings.SanitizeExcludedFolders(many);
+        Assert.Equal(256, result.Count);
+    }
+
+    [Fact]
+    public void SanitizeExcludedFolders_NullInput_ReturnsEmpty()
+    {
+        Assert.Empty(AppSettings.SanitizeExcludedFolders(null));
+    }
+
+    [Fact]
+    public void CloneForWrite_SnapshotsExcludedFoldersList()
+    {
+        // The debounced Save() serializes a clone on a worker; a mid-debounce
+        // Add on the UI thread must not mutate the snapshot being written.
+        var s = new AppSettings();
+        s.ExcludedFolders.Add(@"C:\Pics\Raw");
+        var clone = (AppSettings)typeof(AppSettings)
+            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(s, null)!;
+        s.ExcludedFolders.Add(@"C:\Pics\Other");
+        Assert.Single(clone.ExcludedFolders);
+        Assert.Equal(s_cloneExpectedExcludedFolders, s.ExcludedFolders);
     }
 }

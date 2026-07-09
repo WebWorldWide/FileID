@@ -95,10 +95,11 @@ Landed (round-trip-critical):
 - **Tag source** `vision`→`auto` (writer + all readers); rescan DELETE+REPLACE
   + trim/skip-empty; dropped orientation/capability extra tags; hyphen
   sanitizer (byte-faithful to `sanitize_proposed_name`).
-- **IPC**: `startScan` → rootPath/rootDisplay?/rescan (app resolves bookmark;
-  **unsandboxed** model — no `.entitlements`); +`markPersonsDifferent`,
-  +`wipeLibrary`, +8 reply events/DTOs, +`EngineInfo.hardware`/`HardwareInfo`,
-  +`EngineError.modelKind`, +`deepAnalyzeAll.tagsOnly`.
+- **IPC**: `startScan` → rootPath/rootDisplay?/rescan/excludedPaths? (app
+  resolves bookmark; **unsandboxed** model — no `.entitlements`);
+  +`purgeExcluded`, +`markPersonsDifferent`, +`wipeLibrary`, +8 reply
+  events/DTOs, +`EngineInfo.hardware`/`HardwareInfo`, +`EngineError.modelKind`,
+  +`deepAnalyzeAll.tagsOnly`.
 
 Deferred here (need a Mac to behavior-verify; some overlap Part 2):
 1. **Face bbox** coordinate-space parity (Windows stores **pixels**, macOS

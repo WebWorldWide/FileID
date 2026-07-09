@@ -71,6 +71,10 @@ pub struct ScanSession {
     /// When true, skip the incremental-rescan skip set and reprocess
     /// every file. Plumbed from `StartScanPayload::rescan`.
     rescan: bool,
+    /// User-excluded folders, raw as received from the app. Resolved
+    /// against the root at run() time. Plumbed from
+    /// `StartScanPayload::excluded_paths`.
+    excluded_paths: Vec<String>,
 }
 
 impl ScanSession {
@@ -81,6 +85,7 @@ impl ScanSession {
         sink: Sink,
         models: Arc<ModelStack>,
         rescan: bool,
+        excluded_paths: Vec<String>,
     ) -> Self {
         Self {
             session_id: Uuid::new_v4().to_string(),
@@ -90,6 +95,7 @@ impl ScanSession {
             sink,
             models,
             rescan,
+            excluded_paths,
         }
     }
 
@@ -160,6 +166,18 @@ impl ScanSession {
                     started_unix,
                 ],
             );
+        }
+
+        // Resolve user exclusions against this root, then purge already-
+        // cataloged rows beneath them BEFORE the skip-set preload so a
+        // stale excluded row can never enter the skip set.
+        let exclusions = crate::util::path_safety::resolve_exclusions(root, &self.excluded_paths);
+        if !exclusions.is_empty() {
+            let conn = self.db_conn.lock();
+            let purged = purge_excluded_rows(&conn, &exclusions);
+            if purged > 0 {
+                tracing::info!("[SCAN] purged {purged} cataloged rows under excluded folders");
+            }
         }
 
         // Pre-load the "already current" set from DB so Discovery can skip
@@ -278,7 +296,13 @@ impl ScanSession {
         // result with a non-empty skip set means "incremental rescan, all files
         // already current" — NOT an empty/unsupported folder (#21).
         let skip_count = skip_paths.len();
-        let discovery = Discovery::new_with_skip(root, self.coordinator.clone(), skip_paths);
+        let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
+        let discovery = Discovery::new_with_skip_and_exclusions(
+            root,
+            self.coordinator.clone(),
+            skip_paths,
+            Arc::new(excl_norm),
+        );
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
         let discovered_done = handle.done.clone();
@@ -750,6 +774,47 @@ fn bge_installed() -> bool {
 /// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
 /// None when no finite bound exists (empty prefix, or an all-`char::MAX` tail)
 /// — callers then match the whole table.
+/// Delete cataloged rows under each excluded folder. Child rows
+/// (tags / face prints / captions / embeddings) go via ON DELETE CASCADE
+/// (`PRAGMA foreign_keys = ON` on every engine connection); face-crop JPEGs
+/// are pruned best-effort after each delete. Range-matches `path_text` with
+/// the exclusion's original casing — same walk-derived casing contract as
+/// the skip-set preload above; a mismatch fails safe (rows survive until a
+/// future exact-cased scan). Returns the number of `files` rows purged.
+pub(crate) fn purge_excluded_rows(
+    conn: &Connection,
+    exclusions: &[crate::util::path_safety::ResolvedExclusion],
+) -> u64 {
+    let mut purged = 0u64;
+    for excl in exclusions {
+        let lo = format!("{}{}", excl.original, std::path::MAIN_SEPARATOR);
+        let Some(hi) = prefix_upper_bound(&lo) else { continue };
+        let crop_ids: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM face_prints WHERE file_id IN \
+                 (SELECT id FROM files WHERE path_text >= ?1 AND path_text < ?2)",
+            )
+            .and_then(|mut st| {
+                st.query_map(rusqlite::params![lo, hi], |r| r.get(0))
+                    .map(|rows| rows.filter_map(Result::ok).collect())
+            })
+            .unwrap_or_default();
+        match conn.execute(
+            "DELETE FROM files WHERE path_text >= ?1 AND path_text < ?2",
+            rusqlite::params![lo, hi],
+        ) {
+            Ok(n) => {
+                purged += n as u64;
+                for id in crop_ids {
+                    crate::pipeline::dbwriter::remove_face_crop(id);
+                }
+            }
+            Err(err) => tracing::warn!(?err, "excluded-rows purge failed"),
+        }
+    }
+    purged
+}
+
 pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {
@@ -877,6 +942,74 @@ mod tests {
         assert_eq!(prefix_upper_bound(""), None);
         // Simple increment.
         assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
+    }
+
+    /// purge_excluded_rows deletes exactly the rows strictly under each
+    /// excluded folder (BINARY prefix range) and cascades child rows; a
+    /// sibling folder sharing the excluded name as a prefix survives.
+    #[test]
+    fn purge_excluded_rows_deletes_subtree_and_cascades() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        for pragma in crate::db::SETUP_PRAGMAS {
+            let _ = conn.execute_batch(pragma);
+        }
+        crate::db::migrations::apply(&conn).unwrap();
+
+        let insert = |path: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+                 VALUES (?1, 1, 10, 100.0, 'image', 'jpg')",
+                rusqlite::params![path],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        // Platform-appropriate absolute paths: resolve_exclusions drops
+        // non-absolute entries, and these tests also run on Linux CI.
+        let j = |tail: &str| {
+            if cfg!(windows) {
+                format!(r"C:\a{}", tail.replace('/', "\\"))
+            } else {
+                format!("/a{tail}")
+            }
+        };
+        let in_a = insert(&j("/b/one.jpg"));
+        let in_b = insert(&j("/b/deep/two.jpg"));
+        let boundary = insert(&j("/bc/three.jpg")); // shares '…\a\b' as string prefix
+        let keeper = insert(&j("/keep/four.jpg"));
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source) VALUES (?1, 'cat', 'test')",
+            rusqlite::params![in_a],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO face_prints (file_id, print_data, bbox) VALUES (?1, X'00', '[]')",
+            rusqlite::params![in_b],
+        )
+        .unwrap();
+
+        let root = if cfg!(windows) { r"C:\a".to_string() } else { "/a".to_string() };
+        let exclusions = crate::util::path_safety::resolve_exclusions(
+            std::path::Path::new(&root),
+            &[j("/b")],
+        );
+        assert_eq!(exclusions.len(), 1);
+        let purged = purge_excluded_rows(&conn, &exclusions);
+        assert_eq!(purged, 2);
+
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining, vec![boundary, keeper]);
+        let tag_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+        let face_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM face_prints", [], |r| r.get(0)).unwrap();
+        assert_eq!((tag_count, face_count), (0, 0), "cascade must clear child rows");
     }
 
     /// Two emits closer than MIN_RATE_DT must not re-divide and spike the rate.
