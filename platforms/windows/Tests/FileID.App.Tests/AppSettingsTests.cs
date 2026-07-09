@@ -16,6 +16,19 @@ public class AppSettingsTests
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
+    private static readonly string[] s_excludedFoldersWithMalformed =
+    [
+        @"C:\Pics\Raw\",
+        @"c:\pics\raw",
+        "relative\\path",
+        "   ",
+        @"C:\Pics\Other",
+    ];
+
+    private static readonly string[] s_sanitizedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
+
+    private static readonly string[] s_cloneExpectedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
+
     [Fact]
     public void NewInstance_HasDocumentedDefaults()
     {
@@ -154,15 +167,8 @@ public class AppSettingsTests
     [Fact]
     public void SanitizeExcludedFolders_DropsMalformedAndDedupes()
     {
-        var result = AppSettings.SanitizeExcludedFolders(new[]
-        {
-            @"C:\Pics\Raw\",          // trailing separator trimmed
-            @"c:\pics\raw",           // case-insensitive duplicate
-            "relative\\path",         // not fully qualified → dropped
-            "   ",                    // whitespace → dropped
-            @"C:\Pics\Other",
-        });
-        Assert.Equal(new[] { @"C:\Pics\Raw", @"C:\Pics\Other" }, result);
+        var result = AppSettings.SanitizeExcludedFolders(s_excludedFoldersWithMalformed);
+        Assert.Equal(s_sanitizedExcludedFolders, result);
     }
 
     [Fact]
@@ -192,6 +198,6 @@ public class AppSettingsTests
             .Invoke(s, null)!;
         s.ExcludedFolders.Add(@"C:\Pics\Other");
         Assert.Single(clone.ExcludedFolders);
-        Assert.Equal(new[] { @"C:\Pics\Raw", @"C:\Pics\Other" }, s.ExcludedFolders);
+        Assert.Equal(s_cloneExpectedExcludedFolders, s.ExcludedFolders);
     }
 }

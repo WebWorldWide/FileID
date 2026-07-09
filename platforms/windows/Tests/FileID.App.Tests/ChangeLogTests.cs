@@ -111,7 +111,7 @@ public class ChangeLogTests
         var results = await Task.WhenAll(Log.UndoAsync(entry), Log.UndoAsync(entry));
 
         Assert.Equal(1, runs);
-        Assert.Single(results.Where(r => r));
+        Assert.Single(results, r => r);
         Assert.Equal(ChangeStatus.Undone, entry.Status);
         Log.Clear();
     }
