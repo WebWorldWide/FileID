@@ -22,7 +22,18 @@ public sealed record StartScanCommand(
     // `rescan = false` (default) is incremental: engine skips files where
     // `scanned_at >= modified_at`. `rescan = true` forces every file to
     // be re-tagged.
-    bool Rescan = false) : CommandPayload;
+    bool Rescan = false,
+    // User-excluded folder subtrees pruned from the walk; rows already
+    // cataloged under them are purged at scan start. Null = no exclusions
+    // (key omitted on the wire — additive-optional for macOS parity).
+    System.Collections.Generic.IReadOnlyList<string>? ExcludedPaths = null) : CommandPayload;
+
+/// <summary>Immediately remove cataloged rows under the given excluded
+/// folders (files on disk untouched). Sent when the user adds an exclusion
+/// so the Library reflects it without waiting for a rescan. Replies with a
+/// <c>bulkActionResult</c> (action "purgeExcluded").</summary>
+public sealed record PurgeExcludedCommand(
+    System.Collections.Generic.IReadOnlyList<string> ExcludedPaths) : CommandPayload;
 
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
@@ -200,6 +211,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "generateVideoThumbnail" => JsonSerializer.Deserialize<GenerateVideoThumbnailCommand>(ref reader, options) ?? throw new JsonException("generateVideoThumbnail: null body"),
 
             "wipeLibrary" => Empty<WipeLibraryCommand>(ref reader),
+            "purgeExcluded" => JsonSerializer.Deserialize<PurgeExcludedCommand>(ref reader, options) ?? throw new JsonException("purgeExcluded: null body"),
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
@@ -258,6 +270,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
             case GenerateVideoThumbnailCommand c: WriteVariant(writer, "generateVideoThumbnail", c, options); break;
             case WipeLibraryCommand: WriteEmpty(writer, "wipeLibrary"); break;
+            case PurgeExcludedCommand c: WriteVariant(writer, "purgeExcluded", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

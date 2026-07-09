@@ -71,8 +71,135 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // Populate the Recent Scans card. Query is cheap (≤5 rows)
             // so we do it inline on the dispatcher.
             try { _ = PopulateRecentScansAsync(); } catch { }
+            try { PopulateExcludedFolders(); } catch { }
         };
     }
+
+    // ----- Excluded folders card -----
+
+    private void PopulateExcludedFolders()
+    {
+        var settings = AppViewModel.Instance.Settings;
+        if (settings.ExcludedFolders.Count == 0)
+        {
+            ExcludedFoldersEmptyText.Visibility = Visibility.Visible;
+            ExcludedFoldersList.ItemsSource = null;
+            return;
+        }
+        ExcludedFoldersEmptyText.Visibility = Visibility.Collapsed;
+        var root = AppViewModel.Instance.FolderPath?.TrimEnd('\\', '/');
+        var rows = new System.Collections.Generic.List<Grid>();
+        foreach (var path in settings.ExcludedFolders)
+        {
+            var outside = root is null
+                || !path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
+            var grid = new Grid { ColumnSpacing = 8 };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var label = new TextBlock
+            {
+                Text = outside ? path + "   (outside current library)" : path,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            ToolTipService.SetToolTip(label, path);
+            var remove = new Button
+            {
+                Content = "✕",
+                Tag = path,
+                Padding = new Thickness(6, 2, 6, 2),
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Stop excluding " + path);
+            remove.Click += OnRemoveExcludedFolderClicked;
+            Grid.SetColumn(remove, 1);
+            grid.Children.Add(label);
+            grid.Children.Add(remove);
+            rows.Add(grid);
+        }
+        ExcludedFoldersList.ItemsSource = rows;
+    }
+
+    private void ShowExcludedFoldersInfo(InfoBarSeverity severity, string message)
+    {
+        ExcludedFoldersInfoBar.Severity = severity;
+        ExcludedFoldersInfoBar.Message = message;
+        ExcludedFoldersInfoBar.IsOpen = true;
+    }
+
+    private async void OnAddExcludedFolderClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnAddExcludedFolderClicked), async () =>
+        {
+            var vm = AppViewModel.Instance;
+            var hwnd = App.HostWindow is { } window
+                ? WinRT.Interop.WindowNative.GetWindowHandle(window)
+                : IntPtr.Zero;
+            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            if (result.FailureReason is not null)
+            {
+                ShowExcludedFoldersInfo(InfoBarSeverity.Error, result.FailureReason);
+                return;
+            }
+            if (result.Path is null) return; // user cancelled
+            var picked = result.Path.TrimEnd('\\', '/');
+            var root = vm.FolderPath?.TrimEnd('\\', '/');
+            if (root is not null && string.Equals(picked, root, StringComparison.OrdinalIgnoreCase))
+            {
+                ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
+                    "That's your whole library. Pick a folder inside it instead.");
+                return;
+            }
+            foreach (var existing in vm.Settings.ExcludedFolders)
+            {
+                if (string.Equals(existing, picked, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
+                        "That folder is already excluded.");
+                    return;
+                }
+            }
+            var updated = new System.Collections.Generic.List<string>(vm.Settings.ExcludedFolders) { picked };
+            vm.Settings.ExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
+            vm.Settings.Save();
+            PopulateExcludedFolders();
+
+            // Purge-immediately ruling: the Library reflects the exclusion now,
+            // not at the next rescan. Engine offline / timeout degrades to the
+            // scan-start purge backstop — say so instead of failing silently.
+            try
+            {
+                var reply = await EngineClient.Instance
+                    .PurgeExcludedAndWaitAsync(new[] { picked }).ConfigureAwait(true);
+                ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
+                    ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
+                    : "Excluded. This folder will be skipped from now on.");
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn($"[SETTINGS] purgeExcluded didn't confirm: {ex.Message}");
+                ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
+                    "Excluded. The library will fully reflect this at the next scan.");
+            }
+        });
+
+    private void OnRemoveExcludedFolderClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRemoveExcludedFolderClicked), () =>
+        {
+            if (sender is not Button button || button.Tag is not string path) return;
+            var vm = AppViewModel.Instance;
+            var updated = new System.Collections.Generic.List<string>();
+            foreach (var existing in vm.Settings.ExcludedFolders)
+            {
+                if (!string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    updated.Add(existing);
+                }
+            }
+            vm.Settings.ExcludedFolders = updated;
+            vm.Settings.Save();
+            PopulateExcludedFolders();
+            ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
+                "No longer excluded. Its files will be added back at the next scan.");
+        });
 
     // Reads up to the 5 most-recent scan_sessions rows and renders one
     // line per row in the Recent Scans card.
@@ -616,7 +743,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
             DebugLog.Info("[RETAG] force re-scan (re-tag) requested for the current library root.");
             await FileID.ViewModels.EngineClient.Instance
-                .StartScanAsync(root!, vm.FolderDisplay, rescan: true)
+                .StartScanAsync(root!, vm.FolderDisplay, rescan: true,
+                    excludedPaths: vm.Settings.ExcludedFolders)
                 .ConfigureAwait(true);
         });
 

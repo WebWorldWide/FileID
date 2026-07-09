@@ -777,6 +777,10 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             var name = _pendingProposedName;
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
+            // Capture the pre-rename name NOW for the session change log's
+            // inverse action (renaming back is just another renameFiles).
+            var fileId = FileId;
+            var oldName = System.IO.Path.GetFileName(FilePath);
             try
             {
                 // Await the engine's BulkActionResult instead of fire-and-forget:
@@ -801,6 +805,32 @@ public sealed partial class FilePreviewSheet : UserControl
                     // didn't apply and retry, rather than silently vanishing.
                     Services.DebugLog.Warn("Apply rename reported failure; leaving card open");
                     return;
+                }
+                if (!string.IsNullOrEmpty(oldName))
+                {
+                    Services.UndoStack.Instance.Push(
+                        $"rename “{oldName}”",
+                        Services.ChangeKind.Rename,
+                        async () =>
+                        {
+                            try
+                            {
+                                var undoResult = await ViewModels.EngineClient.Instance
+                                    .WaitForBulkActionResultAsync(
+                                        "renameFiles",
+                                        () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
+                                        {
+                                            new IpcSchema.RenameEntry(fileId, oldName),
+                                        }),
+                                        TimeSpan.FromSeconds(30));
+                                return undoResult.Failed == 0 && undoResult.Succeeded > 0;
+                            }
+                            catch (Exception ex)
+                            {
+                                Services.DebugLog.Warn("Undo single rename failed: " + ex.Message);
+                                return false;
+                            }
+                        });
                 }
                 ProposedRenameCard.Visibility = Visibility.Collapsed;
                 _pendingProposedName = null;

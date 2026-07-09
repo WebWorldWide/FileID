@@ -237,7 +237,8 @@ public partial class App : Application
             }
             AppViewModel.Instance.FolderPath = folderPath;
             DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
-            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
+            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay,
+                excludedPaths: AppViewModel.Instance.Settings.ExcludedFolders);
             if (!exitAfterScan) return;
 
             // Wait for ScanComplete by watching Phase transition to Completed

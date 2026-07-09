@@ -97,7 +97,8 @@ internal sealed partial class EngineClient
         get => _lastScanProcessedFiles;
         private set => Set(ref _lastScanProcessedFiles, value);
     }
-    public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
+    public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false,
+        IReadOnlyList<string>? excludedPaths = null)
     {
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
@@ -108,8 +109,26 @@ internal sealed partial class EngineClient
         DeepAnalyzeComplete = null;
         DeepAnalyzeProgress = null;
         DeepAnalyzeStarting = null;
-        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan));
+        // Snapshot now (UI thread): the caller usually hands us the live
+        // settings list, and encode happens later on a Task.Run worker.
+        string[]? exclusions = excludedPaths is { Count: > 0 }
+            ? System.Linq.Enumerable.ToArray(excludedPaths)
+            : null;
+        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan, exclusions));
     }
+
+    /// <summary>Immediately purge cataloged rows under the given excluded
+    /// folders (files on disk untouched) and await the engine's
+    /// <c>BulkActionResult</c> reply (action "purgeExcluded",
+    /// Succeeded = purged row count) so Settings can surface the count
+    /// instead of fire-and-forgetting.</summary>
+    public Task<BulkActionResult> PurgeExcludedAndWaitAsync(
+        IReadOnlyList<string> excludedPaths, CancellationToken ct = default) =>
+        WaitForBulkActionResultAsync(
+            "purgeExcluded",
+            () => SendCommandAsync(new PurgeExcludedCommand(excludedPaths), ct),
+            TimeSpan.FromSeconds(30),
+            ct);
 
     /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
     /// Start Scan after a failure). Without this, the sidebar's Failed branch

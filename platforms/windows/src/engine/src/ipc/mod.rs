@@ -181,6 +181,14 @@ pub enum CommandPayload {
     /// time, carried through so the app can key its thumbnail cache.
     #[serde(rename = "generateVideoThumbnail")]
     GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
+
+    /// Remove cataloged rows under the given excluded folders immediately
+    /// (files on disk untouched; cascades tags/faces/captions/embeddings).
+    /// Sent when the user adds an exclusion so the Library reflects it without
+    /// waiting for a rescan. Replies with a `bulkActionResult`
+    /// (action `purgeExcluded`, succeeded = purged row count).
+    #[serde(rename = "purgeExcluded")]
+    PurgeExcluded(PurgeExcludedPayload),
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
@@ -201,6 +209,17 @@ pub struct StartScanPayload {
     /// rescan (skip already-current files).
     #[serde(default)]
     pub rescan: bool,
+    /// Folder subtrees to prune from the walk. Absent/None = no exclusions.
+    /// Entries outside `root_path` (or equal to it) are ignored; rows already
+    /// cataloged under an excluded path are purged at scan start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeExcludedPayload {
+    pub excluded_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1037,16 +1056,47 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
+                excluded_paths: None,
             }),
         };
         let j = serde_json::to_string(&cmd).unwrap();
+        assert!(!j.contains("excludedPaths"), "None must omit the key on the wire");
         let parsed: IpcCommand = serde_json::from_str(&j).unwrap();
         match parsed.payload {
             CommandPayload::StartScan(p) => {
                 assert_eq!(p.root_path, r"C:\Users\adam\Pictures");
                 assert_eq!(p.root_display.as_deref(), Some("Pictures"));
+                assert!(p.excluded_paths.is_none());
             }
             other => panic!("expected StartScan variant, got {other:?}"),
+        }
+    }
+
+    /// `excludedPaths` is additive-optional: legacy JSON without the key must
+    /// decode to `None`, and a populated list must round-trip verbatim.
+    #[test]
+    fn start_scan_excluded_paths_optional_roundtrip() {
+        let legacy = r#"{"id":"c-1","payload":{"startScan":{"rootPath":"C:\\pics"}}}"#;
+        match serde_json::from_str::<IpcCommand>(legacy).unwrap().payload {
+            CommandPayload::StartScan(p) => assert!(p.excluded_paths.is_none()),
+            other => panic!("expected StartScan, got {other:?}"),
+        }
+        let cmd = IpcCommand {
+            id: "c-2".into(),
+            payload: CommandPayload::StartScan(StartScanPayload {
+                root_path: r"C:\pics".into(),
+                root_display: None,
+                rescan: true,
+                excluded_paths: Some(vec![r"C:\pics\raw".into(), r"C:\pics\tmp\".into()]),
+            }),
+        };
+        let j = serde_json::to_string(&cmd).unwrap();
+        match serde_json::from_str::<IpcCommand>(&j).unwrap().payload {
+            CommandPayload::StartScan(p) => assert_eq!(
+                p.excluded_paths.as_deref(),
+                Some(&[r"C:\pics\raw".to_string(), r"C:\pics\tmp\".to_string()][..])
+            ),
+            other => panic!("expected StartScan, got {other:?}"),
         }
     }
 
@@ -1135,6 +1185,7 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
+                excluded_paths: Some(vec![r"C:\Users\adam\Pictures\node_backups".into()]),
             }),
             CommandPayload::PauseScan(Empty {}),
             CommandPayload::ResumeScan(Empty {}),
@@ -1238,6 +1289,9 @@ mod tests {
                 path: r"C:\Users\adam\Videos\clip.mp4".into(),
                 modified_at: Some(1_700_000_000.0),
             }),
+            CommandPayload::PurgeExcluded(PurgeExcludedPayload {
+                excluded_paths: vec![r"C:\Users\adam\Pictures\node_backups".into()],
+            }),
         ];
 
         for payload in &cases {
@@ -1306,6 +1360,7 @@ mod tests {
                     root_path: path.clone(),
                     root_display: None,
                     rescan: false,
+                    excluded_paths: None,
                 }),
             };
             let json = serde_json::to_string(&cmd).expect("encode");

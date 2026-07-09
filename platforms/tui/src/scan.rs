@@ -161,6 +161,7 @@ fn run_scan(
             root_path: root_abs.to_string_lossy().into_owned(),
             root_display: None,
             rescan: false,
+            excluded_paths: None,
         }),
     };
     let line = serde_json::to_string(&cmd).context("serialize startScan command")?;

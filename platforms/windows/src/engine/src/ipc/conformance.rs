@@ -21,7 +21,8 @@ use super::{
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
     RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
-    StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload, UndoRestructurePayload, Wrap,
+    PurgeExcludedPayload, StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload,
+    UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
@@ -217,6 +218,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::RevertMerge(_) => "revertMerge",
         CommandPayload::WipeLibrary(_) => "wipeLibrary",
         CommandPayload::GenerateVideoThumbnail(_) => "generateVideoThumbnail",
+        CommandPayload::PurgeExcluded(_) => "purgeExcluded",
     }
 }
 
@@ -296,6 +298,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
             root_path: r"C:\Users\adam\Pictures".into(),
             root_display: Some("Pictures".into()),
             rescan: true,
+            excluded_paths: Some(vec![r"C:\Users\adam\Pictures\node_backups".into()]),
         }),
         CommandPayload::PauseScan(Empty {}),
         CommandPayload::ResumeScan(Empty {}),
@@ -380,6 +383,9 @@ fn command_exemplars() -> Vec<CommandPayload> {
             source_person_id: 1,
             destination_person_id: 2,
             face_ids_to_revert: vec![10, 11, 12],
+        }),
+        CommandPayload::PurgeExcluded(PurgeExcludedPayload {
+            excluded_paths: vec![r"C:\Users\adam\Pictures\node_backups".into()],
         }),
         CommandPayload::WipeLibrary(Empty {}),
         CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {

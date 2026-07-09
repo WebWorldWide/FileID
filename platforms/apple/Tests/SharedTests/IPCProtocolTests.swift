@@ -11,7 +11,8 @@ struct IPCProtocolTests {
     @Test("Command: every payload variant survives JSON round-trip")
     func commandRoundTrip() throws {
         let commands: [IPCCommand.Payload] = [
-            .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos", rescan: false),
+            .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos",
+                       rescan: false, excludedPaths: ["/Users/adam/photos/.cache"]),
             .pauseScan,
             .resumeScan,
             .cancelScan,
@@ -87,6 +88,7 @@ struct IPCProtocolTests {
             .applyRestructure(libraryRoot: "/Users/x/Pictures", moves: moves, useSymlinks: true),
             .applyTags(fileIDs: [1, 2, 3], tags: ["beach", "summer"], mode: "add"),
             .renameFiles(renames: renames),
+            .purgeExcluded(excludedPaths: ["/Users/x/Pictures/.cache"]),
             .trashFiles(fileIDs: [10, 11]),
             .mergeClusters(sourcePersonID: 4, destinationPersonID: 7),
             .embedTextQuery(query: "dog at the beach", queryID: "q-1"),
