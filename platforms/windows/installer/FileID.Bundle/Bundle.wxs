@@ -38,7 +38,7 @@
       <bal:WixStandardBootstrapperApplication
           LicenseFile="theme\license.rtf"
           LogoFile="theme\logo.png"
-          Theme="hyperlinkLicense"
+          Theme="rtfLicense"
           ShowVersion="yes"
           SuppressOptionsUI="yes" />
     </BootstrapperApplication>
