@@ -427,7 +427,14 @@ impl RestructureApply {
         // put the REMAINING files back (already-restored ones stale-skip on the
         // retry). Only a fully-completed (non-cancelled) undo clears it.
         let result = self.apply_with(&inverse, false)?;
-        if !self.cancel.load(Ordering::Relaxed) {
+        // Clear the journal ONLY on a fully-completed undo: not cancelled AND
+        // every inverse move succeeded. A partial failure (a file locked by
+        // another process, a privilege error) keeps the journal so the user can
+        // re-run undo and put the REMAINING files back — the already-restored
+        // ones stale-skip on the retry, exactly like the cancel path. Deleting
+        // it on partial failure permanently stranded the un-restored files in
+        // their group folders with no inverse-move record. (audit 2026-07-08)
+        if !self.cancel.load(Ordering::Relaxed) && result.failed == 0 {
             if let Some(path) = Self::undo_journal_path() {
                 let _ = std::fs::remove_file(path);
             }
