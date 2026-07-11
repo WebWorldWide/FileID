@@ -1110,6 +1110,15 @@ fn run_decoder_thread(
             Ok(f) => f,
             Err(_) => return,
         };
+        // Trace-gated forensics: a native crash never reaches the log as a
+        // Rust panic, so the last "decode start" lines name the in-flight
+        // victims.
+        tracing::trace!(
+            path = %crate::platform::redact_path_for_log(&file.path),
+            kind = ?file.kind,
+            size = file.size_bytes,
+            "decode start"
+        );
         let decode_started = Instant::now();
 
         let mut file_bytes = None;
