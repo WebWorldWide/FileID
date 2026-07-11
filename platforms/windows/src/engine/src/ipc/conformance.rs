@@ -327,13 +327,15 @@ fn command_exemplars() -> Vec<CommandPayload> {
         }),
         CommandPayload::PlanRestructure(PlanRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
+            supports_paged_plans: true,
         }),
         CommandPayload::UndoRestructure(UndoRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
         }),
         CommandPayload::ApplyRestructure(ApplyRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
-            moves: vec![restructure_move()],
+            plan_id: Some("00000000-0000-0000-0000-000000000123".into()),
+            moves: vec![],
             use_symlinks: true,
         }),
         CommandPayload::ApplyTags(ApplyTagsPayload {
@@ -517,6 +519,9 @@ fn event_exemplars() -> Vec<EventPayload> {
         })),
         EventPayload::RestructurePlan(Wrap::new(RestructurePlan {
             library_root: r"C:\Users\adam\Pictures".into(),
+            plan_id: Some("00000000-0000-0000-0000-000000000123".into()),
+            total_moves: Some(1_000_000),
+            truncated: true,
             moves: vec![restructure_move()],
             category_counts: vec![RestructureCategoryCount {
                 category: "Photos/2024/01".into(),

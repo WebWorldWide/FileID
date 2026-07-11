@@ -8,6 +8,23 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-10 — Paged / truncated restructure plans finished + verified (cross-platform)
+
+Picked up an **uncommitted, undocumented** in-flight feature ("codex" work in the working tree, not in any STATE/NEXT entry) and completed the loop: audited it across every platform, found it code-complete (no stubs/`todo!()`/placeholders anywhere), and **verified everything buildable on this Windows box is green**.
+
+**The feature — paged/truncated restructure plans (million-file scale).** Previously the restructure planner materialized every `(source→destination)` move in memory and shipped the whole list across IPC just to draw the Sankey preview — O(N) memory + wire on a 500k-file library. Now: `planRestructure` gains `supportsPagedPlans` (client opt-in); when the plan exceeds the preview cap the engine **spools the full move list to disk** (`<planID>.ndjson`, a versioned header + one move per line, written atomically tmp→rename, stale spools cleared first) and returns only a **bounded preview (≤5000 moves) + opaque `planID` + exact `totalMoves` + `truncated=true`**; `applyRestructure` then takes the `planID` and **streams the spooled plan** through `apply_iter` instead of echoing every move back over IPC. Schema (`ipc.schema.json`) is the contract; per-platform DTOs mirror it (there is no codegen — DTOs are hand-maintained + guarded by conformance tests).
+
+**Per-platform status:**
+- **Windows** — COMPLETE + VERIFIED. Engine spool (`commands/restructure.rs`), `restructure_plans_dir()` (`paths.rs`), streaming apply (`restructure_apply.rs::apply_iter`), C# DTOs + app opt-in + apply-by-`planID` (`RestructureView.xaml.cs` hides per-row surfaces + gates apply on `PlanId` when truncated). `cargo check` ✓ · `clippy -D warnings` ✓ · **engine 414 tests** ✓ · **IpcSchema conformance 48** ✓ · **app build 0/0** ✓ · **app 174 tests** ✓ · `dotnet format --verify-no-changes` ✓.
+- **Apple** (reference) — COMPLETE by inspection; `Restructure.swift` has the full disk-spool (`storePlanStream`/`applyStoredPlan`) + `proposeLargeStoredIfNeeded` million-file streaming path + tests. **Unverified-until-Mac** (can't build Swift here).
+- **CLI** — COMPLETE + VERIFIED. In-process (no IPC), so it uses a native RAII `PlanSpool` streaming the full plan to `--json` / apply without buffering. `clippy` ✓ · **8 tests** ✓ (built on Windows).
+- **Linux** — COMPLETE by inspection (opts in, handles `truncated`, applies via `plan_id`); DTOs come from the shared engine crate. **Unverified-until-Linux** (GTK app needs Linux; Rust field-alignment is correct by reading).
+- **TUI** — N/A: read-only 3000-row preview, no restructure-apply surface. Not affected.
+
+Same-batch sibling scalability changes in the tree (all verified by the above compiles/tests): discovery skip-cache keyed by a 128-bit BLAKE3 `SkipFingerprint` instead of full `PathBuf` (`discovery.rs`), and Cleanup dup-group preview truncation.
+
+**Not yet committed.** The whole working tree is dirty (this feature + prior excludedPaths churn) and shows tree-wide CRLF normalization noise (no `.gitattributes`; files written LF vs committed CRLF). Landing on a branch is the next step, pending owner go-ahead.
+
 ## 2026-07-09 — windows-prod-hardening landed (PR #89); FileIDSetup.exe installer working; v0.0.1 assets refreshed
 
 Landed the in-flight `windows-prod-hardening` branch to `main` after full local verification + an adversarial review pass, then produced the first working single-EXE installer and refreshed the v0.0.1 release assets. All real CI green (engine x64/arm64-native/arm64-cross, .NET app x64/arm64, macOS SwiftPM, Linux CLI/TUI/GTK/engine); the lone red is the known Flatpak advisory.

@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-07-10 — Large restructure plans spool to disk and apply by opaque `planID`, not by echoing moves over IPC
+
+The restructure planner emitted every `(fileID, source, destination, category)` move as one list: held fully in memory by the engine, serialized whole across the newline-JSON IPC channel, rendered by the app, then — on apply — **echoed back** move-for-move from app to engine. On a 500k–1M file library that is hundreds of MB of moves crossing the wire twice, plus O(N) resident memory on both sides, just to file a plan the user only ever previews as an aggregate Sankey diagram.
+
+Decision: add an **opt-in paged path** (`supportsPagedPlans` on `planRestructure`; older clients omit it and keep the legacy full-plan behavior byte-for-byte). When the move count exceeds the preview cap, the engine **writes the full plan to an on-disk spool** — `<planID>.ndjson` under a per-app plans dir (`restructure_plans_dir()` on Windows/Rust; `~/Library/Application Support/FileID/restructure_plans/` on macOS): a versioned `StoredPlanHeader{version, library_root, total_moves}` line followed by one JSON move per line, published atomically (`.tmp`→rename + `sync_all`), with stale spools swept first so the dir stays bounded. Across IPC it returns only a **bounded preview (≤5000 moves) + opaque `planID` + exact `totalMoves` + `truncated=true`**. `applyRestructure` then carries the `planID` (with `moves` empty — the engine `ensure!`s this) and **streams the spool line-by-line** through `RestructureApply::apply_iter`, never materializing the full plan.
+
+Alternatives weighed: (a) a stateful **`requestRestructurePlanPage(planID, offset)`** cursor so the app could scroll all moves — rejected: the app never needs every move (the preview + counts drive the whole UI), and a live cursor means the engine must pin plan state across an unbounded interactive window; the disk spool is simpler, survives an engine restart, and self-bounds. (b) Keep it all in memory and just cap the preview — rejected: apply still needs the full set, so memory isn't actually bounded. (c) A DB table instead of an NDJSON sidecar — rejected: the plan is ephemeral scratch, not library state; it must not enter the single-writer WAL, migrations, or backups, and a flat append-only file streams with zero query overhead. **Root-match safety:** apply validates `header.version` and that the spool's `library_root` equals the request root (with canonicalize fallback) before replaying, so a stale/mismatched spool can't move files under the wrong tree.
+
+The **CLI** links the engine in-process (no IPC), so it has no `planID` on the wire; it implements the same *memory-bounded* intent with a native RAII `PlanSpool` that streams the full plan into `--json`/apply without buffering. The **TUI** has no apply surface (read-only preview), so it's unaffected. macOS is the reference implementation (`Restructure.swift`); Windows/Linux/CLI mirror it.
+
 ## 2026-07-09 — The `.exe` installer refreshes v0.0.1 in place (ProductVersion stays 0.1.0); Burn bundle uses the `rtfLicense` theme
 
 Two installer/release calls from the prod-hardening session (PR #89).

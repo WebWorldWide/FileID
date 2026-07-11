@@ -61,7 +61,8 @@ struct DispatchHandlersTests {
         // Empty library → an empty (but real) plan. Proves the dead IPC is wired
         // to proposeAll instead of returning not_implemented_yet.
         await FileIDEngineMain.dispatch(
-            IPCCommand(payload: .planRestructure(libraryRoot: tmp.path)),
+            IPCCommand(payload: .planRestructure(
+                libraryRoot: tmp.path, supportsPagedPlans: false)),
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let planNeedle = Data("\"restructurePlan\"".utf8)
         let notImpl = Data("\"not_implemented_yet\"".utf8)
@@ -71,7 +72,8 @@ struct DispatchHandlersTests {
 
         // applyRestructure with no moves → a real (zero) result.
         await FileIDEngineMain.dispatch(
-            IPCCommand(payload: .applyRestructure(libraryRoot: tmp.path, moves: [], useSymlinks: false)),
+            IPCCommand(payload: .applyRestructure(
+                libraryRoot: tmp.path, moves: [], useSymlinks: false, planID: nil)),
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let applyNeedle = Data("\"restructureApplyResult\"".utf8)
         out = await waitFor([applyNeedle], in: cap)

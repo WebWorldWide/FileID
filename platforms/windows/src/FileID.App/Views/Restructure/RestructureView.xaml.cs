@@ -273,7 +273,9 @@ public sealed partial class RestructureView : UserControl
             list.Add(row);
         }
 
-        int moveCount = plan.Moves.Count;
+        int moveCount = plan.Truncated
+            ? (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue)
+            : plan.Moves.Count;
         int keepFolders = (int)(plan.FolderClassifications?.AnchorFolders ?? 0);
         int tidyFiles = CountOf(RestructureOutcome.Tidy);
         int reorgFiles = CountOf(RestructureOutcome.Reorganize);
@@ -325,10 +327,12 @@ public sealed partial class RestructureView : UserControl
         bool hasMoves = moveCount > 0;
         PlanStatusText.Text = moveCount == 0
             ? "Your library is already organized - nothing to move."
-            : $"{moveCount:N0} files to reorganize across {plan.CategoryCounts.Count} categories.";
-        StatHero.Visibility = hasContent ? Visibility.Visible : Visibility.Collapsed;
-        ViewModeToggle.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
-        UnifiedSurface.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
+            : plan.Truncated
+                ? $"{moveCount:N0} files to reorganize across {plan.CategoryCounts.Count} categories. This large plan is stored by the engine and will be applied as one undoable run."
+                : $"{moveCount:N0} files to reorganize across {plan.CategoryCounts.Count} categories.";
+        StatHero.Visibility = hasContent && !plan.Truncated ? Visibility.Visible : Visibility.Collapsed;
+        ViewModeToggle.Visibility = hasMoves && !plan.Truncated ? Visibility.Visible : Visibility.Collapsed;
+        UnifiedSurface.Visibility = hasMoves && !plan.Truncated ? Visibility.Visible : Visibility.Collapsed;
         NothingToMoveCard.Visibility = hasMoves ? Visibility.Collapsed : Visibility.Visible;
         UpdateStayingPut(keepFolders);
 
@@ -414,6 +418,21 @@ public sealed partial class RestructureView : UserControl
     private void RecomputeSelection()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
+        if (plan?.Truncated == true)
+        {
+            int storedTotal = (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue);
+            bool storedHasWork = storedTotal > 0 && !string.IsNullOrWhiteSpace(plan.PlanId);
+            ApplySymlinkButton.IsEnabled = storedHasWork && !_applying;
+            ApplyMovesButton.IsEnabled = storedHasWork && !_applying;
+            ApplyBarSelectedCount.Text = storedTotal.ToString("N0");
+            ApplyBarTotalCount.Text = storedTotal.ToString("N0");
+            ApplySymlinkButtonText.Text = storedHasWork ? $"Apply as shortcuts ({storedTotal:N0})" : "Apply as shortcuts";
+            ApplyStatusText.Text = storedHasWork
+                ? $"Ready to apply all {storedTotal:N0} moves from the engine-stored plan into '{plan.LibraryRoot}'."
+                : "The stored plan is unavailable. Generate it again.";
+            ApplyBarHint.Text = "Large plans apply as one complete, crash-journaled run · Moves are undoable.";
+            return;
+        }
         int total = plan?.Moves.Count ?? 0;
         int selected = 0;
         foreach (var kv in _filesByOutcome)
@@ -690,21 +709,29 @@ public sealed partial class RestructureView : UserControl
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
         var sel = new List<RestructureMove>();
-        foreach (var m in plan.Moves)
+        if (!plan.Truncated)
         {
-            if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
+            foreach (var m in plan.Moves)
+            {
+                if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
+            }
         }
-        if (sel.Count == 0) return;
+        if (plan.Truncated && string.IsNullOrWhiteSpace(plan.PlanId)) return;
+        if (!plan.Truncated && sel.Count == 0) return;
+        int applyCount = plan.Truncated
+            ? (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue)
+            : sel.Count;
         _applying = true;
         _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
-            ? $"Creating {sel.Count:N0} symlinks..."
-            : $"Moving {sel.Count:N0} files...";
+            ? $"Creating {applyCount:N0} symlinks..."
+            : $"Moving {applyCount:N0} files...";
         try
         {
-            await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, sel, useSymlinks);
+            await EngineClient.Instance.ApplyRestructureAsync(
+                plan.LibraryRoot, sel, useSymlinks, plan.Truncated ? plan.PlanId : null);
         }
         catch (Exception ex)
         {

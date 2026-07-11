@@ -10,7 +10,8 @@
 //! engine scan (`scan --models` / desktop); on a model-free library the command
 //! reports that none are present.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use anyhow::Result;
 use rusqlite::params;
@@ -28,6 +29,45 @@ struct Hit {
     /// `ORDER BY rank`, so capturing the row index preserves relevance order
     /// through the id-keyed dedup map and the truncation to `limit`.
     ordinal: usize,
+}
+
+struct ScoredHit {
+    score: f32,
+    hit: Hit,
+}
+
+impl PartialEq for ScoredHit {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.to_bits() == other.score.to_bits() && self.hit.id == other.hit.id
+    }
+}
+
+impl Eq for ScoredHit {}
+
+impl PartialOrd for ScoredHit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredHit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.hit.id.cmp(&other.hit.id))
+    }
+}
+
+fn keep_top_k(heap: &mut BinaryHeap<Reverse<ScoredHit>>, candidate: ScoredHit, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    if heap.len() < limit {
+        heap.push(Reverse(candidate));
+    } else if heap.peek().is_some_and(|worst| candidate > worst.0) {
+        let _ = heap.pop();
+        heap.push(Reverse(candidate));
+    }
 }
 
 pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> Result<()> {
@@ -82,16 +122,17 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
         println!("No matches for {}.", ctx.bold(raw));
         return Ok(());
     }
-    println!(
-        "{} match(es) for {}:",
-        rows.len(),
-        ctx.bold(raw)
-    );
+    println!("{} match(es) for {}:", rows.len(), ctx.bold(raw));
     for h in &rows {
         println!(
             "  {}  {}",
             ctx.bold(&display_path(&h.path)),
-            ctx.dim(&format!("[{}, {}, {}]", h.kind, human_size(h.size), h.source))
+            ctx.dim(&format!(
+                "[{}, {}, {}]",
+                h.kind,
+                human_size(h.size),
+                h.source
+            ))
         );
         if let Some(s) = &h.snippet {
             let one_line: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -200,7 +241,12 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
     let Some(seed_id) = resolve_file_id(&conn, seed) else {
-        return absent(ctx, "not_found", &format!("no indexed file matches {seed}"), None);
+        return absent(
+            ctx,
+            "not_found",
+            &format!("no indexed file matches {seed}"),
+            None,
+        );
     };
 
     let seed_vec: Option<Vec<f32>> = conn
@@ -235,7 +281,12 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
     };
     let seed_norm = norm(&seed_vec);
     if seed_norm == 0.0 {
-        return absent(ctx, "seed_not_embedded", "the seed embedding is degenerate (zero vector)", Some(seed_id));
+        return absent(
+            ctx,
+            "seed_not_embedded",
+            "the seed embedding is degenerate (zero vector)",
+            Some(seed_id),
+        );
     }
 
     let mut stmt = conn.prepare(
@@ -243,30 +294,46 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
          FROM clip_embeddings e JOIN files f ON f.id = e.file_id \
          WHERE e.file_id <> ?1",
     )?;
-    let mut scored: Vec<(f32, Hit)> = stmt
-        .query_map(params![seed_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, Vec<u8>>(4)?,
-            ))
-        })?
-        .filter_map(Result::ok)
-        .filter_map(|(id, path, kind, size, blob)| {
-            let v = decode_embedding(&blob);
-            let n = norm(&v);
-            if v.len() != seed_vec.len() || n == 0.0 {
-                return None;
-            }
-            let cos = dot(&seed_vec, &v) / (seed_norm * n);
-            Some((cos, Hit { id, path, kind, size, source: "similar", snippet: None, ordinal: 0 }))
-        })
-        .collect();
+    let rows = stmt.query_map(params![seed_id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, Vec<u8>>(4)?,
+        ))
+    })?;
+    let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
+    for (id, path, kind, size, blob) in rows.flatten() {
+        let v = decode_embedding(&blob);
+        let n = norm(&v);
+        if v.len() != seed_vec.len() || n == 0.0 {
+            continue;
+        }
+        let score = dot(&seed_vec, &v) / (seed_norm * n);
+        if !score.is_finite() {
+            continue;
+        }
+        keep_top_k(
+            &mut top,
+            ScoredHit {
+                score,
+                hit: Hit {
+                    id,
+                    path,
+                    kind,
+                    size,
+                    source: "similar",
+                    snippet: None,
+                    ordinal: 0,
+                },
+            },
+            limit,
+        );
+    }
+    let mut scored: Vec<(f32, Hit)> = top.into_iter().map(|Reverse(v)| (v.score, v.hit)).collect();
 
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
 
     if ctx.json {
         let arr: Vec<serde_json::Value> = scored
@@ -295,12 +362,21 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
         println!("No other embedded files to compare against.");
         return Ok(());
     }
-    println!("{} file(s) most similar to {}:", scored.len(), ctx.bold(seed));
+    println!(
+        "{} file(s) most similar to {}:",
+        scored.len(),
+        ctx.bold(seed)
+    );
     for (cos, h) in &scored {
         println!(
             "  {}  {}",
             ctx.bold(&display_path(&h.path)),
-            ctx.dim(&format!("[{}, {}, cos {:.3}]", h.kind, human_size(h.size), cos))
+            ctx.dim(&format!(
+                "[{}, {}, cos {:.3}]",
+                h.kind,
+                human_size(h.size),
+                cos
+            ))
         );
     }
     Ok(())
@@ -337,4 +413,37 @@ fn absent(ctx: &Ctx, kind: &str, msg: &str, seed_id: Option<i64>) -> Result<()> 
         println!("  {msg}.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_k_similarity_memory_is_bounded_and_ordered() {
+        let mut heap = BinaryHeap::new();
+        for id in 0..100_000 {
+            keep_top_k(
+                &mut heap,
+                ScoredHit {
+                    score: id as f32,
+                    hit: Hit {
+                        id,
+                        path: String::new(),
+                        kind: String::new(),
+                        size: 0,
+                        source: "similar",
+                        snippet: None,
+                        ordinal: 0,
+                    },
+                },
+                25,
+            );
+            assert!(heap.len() <= 25);
+        }
+        let mut scores: Vec<f32> = heap.into_iter().map(|Reverse(v)| v.score).collect();
+        scores.sort_by(|a, b| b.total_cmp(a));
+        assert_eq!(scores.first().copied(), Some(99_999.0));
+        assert_eq!(scores.last().copied(), Some(99_975.0));
+    }
 }

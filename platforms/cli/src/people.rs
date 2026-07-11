@@ -19,7 +19,12 @@ struct Person {
 
 impl Person {
     fn display_name(&self) -> String {
-        if let Some(n) = self.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(n) = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return n.to_string();
         }
         let composed = [self.first.as_deref(), self.last.as_deref()]

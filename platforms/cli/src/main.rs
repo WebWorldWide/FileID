@@ -355,29 +355,50 @@ fn main() -> ExitCode {
     };
 
     let result = match command {
-        Command::Scan { path, rescan, models } => {
+        Command::Scan {
+            path,
+            rescan,
+            models,
+        } => {
             if models {
                 scan_models::run(&ctx, &path, rescan)
             } else {
                 scan::run(&ctx, &path, rescan)
             }
         }
-        Command::Search { query, similar, limit } => {
-            search::run(&ctx, &query, similar.as_deref(), limit)
-        }
+        Command::Search {
+            query,
+            similar,
+            limit,
+        } => search::run(&ctx, &query, similar.as_deref(), limit),
         Command::Info { target } => info::run(&ctx, &target),
         Command::People => people::run(&ctx),
-        Command::Dedupe { exact, similar, threshold, apply, dry_run, delete, yes } => {
-            dedupe::run(&ctx, exact, similar, threshold, apply, dry_run, delete, yes)
-        }
-        Command::Restructure { plan, apply, dry_run, symlinks, yes, root } => {
-            restructure::run(&ctx, plan, apply, dry_run, symlinks, yes, root)
-        }
+        Command::Dedupe {
+            exact,
+            similar,
+            threshold,
+            apply,
+            dry_run,
+            delete,
+            yes,
+        } => dedupe::run(&ctx, exact, similar, threshold, apply, dry_run, delete, yes),
+        Command::Restructure {
+            plan,
+            apply,
+            dry_run,
+            symlinks,
+            yes,
+            root,
+        } => restructure::run(&ctx, plan, apply, dry_run, symlinks, yes, root),
         Command::Models { cmd } => match cmd {
             ModelsCmd::List => models::list(&ctx),
-            ModelsCmd::Download { all, dry_run, yes, porcelain_progress, names } => {
-                models::download(&ctx, all, dry_run, yes, porcelain_progress, &names)
-            }
+            ModelsCmd::Download {
+                all,
+                dry_run,
+                yes,
+                porcelain_progress,
+                names,
+            } => models::download(&ctx, all, dry_run, yes, porcelain_progress, &names),
         },
         Command::Runtime { cmd } => match cmd {
             RuntimeCmd::Status => runtime::status(&ctx),

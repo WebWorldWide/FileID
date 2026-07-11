@@ -23,7 +23,7 @@ use crate::ipc::{
     sink::Sink, BatchSummary, EventPayload, IpcEvent, ScanComplete, ScanPhase, ScanProgress, Wrap,
 };
 use crate::pipeline::dbwriter::{BatchStats, DbWriter};
-use crate::pipeline::discovery::Discovery;
+use crate::pipeline::discovery::{path_fingerprint_text, Discovery, SkipFingerprint};
 use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
@@ -193,7 +193,7 @@ impl ScanSession {
             // revalidate against the LIVE file mtime — a bare path set skipped any
             // file edited after its last scan.
             let mut set =
-                std::collections::HashMap::<std::path::PathBuf, (i64, Option<f64>)>::new();
+                std::collections::HashMap::<SkipFingerprint, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
             // Diagnostic counts so we can tell at a glance whether (a) the
             // DB is empty, (b) the LIKE prefix is wrong, or (c) the
@@ -277,7 +277,7 @@ impl ScanSession {
                 };
                 if let Ok(rows) = rows {
                     for (p, size, modified) in rows.flatten() {
-                        set.insert(std::path::PathBuf::from(p), (size, modified));
+                        set.insert(path_fingerprint_text(&p), (size, modified));
                     }
                 }
             }

@@ -50,6 +50,10 @@ struct RestructureView: View {
     /// stays open; the confirm action must apply exactly what the user reviewed,
     /// not the re-planned set (TOCTOU → unreviewed irreversible moves).
     @State private var pendingMoves: [RestructureMove] = []
+    @State private var pendingPlanID: String?
+    @State private var pendingApplyCount = 0
+    @State private var storedPlanID: String?
+    @State private var storedPlanMoveCount = 0
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
     private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
@@ -167,7 +171,9 @@ struct RestructureView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     header
-                    if libraryRoot == nil
+                    if storedPlanMoveCount > 0 {
+                        largePlanCard
+                    } else if libraryRoot == nil
                         || (!summary.hasContent && proposals.isEmpty) {
                         emptyState
                     } else {
@@ -209,14 +215,24 @@ struct RestructureView: View {
             }
             if applyBarVisible {
                 RestructureApplyBar(
-                    selectedCount: selectedIDs.count,
-                    totalCount: proposals.count,
-                    canApply: !selectedIDs.isEmpty,
+                    selectedCount: storedPlanMoveCount > 0
+                        ? storedPlanMoveCount : selectedIDs.count,
+                    totalCount: storedPlanMoveCount > 0
+                        ? storedPlanMoveCount : proposals.count,
+                    canApply: storedPlanMoveCount > 0 || !selectedIDs.isEmpty,
                     isApplying: applying,
                     onApply: {
                         guard !applying else { return }
-                        pendingMoves = eligibleMoves()   // R6-01: freeze the reviewed set
-                        guard !pendingMoves.isEmpty else { return }
+                        if storedPlanMoveCount > 0 {
+                            pendingMoves = []
+                            pendingPlanID = storedPlanID
+                            pendingApplyCount = storedPlanMoveCount
+                        } else {
+                            pendingMoves = eligibleMoves() // R6-01: freeze reviewed set
+                            pendingPlanID = nil
+                            pendingApplyCount = pendingMoves.count
+                        }
+                        guard pendingApplyCount > 0 else { return }
                         confirmApply = true
                     }
                 )
@@ -229,7 +245,7 @@ struct RestructureView: View {
                 // "Apply moves" action; this confirmation states the real,
                 // irreversible behavior so the user always confirms first.
                 .confirmationDialog(
-                    "Apply \(pendingMoves.count) move\(pendingMoves.count == 1 ? "" : "s")?",
+                    "Apply \(pendingApplyCount) move\(pendingApplyCount == 1 ? "" : "s")?",
                     isPresented: $confirmApply,
                     titleVisibility: .visible
                 ) {
@@ -390,7 +406,7 @@ struct RestructureView: View {
     // MARK: - Unified surface
 
     private var applyBarVisible: Bool {
-        libraryRoot != nil && !proposals.isEmpty
+        libraryRoot != nil && (storedPlanMoveCount > 0 || !proposals.isEmpty)
     }
 
     private var shouldShowDeepAnalyzeHint: Bool {
@@ -728,6 +744,23 @@ struct RestructureView: View {
         }
     }
 
+    private var largePlanCard: some View {
+        GlassCard {
+            HStack(spacing: 12) {
+                Image(systemName: "externaldrive.badge.checkmark")
+                    .font(.title2)
+                    .foregroundStyle(Theme.gold)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Large plan ready").font(.headline)
+                    Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams the complete plan without loading every file path into the app.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+        }
+    }
+
     /// One row inside the "Staying put" disclosure. Hovering it
     /// writes `sourceFolder(name)` to the hover bus so the matching
     /// node in the Sankey lights up — the disclosure becomes a
@@ -1018,6 +1051,8 @@ struct RestructureView: View {
         // (e.g. after Deep Analyze finishes mid-review) doesn't re-check rows
         // the user unchecked. Re-applied in applyPlan().
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
+        storedPlanID = nil
+        storedPlanMoveCount = 0
         loading = true
         status = nil
         if !engine.planRestructure(libraryRoot: root.path) {
@@ -1035,6 +1070,30 @@ struct RestructureView: View {
         // Ignore a plan computed for a different destination root (the user may
         // have switched folders while a plan was in flight).
         guard Self.pathsMatch(plan.libraryRoot, root.path) else { return }
+
+        if plan.truncated {
+            guard let planID = plan.planID,
+                  let totalMoves = plan.totalMoves, totalMoves > 0 else {
+                loading = false
+                status = "The stored plan is unavailable. Generate it again."
+                statusIsError = true
+                return
+            }
+            storedPlanID = planID
+            storedPlanMoveCount = totalMoves
+            proposals = []
+            groups = []
+            selectedIDs = []
+            summary = .empty
+            inlineGroupsByOutcome = [:]
+            inlineMatchedCountByOutcome = [:]
+            loading = false
+            status = nil
+            statusIsError = false
+            return
+        }
+        storedPlanID = nil
+        storedPlanMoveCount = 0
 
         let mapped = Self.mapProposals(from: plan)
         proposals = mapped
@@ -1121,14 +1180,16 @@ struct RestructureView: View {
         // R6-01: apply exactly the set frozen when the dialog was presented, not
         // a set a mid-dialog re-plan may have rewritten.
         let moves = pendingMoves
-        guard !moves.isEmpty else {
+        guard pendingPlanID != nil || !moves.isEmpty else {
             status = "Nothing selected to apply."
             statusIsError = true
             return
         }
         applying = true
         status = nil
-        if !engine.applyRestructure(libraryRoot: root.path, moves: moves) {
+        if !engine.applyRestructure(
+            libraryRoot: root.path, moves: moves, planID: pendingPlanID)
+        {
             applying = false
             status = "Engine is unavailable — try again in a moment."
             statusIsError = true

@@ -507,7 +507,8 @@ fn update_bulk_strip(ui: &Rc<Ui>) {
         }
         Mode::Unknown => {
             let n = ui.unknown_checked.borrow().len();
-            ui.bulk_label.set_text(&format!("{n} selected to mark unknown"));
+            ui.bulk_label
+                .set_text(&format!("{n} selected to mark unknown"));
             ui.bulk_button.set_label(&format!("Mark {n} as unknown"));
             ui.bulk_button.set_sensitive(n >= 1);
         }
@@ -540,7 +541,11 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                 );
                 set_status(
                     ui,
-                    format!("Marked {} cluster{} as unknown.", ids.len(), plural(ids.len() as i64)),
+                    format!(
+                        "Marked {} cluster{} as unknown.",
+                        ids.len(),
+                        plural(ids.len() as i64)
+                    ),
                 );
                 set_mode(ui, Mode::Normal);
                 schedule_reload_burst(ui);
@@ -841,7 +846,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     body.append(&subtitle);
 
     let group = adw::PreferencesGroup::new();
-    let title_row = adw::EntryRow::builder().title("Title (Uncle, Grandma…)").build();
+    let title_row = adw::EntryRow::builder()
+        .title("Title (Uncle, Grandma…)")
+        .build();
     let first_row = adw::EntryRow::builder().title("First name").build();
     let middle_row = adw::EntryRow::builder().title("Middle name").build();
     let last_row = adw::EntryRow::builder().title("Last name").build();
@@ -1088,10 +1095,7 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                     }),
                 );
             }
-            set_status(
-                &ui2,
-                format!("Merging {} clusters into one…", ids2.len()),
-            );
+            set_status(&ui2, format!("Merging {} clusters into one…", ids2.len()));
             set_mode(&ui2, Mode::Normal);
             schedule_reload_burst(&ui2);
             dialog2.close();
@@ -1188,7 +1192,11 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
         let disp = displayable.clone();
         let dialog2 = dialog.clone();
         merge_very.connect_clicked(move |_| {
-            let very: Vec<Candidate> = disp.iter().copied().filter(|c| c.sim >= VERY_LIKELY).collect();
+            let very: Vec<Candidate> = disp
+                .iter()
+                .copied()
+                .filter(|c| c.sim >= VERY_LIKELY)
+                .collect();
             run_batch_merges(&ui2, &very);
             set_status(&ui2, format!("Merging {} very-likely pairs…", very.len()));
             schedule_reload_burst(&ui2);
@@ -1521,9 +1529,7 @@ fn read_candidates() -> anyhow::Result<Vec<Candidate>> {
          WHERE person_id IS NOT NULL AND LENGTH(arcface_embedding) > 0",
     )?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
         .collect::<rusqlite::Result<Vec<(i64, Vec<u8>)>>>()?;
     Ok(compute_candidates(rows))
 }
@@ -1589,7 +1595,11 @@ fn compute_candidates(rows: Vec<(i64, Vec<u8>)>) -> Vec<Candidate> {
             }
         }
     }
-    pairs.sort_by(|x, y| y.sim.partial_cmp(&x.sim).unwrap_or(std::cmp::Ordering::Equal));
+    pairs.sort_by(|x, y| {
+        y.sim
+            .partial_cmp(&x.sim)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     pairs
 }
 

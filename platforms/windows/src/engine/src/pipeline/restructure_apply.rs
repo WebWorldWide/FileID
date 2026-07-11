@@ -31,7 +31,7 @@
 // library — even if the planner is buggy or someone forges a payload.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -43,6 +43,38 @@ use std::sync::Arc;
 
 use crate::ipc::{RestructureApplyResult, RestructureMove};
 use crate::pipeline::restructure_feedback;
+
+type ClaimedDestination = [u8; 16];
+
+#[derive(serde::Deserialize)]
+struct UndoEntry {
+    file_id: i64,
+    from: String,
+    to: String,
+}
+
+struct UndoJournalIter {
+    lines: Lines<BufReader<File>>,
+}
+
+impl Iterator for UndoJournalIter {
+    type Item = Result<UndoEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.lines.next().map(|line| {
+            let line = line.context("reading restructure undo journal")?;
+            serde_json::from_str(&line).context("parsing restructure undo journal entry")
+        })
+    }
+}
+
+fn claimed_destination_key(path: &Path) -> ClaimedDestination {
+    let folded = path.to_string_lossy().to_lowercase();
+    let digest = blake3::hash(folded.as_bytes());
+    let mut key = [0_u8; 16];
+    key.copy_from_slice(&digest.as_bytes()[..16]);
+    key
+}
 
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -84,15 +116,42 @@ impl RestructureApply {
     /// Apply every proposed move. Stops on first hard error; returns the
     /// applied + failed counts. A privilege error in symlink mode short-
     /// circuits with a friendly message instead of partial writes.
+    // The engine package compiles this module once for the library and again
+    // for the binary. External library callers and unit tests use the slice
+    // convenience method; the binary uses `apply_iter` directly.
+    #[allow(dead_code)]
     pub fn apply(&self, moves: &[RestructureMove]) -> Result<RestructureApplyResult> {
-        self.apply_with(moves, true)
+        self.apply_iter_with(
+            moves.iter().cloned().map(Ok),
+            Some(moves.len()),
+            true,
+        )
     }
 
-    fn apply_with(
+    /// Apply a move stream without materializing the complete plan. This is the
+    /// million-file path used by the CLI and persisted GUI plans; all per-run
+    /// state (undo journal, collision set, cancellation, and feedback) remains
+    /// shared across the stream exactly as it is for `apply(&[...])`.
+    pub fn apply_iter<I>(
         &self,
-        moves: &[RestructureMove],
+        moves: I,
+        total_hint: Option<usize>,
+    ) -> Result<RestructureApplyResult>
+    where
+        I: IntoIterator<Item = Result<RestructureMove>>,
+    {
+        self.apply_iter_with(moves, total_hint, true)
+    }
+
+    fn apply_iter_with<I>(
+        &self,
+        moves: I,
+        total_hint: Option<usize>,
         record_undo: bool,
-    ) -> Result<RestructureApplyResult> {
+    ) -> Result<RestructureApplyResult>
+    where
+        I: IntoIterator<Item = Result<RestructureMove>>,
+    {
         let canonical_root = canonicalize_safely(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
 
@@ -115,7 +174,8 @@ impl RestructureApply {
         // future plan can boost a move toward a folder the user has filed here
         // before. Populated alongside the undo journal, so it is forward-applies-only
         // (empty on an undo run, record_undo=false). (R3 → learn-your-style)
-        let mut applied_pairs: Vec<(String, PathBuf)> = Vec::new();
+        let mut applied_pairs: Vec<(String, PathBuf)> =
+            Vec::with_capacity(APPLY_PROGRESS_INTERVAL);
         // B3: destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
         // touches disk. Keyed by the LOWERCASED path string: NTFS (and APFS)
@@ -124,12 +184,13 @@ impl RestructureApply {
         // instead of silently clobbering the first (data loss). Mirrors the
         // `ci_starts_with` full-Unicode fold and the macOS `Restructure.swift`
         // lowercased claimed set, so a library round-trips identically.
-        let mut claimed: HashSet<String> = HashSet::new();
+        let mut claimed: HashSet<ClaimedDestination> = HashSet::new();
 
         // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop.
-        let total = moves.len();
-        for (idx, m) in moves.iter().enumerate() {
+        let total = total_hint.unwrap_or(0);
+        for (idx, m) in moves.into_iter().enumerate() {
+            let m = m.context("reading streamed restructure plan")?;
             // Poll the cancel flag at the TOP of every iteration. Every move
             // already completed is durable (per-move FS op + DB update), so
             // stopping BETWEEN moves is safe and preserves per-move atomicity.
@@ -150,6 +211,21 @@ impl RestructureApply {
             // the row with a path that never held this file.
             let db_file_ref = match current_identity_in_db(&self.db_conn, m.file_id) {
                 Ok(Some((db_path, db_ref))) if paths_equal(&db_path, &m.source) => db_ref,
+                // A cancelled/partially failed undo is intentionally resumable.
+                // Entries already restored by the first attempt remain in the
+                // journal; recognize their live DB + on-disk destination as an
+                // idempotent success so a retry can finish and clear the journal.
+                Ok(Some((db_path, db_ref)))
+                    if !record_undo
+                        && paths_equal(&db_path, &m.destination)
+                        && Path::new(&m.destination).try_exists().unwrap_or(false)
+                        && !file_ref_swapped(
+                            db_ref,
+                            crate::platform::file_ref(Path::new(&m.destination)),
+                        ) =>
+                {
+                    continue;
+                }
                 _ => {
                     tracing::warn!(
                         file_id = m.file_id,
@@ -240,7 +316,7 @@ impl RestructureApply {
                 dest.clone()
             } else {
                 let d = unique_destination(&dest, &claimed);
-                claimed.insert(d.to_string_lossy().to_lowercase());
+                claimed.insert(claimed_destination_key(&d));
                 d
             };
 
@@ -300,6 +376,9 @@ impl RestructureApply {
                         // learning. (record_undo=false on an undo run.)
                         if record_undo {
                             applied_pairs.push((m.source.clone(), final_dest.clone()));
+                            if applied_pairs.len() >= APPLY_PROGRESS_INTERVAL {
+                                record_feedback_batch(&self.db_conn, &mut applied_pairs);
+                            }
                         }
                     }
                     applied += 1;
@@ -336,16 +415,8 @@ impl RestructureApply {
         // its filename tokens toward its destination folder for future plans. One lock
         // acquisition for the whole batch; best-effort, never fails an apply. Forward
         // applies only — `applied_pairs` is empty on an undo run (record_undo=false).
-        if record_undo && !applied_pairs.is_empty() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            restructure_feedback::record(
-                &self.db_conn,
-                applied_pairs.iter().map(|(s, d)| (Path::new(s), d.as_path())),
-                now,
-            );
+        if record_undo {
+            record_feedback_batch(&self.db_conn, &mut applied_pairs);
         }
         Ok(RestructureApplyResult { applied, failed, privilege_error: None })
     }
@@ -375,30 +446,23 @@ impl RestructureApply {
         Some(BufWriter::new(f))
     }
 
-    /// Append one inverse-move entry (NDJSON) to the open journal — the same
-    /// on-disk format `read_undo_journal` parses: `{file_id, from, to}` per line.
+    /// Append one inverse-move entry (NDJSON) to the open journal.
     fn append_undo_entry(j: &mut BufWriter<File>, file_id: i64, from: &str, to: &str) {
         let line = serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
         let _ = writeln!(j, "{line}");
     }
 
-    fn read_undo_journal() -> Vec<(i64, String, String)> {
+    fn open_undo_journal() -> Result<Option<UndoJournalIter>> {
         let Some(path) = Self::undo_journal_path() else {
-            return Vec::new();
+            return Ok(None);
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return Vec::new();
-        };
-        text.lines()
-            .filter_map(|line| {
-                let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                Some((
-                    v.get("file_id")?.as_i64()?,
-                    v.get("from")?.as_str()?.to_string(),
-                    v.get("to")?.as_str()?.to_string(),
-                ))
-            })
-            .collect()
+        match File::open(&path) {
+            Ok(file) => Ok(Some(UndoJournalIter {
+                lines: BufReader::new(file).lines(),
+            })),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("opening undo journal {}", path.display())),
+        }
     }
 
     /// Undo the most recent `apply`: replay the inverse moves through `apply`
@@ -406,27 +470,39 @@ impl RestructureApply {
     /// safety applies), then clear the journal so a run can't be undone twice.
     /// (RESTRUCTURE.md §6 reversibility)
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
-        let entries = Self::read_undo_journal();
-        if entries.is_empty() {
+        let Some(entries) = Self::open_undo_journal()? else {
+            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+        };
+        // Count in one streaming pass for progress, then reopen for replay. No
+        // journal-sized String/Vec is retained even for a million-move apply.
+        let total = entries
+            .map(|entry| entry.map(|_| 1usize))
+            .try_fold(0usize, |sum, one| one.map(|one| sum + one))?;
+        if total == 0 {
             return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
         }
-        let inverse: Vec<RestructureMove> = entries
-            .iter()
-            .map(|(file_id, from, to)| RestructureMove {
-                file_id: *file_id,
-                source: from.clone(),
-                destination: to.clone(),
+        let entries = Self::open_undo_journal()?
+            .context("undo journal disappeared before replay")?;
+        let inverse = entries.map(|entry| {
+            entry.map(|entry| RestructureMove {
+                file_id: entry.file_id,
+                source: entry.from,
+                destination: entry.to,
                 category: String::new(),
                 tier: None,
                 confidence: String::new(),
                 reason: None,
             })
-            .collect();
+        });
         // record_undo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it and
         // put the REMAINING files back (already-restored ones stale-skip on the
         // retry). Only a fully-completed (non-cancelled) undo clears it.
-        let result = self.apply_with(&inverse, false)?;
+        let result = self.apply_iter_with(
+            inverse,
+            Some(total),
+            false,
+        )?;
         // Clear the journal ONLY on a fully-completed undo: not cancelled AND
         // every inverse move succeeded. A partial failure (a file locked by
         // another process, a privilege error) keeps the journal so the user can
@@ -435,12 +511,13 @@ impl RestructureApply {
         // it on partial failure permanently stranded the un-restored files in
         // their group folders with no inverse-move record. (audit 2026-07-08)
         if !self.cancel.load(Ordering::Relaxed) && result.failed == 0 {
+            // Re-read the journal for bounded-memory empty-directory cleanup
+            // before deleting it. Repeated parents are harmless: remove_dir is
+            // empty-only, and later entries simply observe an absent directory.
+            Self::cleanup_empty_dirs_from_journal(&self.library_root);
             if let Some(path) = Self::undo_journal_path() {
                 let _ = std::fs::remove_file(path);
             }
-            // Reversibility completeness: undo shouldn't leave the orphan empty group
-            // folders apply created. Best-effort, deepest-first.
-            Self::cleanup_empty_dirs(&entries, &self.library_root);
         }
         Ok(result)
     }
@@ -450,16 +527,14 @@ impl RestructureApply {
     /// never at risk; we additionally stay strictly inside the library root and never
     /// touch the root itself. Deepest-first so nested empties fully collapse.
     /// Best-effort. (R2 → reversibility completeness)
-    fn cleanup_empty_dirs(entries: &[(i64, String, String)], root: &Path) {
-        let mut dirs: Vec<&Path> = entries
-            .iter()
-            .filter_map(|(_, from, _)| Path::new(from).parent())
-            .collect();
-        dirs.sort_unstable();
-        dirs.dedup();
-        // Deepest path first so a nested chain collapses bottom-up.
-        dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-        for dir in dirs {
+    fn cleanup_empty_dirs_from_journal(root: &Path) {
+        let Ok(Some(entries)) = Self::open_undo_journal() else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Some(dir) = Path::new(&entry.from).parent() else {
+                continue;
+            };
             let mut cur = dir.to_path_buf();
             while cur.as_path() != root && cur.starts_with(root) && std::fs::remove_dir(&cur).is_ok()
             {
@@ -708,13 +783,13 @@ fn paths_equal(a: &str, b: &str) -> bool {
 /// destination already claimed by an earlier move in this batch, by appending
 /// ` (2)`, ` (3)`, … before the extension — within the same parent so the
 /// containment/reparse checks already performed on `dest` still hold.
-fn unique_destination(dest: &Path, claimed: &HashSet<String>) -> PathBuf {
+fn unique_destination(dest: &Path, claimed: &HashSet<ClaimedDestination>) -> PathBuf {
     let occupied = |p: &Path| {
         // \\?\ prefix so a deep already-occupied destination is detected rather
         // than mis-probed as free (std::fs silently fails past MAX_PATH).
         // `claimed` is keyed by the lowercased path string so a case-only
         // difference (NTFS/APFS are case-insensitive) still registers as taken.
-        claimed.contains(&p.to_string_lossy().to_lowercase())
+        claimed.contains(&claimed_destination_key(p))
             || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(p)).is_ok()
     };
     if !occupied(dest) {
@@ -738,6 +813,28 @@ fn unique_destination(dest: &Path, claimed: &HashSet<String>) -> PathBuf {
     }
     // Exhausted — return the original; the no-REPLACE move then fails safely.
     dest.to_path_buf()
+}
+
+/// Persist one bounded feedback batch, then release its path strings. Keeping
+/// every successful pair until a million-file run completed duplicated the
+/// whole plan in memory even though feedback recording itself is append-only.
+fn record_feedback_batch(
+    db: &Arc<Mutex<Connection>>,
+    pairs: &mut Vec<(String, PathBuf)>,
+) {
+    if pairs.is_empty() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    restructure_feedback::record(
+        db,
+        pairs.iter().map(|(s, d)| (Path::new(s), d.as_path())),
+        now,
+    );
+    pairs.clear();
 }
 
 /// B5: best-effort durable record of a successful on-disk move whose DB
@@ -990,11 +1087,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         let dest = tmp.join("audio.mp3");
         // Nothing assigned, file absent → original name.
-        let assigned0: HashSet<String> = HashSet::new();
+        let assigned0: HashSet<ClaimedDestination> = HashSet::new();
         assert_eq!(unique_destination(&dest, &assigned0), dest);
         // A second move targeting the same name in-batch → " (2)".
-        let mut assigned1: HashSet<String> = HashSet::new();
-        assigned1.insert(dest.to_string_lossy().to_lowercase());
+        let mut assigned1: HashSet<ClaimedDestination> = HashSet::new();
+        assigned1.insert(claimed_destination_key(&dest));
         let d2 = unique_destination(&dest, &assigned1);
         assert_eq!(d2, tmp.join("audio (2).mp3"));
         assert_ne!(d2, dest);
@@ -1032,7 +1129,7 @@ mod tests {
 
         // " (2)" also claimed this batch → bumped to " (3)".
         let mut claimed = HashSet::new();
-        claimed.insert(dir.join("IMG (2).jpg").to_string_lossy().to_lowercase());
+        claimed.insert(claimed_destination_key(&dir.join("IMG (2).jpg")));
         assert_eq!(unique_destination(&dest, &claimed), dir.join("IMG (3).jpg"));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1051,7 +1148,7 @@ mod tests {
 
         // First move claimed "photo.jpg" (stored lowercased, as `apply` does).
         let mut claimed = HashSet::new();
-        claimed.insert(dir.join("photo.jpg").to_string_lossy().to_lowercase());
+        claimed.insert(claimed_destination_key(&dir.join("photo.jpg")));
 
         // Second move targets the case-variant "Photo.jpg" — same file on a
         // case-insensitive FS → must be detected and bumped to " (2)".
@@ -1082,6 +1179,39 @@ mod tests {
             params![id, path],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn undo_retry_treats_an_already_restored_entry_as_idempotent() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-undo-retry-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let original_dir = root.join("incoming");
+        std::fs::create_dir_all(&original_dir).unwrap();
+        let original = original_dir.join("photo.jpg");
+        std::fs::write(&original, b"photo").unwrap();
+        let already_vacated = root.join("Photos").join("photo.jpg");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &original.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let inverse = move_fixture(
+            1,
+            &already_vacated.to_string_lossy(),
+            &original.to_string_lossy(),
+        );
+
+        let result = apply
+            .apply_iter_with(std::iter::once(Ok(inverse)), Some(1), false)
+            .unwrap();
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.failed, 0, "retry must not become permanently stale");
+        assert!(original.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// B3: two distinct sources sharing a basename, funnelled to the same

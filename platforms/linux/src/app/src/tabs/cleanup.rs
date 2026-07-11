@@ -31,10 +31,10 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
+use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use crate::engine_client::{
     decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent,
 };
-use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use fileid_engine::ipc::{CommandPayload, TrashFilesPayload};
 
 /// Files larger than this carry a head+tail+size COMPOSITE `content_hash`, not a
@@ -49,6 +49,8 @@ const DEFAULT_NEARDUP_HAMMING: u32 = 8;
 const NEAR_DUP_IMAGE_CAP: usize = 20_000;
 /// Largest clusters first; cap the rendered groups like the reference.
 const MAX_GROUPS: usize = 200;
+const MAX_VISIBLE_MEMBERS: usize = 5_000;
+const MAX_VISIBLE_MEMBERS_PER_GROUP: usize = 500;
 const TILE_THUMB_PX: i32 = 256;
 const BYTES_PER_MB: f64 = 1_048_576.0;
 
@@ -71,6 +73,7 @@ struct DupGroup {
     /// mid-scan re-rank can't change the key. Drives skip-state tracking.
     key: String,
     members: Vec<Member>,
+    total_members: usize,
     is_similar: bool,
     is_approximate: bool,
     total_bytes: i64,
@@ -88,11 +91,16 @@ struct LoadResult {
     /// Number of candidate rows considered (files with a content hash, or images
     /// with a dHash) — distinguishes "nothing scanned yet" from "no duplicates".
     candidate_count: usize,
+    warning: Option<String>,
 }
 
 impl LoadResult {
     fn empty() -> Self {
-        Self { groups: Vec::new(), candidate_count: 0 }
+        Self {
+            groups: Vec::new(),
+            candidate_count: 0,
+            warning: None,
+        }
     }
 }
 
@@ -107,6 +115,7 @@ struct Cleanup {
     query_gen: Cell<u64>,
     deleting: Cell<bool>,
     last_candidates: Cell<usize>,
+    last_warning: RefCell<Option<String>>,
     reload_throttle: Cell<Instant>,
 
     subtitle: gtk::Label,
@@ -259,6 +268,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         query_gen: Cell::new(0),
         deleting: Cell::new(false),
         last_candidates: Cell::new(0),
+        last_warning: RefCell::new(None),
         reload_throttle: Cell::new(Instant::now() - Duration::from_secs(10)),
         subtitle,
         actions_box,
@@ -352,7 +362,12 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 }
 
 impl Cleanup {
-    fn switch_mode(self: &Rc<Self>, mode: &str, pill_exact: &gtk::Button, pill_similar: &gtk::Button) {
+    fn switch_mode(
+        self: &Rc<Self>,
+        mode: &str,
+        pill_exact: &gtk::Button,
+        pill_similar: &gtk::Button,
+    ) {
         if self.mode.borrow().as_str() == mode {
             return;
         }
@@ -369,6 +384,7 @@ impl Cleanup {
         self.selection.borrow_mut().clear();
         self.skipped.borrow_mut().clear();
         self.groups.borrow_mut().clear();
+        self.last_warning.borrow_mut().take();
         self.status_bar.set_visible(false);
         self.reload();
         self.update_global_summary();
@@ -397,6 +413,7 @@ impl Cleanup {
                 return;
             }
             this.last_candidates.set(res.candidate_count);
+            *this.last_warning.borrow_mut() = res.warning;
             // Prune any selection that no longer maps to a visible copy.
             {
                 let visible_ids: HashSet<i64> = res
@@ -424,7 +441,10 @@ impl Cleanup {
         let mode_similar = self.mode.borrow().as_str() == "similar";
         let groups = self.groups.borrow();
         let skipped = self.skipped.borrow();
-        let visible: Vec<&DupGroup> = groups.iter().filter(|g| !skipped.contains(&g.key)).collect();
+        let visible: Vec<&DupGroup> = groups
+            .iter()
+            .filter(|g| !skipped.contains(&g.key))
+            .collect();
 
         if visible.is_empty() {
             self.show_empty(mode_similar, !groups.is_empty());
@@ -441,7 +461,13 @@ impl Cleanup {
 
     fn show_empty(self: &Rc<Self>, mode_similar: bool, has_skipped_only: bool) {
         let candidates = self.last_candidates.get();
-        if has_skipped_only {
+        if let Some(warning) = self.last_warning.borrow().as_deref() {
+            self.empty_page.set_child(None::<&gtk::Box>);
+            self.empty_page
+                .set_icon_name(Some("dialog-warning-symbolic"));
+            self.empty_page.set_title("Similar comparison not run");
+            self.empty_page.set_description(Some(warning));
+        } else if has_skipped_only {
             self.empty_page.set_icon_name(Some("emblem-ok-symbolic"));
             self.empty_page.set_title("All duplicate groups skipped");
             self.empty_page
@@ -470,7 +496,8 @@ impl Cleanup {
             self.empty_page.set_child(None::<&gtk::Box>);
             self.empty_page.set_icon_name(Some("emblem-ok-symbolic"));
             if mode_similar {
-                self.empty_page.set_title("No visually similar images found");
+                self.empty_page
+                    .set_title("No visually similar images found");
                 let desc = format!(
                     "All {candidates} images compared — none are near-identical within the \
                      similarity threshold. Byte-for-byte duplicates appear under \"Exact\"."
@@ -506,7 +533,7 @@ impl Cleanup {
             .build();
         let count_text = format!(
             "{} {}",
-            group.members.len(),
+            group.total_members,
             if group.is_similar { "images" } else { "copies" }
         );
         let count_badge = gtk::Label::builder()
@@ -544,6 +571,15 @@ impl Cleanup {
                 .valign(gtk::Align::Center)
                 .build(),
         );
+        if group.total_members > group.members.len() {
+            head.append(
+                &gtk::Label::builder()
+                    .label(format!("showing {}", group.members.len()).as_str())
+                    .css_classes(["dim-label"])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
         head.append(&gtk::Box::builder().hexpand(true).build());
         let sel_lbl = gtk::Label::builder()
             .css_classes(["gold-accent"])
@@ -646,7 +682,13 @@ impl Cleanup {
         popbox.append(&b_invert);
         popover.set_child(Some(&popbox));
 
-        wire_select(&b_except, self, &member_ids, &popover, SelectOp::AllExceptKeeper);
+        wire_select(
+            &b_except,
+            self,
+            &member_ids,
+            &popover,
+            SelectOp::AllExceptKeeper,
+        );
         wire_select(&b_all, self, &member_ids, &popover, SelectOp::All);
         wire_select(&b_none, self, &member_ids, &popover, SelectOp::None);
         wire_select(&b_invert, self, &member_ids, &popover, SelectOp::Invert);
@@ -745,13 +787,17 @@ impl Cleanup {
             let rx = self.engine.borrow().request_thumbnail(member.path.clone());
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                let Ok(Some(bytes)) = rx.recv().await else { return };
+                let Ok(Some(bytes)) = rx.recv().await else {
+                    return;
+                };
                 // Decode + scale OFF the main loop; only Send pixel data crosses back.
                 let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
                 std::thread::spawn(move || {
                     let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
                 });
-                let Ok(Some(decoded)) = drx.recv().await else { return };
+                let Ok(Some(decoded)) = drx.recv().await else {
+                    return;
+                };
                 if let Some(p) = pic_weak.upgrade() {
                     p.set_paintable(Some(&texture_from_decoded(&decoded)));
                 }
@@ -787,7 +833,12 @@ impl Cleanup {
             if let Some(im) = ind_weak.upgrade() {
                 im.set_icon_name(Some(checkbox_icon(now_selected)));
             }
-            update_group_selection_widgets(&this.selection.borrow(), &group_sizes, &sel_lbl, &del_btn);
+            update_group_selection_widgets(
+                &this.selection.borrow(),
+                &group_sizes,
+                &sel_lbl,
+                &del_btn,
+            );
             this.update_global_summary();
         });
         outer.add_controller(gesture);
@@ -803,7 +854,10 @@ impl Cleanup {
         let skipped = self.skipped.borrow();
         let sel = self.selection.borrow();
 
-        let visible: Vec<&DupGroup> = groups.iter().filter(|g| !skipped.contains(&g.key)).collect();
+        let visible: Vec<&DupGroup> = groups
+            .iter()
+            .filter(|g| !skipped.contains(&g.key))
+            .collect();
         let mut total_sel = 0i64;
         let mut total_sel_bytes = 0i64;
         let mut reclaimable = 0i64;
@@ -938,9 +992,18 @@ impl Cleanup {
         {
             let mut groups = self.groups.borrow_mut();
             for g in groups.iter_mut() {
+                let removed_count = g.members.iter().filter(|m| idset.contains(&m.id)).count();
+                let removed_bytes: i64 = g
+                    .members
+                    .iter()
+                    .filter(|m| idset.contains(&m.id))
+                    .map(|m| m.size)
+                    .sum();
                 g.members.retain(|m| !idset.contains(&m.id));
+                g.total_members = g.total_members.saturating_sub(removed_count);
+                g.total_bytes = g.total_bytes.saturating_sub(removed_bytes);
             }
-            groups.retain(|g| g.members.len() >= 2);
+            groups.retain(|g| g.total_members >= 2 && !g.members.is_empty());
             for g in groups.iter_mut() {
                 recompute_group(g);
             }
@@ -1042,7 +1105,10 @@ fn update_group_selection_widgets(
             (c, b)
         }
     });
-    sel_lbl.set_text(&format!("{cnt} selected · {:.1} MB", bytes as f64 / BYTES_PER_MB));
+    sel_lbl.set_text(&format!(
+        "{cnt} selected · {:.1} MB",
+        bytes as f64 / BYTES_PER_MB
+    ));
     sel_lbl.set_visible(cnt > 0);
     del_btn.set_label(&format!("Delete {cnt} from this group"));
     del_btn.set_sensitive(cnt > 0);
@@ -1124,29 +1190,61 @@ struct RawRow {
     kind: String,
     phash: i64,
     hash: Option<Vec<u8>>,
+    group_count: usize,
 }
 
 fn load_exact(conn: &rusqlite::Connection) -> LoadResult {
-    // Every file with a content hash; group by EXACT (hash + size) equality —
-    // identical content_hash AND size_bytes is byte-for-byte identical.
-    let sql = "SELECT id, path_text, size_bytes, content_hash, modified_at, created_at, aesthetic, kind \
-               FROM files WHERE content_hash IS NOT NULL AND failed = 0";
+    let candidate_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL AND failed=0",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        .max(0) as usize;
+    // Indexed top-group selection plus a ranked, bounded member preview.
+    let sql = "WITH top_groups AS ( \
+                   SELECT content_hash,size_bytes,COUNT(*) AS n FROM files \
+                   WHERE content_hash IS NOT NULL AND failed=0 \
+                   GROUP BY content_hash,size_bytes HAVING n>1 \
+                   ORDER BY n DESC,hex(content_hash),size_bytes LIMIT ?1 \
+               ), ranked AS ( \
+                   SELECT f.id,f.path_text,f.size_bytes,f.content_hash,f.modified_at, \
+                          f.created_at,f.aesthetic,f.kind,tg.n AS group_count, \
+                          ROW_NUMBER() OVER (PARTITION BY f.content_hash,f.size_bytes \
+                            ORDER BY COALESCE(f.aesthetic,0) DESC,f.size_bytes DESC, \
+                                     COALESCE(f.created_at,1e18),LENGTH(f.path_text),f.path_text) AS member_rank \
+                   FROM files f JOIN top_groups tg \
+                     ON tg.content_hash=f.content_hash AND tg.size_bytes=f.size_bytes \
+                   WHERE f.failed=0 \
+               ) \
+               SELECT id,path_text,size_bytes,content_hash,modified_at,created_at,aesthetic,kind,group_count \
+               FROM ranked WHERE member_rank<=?2 \
+               ORDER BY group_count DESC,hex(content_hash),size_bytes,member_rank LIMIT ?3";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return LoadResult::empty();
     };
-    let rows = stmt.query_map([], |row| {
-        Ok(RawRow {
-            id: row.get(0)?,
-            path: row.get(1)?,
-            size: row.get(2)?,
-            hash: row.get::<_, Option<Vec<u8>>>(3)?,
-            modified: row.get(4)?,
-            created: row.get(5)?,
-            aesthetic: row.get(6)?,
-            kind: row.get(7)?,
-            phash: 0,
-        })
-    });
+    let rows = stmt.query_map(
+        rusqlite::params![
+            MAX_GROUPS,
+            MAX_VISIBLE_MEMBERS_PER_GROUP,
+            MAX_VISIBLE_MEMBERS
+        ],
+        |row| {
+            Ok(RawRow {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                size: row.get(2)?,
+                hash: row.get::<_, Option<Vec<u8>>>(3)?,
+                modified: row.get(4)?,
+                created: row.get(5)?,
+                aesthetic: row.get(6)?,
+                kind: row.get(7)?,
+                phash: 0,
+                group_count: row.get::<_, i64>(8)?.max(0) as usize,
+            })
+        },
+    );
     let Ok(rows) = rows else {
         return LoadResult::empty();
     };
@@ -1158,8 +1256,6 @@ fn load_exact(conn: &rusqlite::Connection) -> LoadResult {
             _ => {}
         }
     }
-    let candidate_count = raw.len();
-
     // Group by content_hash hex + size (O(n) via a map).
     let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, r) in raw.iter().enumerate() {
@@ -1174,15 +1270,43 @@ fn load_exact(conn: &rusqlite::Connection) -> LoadResult {
         }
         rank_indices(&raw, &mut indices);
         let keeper = &raw[indices[0]];
-        let key = format!("dup-{}:{}", hex(keeper.hash.as_deref().unwrap_or(&[])), keeper.size);
+        let key = format!(
+            "dup-{}:{}",
+            hex(keeper.hash.as_deref().unwrap_or(&[])),
+            keeper.size
+        );
         let is_approximate = keeper.size > FULL_HASH_MAX_BYTES;
-        groups.push(build_group(&raw, &indices, key, false, is_approximate));
+        let total_members = keeper.group_count.max(indices.len());
+        let total_bytes = keeper.size.saturating_mul(total_members as i64);
+        let mut group = build_group(&raw, &indices, key, false, is_approximate);
+        group.total_members = total_members;
+        group.total_bytes = total_bytes;
+        groups.push(group);
     }
 
     finalize(groups, candidate_count)
 }
 
 fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
+    let candidate_count = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE kind='image' AND failed=0 AND phash IS NOT NULL AND phash!=0",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        .max(0) as usize;
+    if candidate_count > NEAR_DUP_IMAGE_CAP {
+        return LoadResult {
+            groups: Vec::new(),
+            candidate_count,
+            warning: Some(format!(
+                "Visually similar comparison is unavailable for {candidate_count} images: \
+                 the exact Hamming matcher is capped at {NEAR_DUP_IMAGE_CAP}. \
+                 Exact duplicate cleanup remains available."
+            )),
+        };
+    }
     // Only images carry a dHash; phash == 0 is the engine's "none / failed"
     // sentinel — exclude it so blank hashes don't collapse into one giant group.
     let sql = "SELECT id, path_text, size_bytes, content_hash, modified_at, created_at, aesthetic, phash, kind \
@@ -1202,6 +1326,7 @@ fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
             aesthetic: row.get(6)?,
             phash: row.get(7)?,
             kind: row.get(8)?,
+            group_count: 0,
         })
     });
     let Ok(rows) = rows else {
@@ -1209,12 +1334,12 @@ fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
     };
 
     let raw: Vec<RawRow> = rows.flatten().filter(|r| r.phash != 0).collect();
-    let candidate_count = raw.len();
     if raw.len() <= 1 || raw.len() > NEAR_DUP_IMAGE_CAP {
         // Empty or beyond the O(N²) cap — skip perceptual grouping (Exact stays).
         return LoadResult {
             groups: Vec::new(),
             candidate_count,
+            warning: None,
         };
     }
 
@@ -1227,7 +1352,11 @@ fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
     }
 
     let mut groups: Vec<DupGroup> = Vec::new();
+    let mut remaining = MAX_VISIBLE_MEMBERS;
     for ids in group_by_hamming(&items, max_hamming) {
+        if remaining < 2 {
+            break;
+        }
         let mut indices: Vec<usize> = ids
             .iter()
             .filter_map(|id| index_by_id.get(id).copied())
@@ -1243,20 +1372,30 @@ fn load_similar(conn: &rusqlite::Connection) -> LoadResult {
         rank_indices(&raw, &mut indices);
         // Stable identity: smallest member id, independent of keeper re-ranks.
         let gid = indices.iter().map(|&i| raw[i].id).min().unwrap_or(0);
-        groups.push(build_group(&raw, &indices, format!("sim-{gid}"), true, false));
+        let total_members = indices.len();
+        let total_bytes = indices.iter().map(|&i| raw[i].size).sum();
+        let visible = total_members
+            .min(MAX_VISIBLE_MEMBERS_PER_GROUP)
+            .min(remaining);
+        let mut group = build_group(&raw, &indices[..visible], format!("sim-{gid}"), true, false);
+        group.total_members = total_members;
+        group.total_bytes = total_bytes;
+        remaining -= group.members.len();
+        groups.push(group);
     }
 
     finalize(groups, candidate_count)
 }
 
 fn finalize(mut groups: Vec<DupGroup>, candidate_count: usize) -> LoadResult {
-    groups.sort_by_key(|g| std::cmp::Reverse(g.members.len()));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.total_members));
     if groups.len() > MAX_GROUPS {
         groups.truncate(MAX_GROUPS);
     }
     LoadResult {
         groups,
         candidate_count,
+        warning: None,
     }
 }
 
@@ -1286,6 +1425,7 @@ fn build_group(
     DupGroup {
         key,
         members,
+        total_members: indices.len(),
         is_similar,
         is_approximate,
         total_bytes,
@@ -1296,7 +1436,6 @@ fn build_group(
 /// Recompute keeper flags + totals after an optimistic member removal. Members
 /// stay in rank order, so element 0 is the best surviving keeper.
 fn recompute_group(g: &mut DupGroup) {
-    g.total_bytes = g.members.iter().map(|m| m.size).sum();
     g.keeper_bytes = g.members.first().map(|m| m.size).unwrap_or(0);
     for (i, m) in g.members.iter_mut().enumerate() {
         m.is_keeper = i == 0;
@@ -1447,4 +1586,57 @@ fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn exact_cleanup_keeps_true_totals_with_a_bounded_preview() {
+        let conn = database();
+        conn.execute_batch(
+            "WITH RECURSIVE ids(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM ids WHERE x<600) \
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,content_hash) \
+             SELECT x,printf('/library/%d.jpg',x),x,4,1,'image','jpg',0,x'0102' FROM ids;",
+        )
+        .unwrap();
+
+        let loaded = load_exact(&conn);
+        assert_eq!(loaded.candidate_count, 600);
+        assert_eq!(loaded.groups.len(), 1);
+        assert_eq!(loaded.groups[0].total_members, 600);
+        assert_eq!(
+            loaded.groups[0].members.len(),
+            MAX_VISIBLE_MEMBERS_PER_GROUP
+        );
+        assert_eq!(loaded.groups[0].total_bytes, 2_400);
+    }
+
+    #[test]
+    fn similar_cleanup_rejects_oversized_input_before_materializing_rows() {
+        let conn = database();
+        conn.execute(
+            "WITH RECURSIVE ids(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM ids WHERE x<?1) \
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,phash) \
+             SELECT x,printf('/library/%d.jpg',x),x,4,1,'image','jpg',0,x FROM ids",
+            [NEAR_DUP_IMAGE_CAP as i64 + 1],
+        )
+        .unwrap();
+
+        let loaded = load_similar(&conn);
+        assert!(loaded.groups.is_empty());
+        assert_eq!(loaded.candidate_count, NEAR_DUP_IMAGE_CAP + 1);
+        assert!(loaded
+            .warning
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unavailable"));
+    }
 }

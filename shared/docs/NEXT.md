@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## STATUS 2026-07-10 — paged restructure plans finished + Windows-verified; needs landing + on-Mac/on-Linux confirm
+
+Completed the previously-uncommitted "paged/truncated restructure plans" feature (STATE top entry + DECISIONS 2026-07-10). Everything buildable on the Windows dev box is green (engine clippy + 414 tests; IpcSchema 48; app build 0/0 + 174 tests + `dotnet format`; CLI 8; TUI 83). A fresh **Release self-contained build** was produced (LocalAppData install + Desktop shortcut) for owner runtime testing.
+
+**Open follow-ups (acceptance criteria):**
+1. **Land it.** The whole working tree is uncommitted (this feature + prior excludedPaths churn) and carries tree-wide CRLF normalization noise — there is **no `.gitattributes`**. Before committing, decide the EOL policy (add a `.gitattributes` normalizing to the repo's convention, or `git add --renormalize`) so the commit diff is the real feature, not a whole-tree rewrite. Then land on a branch → PR → confirm engine + app + CLI/TUI + macOS + Linux CI all green.
+2. **Apple runtime confirm (needs Mac):** `swift build` + `swift test` for `Restructure.swift` / `RestructureView.swift` — code-complete by inspection only, never compiled here.
+3. **Linux runtime confirm (needs Linux):** `cargo clippy --all-targets -D warnings` + `cargo test` on the GTK app + engine (Windows-local 1.90 ≠ Linux CI 1.90); exercise the truncated apply-by-`plan_id` path in the GTK Restructure tab.
+4. **On-hardware:** drive a >5000-move restructure on a real large library so the disk-spool + apply-by-`planID` path actually runs end-to-end (unit tests cover spool write/read/root-mismatch; the full plan→spool→apply loop isn't asserted as one integration test — a coverage gap worth closing).
+
 ## STATUS 2026-07-09 — prod-hardening landed (PR #89); FileIDSetup.exe works; v0.0.1 assets refreshed
 
 The `windows-prod-hardening` branch is merged to `main`, all real CI green (STATE top entry). The engine perf/robustness work, the macOS/Linux user-folder-exclusions lockstep, and the VS18 installer path all landed. **The single-EXE `.exe` installer now builds end-to-end** (`publish-bundle.ps1 -SkipSign -SkipArm64` → `FileIDSetup.exe` + `FileID-x64.msi`, privacy gate green) after fixing the Burn bundle theme. Per owner, the version stays **0.1.0** and the release stays **v0.0.1** (a 0.0.2 MSI would be a lower ProductVersion than the already-shipped 0.1.0 and wouldn't in-place upgrade); the v0.0.1 assets were refreshed with the rebuilt MSI + the new `FileID-0.0.1-Setup-x64.exe`.

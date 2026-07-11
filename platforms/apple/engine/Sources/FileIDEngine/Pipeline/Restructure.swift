@@ -16,6 +16,7 @@
 // `vlm_proposed_name` becomes the new filename within whichever
 // folder the heuristic picks. A missing timestamp coerces to 1970.
 import Foundation
+import CryptoKit
 import GRDB
 import FileIDShared
 
@@ -47,12 +48,243 @@ public struct RestructureProposal: Sendable {
 
 public enum Restructure {
 
+    private static func rootBounds(
+        _ raw: String
+    ) -> (root: String, prefix: String, upper: String) {
+        var root = raw
+        while root.count > 1, root.hasSuffix("/") { root.removeLast() }
+        let prefix = root == "/" ? "/" : root + "/"
+        // The prefix always ends in ASCII '/', whose immediate binary successor
+        // is '0'. SQLite's BINARY range [prefix, upper) therefore includes
+        // exactly descendants and excludes siblings such as `/library-old`.
+        let upper = String(prefix.dropLast()) + "0"
+        return (root, prefix, upper)
+    }
+
+    static let largePlanThreshold = 50_000
+    private static let largePlanChunk = 4_096
+
+    /// Million-file planning path. Metadata is classified in bounded chunks
+    /// into an on-disk sidecar, folder tiers are aggregated in SQL, and only a
+    /// bounded preview crosses IPC. Smaller libraries keep the richer semantic
+    /// planner below.
+    static func proposeLargeStoredIfNeeded(
+        database: Database,
+        libraryRoot: URL,
+        directory override: URL? = nil,
+        threshold: Int = largePlanThreshold
+    ) async throws -> RestructurePlan? {
+        let bounds = rootBounds(libraryRoot.path)
+        let count = try await database.pool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM files f WHERE f.failed=0
+                  AND (?='' OR f.path_text=? OR (f.path_text>=? AND f.path_text<?))
+                """, arguments: [
+                    bounds.root, bounds.root, bounds.prefix, bounds.upper]) ?? 0
+        }
+        guard count > threshold else { return nil }
+        guard let directory = override ?? storedPlansDirectory else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let planningURL = directory.appendingPathComponent(
+            "\(UUID().uuidString.lowercased()).planning.sqlite")
+        defer { try? FileManager.default.removeItem(at: planningURL) }
+        let planDB = try DatabaseQueue(path: planningURL.path)
+        try planDB.write { db in
+            try db.execute(sql: """
+                CREATE TABLE raw_moves(
+                    seq INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    source_folder TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    confidence TEXT NOT NULL,
+                    reason TEXT);
+                CREATE TABLE folder_stats(
+                    folder TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY(folder,category));
+                CREATE TABLE folder_tiers(
+                    folder TEXT PRIMARY KEY,
+                    tier TEXT NOT NULL);
+                """)
+        }
+
+        var lastID = Int64.min
+        var sequence = 0
+        while true {
+            try Task.checkCancellation()
+            // Keyset pages release the pool read transaction between chunks, so
+            // a million-file plan cannot pin one long-lived SQLite snapshot and
+            // prevent WAL checkpoints while scanning continues.
+            let chunk = try await database.pool.read { sourceDB -> [FileForClassify] in
+                let rows = try Row.fetchAll(sourceDB, sql: """
+                    SELECT
+                      f.id, f.path_text, f.kind, f.created_at, f.modified_at,
+                      f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
+                      (SELECT GROUP_CONCAT(name, char(31))
+                         FROM (SELECT DISTINCT p.name
+                                 FROM persons p
+                                 JOIN face_prints fp ON fp.person_id = p.id
+                                WHERE fp.file_id = f.id
+                                  AND p.name IS NOT NULL AND p.name <> ''
+                                ORDER BY p.name)) AS names
+                    FROM files f
+                    WHERE f.failed=0
+                      AND (?='' OR f.path_text=? OR (f.path_text>=? AND f.path_text<?))
+                      AND f.id > ?
+                    ORDER BY f.id
+                    LIMIT ?
+                    """, arguments: [
+                        bounds.root, bounds.root, bounds.prefix, bounds.upper,
+                        lastID, largePlanChunk])
+                return rows.map { row in
+                    let names: String? = row["names"]
+                    return FileForClassify(
+                        fileID: row["id"] ?? 0,
+                        source: row["path_text"] ?? "",
+                        kind: row["kind"] ?? "other",
+                        modifiedUnix: row["modified_at"] ?? 0,
+                        createdUnix: row["created_at"],
+                        personName: firstPersonName(names),
+                        lat: row["location_lat"], lon: row["location_lon"],
+                        hasText: (row["has_text"] ?? 0) != 0,
+                        vlmProposed: row["vlm_proposed_name"])
+                }
+            }
+            guard !chunk.isEmpty else { break }
+            lastID = chunk.last?.fileID ?? lastID
+            let proposals = ruleClassify(chunk, libraryRoot: libraryRoot)
+            try planDB.write { plan in
+                for proposal in proposals {
+                    let folder = (proposal.oldPath as NSString).deletingLastPathComponent
+                    try plan.execute(sql: """
+                        INSERT INTO raw_moves
+                          (seq,file_id,source,source_folder,destination,category,confidence,reason)
+                        VALUES (?,?,?,?,?,?,?,?)
+                        """, arguments: [
+                            sequence, proposal.fileID, proposal.oldPath, folder,
+                            proposal.newPath, proposal.bucket,
+                            proposal.confidence, proposal.reason])
+                    try plan.execute(sql: """
+                        INSERT INTO folder_stats(folder,category,count) VALUES (?,?,1)
+                        ON CONFLICT(folder,category) DO UPDATE SET count=count+1
+                        """, arguments: [folder, proposal.bucket])
+                    sequence += 1
+                }
+            }
+            if chunk.count < largePlanChunk { break }
+        }
+
+        try planDB.write { db in
+            try db.execute(sql: """
+                INSERT INTO folder_tiers(folder,tier)
+                SELECT folder,
+                  CASE
+                    WHEN total <= 2
+                      OR lower(folder) LIKE '%/downloads'
+                      OR lower(folder) LIKE '%/downloaded'
+                      OR lower(folder) LIKE '%/new folder'
+                      OR lower(folder) LIKE '%/untitled'
+                      OR lower(folder) LIKE '%/temp'
+                      OR lower(folder) LIKE '%/tmp'
+                      OR lower(folder) LIKE '%/misc'
+                      OR lower(folder) LIKE '%/other'
+                      OR lower(folder) LIKE '%/stuff'
+                      OR lower(folder) LIKE '%/things'
+                      OR lower(folder) LIKE '%/files' THEN 'Junk'
+                    WHEN top_count * 100 >= total * 80 THEN 'Anchor'
+                    ELSE 'Mixed'
+                  END
+                FROM (
+                  SELECT folder, SUM(count) AS total, MAX(count) AS top_count
+                  FROM folder_stats GROUP BY folder
+                )
+                """)
+        }
+
+        let summary = try planDB.read { db -> (
+            total: Int, categories: [RestructureCategoryCount], folders: FolderClassificationCounts
+        ) in
+            let total = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM raw_moves r
+                JOIN folder_tiers t ON t.folder=r.source_folder
+                WHERE t.tier <> 'Anchor'
+                """) ?? 0
+            let categories = try Row.fetchAll(db, sql: """
+                SELECT r.category, COUNT(*) AS n FROM raw_moves r
+                JOIN folder_tiers t ON t.folder=r.source_folder
+                WHERE t.tier <> 'Anchor'
+                GROUP BY r.category ORDER BY n DESC, r.category ASC
+                """).map {
+                    RestructureCategoryCount(
+                        category: $0["category"] ?? "", count: $0["n"] ?? 0)
+                }
+            func tierCount(_ tier: String) throws -> Int {
+                try Int.fetchOne(
+                    db, sql: "SELECT COUNT(*) FROM folder_tiers WHERE tier=?",
+                    arguments: [tier]) ?? 0
+            }
+            return (total, categories, FolderClassificationCounts(
+                anchorFolders: try tierCount("Anchor"),
+                mixedFolders: try tierCount("Mixed"),
+                junkFolders: try tierCount("Junk")))
+        }
+
+        let stored = try planDB.read { db in
+            let cursor = try Row.fetchCursor(db, sql: """
+                SELECT r.file_id,r.source,r.destination,r.category,t.tier,
+                       r.confidence,r.reason
+                FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
+                WHERE t.tier <> 'Anchor' ORDER BY r.seq
+                """)
+            return try storePlanStream(
+                libraryRoot: libraryRoot.path,
+                totalMoves: summary.total,
+                directory: directory,
+                nextMove: {
+                    guard let row = try cursor.next() else { return nil }
+                    return RestructureMove(
+                        fileID: row["file_id"] ?? 0,
+                        source: row["source"] ?? "",
+                        destination: row["destination"] ?? "",
+                        category: row["category"] ?? "",
+                        tier: row["tier"],
+                        confidence: row["confidence"] ?? "",
+                        reason: row["reason"])
+                })
+        }
+        let truncated = summary.total > storedPlanPreviewCap
+        if !truncated {
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent("\(stored.planID).ndjson"))
+        }
+        return RestructurePlan(
+            libraryRoot: libraryRoot.path,
+            moves: stored.preview,
+            categoryCounts: summary.categories,
+            folderClassifications: summary.folders,
+            planID: truncated ? stored.planID : nil,
+            totalMoves: truncated ? summary.total : nil,
+            truncated: truncated)
+    }
+
     /// Build proposals for every image in the library. The caller (UI)
     /// renders, the user filters/checks, then apply runs the moves.
     public static func proposeAll(
         database: Database,
         libraryRoot: URL
     ) async throws -> PlanResult {
+        let bounds = rootBounds(libraryRoot.path)
+        let signalCap: Int = switch Hardware.memoryTier {
+        case .low: 20_000
+        case .balanced: 50_000
+        case .high: 100_000
+        }
         struct Source: Sendable {
             let id: Int64
             let path: String
@@ -93,7 +325,9 @@ public enum Restructure {
                             ORDER BY p.name)) AS names
                 FROM files f
                 WHERE f.failed = 0
-                """)
+                  AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
+                ORDER BY f.id
+                """, arguments: [bounds.root, bounds.root, bounds.prefix, bounds.upper])
             let rows = r.map { row in
                 Source(
                     id: row["id"] ?? 0,
@@ -110,12 +344,13 @@ public enum Restructure {
             }
             // CLIP image embeddings (512-d f32 LE) drive the semantic clusterer.
             var embeddings: [Int64: [Float]] = [:]
-            let erows = try GRDB.Row.fetchAll(db, sql: """
+            let ecursor = try GRDB.Row.fetchCursor(db, sql: """
                 SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
                 JOIN files f ON f.id = ce.file_id
                 WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')
-                """)
-            for row in erows {
+                  AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
+                """, arguments: [bounds.root, bounds.root, bounds.prefix, bounds.upper])
+            while embeddings.count < signalCap, let row = try ecursor.next() {
                 let id: Int64 = row["file_id"] ?? 0
                 if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
                     embeddings[id] = Self.floatsLE(data)
@@ -123,8 +358,15 @@ public enum Restructure {
             }
             // Content tags for distinctive-term naming + fusion.
             var tags: [Int64: [String]] = [:]
-            let trows = try GRDB.Row.fetchAll(
-                db, sql: "SELECT DISTINCT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")
+            let trows = try GRDB.Row.fetchAll(db, sql: """
+                SELECT DISTINCT t.file_id, t.tag FROM tags t
+                JOIN files f ON f.id = t.file_id
+                WHERE t.source IN ('auto','vlm','user') AND f.failed = 0
+                  AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
+                LIMIT ?
+                """, arguments: [
+                    bounds.root, bounds.root, bounds.prefix, bounds.upper,
+                    signalCap * 8])
             for row in trows {
                 let id: Int64 = row["file_id"] ?? 0
                 if let t: String = row["tag"] { tags[id, default: []].append(t) }
@@ -132,12 +374,13 @@ public enum Restructure {
             // BGE document text embeddings (384-d f32 LE), cached at scan. The doc pass
             // reads these directly; a doc without one is embedded at plan time (older scan).
             var docEmbeddings: [Int64: [Float]] = [:]
-            let drows = try GRDB.Row.fetchAll(db, sql: """
+            let dcursor = try GRDB.Row.fetchCursor(db, sql: """
                 SELECT te.file_id, te.embedding FROM text_embeddings te
                 JOIN files f ON f.id = te.file_id
                 WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')
-                """)
-            for row in drows {
+                  AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
+                """, arguments: [bounds.root, bounds.root, bounds.prefix, bounds.upper])
+            while docEmbeddings.count < signalCap, let row = try dcursor.next() {
                 let id: Int64 = row["file_id"] ?? 0
                 if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
                     docEmbeddings[id] = Self.floatsLE(data)
@@ -603,6 +846,179 @@ public enum Restructure {
         public let conflicts: [String]
     }
 
+    struct DestinationClaim: Hashable {
+        let high: UInt64
+        let low: UInt64
+
+        init(_ path: String) {
+            let digest = SHA256.hash(data: Data(path.lowercased().utf8))
+            var high: UInt64 = 0
+            var low: UInt64 = 0
+            for (index, byte) in digest.prefix(16).enumerated() {
+                if index < 8 { high = (high << 8) | UInt64(byte) }
+                else { low = (low << 8) | UInt64(byte) }
+            }
+            self.high = high
+            self.low = low
+        }
+    }
+
+    private struct StoredPlanHeader: Codable {
+        let version: Int
+        let libraryRoot: String
+        let totalMoves: Int
+    }
+
+    private final class NDJSONLineReader {
+        private let handle: FileHandle
+        private var buffer = Data()
+        private var eof = false
+        private static let chunkSize = 64 * 1024
+        private static let maxLineSize = 1024 * 1024
+
+        init(url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
+        deinit { try? handle.close() }
+
+        func nextLine() throws -> Data? {
+            while true {
+                if let newline = buffer.firstIndex(of: 0x0A) {
+                    let line = Data(buffer[..<newline])
+                    buffer.removeSubrange(...newline)
+                    return line
+                }
+                if eof {
+                    guard !buffer.isEmpty else { return nil }
+                    let line = buffer
+                    buffer.removeAll(keepingCapacity: false)
+                    return line
+                }
+                let chunk = try handle.read(upToCount: Self.chunkSize) ?? Data()
+                if chunk.isEmpty { eof = true }
+                else { buffer.append(chunk) }
+                guard buffer.count <= Self.maxLineSize else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            }
+        }
+    }
+
+    static let storedPlanPreviewCap = 5_000
+    private static let storedPlanVersion = 1
+
+    private static var storedPlansDirectory: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("FileID/restructure_plans", isDirectory: true)
+    }
+
+    static func storePlan(
+        libraryRoot: String, moves: [RestructureMove], directory override: URL? = nil
+    ) throws -> (planID: String, preview: [RestructureMove]) {
+        var iterator = moves.makeIterator()
+        return try storePlanStream(
+            libraryRoot: libraryRoot,
+            totalMoves: moves.count,
+            directory: override,
+            nextMove: { iterator.next() })
+    }
+
+    private static func storePlanStream(
+        libraryRoot: String,
+        totalMoves: Int,
+        directory override: URL? = nil,
+        nextMove: () throws -> RestructureMove?
+    ) throws -> (planID: String, preview: [RestructureMove]) {
+        guard let directory = override ?? storedPlansDirectory else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        if let files = try? fm.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)
+        {
+            for file in files where file.pathExtension == "ndjson" || file.pathExtension == "tmp" {
+                try? fm.removeItem(at: file)
+            }
+        }
+
+        let planID = UUID().uuidString.lowercased()
+        let finalURL = directory.appendingPathComponent("\(planID).ndjson")
+        let temporaryURL = directory.appendingPathComponent("\(planID).tmp")
+        guard fm.createFile(atPath: temporaryURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: temporaryURL)
+        let encoder = JSONEncoder()
+        var preview: [RestructureMove] = []
+        preview.reserveCapacity(min(storedPlanPreviewCap, totalMoves))
+        var written = 0
+        do {
+            func append<T: Encodable>(_ value: T) throws {
+                var data = try encoder.encode(value)
+                data.append(0x0A)
+                try handle.write(contentsOf: data)
+            }
+            try append(StoredPlanHeader(
+                version: storedPlanVersion,
+                libraryRoot: libraryRoot,
+                totalMoves: totalMoves))
+            while let move = try nextMove() {
+                if preview.count < storedPlanPreviewCap { preview.append(move) }
+                try append(move)
+                written += 1
+            }
+            guard written == totalMoves else { throw CocoaError(.fileWriteUnknown) }
+            try handle.synchronize()
+            try handle.close()
+            try fm.moveItem(at: temporaryURL, to: finalURL)
+        } catch {
+            try? handle.close()
+            try? fm.removeItem(at: temporaryURL)
+            throw error
+        }
+        return (planID, preview)
+    }
+
+    static func applyStoredPlan(
+        planID: String,
+        expectedRoot: String,
+        database: Database,
+        libraryRoot: URL,
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        directory override: URL? = nil
+    ) async throws -> ApplyResult {
+        guard let uuid = UUID(uuidString: planID),
+              let directory = override ?? storedPlansDirectory else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        let canonicalID = uuid.uuidString.lowercased()
+        let url = directory.appendingPathComponent("\(canonicalID).ndjson")
+        let reader = try NDJSONLineReader(url: url)
+        let decoder = JSONDecoder()
+        guard let headerData = try reader.nextLine() else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let header = try decoder.decode(StoredPlanHeader.self, from: headerData)
+        guard header.version == storedPlanVersion,
+              pathsEqual(header.libraryRoot, expectedRoot) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return await applyStream(
+            total: header.totalMoves,
+            nextProposal: {
+                guard let line = try reader.nextLine() else { return nil }
+                let move = try decoder.decode(RestructureMove.self, from: line)
+                return RestructureProposal(
+                    fileID: move.fileID, oldPath: move.source,
+                    newPath: move.destination, bucket: move.category,
+                    confidence: move.confidence, reason: move.reason)
+            },
+            database: database,
+            libraryRoot: libraryRoot,
+            isCancelled: isCancelled,
+            undoJournal: nil,
+            recordUndo: true)
+    }
+
     public static func apply(
         proposals: [RestructureProposal],
         database: Database,
@@ -610,6 +1026,26 @@ public enum Restructure {
         isCancelled: @Sendable () -> Bool = { Task.isCancelled },
         undoJournal: URL? = nil,
         recordUndo: Bool = true
+    ) async -> ApplyResult {
+        var iterator = proposals.makeIterator()
+        return await applyStream(
+            total: proposals.count,
+            nextProposal: { iterator.next() },
+            database: database,
+            libraryRoot: libraryRoot,
+            isCancelled: isCancelled,
+            undoJournal: undoJournal,
+            recordUndo: recordUndo)
+    }
+
+    private static func applyStream(
+        total: Int,
+        nextProposal: () throws -> RestructureProposal?,
+        database: Database,
+        libraryRoot: URL,
+        isCancelled: @Sendable () -> Bool,
+        undoJournal: URL?,
+        recordUndo: Bool
     ) async -> ApplyResult {
         let fm = FileManager.default
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
@@ -641,16 +1077,24 @@ public enum Restructure {
         // B3: destinations claimed by an earlier move in THIS batch, so two
         // distinct sources mapping to the same basename don't collide before
         // either touches disk.
-        var claimed = Set<String>()
+        var claimed = Set<DestinationClaim>()
         // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop. Poll the cancel
         // signal at the TOP of every iteration (each completed move is already
         // durable, so stopping BETWEEN moves preserves per-move atomicity) and
         // emit throttled progress to the engine log so the run isn't feedbackless.
-        let total = proposals.count
         var processed = 0
 
-        for p in proposals {
+        while true {
+            let p: RestructureProposal
+            do {
+                guard let next = try nextProposal() else { break }
+                p = next
+            } catch {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_plan_read_failed", error: "\(error)")
+                break
+            }
             if isCancelled() {
                 JSONLog.shared.info(ev: "restructure_apply_cancelled",
                                     extra: ["processed": AnyCodable(processed),
@@ -686,6 +1130,21 @@ public enum Restructure {
                     return (row["path_text"], row["file_ref"])
                 }
             guard let live, Self.pathsEqual(live.path, p.oldPath) else {
+                // Undo journals are deliberately retained after cancellation or
+                // a partial failure. A retry sees already-restored entries first;
+                // treat a live DB row + file at the original destination as an
+                // idempotent skip so the remaining entries can finish and the
+                // journal can finally be cleared.
+                if !recordUndo,
+                   let live,
+                   Self.pathsEqual(live.path, p.newPath),
+                   FileManager.default.fileExists(atPath: p.newPath),
+                   !Self.fileRefSwapped(
+                       dbRef: live.fileRef,
+                       currentRef: Discovery.inode(of: URL(fileURLWithPath: p.newPath))) {
+                    skipped += 1
+                    continue
+                }
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_stale_plan",
                                     path: redactPathForLog(p.oldPath))
@@ -758,7 +1217,7 @@ public enum Restructure {
             // claim would miss that collision and let the second move overwrite the
             // first (data loss). Erring toward uniquify is safe even on case-sensitive
             // volumes — byte-faithful with the Windows restructure_apply fix.
-            claimed.insert(finalURL.path.lowercased())
+            claimed.insert(DestinationClaim(finalURL.path))
 
             do {
                 try fm.moveItem(at: oldURL, to: finalURL)
@@ -790,8 +1249,16 @@ public enum Restructure {
                 // Credit every successful move to the feedback memory regardless
                 // of whether the undo journal opened (disk-full / sandbox failure).
                 appliedPairs.append((source: oldURL.path, destination: finalURL.path))
+                if appliedPairs.count >= Self.applyProgressInterval {
+                    await RestructureFeedback.record(
+                        database: database, moves: appliedPairs,
+                        now: Date().timeIntervalSince1970)
+                    appliedPairs.removeAll(keepingCapacity: true)
+                }
             }
-            if finalURL.path != plannedURL.path { conflicts.append(plannedURL.path) }
+            if finalURL.path != plannedURL.path, conflicts.count < 1_000 {
+                conflicts.append(plannedURL.path)
+            }
             do {
                 let finalPath = finalURL.path
                 // ENG-91: refresh path_hash too (notNull, indexed StablePathHash
@@ -839,10 +1306,15 @@ public enum Restructure {
     // MARK: - Undo (R2 — reversible "Undo last run")
 
     /// One reversal: move the file currently at `from` back to `to`.
-    struct UndoEntry: Sendable {
+    struct UndoEntry: Codable, Sendable {
         let fileID: Int64
         let from: String
         let to: String
+
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id"
+            case from, to
+        }
     }
 
     /// `~/Library/Application Support/FileID/restructure_undo.ndjson` — the last
@@ -868,8 +1340,7 @@ public enum Restructure {
         return try? FileHandle(forWritingTo: url)
     }
 
-    /// Append one inverse-move entry (NDJSON) to the open journal — the same on-disk
-    /// format `readUndoJournal` parses: `{file_id, from, to}` per line.
+    /// Append one inverse-move entry (NDJSON) to the open journal.
     static func appendUndoEntry(_ e: UndoEntry, to handle: FileHandle) {
         let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
         guard var line = try? JSONSerialization.data(withJSONObject: obj) else { return }
@@ -877,16 +1348,15 @@ public enum Restructure {
         try? handle.write(contentsOf: line)
     }
 
-    static func readUndoJournal(from url: URL?) -> [UndoEntry] {
-        guard let url, let data = try? Data(contentsOf: url) else { return [] }
-        var out: [UndoEntry] = []
-        for slice in data.split(separator: 0x0A) where !slice.isEmpty {
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(slice)) as? [String: Any],
-                  let fid = (obj["file_id"] as? NSNumber)?.int64Value,
-                  let from = obj["from"] as? String, let to = obj["to"] as? String else { continue }
-            out.append(UndoEntry(fileID: fid, from: from, to: to))
+    private static func undoEntryCount(from url: URL) throws -> Int {
+        let reader = try NDJSONLineReader(url: url)
+        let decoder = JSONDecoder()
+        var count = 0
+        while let line = try reader.nextLine() {
+            _ = try decoder.decode(UndoEntry.self, from: line)
+            count += 1
         }
-        return out
+        return count
     }
 
     static func clearUndoJournal(_ url: URL?) {
@@ -899,15 +1369,16 @@ public enum Restructure {
     /// folder), stays strictly inside the resolved root, and never touches the root.
     /// Deepest-first so nested empties fully collapse. Best-effort.
     /// (R2 → reversibility completeness)
-    static func cleanupEmptyDirs(_ entries: [UndoEntry], root: URL) {
+    private static func cleanupEmptyDirs(from journal: URL, root: URL) {
+        guard let reader = try? NDJSONLineReader(url: journal) else { return }
+        let decoder = JSONDecoder()
         let fm = FileManager.default
         let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
-        let dirs = Set(entries.map {
-            URL(fileURLWithPath: $0.from).deletingLastPathComponent().path
-        })
-        // Longer paths first ≈ deepest first, so a nested chain collapses bottom-up.
-        for d in dirs.sorted(by: { $0.count > $1.count }) {
-            var cur = URL(fileURLWithPath: d)
+        // The replay has finished, so each row can attempt its parent immediately.
+        // Repeated folders are harmless and keep memory constant for huge journals.
+        while let line = try? reader.nextLine() {
+            guard let entry = try? decoder.decode(UndoEntry.self, from: line) else { continue }
+            var cur = URL(fileURLWithPath: entry.from).deletingLastPathComponent()
             while true {
                 let curPath = cur.resolvingSymlinksInPath().standardizedFileURL.path
                 guard curPath != resolvedRoot, curPath.hasPrefix(resolvedRoot + "/") else { break }
@@ -922,7 +1393,10 @@ public enum Restructure {
     /// True when the last apply left a reversible journal — drives the app's
     /// "Undo last run" affordance.
     public static func hasUndoableRun(undoJournal: URL? = nil) -> Bool {
-        !readUndoJournal(from: undoJournal ?? defaultUndoJournalURL).isEmpty
+        guard let url = undoJournal ?? defaultUndoJournalURL,
+              let reader = try? NDJSONLineReader(url: url),
+              let line = try? reader.nextLine() else { return false }
+        return (try? JSONDecoder().decode(UndoEntry.self, from: line)) != nil
     }
 
     /// Undo the most recent `apply`: move every file the last run relocated back to
@@ -937,26 +1411,52 @@ public enum Restructure {
         undoJournal: URL? = nil
     ) async -> ApplyResult {
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
-        let entries = readUndoJournal(from: journalURL)
-        guard !entries.isEmpty else {
+        guard let journalURL else {
             return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
         }
-        let inverse = entries.map {
-            RestructureProposal(fileID: $0.fileID, oldPath: $0.from, newPath: $0.to, bucket: "")
+        guard FileManager.default.fileExists(atPath: journalURL.path) else {
+            return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
         }
+        let total: Int
+        do {
+            total = try undoEntryCount(from: journalURL)
+        } catch {
+            JSONLog.shared.warn(ev: "restructure_undo_journal_invalid", error: "\(error)")
+            return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+        }
+        guard total > 0 else {
+            return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
+        }
+        let reader: NDJSONLineReader
+        do {
+            reader = try NDJSONLineReader(url: journalURL)
+        } catch {
+            return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+        }
+        let decoder = JSONDecoder()
         // recordUndo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it
         // and put the REMAINING files back (the already-restored ones stale-skip on
         // the retry). Only a fully-completed (non-cancelled) undo clears it, so the
         // button can't toggle apply→undo→apply by accident.
-        let result = await apply(proposals: inverse, database: database,
-                                 libraryRoot: libraryRoot, isCancelled: isCancelled,
-                                 undoJournal: journalURL, recordUndo: false)
-        if !isCancelled() {
-            clearUndoJournal(journalURL)
+        let result = await applyStream(
+            total: total,
+            nextProposal: {
+                guard let line = try reader.nextLine() else { return nil }
+                let entry = try decoder.decode(UndoEntry.self, from: line)
+                return RestructureProposal(
+                    fileID: entry.fileID, oldPath: entry.from,
+                    newPath: entry.to, bucket: "")
+            },
+            database: database, libraryRoot: libraryRoot,
+            isCancelled: isCancelled, undoJournal: journalURL,
+            recordUndo: false)
+        if !isCancelled(), result.failed == 0 {
             // Reversibility completeness: remove the orphan empty group folders the
-            // apply created, now that undo emptied them.
-            Self.cleanupEmptyDirs(entries, root: libraryRoot)
+            // apply created, now that undo emptied them. Stream the journal again
+            // before deleting it so cleanup also stays bounded.
+            Self.cleanupEmptyDirs(from: journalURL, root: libraryRoot)
+            clearUndoJournal(journalURL)
         }
         return result
     }
@@ -978,12 +1478,13 @@ public enum Restructure {
     /// set ∪ an `lstat` (does not follow the final symlink, so a broken symlink
     /// occupying the slot is still detected). (F-C3-011)
     static func uniqueDestination(
-        _ dest: URL, claimed: Set<String>, fm: FileManager
+        _ dest: URL, claimed: Set<DestinationClaim>, fm: FileManager
     ) -> URL {
         func occupied(_ url: URL) -> Bool {
             // Case-folded membership: the claimed set is stored lowercased so a
             // case-only collision (APFS/NTFS are case-insensitive) is still detected.
-            claimed.contains(url.path.lowercased()) || (try? fm.attributesOfItem(atPath: url.path)) != nil
+            claimed.contains(DestinationClaim(url.path))
+                || (try? fm.attributesOfItem(atPath: url.path)) != nil
         }
         if !occupied(dest) { return dest }
         let parent = dest.deletingLastPathComponent()

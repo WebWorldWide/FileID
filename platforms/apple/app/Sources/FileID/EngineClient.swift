@@ -981,7 +981,7 @@ public final class EngineClient {
     /// down) so the caller can stop its "computing…" spinner.
     @discardableResult
     public func planRestructure(libraryRoot: String) -> Bool {
-        send(.planRestructure(libraryRoot: libraryRoot))
+        send(.planRestructure(libraryRoot: libraryRoot, supportsPagedPlans: true))
     }
 
     /// Apply the selected `moves` through the engine butler. macOS performs
@@ -990,8 +990,11 @@ public final class EngineClient {
     /// `restructureApplyResultSignal`.
     @discardableResult
     public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
-                                 useSymlinks: Bool = false) -> Bool {
-        send(.applyRestructure(libraryRoot: libraryRoot, moves: moves, useSymlinks: useSymlinks))
+                                 useSymlinks: Bool = false,
+                                 planID: String? = nil) -> Bool {
+        send(.applyRestructure(
+            libraryRoot: libraryRoot, moves: moves,
+            useSymlinks: useSymlinks, planID: planID))
     }
 
     /// Reverse the most recent applyRestructure — the engine replays its on-disk

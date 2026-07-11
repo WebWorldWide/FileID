@@ -318,13 +318,15 @@ struct RestructureApplyTests {
         #expect(Restructure.uniqueDestination(dest, claimed: [], fm: fm) == dest)
         // Claimed this batch → " (2)". The claimed set is stored case-folded
         // (APFS/NTFS are case-insensitive), so claims are registered lowercased.
-        let d2 = Restructure.uniqueDestination(dest, claimed: [dest.path.lowercased()], fm: fm)
+        let d2 = Restructure.uniqueDestination(
+            dest, claimed: [Restructure.DestinationClaim(dest.path)], fm: fm)
         #expect(d2 == tmp.appendingPathComponent("audio (2).mp3"))
         // Case-ONLY collision is detected (the data-loss fix): a destination that
         // differs from a claimed path only in case maps to the same on-disk slot and
         // must be uniquified, never silently overwritten.
         let dUpper = tmp.appendingPathComponent("AUDIO.mp3")
-        let d2ci = Restructure.uniqueDestination(dUpper, claimed: [dest.path.lowercased()], fm: fm)
+        let d2ci = Restructure.uniqueDestination(
+            dUpper, claimed: [Restructure.DestinationClaim(dest.path)], fm: fm)
         #expect(d2ci == tmp.appendingPathComponent("AUDIO (2).mp3"))
         // On disk → also bumped.
         try Data("x".utf8).write(to: dest)
@@ -418,5 +420,111 @@ struct RestructureApplyTests {
         #expect(done.moved == 1)
         #expect(FileManager.default.fileExists(atPath: src.path), "restored on re-run")
         #expect(!Restructure.hasUndoableRun(undoJournal: journal), "journal cleared after completion")
+    }
+
+    @Test("A partially completed undo is idempotent when retried")
+    func partialUndoCanResume() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoResume-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let incoming = root.appendingPathComponent("incoming")
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let src1 = incoming.appendingPathComponent("one.jpg")
+        let src2 = incoming.appendingPathComponent("two.jpg")
+        try Data("one".utf8).write(to: src1)
+        try Data("two".utf8).write(to: src2)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src1.path)
+        try await insertRow(db, id: 2, path: src2.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let dest1 = root.appendingPathComponent("Photos/one.jpg")
+        let dest2 = root.appendingPathComponent("Photos/two.jpg")
+
+        let applied = await Restructure.apply(
+            proposals: [
+                RestructureProposal(fileID: 1, oldPath: src1.path,
+                                    newPath: dest1.path, bucket: "photo"),
+                RestructureProposal(fileID: 2, oldPath: src2.path,
+                                    newPath: dest2.path, bucket: "photo")
+            ], database: db, libraryRoot: root, undoJournal: journal)
+        #expect(applied.moved == 2)
+
+        // Make the second inverse fail after the first has already restored.
+        try FileManager.default.removeItem(at: dest2)
+        let partial = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(partial.moved == 1)
+        #expect(partial.failed == 1)
+        #expect(Restructure.hasUndoableRun(undoJournal: journal))
+        #expect(FileManager.default.fileExists(atPath: src1.path))
+
+        // Repair the unavailable source and retry. Entry 1 is already restored;
+        // it must be an idempotent skip rather than a permanent stale failure.
+        try Data("two".utf8).write(to: dest2)
+        let completed = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(completed.failed == 0)
+        #expect(completed.skipped == 1)
+        #expect(FileManager.default.fileExists(atPath: src2.path))
+        #expect(!Restructure.hasUndoableRun(undoJournal: journal))
+    }
+
+    @Test("Large-library planning uses an on-disk plan and bounded preview")
+    func largePlannerIsDiskBacked() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDLargePlanner-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let root = tmp.appendingPathComponent("Library")
+        let db = try makeDB(tmp)
+        let total = Restructure.storedPlanPreviewCap + 37
+        try await db.pool.write { d in
+            try d.execute(sql: """
+                WITH RECURSIVE ids(x) AS (
+                    SELECT 1 UNION ALL SELECT x + 1 FROM ids WHERE x < ?
+                )
+                INSERT INTO files
+                  (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+                SELECT x, printf(? || '/downloads/%d.jpg', x), x, 1, 1,
+                       'image', 'jpg', 0 FROM ids
+                """, arguments: [total, root.path])
+        }
+        let planDir = tmp.appendingPathComponent("plans")
+        let maybePlan = try await Restructure.proposeLargeStoredIfNeeded(
+            database: db, libraryRoot: root, directory: planDir,
+            threshold: Restructure.storedPlanPreviewCap)
+        let plan = try #require(maybePlan)
+
+        #expect(plan.truncated)
+        #expect(plan.totalMoves == total)
+        #expect(plan.moves.count == Restructure.storedPlanPreviewCap)
+        let planID = try #require(plan.planID)
+        #expect(FileManager.default.fileExists(
+            atPath: planDir.appendingPathComponent("\(planID).ndjson").path))
+    }
+
+    @Test("Stored restructure plans expose a bounded preview")
+    func storedPlanPreviewIsBounded() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDPlanSpool-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let total = Restructure.storedPlanPreviewCap + 37
+        let moves = (0..<total).map { index in
+            RestructureMove(
+                fileID: Int64(index),
+                source: "/library/incoming/\(index).jpg",
+                destination: "/library/Photos/2024/\(index).jpg",
+                category: "photo", tier: "Mixed",
+                confidence: "review", reason: "Photo from 2024")
+        }
+
+        let stored = try Restructure.storePlan(
+            libraryRoot: "/library", moves: moves, directory: tmp)
+        #expect(stored.preview.count == Restructure.storedPlanPreviewCap)
+        #expect(UUID(uuidString: stored.planID) != nil)
+        let file = tmp.appendingPathComponent("\(stored.planID).ndjson")
+        let data = try Data(contentsOf: file)
+        #expect(data.split(separator: 0x0A).count == total + 1)
     }
 }

@@ -68,12 +68,16 @@ public sealed record PrewarmModelCommand(string ModelKind) : CommandPayload;
 
 public sealed record CancelPrewarmCommand(string? ModelKind = null) : CommandPayload;
 
-public sealed record PlanRestructureCommand(string LibraryRoot) : CommandPayload;
+public sealed record PlanRestructureCommand(
+    string LibraryRoot,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool SupportsPagedPlans = false) : CommandPayload;
 
 public sealed record ApplyRestructureCommand(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
-    bool UseSymlinks = false) : CommandPayload;
+    bool UseSymlinks = false,
+    [property: JsonPropertyName("planID")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PlanId = null) : CommandPayload;
 
 /// <summary>Reverse the most recent applyRestructure — the engine replays its
 /// on-disk undo journal to move every relocated file back. Reply is a

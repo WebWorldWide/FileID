@@ -31,8 +31,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] =
-        [Tab::Library, Tab::People, Tab::Cleanup, Tab::Restructure, Tab::Settings];
+    pub const ALL: [Tab; 5] = [
+        Tab::Library,
+        Tab::People,
+        Tab::Cleanup,
+        Tab::Restructure,
+        Tab::Settings,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -168,14 +173,16 @@ impl App {
 
     /// Files visible under the current search filter (Library tab).
     pub fn visible_files(&self) -> Vec<&FileRow> {
-        if self.search.is_empty() {
+        if !self.search_active || self.search == self.data.query {
             self.data.files.iter().collect()
         } else {
             let q = self.search.to_lowercase();
             self.data
                 .files
                 .iter()
-                .filter(|f| f.path.to_lowercase().contains(&q) || f.kind.to_lowercase().contains(&q))
+                .filter(|f| {
+                    f.path.to_lowercase().contains(&q) || f.kind.to_lowercase().contains(&q)
+                })
                 .collect()
         }
     }
@@ -252,7 +259,11 @@ impl App {
                 // Clamp defensively (the parser already does, but the gauge must
                 // never see >100). A live install means no error on the status row.
                 let percent = percent.min(100);
-                self.download = Some(DownloadState { percent, label, done: percent >= 100 });
+                self.download = Some(DownloadState {
+                    percent,
+                    label,
+                    done: percent >= 100,
+                });
                 self.status_error = false;
             }
             LoadMsg::Done(snap) => {
@@ -325,7 +336,7 @@ impl App {
             KeyCode::Char('s') => self.open_browser(),
             KeyCode::Char('r') => self.request_reload(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
-            KeyCode::Char('/') if self.tab == Tab::Library => {
+            KeyCode::Char('/') if self.tab == Tab::Library && !self.loading => {
                 self.search_active = true;
                 self.show_help = false;
             }
@@ -349,12 +360,18 @@ impl App {
     /// the same SQLite file (violating the single-writer invariant). Ignored while
     /// either runs.
     fn request_reload(&mut self) {
+        if self.loading {
+            self.status = "A library load is already running…".to_string();
+            return;
+        }
         if self.downloading {
-            self.status = "A model download is running — wait for it to finish before reloading…".to_string();
+            self.status =
+                "A model download is running — wait for it to finish before reloading…".to_string();
             return;
         }
         if self.scanning {
-            self.status = "A scan is in progress — wait for it to finish before reloading…".to_string();
+            self.status =
+                "A scan is in progress — wait for it to finish before reloading…".to_string();
             return;
         }
         self.loading = true;
@@ -548,8 +565,18 @@ impl App {
                 self.search_active = false;
                 self.search.clear();
                 self.set_cursor(0);
+                if !self.data.query.is_empty() {
+                    self.request_reload();
+                }
             }
-            KeyCode::Enter => self.search_active = false,
+            KeyCode::Enter => {
+                self.search = self.search.trim().to_string();
+                self.search_active = false;
+                self.set_cursor(0);
+                if self.search != self.data.query {
+                    self.request_reload();
+                }
+            }
             KeyCode::Backspace => {
                 self.search.pop();
                 self.set_cursor(0);
@@ -736,7 +763,9 @@ impl Browser {
             return cached;
         }
         let computed = count_dir_shallow(path, self.show_hidden);
-        self.counts.borrow_mut().insert(path.to_path_buf(), computed);
+        self.counts
+            .borrow_mut()
+            .insert(path.to_path_buf(), computed);
         computed
     }
 
@@ -762,7 +791,10 @@ impl Browser {
                     self.selected = 0;
                     self.refresh();
                 } else {
-                    self.notice = Some(format!("Can't open {} (permission denied).", dir_label(&path)));
+                    self.notice = Some(format!(
+                        "Can't open {} (permission denied).",
+                        dir_label(&path)
+                    ));
                 }
             }
             None => {}
@@ -801,12 +833,18 @@ impl Browser {
 
 /// Case-insensitive sort key for a directory (its final segment).
 fn dir_key(p: &Path) -> String {
-    p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().to_lowercase()
+    p.file_name()
+        .unwrap_or(p.as_os_str())
+        .to_string_lossy()
+        .to_lowercase()
 }
 
 /// The directory's display label (final segment, or the whole path if none).
 pub fn dir_label(p: &Path) -> String {
-    p.file_name().map_or_else(|| p.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
+    p.file_name().map_or_else(
+        || p.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Is `path` an image, by extension? Uses the engine's OWN `FileKind` table so
@@ -837,7 +875,10 @@ fn count_dir_shallow(path: &Path, show_hidden: bool) -> Option<DirCounts> {
         if !show_hidden && dir_label(&p).starts_with('.') {
             continue;
         }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or_else(|_| p.is_dir());
+        let is_dir = entry
+            .file_type()
+            .map(|t| t.is_dir())
+            .unwrap_or_else(|_| p.is_dir());
         if is_dir {
             c.dirs += 1;
         } else {
@@ -865,7 +906,10 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
         if let Some(h) = home {
             return h.to_path_buf();
         }
-    } else if let Some(rest) = input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")) {
+    } else if let Some(rest) = input
+        .strip_prefix("~/")
+        .or_else(|| input.strip_prefix("~\\"))
+    {
         if let Some(h) = home {
             return h.join(rest);
         }
@@ -935,7 +979,10 @@ mod tests {
 
     fn app_with_files(n: i64) -> App {
         let mut app = App::new("db".into());
-        app.data.files = (0..n).map(|i| file(i, &format!("/x/file{i}.jpg"), "image")).collect();
+        app.data.files = (0..n)
+            .map(|i| file(i, &format!("/x/file{i}.jpg"), "image"))
+            .collect();
+        app.loading = false;
         app
     }
 
@@ -1031,6 +1078,20 @@ mod tests {
     }
 
     #[test]
+    fn committed_search_requests_a_database_reload() {
+        let mut app = app_with_files(3);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.search_active);
+        assert!(app.loading);
+        assert!(app.reload_requested);
+        assert_eq!(app.search, "invoice");
+    }
+
+    #[test]
     fn q_and_ctrl_c_quit() {
         let mut app = app_with_files(0);
         app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1063,10 +1124,16 @@ mod tests {
         assert!(!app.reload_requested, "reload must be ignored mid-download");
 
         app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
-        assert!(app.browser.is_none(), "scan browser must not open mid-download");
+        assert!(
+            app.browser.is_none(),
+            "scan browser must not open mid-download"
+        );
 
         app.on_key(KeyCode::Char('t'), KeyModifiers::NONE);
-        assert!(!app.input_active, "typed-path prompt must not open mid-download");
+        assert!(
+            !app.input_active,
+            "typed-path prompt must not open mid-download"
+        );
 
         // The download is left intact for the worker to finish.
         assert!(app.downloading);
@@ -1100,7 +1167,11 @@ mod tests {
         app.switch_tab(Tab::People);
         app.selected[Tab::People.index()] = 99;
         // empty people -> cursor must clamp to 0
-        let snap = Snapshot { db_exists: true, people: vec![], ..Snapshot::default() };
+        let snap = Snapshot {
+            db_exists: true,
+            people: vec![],
+            ..Snapshot::default()
+        };
         app.apply_load(LoadMsg::Done(Box::new(snap)));
         assert!(!app.loading);
         assert_eq!(app.cursor(), 0);
@@ -1110,13 +1181,19 @@ mod tests {
     fn expand_tilde_resolves_home() {
         let home = Path::new("/home/u");
         assert_eq!(expand_tilde_with("~", Some(home)), PathBuf::from("/home/u"));
-        assert_eq!(expand_tilde_with("~/Pictures", Some(home)), PathBuf::from("/home/u/Pictures"));
+        assert_eq!(
+            expand_tilde_with("~/Pictures", Some(home)),
+            PathBuf::from("/home/u/Pictures")
+        );
         // No home → left verbatim (no panic).
         assert_eq!(expand_tilde_with("~/x", None), PathBuf::from("~/x"));
         // A literal `~foo` (not `~/`) is not tilde-expansion; left as-is.
         assert_eq!(expand_tilde_with("~foo", Some(home)), PathBuf::from("~foo"));
         // Absolute paths pass through untouched.
-        assert_eq!(expand_tilde_with("/var/data", Some(home)), PathBuf::from("/var/data"));
+        assert_eq!(
+            expand_tilde_with("/var/data", Some(home)),
+            PathBuf::from("/var/data")
+        );
     }
 
     /// A throwaway temp directory containing two subdirs + a file (the file must
@@ -1193,7 +1270,10 @@ mod tests {
         assert_eq!(app.scan_requested.as_deref(), Some(base.as_path()));
         assert!(app.scan_root.is_some());
         // A terminal load message clears `scanning` (post-scan reload).
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            ..Snapshot::default()
+        })));
         assert!(!app.scanning);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1275,7 +1355,15 @@ mod tests {
         let b = Browser::open(base.clone());
 
         // cwd's own counts (browser title): 1 image, 2 files, 2 dirs.
-        assert_eq!(b.here, DirCounts { images: 1, files: 2, dirs: 2, capped: false });
+        assert_eq!(
+            b.here,
+            DirCounts {
+                images: 1,
+                files: 2,
+                dirs: 2,
+                capped: false
+            }
+        );
         assert_eq!(b.files_total, 2);
 
         // The dimmed file preview lists the actual files a scan would pick up,
@@ -1284,19 +1372,27 @@ mod tests {
         assert_eq!(names, vec!["notes.txt", "photo.jpg"]);
         let photo = b.files.iter().find(|f| f.name == "photo.jpg").unwrap();
         assert!(photo.is_image, "photo.jpg must be flagged an image");
-        assert!(!b.files.iter().find(|f| f.name == "notes.txt").unwrap().is_image);
+        assert!(
+            !b.files
+                .iter()
+                .find(|f| f.name == "notes.txt")
+                .unwrap()
+                .is_image
+        );
 
         // Lazy per-subdir count: sub/ has 2 images, 3 files, 1 subfolder.
         let sub = base.join("sub");
         assert_eq!(
             b.count_for(&sub),
-            Some(DirCounts { images: 2, files: 3, dirs: 1, capped: false })
+            Some(DirCounts {
+                images: 2,
+                files: 3,
+                dirs: 1,
+                capped: false
+            })
         );
         // docs/ is empty.
-        assert_eq!(
-            b.count_for(&base.join("docs")),
-            Some(DirCounts::default())
-        );
+        assert_eq!(b.count_for(&base.join("docs")), Some(DirCounts::default()));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1312,7 +1408,11 @@ mod tests {
         let b = Browser::open(base.clone());
         let counts = b.count_for(&huge).expect("readable dir counts");
         assert!(counts.capped, "a >COUNT_CAP folder must report capped");
-        assert_eq!(counts.dirs + counts.files, COUNT_CAP, "walk stops at the cap");
+        assert_eq!(
+            counts.dirs + counts.files,
+            COUNT_CAP,
+            "walk stops at the cap"
+        );
         // Second call is served from cache (same result, no re-walk).
         assert_eq!(b.count_for(&huge), Some(counts));
         let _ = std::fs::remove_dir_all(&base);
@@ -1355,9 +1455,20 @@ mod tests {
             .any(|r| matches!(r, BrowseRow::Dir(p) if dir_label(p).starts_with('.')));
         assert!(!has_hidden_dir, "hidden subdir must be filtered by default");
         // No dot-prefixed file in the preview.
-        assert!(b.files.iter().all(|f| !f.name.starts_with('.')), "hidden file must be filtered");
+        assert!(
+            b.files.iter().all(|f| !f.name.starts_with('.')),
+            "hidden file must be filtered"
+        );
         // Counts AGREE with what's shown: the hidden pair is dropped → 1 file, 1 dir.
-        assert_eq!(b.here, DirCounts { images: 0, files: 1, dirs: 1, capped: false });
+        assert_eq!(
+            b.here,
+            DirCounts {
+                images: 0,
+                files: 1,
+                dirs: 1,
+                capped: false
+            }
+        );
         assert_eq!(b.files_total, 1);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1376,15 +1487,34 @@ mod tests {
             .iter()
             .any(|r| matches!(r, BrowseRow::Dir(p) if dir_label(p) == ".hidden_dir"));
         assert!(has_hidden_dir, "hidden subdir appears once toggled on");
-        assert!(b.files.iter().any(|f| f.name == ".secret"), "hidden file appears once toggled on");
+        assert!(
+            b.files.iter().any(|f| f.name == ".secret"),
+            "hidden file appears once toggled on"
+        );
         // Counts now include the hidden pair: 2 files, 2 dirs.
-        assert_eq!(b.here, DirCounts { images: 0, files: 2, dirs: 2, capped: false });
+        assert_eq!(
+            b.here,
+            DirCounts {
+                images: 0,
+                files: 2,
+                dirs: 2,
+                capped: false
+            }
+        );
         assert_eq!(b.files_total, 2);
         // Press `.` again to hide them — counts revert.
         app.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let b = app.browser.as_ref().unwrap();
         assert!(!b.show_hidden);
-        assert_eq!(b.here, DirCounts { images: 0, files: 1, dirs: 1, capped: false });
+        assert_eq!(
+            b.here,
+            DirCounts {
+                images: 0,
+                files: 1,
+                dirs: 1,
+                capped: false
+            }
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1399,7 +1529,12 @@ mod tests {
         let b = Browser::open(base.clone());
         assert_eq!(
             b.count_for(&sub),
-            Some(DirCounts { images: 0, files: 1, dirs: 0, capped: false }),
+            Some(DirCounts {
+                images: 0,
+                files: 1,
+                dirs: 0,
+                capped: false
+            }),
             "the hidden .dot file must not be counted by default",
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -1418,9 +1553,15 @@ mod tests {
         let a = PathBuf::from("/aaa-xyz");
         let b = PathBuf::from("/bbb-xyz");
         // Picks the first candidate the predicate accepts.
-        assert_eq!(first_existing_or_root(&[a.clone(), b.clone()], |p| p == b.as_path()), b);
+        assert_eq!(
+            first_existing_or_root(&[a.clone(), b.clone()], |p| p == b.as_path()),
+            b
+        );
         // None accepted → the `/` fallback.
-        assert_eq!(first_existing_or_root(std::slice::from_ref(&a), |_| false), PathBuf::from("/"));
+        assert_eq!(
+            first_existing_or_root(std::slice::from_ref(&a), |_| false),
+            PathBuf::from("/")
+        );
         // Empty candidate list → the `/` fallback (the Windows path).
         assert_eq!(first_existing_or_root(&[], |_| false), PathBuf::from("/"));
     }
@@ -1431,7 +1572,11 @@ mod tests {
         app.browser = Some(Browser::open(std::env::temp_dir()));
         app.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
         let b = app.browser.as_ref().unwrap();
-        assert_eq!(b.cwd, drives_root(), "d jumps the browser to the drives root");
+        assert_eq!(
+            b.cwd,
+            drives_root(),
+            "d jumps the browser to the drives root"
+        );
     }
 
     #[test]
@@ -1439,7 +1584,10 @@ mod tests {
         let mut app = app_with_files(0);
         app.tab = Tab::Settings;
         app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
-        assert!(app.download_requested, "D on Settings arms a model download");
+        assert!(
+            app.download_requested,
+            "D on Settings arms a model download"
+        );
         assert!(app.downloading);
         assert!(app.loading);
         // The gauge is armed at 0% the same frame, before any PROGRESS line.
@@ -1449,8 +1597,14 @@ mod tests {
         app.apply_load(LoadMsg::Error("`fileid` not found".into()));
         assert!(!app.downloading);
         assert!(!app.loading);
-        assert!(app.download.is_none(), "an errored download clears the gauge");
-        assert!(app.status_error, "the failure marks the status row as an error");
+        assert!(
+            app.download.is_none(),
+            "an errored download clears the gauge"
+        );
+        assert!(
+            app.status_error,
+            "the failure marks the status row as an error"
+        );
     }
 
     /// The porcelain gauge state: `DownloadProgress` advances the bar + label,
@@ -1463,18 +1617,30 @@ mod tests {
         assert_eq!(app.download.as_ref().unwrap().percent, 0);
 
         let label = "arcface · 182/271 MB · 3.4 MB/s · model 2/9";
-        app.apply_load(LoadMsg::DownloadProgress { percent: 62, label: label.to_string() });
+        app.apply_load(LoadMsg::DownloadProgress {
+            percent: 62,
+            label: label.to_string(),
+        });
         let d = app.download.as_ref().expect("gauge present mid-install");
         assert_eq!(d.percent, 62);
         assert_eq!(d.label, label);
         assert!(!d.done, "62% is not done");
 
         // The final PROGRESS line flips the gauge into its brief success state.
-        app.apply_load(LoadMsg::DownloadProgress { percent: 100, label: "done".to_string() });
-        assert!(app.download.as_ref().unwrap().done, "100% marks the gauge done");
+        app.apply_load(LoadMsg::DownloadProgress {
+            percent: 100,
+            label: "done".to_string(),
+        });
+        assert!(
+            app.download.as_ref().unwrap().done,
+            "100% marks the gauge done"
+        );
 
         // The worker's terminal Done clears the gauge entirely.
-        app.apply_load(LoadMsg::Done(Box::new(Snapshot { db_exists: true, ..Snapshot::default() })));
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            ..Snapshot::default()
+        })));
         assert!(app.download.is_none(), "the gauge clears on completion");
         assert!(!app.downloading);
     }
@@ -1484,7 +1650,10 @@ mod tests {
     #[test]
     fn download_progress_clamps_percent_to_100() {
         let mut app = app_with_files(0);
-        app.apply_load(LoadMsg::DownloadProgress { percent: 150, label: "x".to_string() });
+        app.apply_load(LoadMsg::DownloadProgress {
+            percent: 150,
+            label: "x".to_string(),
+        });
         assert_eq!(app.download.as_ref().unwrap().percent, 100);
         assert!(app.download.as_ref().unwrap().done);
     }
@@ -1497,7 +1666,10 @@ mod tests {
             let mut app = app_with_files(0);
             app.switch_tab(tab);
             app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
-            assert!(app.download_requested, "{tab:?}: D must arm a download from any tab");
+            assert!(
+                app.download_requested,
+                "{tab:?}: D must arm a download from any tab"
+            );
             assert!(app.downloading, "{tab:?}: D must mark a download in flight");
         }
     }
@@ -1508,14 +1680,24 @@ mod tests {
     #[test]
     fn tab_key_cycles_through_settings_and_wraps() {
         let mut app = app_with_files(0); // starts on Library
-        let order = [Tab::People, Tab::Cleanup, Tab::Restructure, Tab::Settings, Tab::Library];
+        let order = [
+            Tab::People,
+            Tab::Cleanup,
+            Tab::Restructure,
+            Tab::Settings,
+            Tab::Library,
+        ];
         for expected in order {
             app.on_key(KeyCode::Tab, KeyModifiers::NONE);
             assert_eq!(app.tab, expected, "Tab must advance to {expected:?}");
         }
         // From Library, BackTab wraps backwards straight to Settings.
         app.on_key(KeyCode::BackTab, KeyModifiers::NONE);
-        assert_eq!(app.tab, Tab::Settings, "BackTab from the first tab must wrap to Settings");
+        assert_eq!(
+            app.tab,
+            Tab::Settings,
+            "BackTab from the first tab must wrap to Settings"
+        );
         // The number key jumps straight to Settings (index 5 → '5').
         app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Library);
