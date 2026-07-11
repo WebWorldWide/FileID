@@ -571,7 +571,15 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
         };
-        var choice = await confirm.ShowAsync();
+        // ShowAsync throws when another ContentDialog is already open; this is
+        // an async-void drop handler, so treat a failed confirm as Cancel.
+        ContentDialogResult choice;
+        try { choice = await confirm.ShowAsync(); }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Merge confirm dialog failed (another dialog open?): " + ex.Message);
+            return;
+        }
         if (choice != ContentDialogResult.Primary) return;
 
         try

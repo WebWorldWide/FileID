@@ -15,7 +15,6 @@
 // network call.
 
 using System.ComponentModel;
-using System.IO;
 using FileID.ViewModels;
 
 namespace FileID.Services;
@@ -125,8 +124,10 @@ internal static class CudaAutoInstaller
 
         try
         {
-            var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{OpenVinoKind}.installed");
-            if (File.Exists(sentinel))
+            // Matches both flat and hashed sentinel forms (see SentinelProbe)
+            // — a flat-only probe re-dispatched the prewarm every engine
+            // Ready once installed.
+            if (SentinelProbe.Installed(OpenVinoKind))
             {
                 DebugLog.Info("[CUDA-AUTO] ORT OpenVINO pack already installed; skipping.");
                 return;

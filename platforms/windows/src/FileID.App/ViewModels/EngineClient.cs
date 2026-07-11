@@ -98,6 +98,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private DateTime _lastReadyAt = DateTime.MinValue;
     private static readonly TimeSpan StabilitySettle = TimeSpan.FromSeconds(30);
 
+    // Monotonic engine-process generation. Incremented on every teardown
+    // (crash, user stop, restart) in Cleanup(). Lets a view whose in-flight
+    // guard is keyed to a command sent to a PARTICULAR engine process detect
+    // that the process is gone — its result/error event can never arrive —
+    // and release the guard instead of staying wedged for the session.
+    private int _spawnGeneration;
+    public int SpawnGeneration => Volatile.Read(ref _spawnGeneration);
+
     // BUG-3: respawn debouncing — prevents two-spawn races during the
     // 1s/4s/16s backoff window when the engine flaps quickly.
     private int _isStarting; // 0 = idle, 1 = StartAsync in flight
@@ -987,10 +995,35 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // Marshal through _ui (the property must be set on the UI thread); Cleanup()
         // can run from Dispose() off any thread. (audit R3-app)
         _ui.TryEnqueue(() => FaceClusteringInFlight = false);
+        // An engine death mid-Deep-Analyze never emits the terminal
+        // DeepAnalyzeComplete that clears the progress observables, so the
+        // Library "Deep Analyze running…" banner and the Deep Analyze tab's
+        // stream card (Cancel enabled, Analyze All disabled) stayed latched
+        // for the rest of the session. Synthesize a cancelled terminal result
+        // carrying the last known counts so every subscriber unlatches through
+        // the same path a real completion takes; the next run's
+        // DeepAnalyzeStarting clears it again. UI-marshaled like the flags above.
+        _ui.TryEnqueue(() =>
+        {
+            if (DeepAnalyzeProgress is null && DeepAnalyzeStarting is null) return;
+            var prog = DeepAnalyzeProgress;
+            var modelKind = prog?.ModelKind ?? DeepAnalyzeStarting?.ModelKind ?? string.Empty;
+            DebugLog.Warn("EngineClient: engine exited mid-Deep-Analyze; synthesizing a cancelled DeepAnalyzeComplete so the UI unlatches.");
+            DeepAnalyzeComplete = new DeepAnalyzeComplete(
+                prog?.Processed ?? 0, 0, 0, modelKind, Cancelled: true);
+            DeepAnalyzeProgress = null;
+            DeepAnalyzeStarting = null;
+        });
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so the next apply's result would
         // be mis-attributed as the dead undo's. (audit R2-app)
         UndoRestructureInFlight = false;
+        // Bump the process generation LAST so an observer that reads it after a
+        // State PropertyChanged sees the post-teardown value. Views holding a
+        // static in-flight guard keyed to a command sent to THIS process
+        // (RestructureView's apply single-flight) compare generations to detect
+        // that the owning engine is gone and its result will never arrive.
+        Interlocked.Increment(ref _spawnGeneration);
     }
 
     public void Dispose()

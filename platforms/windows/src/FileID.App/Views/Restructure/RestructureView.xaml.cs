@@ -62,6 +62,13 @@ public sealed partial class RestructureView : UserControl
     // re-plan) must NOT release _applying: a second concurrent apply truncates
     // the first run's undo journal (open_undo_journal_truncating).
     private static bool _applyInFlight;
+    // R6-06: the EngineClient.SpawnGeneration captured when the in-flight apply
+    // was sent. If the generation moves while the guard is engaged, the engine
+    // process that owned the apply (or its post-apply re-plan) is gone — its
+    // result/error event can never arrive — so SyncEngineLifecycle releases the
+    // guard instead of leaving Apply disabled for the rest of the session
+    // (e.g. the external drive was unplugged mid-apply and the engine died).
+    private static int _applyingSpawnGen;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     // R6-05: static (like _applying / _applyingPlan) so "the completion we've
@@ -141,6 +148,10 @@ public sealed partial class RestructureView : UserControl
             {
                 SyncApplyResult();
                 SyncEngineError();
+                // R6-06: an engine death while the tab was closed emits NEITHER
+                // a result nor an apply_restructure error, so the replays above
+                // can't release the guard — the generation check can.
+                SyncEngineLifecycle();
             }
             if (EngineClient.Instance.LastRestructurePlan is not null)
             {
@@ -192,6 +203,14 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.LastError):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineError(); });
+                    break;
+                case nameof(EngineClient.State):
+                    // R6-06: an engine that dies mid-apply emits neither a
+                    // RestructureApplyResult nor an apply_restructure error, so
+                    // the static single-flight guard would stay engaged for the
+                    // whole session. A lifecycle transition is the only signal.
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineLifecycle(); });
                     break;
                 case nameof(EngineClient.DeepAnalyzeProgress):
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
@@ -732,6 +751,7 @@ public sealed partial class RestructureView : UserControl
         _applying = true;
         _applyInFlight = true;
         _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
+        _applyingSpawnGen = EngineClient.Instance.SpawnGeneration; // R6-06
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
@@ -955,6 +975,42 @@ public sealed partial class RestructureView : UserControl
         }
     }
 
+    // R6-06: release the apply single-flight guard when the engine process
+    // that owned the in-flight apply (or its post-apply re-plan) is gone. That
+    // engine's RestructureApplyResult / apply_restructure error can never
+    // arrive, so without this the static guard stayed engaged and the Apply
+    // buttons were disabled for the rest of the session (an unplugged external
+    // drive killing the engine mid-apply is the daily-user repro).
+    private void SyncEngineLifecycle()
+    {
+        if (!ShouldReleaseApplyGuardOnEngineChange(
+                _applying || _applyInFlight, _applyingSpawnGen, EngineClient.Instance.SpawnGeneration))
+        {
+            return;
+        }
+        DebugLog.Warn("RestructureView: engine restarted while an apply/re-plan was in flight; releasing the single-flight guard.");
+        bool applyWasInFlight = _applyInFlight;
+        _applyInFlight = false;
+        _applying = false;
+        _applyingPlan = null;
+        RecomputeSelection();
+        if (applyWasInFlight)
+        {
+            // No "your files are unchanged" claim — moves that completed
+            // before the engine died are real and journaled (undoable).
+            ApplyStatusText.Text = "The engine stopped while applying. Completed moves were journaled and can be undone — generate a fresh plan before applying again.";
+            _ = ShowAlertAsync("Apply interrupted",
+                "The engine stopped while your reorganization was being applied. Every move that completed was journaled and can be undone.\n\n" +
+                "Generate a fresh plan before applying again — the old plan no longer matches what's on disk.");
+        }
+        else
+        {
+            // Guard was held across the post-apply re-plan when the engine
+            // died — the fresh plan will never arrive on its own.
+            ApplyStatusText.Text = "The engine restarted before the updated plan arrived. Generate the plan again.";
+        }
+    }
+
     // ---- Helpers --------------------------------------------------------
 
     private static string Count(int n, string noun)
@@ -982,6 +1038,14 @@ public sealed partial class RestructureView : UserControl
     internal static bool ShouldReleaseApplyGuardOnPlanArrival(
         bool applyInFlight, object? incomingPlan, object? applyingPlan)
         => !applyInFlight && !ReferenceEquals(incomingPlan, applyingPlan);
+
+    // R6-06: SyncEngineLifecycle's release rule — the guard is released only
+    // when it is actually engaged AND the engine process generation moved
+    // since the apply was sent (the owning process is gone, so its terminal
+    // result/error event can never arrive).
+    internal static bool ShouldReleaseApplyGuardOnEngineChange(
+        bool guardEngaged, int applyingGeneration, int currentGeneration)
+        => guardEngaged && applyingGeneration != currentGeneration;
 
     // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible ContentDialog
     // that never escalates to App.UnhandledException on a broken XamlRoot.

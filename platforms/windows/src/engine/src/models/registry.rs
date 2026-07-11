@@ -710,6 +710,37 @@ mod tests {
         }
     }
 
+    /// Both spellings of every VLM kind resolve to the SAME bundle, and the
+    /// bundle's files land under the dotted dir the installer writes — the
+    /// snake-vs-dotted split is what made vlm::find_weights (and the app's
+    /// Deep Analyze cards) report installed VLMs as missing.
+    #[test]
+    fn vlm_kind_aliases_and_dirs_agree() {
+        for (snake, dotted) in [
+            ("mistral_small_3_2", "mistral-small-3.2"),
+            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
+            ("gemma_3_4b", "gemma-3-4b"),
+        ] {
+            let LookupResult::Found(a) = lookup_full(snake) else {
+                panic!("{snake} did not resolve")
+            };
+            let LookupResult::Found(b) = lookup_full(dotted) else {
+                panic!("{dotted} did not resolve")
+            };
+            assert_eq!(a.id, b.id, "alias pair {snake}/{dotted} must be one model");
+            for f in &a.files {
+                let dir = f
+                    .dest
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .expect("vlm dest has a parent dir")
+                    .to_string_lossy()
+                    .into_owned();
+                assert_eq!(dir, dotted, "{snake} dest not under vlm/{dotted}: {}", f.dest.display());
+            }
+        }
+    }
+
     #[test]
     fn unknown_kind_is_unknown() {
         assert!(matches!(

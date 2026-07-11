@@ -48,4 +48,24 @@ public class RestructurePagedPlanGuardTests
         Assert.False(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(false, applying, applying));
         Assert.False(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(true, applying, applying));
     }
+
+    // R6-06: engine-lifecycle release rule — the engine process that owned the
+    // in-flight apply died (spawn generation moved), so its result/error can
+    // never arrive and the guard must release; a live engine (generation
+    // unchanged) or a disengaged guard must not.
+
+    [Fact]
+    public void EngineDiedMidApply_ReleasesGuard()
+        => Assert.True(RestructureView.ShouldReleaseApplyGuardOnEngineChange(
+            guardEngaged: true, applyingGeneration: 3, currentGeneration: 4));
+
+    [Fact]
+    public void SameEngineProcess_KeepsGuard()
+        => Assert.False(RestructureView.ShouldReleaseApplyGuardOnEngineChange(
+            guardEngaged: true, applyingGeneration: 3, currentGeneration: 3));
+
+    [Fact]
+    public void GuardNotEngaged_NeverReleases()
+        => Assert.False(RestructureView.ShouldReleaseApplyGuardOnEngineChange(
+            guardEngaged: false, applyingGeneration: 0, currentGeneration: 7));
 }

@@ -76,7 +76,7 @@ impl RuntimeProbe {
         // absent until the user re-enables it (ep_guard), so we transparently
         // fall through to DirectML instead of crash-looping.
         let cuda_pack_present = cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda");
-        let openvino_pack_present = pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino");
+        let openvino_pack_present = openvino_provider_present() && !crate::models::ep_guard::is_disabled("openvino");
         let qnn_pack_present = pack_present("qnn");
         let provider = pick_provider(
             vendor,
@@ -350,7 +350,7 @@ pub fn armed_provider() -> ExecutionProvider {
                 return ExecutionProvider::Cuda;
             }
             ExecutionProvider::OpenVino
-                if pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino") =>
+                if openvino_provider_present() && !crate::models::ep_guard::is_disabled("openvino") =>
             {
                 return ExecutionProvider::OpenVino;
             }
@@ -533,6 +533,23 @@ fn cuda_provider_present() -> bool {
     crate::platform::find_file_under(
         &root.join("packs").join("cuda"),
         "onnxruntime_providers_cuda.dll",
+        4,
+    )
+    .is_some()
+}
+
+/// OpenVINO mirrors the CUDA gate: usable only when the pack's own provider
+/// DLL is on disk. The shallow `pack_present` (any top-level DLL) both
+/// under-reported a pack whose zip carries a top-level directory and
+/// over-reported on a stray unrelated DLL — the same two failure modes the
+/// CUDA gate was hardened against.
+fn openvino_provider_present() -> bool {
+    let Ok(root) = crate::paths::models_dir() else {
+        return false;
+    };
+    crate::platform::find_file_under(
+        &root.join("packs").join("openvino"),
+        "onnxruntime_providers_openvino.dll",
         4,
     )
     .is_some()

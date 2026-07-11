@@ -278,7 +278,11 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
+            // Map the snake_case wire kind to the registry's dotted dir
+            // ("vlm/mistral-small-3.2") — joining the kind itself never found
+            // installed weights, so every card showed Install on a complete
+            // install (the app-side twin of the engine's find_weights bug).
+            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", Services.VlmWeightDirs.DirNameFor(kind));
             return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
                 && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
         }

@@ -1098,22 +1098,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// after {id} guards against an id that is a prefix of another (e.g.
     /// `arcface` must not match a hypothetical `arcface_xl-….installed`).
     /// (Was exact-`{id}.installed` only, so hashed sentinels read as
-    /// NotInstalled and the Welcome sheet re-showed every launch.)</summary>
-    private static bool SentinelInstalled(string modelId)
-    {
-        try
-        {
-            var dir = Path.Combine(AppPaths.ModelsDir, ".sentinels");
-            if (File.Exists(Path.Combine(dir, $"{modelId}.installed"))) return true;
-            if (!Directory.Exists(dir)) return false;
-            foreach (var _ in Directory.EnumerateFiles(dir, $"{modelId}-*.installed"))
-            {
-                return true;
-            }
-            return false;
-        }
-        catch { return false; }
-    }
+    /// NotInstalled and the Welcome sheet re-showed every launch.)
+    /// The matching lives in <see cref="SentinelProbe"/> so SettingsView and
+    /// the auto-installers share it — their flat-name-only copies
+    /// re-dispatched an already-installed CUDA pack prewarm forever.</summary>
+    private static bool SentinelInstalled(string modelId) => SentinelProbe.Installed(modelId);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
