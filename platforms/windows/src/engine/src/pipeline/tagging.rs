@@ -728,6 +728,7 @@ pub struct Tagger {
     coordinator: ScanCoordinator,
     worker_count: usize,
     models: Arc<ModelStack>,
+    scan_root: Option<std::path::PathBuf>,
 }
 
 impl Tagger {
@@ -736,7 +737,15 @@ impl Tagger {
             coordinator,
             worker_count: worker_count.max(1),
             models,
+            scan_root: None,
         }
+    }
+
+    /// Lets the decoder pool clamp to the scan root's storage type; without
+    /// it the pool sizes by CPU topology alone.
+    pub fn with_scan_root(mut self, root: std::path::PathBuf) -> Self {
+        self.scan_root = Some(root);
+        self
     }
 
     /// Wire Discovery → decoder pool → N tagging workers → DBWriter.
@@ -809,6 +818,30 @@ impl Tagger {
         // 4 GB target. Cap the pool, not just the channel.
         let decoder_count = match crate::platform::memory_tier() {
             crate::platform::MemoryTier::Low => decoder_count.min(4),
+            _ => decoder_count,
+        };
+        // Seek-penalty media (USB HDD, network share): a 12-deep read pool
+        // turns large-file reads into seek thrash and runs SLOWER than a
+        // shallow one. 4 keeps the drive busy while threads overlap CPU
+        // decode; discovery's stat walk uses 2 for the same volumes.
+        let decoder_count = match self
+            .scan_root
+            .as_deref()
+            .map(crate::platform::storage_type_for_path)
+        {
+            Some(
+                st @ (crate::platform::StorageType::Hdd
+                | crate::platform::StorageType::Removable
+                | crate::platform::StorageType::Network),
+            ) => {
+                let clamped = decoder_count.min(4);
+                tracing::info!(
+                    storage = st.as_str(),
+                    decoders = clamped,
+                    "decode pool clamped for seek-penalty storage"
+                );
+                clamped
+            }
             _ => decoder_count,
         };
         // Channel cap: a SLOT bound only (floor = one frame ready per worker).

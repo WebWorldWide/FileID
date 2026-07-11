@@ -14,7 +14,7 @@
 //! model-free `scan` does not compute them, so on a CLI-only-indexed library
 //! these report "no … in DB" until a full engine scan has run.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -99,10 +99,15 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<Option<HashBuckets>> {
         return Ok(None);
     }
     let mut stmt = conn.prepare(
-        "SELECT lower(hex(content_hash)) AS h, id, path_text, size_bytes \
-         FROM files WHERE content_hash IS NOT NULL ORDER BY h, path_text",
+        "WITH duplicate_hashes AS ( \
+             SELECT content_hash FROM files WHERE content_hash IS NOT NULL \
+             GROUP BY content_hash HAVING COUNT(*) > 1 \
+         ) \
+         SELECT lower(hex(f.content_hash)) AS h, f.id, f.path_text, f.size_bytes \
+         FROM files f JOIN duplicate_hashes d ON d.content_hash = f.content_hash \
+         ORDER BY f.content_hash, f.path_text",
     )?;
-    let mut buckets: BTreeMap<String, Vec<(i64, String, i64)>> = BTreeMap::new();
+    let mut buckets: HashBuckets = Vec::new();
     let rows = stmt.query_map(params![], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -111,15 +116,16 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<Option<HashBuckets>> {
             r.get::<_, i64>(3)?,
         ))
     })?;
-    for row in rows.flatten() {
-        buckets
-            .entry(row.0)
-            .or_default()
-            .push((row.1, row.2, row.3));
+    for (hash, id, path, size) in rows.flatten() {
+        if let Some((last_hash, members)) = buckets.last_mut() {
+            if *last_hash == hash {
+                members.push((id, path, size));
+                continue;
+            }
+        }
+        buckets.push((hash, vec![(id, path, size)]));
     }
-    Ok(Some(
-        buckets.into_iter().filter(|(_, v)| v.len() > 1).collect(),
-    ))
+    Ok(Some(buckets))
 }
 
 fn exact_groups(conn: &rusqlite::Connection) -> Result<Option<Vec<ExactGroup>>> {
@@ -188,29 +194,38 @@ fn exact_json(groups: &Option<Vec<ExactGroup>>) -> serde_json::Value {
 // ---- near-duplicate (phash Hamming) -----------------------------------------
 
 struct SimilarGroup {
-    files: Vec<(i64, String)>, // (id, path)
+    files: Vec<(i64, String, i64)>, // (id, path, size)
 }
 
 fn similar_groups(
     conn: &rusqlite::Connection,
     threshold: u32,
 ) -> Result<Option<Vec<SimilarGroup>>> {
-    let mut stmt =
-        conn.prepare("SELECT id, path_text, phash FROM files WHERE phash IS NOT NULL")?;
-    let rows: Vec<(i64, String, i64)> = stmt
-        .query_map(params![], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let mut stmt = conn.prepare("SELECT id, phash FROM files WHERE phash IS NOT NULL")?;
+    let rows: Vec<(i64, i64)> = stmt
+        .query_map(params![], |r| Ok((r.get(0)?, r.get(1)?)))?
         .filter_map(Result::ok)
         .collect();
     if rows.is_empty() {
         return Ok(None);
     }
 
-    // Union-find over phash Hamming distance; report connected components of
-    // size > 1. Candidates come from multi-index hashing: split each 64-bit
-    // hash into `threshold + 1` disjoint blocks — two hashes within `threshold`
-    // bits must match some block exactly (pigeonhole), so only same-block pairs
-    // can ever union. The full distance is still checked before unioning, so the
-    // result is identical to all-pairs.
+    let components = similar_components(&rows, threshold);
+    let ids: Vec<i64> = components.iter().flatten().copied().collect();
+    let mut metadata = load_file_metadata(conn, &ids)?;
+    let groups = components
+        .into_iter()
+        .map(|members| SimilarGroup {
+            files: members
+                .into_iter()
+                .filter_map(|id| metadata.remove(&id).map(|(path, size)| (id, path, size)))
+                .collect(),
+        })
+        .collect();
+    Ok(Some(groups))
+}
+
+fn similar_components(rows: &[(i64, i64)], threshold: u32) -> Vec<Vec<i64>> {
     let n = rows.len();
     let mut parent: Vec<usize> = (0..n).collect();
     if threshold >= 64 {
@@ -219,45 +234,90 @@ fn similar_groups(
         }
     } else {
         let blocks = (threshold + 1) as usize;
-        for b in 0..blocks {
-            let lo = (b * 64) / blocks;
-            let width = ((b + 1) * 64) / blocks - lo;
-            let mask: u64 = if width == 64 {
-                u64::MAX
-            } else {
-                (1u64 << width) - 1
-            };
-            let mut by_block: HashMap<u64, Vec<usize>> = HashMap::new();
-            for (idx, row) in rows.iter().enumerate() {
-                by_block
-                    .entry(((row.2 as u64) >> lo) & mask)
-                    .or_default()
-                    .push(idx);
+        let mut by_block: Vec<HashMap<u64, Vec<usize>>> =
+            (0..blocks).map(|_| HashMap::new()).collect();
+        let mut exact_representative: HashMap<u64, usize> = HashMap::new();
+        for (idx, row) in rows.iter().enumerate() {
+            let hash = row.1 as u64;
+            if let Some(&same) = exact_representative.get(&hash) {
+                union(&mut parent, same, idx);
+                continue;
             }
-            for bucket in by_block.values() {
-                for (a, &i) in bucket.iter().enumerate() {
-                    for &j in &bucket[a + 1..] {
-                        if find(&mut parent, i) != find(&mut parent, j)
-                            && (rows[i].2 ^ rows[j].2).count_ones() <= threshold
-                        {
-                            union(&mut parent, i, j);
-                        }
-                    }
+            let mut candidates = HashSet::new();
+            for (b, buckets) in by_block.iter().enumerate() {
+                let lo = (b * 64) / blocks;
+                let width = ((b + 1) * 64) / blocks - lo;
+                let mask = if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                if let Some(prior) = buckets.get(&((hash >> lo) & mask)) {
+                    candidates.extend(prior.iter().copied());
                 }
             }
+            for other in candidates {
+                if (hash ^ rows[other].1 as u64).count_ones() <= threshold {
+                    union(&mut parent, idx, other);
+                }
+            }
+            for (b, buckets) in by_block.iter_mut().enumerate() {
+                let lo = (b * 64) / blocks;
+                let width = ((b + 1) * 64) / blocks - lo;
+                let mask = if width == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                };
+                buckets.entry((hash >> lo) & mask).or_default().push(idx);
+            }
+            exact_representative.insert(hash, idx);
         }
     }
-    let mut comps: BTreeMap<usize, Vec<(i64, String)>> = BTreeMap::new();
+    let mut comps: BTreeMap<usize, Vec<i64>> = BTreeMap::new();
     for (idx, row) in rows.iter().enumerate() {
         let root = find(&mut parent, idx);
-        comps.entry(root).or_default().push((row.0, row.1.clone()));
+        comps.entry(root).or_default().push(row.0);
     }
-    let groups = comps
+    comps
         .into_values()
-        .filter(|v| v.len() > 1)
-        .map(|files| SimilarGroup { files })
-        .collect();
-    Ok(Some(groups))
+        .filter_map(|mut ids| {
+            if ids.len() < 2 {
+                None
+            } else {
+                ids.sort_unstable();
+                Some(ids)
+            }
+        })
+        .collect()
+}
+
+fn load_file_metadata(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, (String, i64)>> {
+    let mut metadata = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql =
+            format!("SELECT id, path_text, size_bytes FROM files WHERE id IN ({placeholders})");
+        let mut stmt = conn.prepare(&sql)?;
+        for (id, path, size) in stmt
+            .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .flatten()
+        {
+            metadata.insert(id, (path, size));
+        }
+    }
+    Ok(metadata)
 }
 
 fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -299,7 +359,7 @@ fn render_similar(ctx: &Ctx, groups: &Option<Vec<SimilarGroup>>, threshold: u32)
                     ctx.bold(&format!("group {}", i + 1)),
                     ctx.dim(&format!("{} files", g.files.len()))
                 );
-                for (_, path) in &g.files {
+                for (_, path, _) in &g.files {
                     println!("      {}", display_path(path));
                 }
             }
@@ -316,7 +376,7 @@ fn similar_json(groups: &Option<Vec<SimilarGroup>>, threshold: u32) -> serde_jso
             "count": groups.len(),
             "groups": groups.iter().map(|g| serde_json::json!({
                 "size": g.files.len(),
-                "files": g.files.iter().map(|(id, p)| serde_json::json!({"id": id, "path": p})).collect::<Vec<_>>(),
+                "files": g.files.iter().map(|(id, p, _)| serde_json::json!({"id": id, "path": p})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
         }),
     }
@@ -674,27 +734,36 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
             victims: Vec::new(),
         });
     };
-    let mut size_stmt = conn.prepare("SELECT id, size_bytes FROM files WHERE phash IS NOT NULL")?;
-    let sizes: BTreeMap<i64, i64> = size_stmt
-        .query_map(params![], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?
-        .filter_map(Result::ok)
-        .collect();
     let victims = groups
         .into_iter()
         .flat_map(|g| {
             let mut files = g.files;
-            files.sort_by_key(|(id, _)| *id);
+            files.sort_by_key(|(id, _, _)| *id);
             files.into_iter().skip(1)
         })
-        .map(|(id, path)| {
-            let size = sizes.get(&id).copied().unwrap_or(0);
-            Victim { id, path, size }
-        })
+        .map(|(id, path, size)| Victim { id, path, size })
         .collect();
     Ok(VictimSet {
         available: true,
         victims,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_phashes_collapse_before_candidate_search() {
+        let rows: Vec<(i64, i64)> = (0..100_000).map(|id| (id, 42)).collect();
+        let groups = similar_components(&rows, 8);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), rows.len());
+    }
+
+    #[test]
+    fn hamming_components_preserve_transitive_groups() {
+        let rows = vec![(1, 0b0000), (2, 0b0001), (3, 0b0011), (4, 0b1111_0000)];
+        assert_eq!(similar_components(&rows, 1), vec![vec![1, 2, 3]]);
+    }
 }

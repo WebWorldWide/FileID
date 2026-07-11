@@ -64,7 +64,14 @@ impl Ctx {
         // even empty, disables color — in addition to the explicit `--no-color`.
         let color_allowed = !no_color && std::env::var_os("NO_COLOR").is_none();
         let color = color_allowed && std::io::stdout().is_terminal();
-        Ok(Self { json, quiet, color, color_allowed, db, db_explicit })
+        Ok(Self {
+            json,
+            quiet,
+            color,
+            color_allowed,
+            db,
+            db_explicit,
+        })
     }
 
     /// Interactive yes/no gate for destructive actions. SAFE by construction:
@@ -171,7 +178,9 @@ fn macos_app_db() -> Option<PathBuf> {
 /// added afterward. Mirrors the macOS `ReadStore` escaping so a `_` or `%` in
 /// a name resolves the same file on every platform.
 pub fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Resolve a `<path-or-id>` argument to a `files.id`. Mirrors the lookup

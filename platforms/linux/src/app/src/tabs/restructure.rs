@@ -114,6 +114,14 @@ enum DrillScope {
     DestBuckets(Vec<String>),
 }
 
+#[derive(Clone)]
+struct ApplyRequest {
+    root: String,
+    moves: Vec<RestructureMove>,
+    plan_id: Option<String>,
+    total: usize,
+}
+
 #[derive(Default)]
 struct State {
     root: Option<String>,
@@ -307,12 +315,19 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     status_inner.set_orientation(gtk::Orientation::Horizontal);
     status_inner.set_spacing(10);
     let status_icon = gtk::Image::from_icon_name("emblem-ok-symbolic");
-    let status_label = gtk::Label::builder().label("").xalign(0.0).wrap(true).build();
+    let status_label = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .wrap(true)
+        .build();
     status_inner.append(&status_icon);
     status_inner.append(&status_label);
     status_row.set_visible(false);
 
-    let bottom_spacer = gtk::Box::builder().height_request(120).visible(false).build();
+    let bottom_spacer = gtk::Box::builder()
+        .height_request(120)
+        .visible(false)
+        .build();
 
     // ── Scroll body ───────────────────────────────────────────────────────────
     let body = gtk::Box::builder()
@@ -460,11 +475,13 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     sankey.add_controller(motion);
 
     let click = gtk::GestureClick::new();
-    click.connect_released(clone!(@strong state, @strong ui, @weak sankey => move |_, _, x, y| {
-        if let Some(scope) = hit_test_node(&state, &sankey, x, y) {
-            open_drilldown(&state, &ui, scope);
-        }
-    }));
+    click.connect_released(
+        clone!(@strong state, @strong ui, @weak sankey => move |_, _, x, y| {
+            if let Some(scope) = hit_test_node(&state, &sankey, x, y) {
+                open_drilldown(&state, &ui, scope);
+            }
+        }),
+    );
     sankey.add_controller(click);
 
     // ── Header pick button ────────────────────────────────────────────────────
@@ -490,26 +507,41 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         update_apply_hint(&ui, sw.is_active());
     }));
 
-    apply_btn.connect_clicked(clone!(@strong engine, @strong state, @strong ui => move |_| {
-        if state.borrow().applying {
-            return;
-        }
-        let (moves, root) = {
-            let s = state.borrow();
-            let (Some(plan), Some(root)) = (s.plan.as_ref(), s.root.clone()) else { return };
-            let moves: Vec<RestructureMove> = plan
-                .moves
-                .iter()
-                .filter(|m| s.selected.contains(&m.file_id))
-                .cloned()
-                .collect();
-            (moves, root)
-        };
-        if moves.is_empty() {
-            return;
-        }
-        confirm_apply(&engine, &state, &ui, moves, ui.symlink_switch.is_active(), root);
-    }));
+    apply_btn.connect_clicked(
+        clone!(@strong engine, @strong state, @strong ui => move |_| {
+            if state.borrow().applying {
+                return;
+            }
+            let request = {
+                let s = state.borrow();
+                let (Some(plan), Some(root)) = (s.plan.as_ref(), s.root.clone()) else { return };
+                if plan.truncated {
+                    let Some(plan_id) = plan.plan_id.clone() else { return };
+                    ApplyRequest {
+                        root,
+                        moves: Vec::new(),
+                        plan_id: Some(plan_id),
+                        total: usize::try_from(
+                            plan.total_moves.unwrap_or(plan.moves.len() as u64)
+                        ).unwrap_or(usize::MAX),
+                    }
+                } else {
+                    let moves: Vec<RestructureMove> = plan
+                        .moves
+                        .iter()
+                        .filter(|m| s.selected.contains(&m.file_id))
+                        .cloned()
+                        .collect();
+                    let total = moves.len();
+                    ApplyRequest { root, moves, plan_id: None, total }
+                }
+            };
+            if request.total == 0 {
+                return;
+            }
+            confirm_apply(&engine, &state, &ui, request, ui.symlink_switch.is_active());
+        }),
+    );
 
     undo_btn.connect_clicked(clone!(@strong engine, @strong state, @strong ui => move |_| {
         if state.borrow().applying {
@@ -538,29 +570,33 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // ── Engine events ─────────────────────────────────────────────────────────
     let ev_rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@strong engine, @strong state, @strong ui => async move {
-        while let Ok(ev) = ev_rx.recv().await {
-            match ev {
-                EngineEvent::RestructurePlan(plan) => on_plan(&state, &ui, plan),
-                EngineEvent::RestructureApplyResult(result) => {
-                    on_apply_result(&engine, &state, &ui, result)
+    glib::MainContext::default().spawn_local(
+        clone!(@strong engine, @strong state, @strong ui => async move {
+            while let Ok(ev) = ev_rx.recv().await {
+                match ev {
+                    EngineEvent::RestructurePlan(plan) => on_plan(&state, &ui, plan),
+                    EngineEvent::RestructureApplyResult(result) => {
+                        on_apply_result(&engine, &state, &ui, result)
+                    }
+                    EngineEvent::Error(msg) => on_error(&state, &ui, &msg),
+                    EngineEvent::Exited => on_exited(&state, &ui),
+                    _ => {}
                 }
-                EngineEvent::Error(msg) => on_error(&state, &ui, &msg),
-                EngineEvent::Exited => on_exited(&state, &ui),
-                _ => {}
             }
-        }
-    }));
+        }),
+    );
 
     // ── Auto-default the destination root to the most recent scan ─────────────
     let rx = recent_root_async();
-    glib::MainContext::default().spawn_local(clone!(@strong engine, @strong state, @strong ui => async move {
-        if let Ok(Some(found)) = rx.recv().await {
-            if state.borrow().root.is_none() {
-                set_root_and_plan(&engine, &state, &ui, found);
+    glib::MainContext::default().spawn_local(
+        clone!(@strong engine, @strong state, @strong ui => async move {
+            if let Ok(Some(found)) = rx.recv().await {
+                if state.borrow().root.is_none() {
+                    set_root_and_plan(&engine, &state, &ui, found);
+                }
             }
-        }
-    }));
+        }),
+    );
 
     root.upcast()
 }
@@ -620,7 +656,9 @@ fn set_root_and_plan(
 }
 
 fn request_plan(engine: &Rc<RefCell<EngineClient>>, state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
-    let Some(root) = state.borrow().root.clone() else { return };
+    let Some(root) = state.borrow().root.clone() else {
+        return;
+    };
     // Preserve the user's per-file unchecks across a re-plan (computed under a
     // separate immutable borrow before the mutable one below).
     let dropped: HashSet<i64> = {
@@ -643,10 +681,15 @@ fn request_plan(engine: &Rc<RefCell<EngineClient>>, state: &Rc<RefCell<State>>, 
         .borrow_mut()
         .send(CommandPayload::PlanRestructure(PlanRestructurePayload {
             library_root: root,
+            supports_paged_plans: true,
         }));
     if sent.is_err() {
         state.borrow_mut().loading = false;
-        show_empty(ui, "Pick a destination root", "Choose a folder, then FileID proposes a tidier layout.");
+        show_empty(
+            ui,
+            "Pick a destination root",
+            "Choose a folder, then FileID proposes a tidier layout.",
+        );
         set_status(ui, "Engine is starting — try again in a moment.", true);
         update_bars(state, ui);
     }
@@ -663,6 +706,8 @@ fn on_plan(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, plan: RestructurePlan) {
         }
     }
 
+    let truncated = plan.truncated;
+    let total_moves = plan.total_moves.unwrap_or(plan.moves.len() as u64);
     let proposals = map_proposals(&plan);
     let summary = make_summary(&plan, &proposals);
     let sankey = build_sankey(&proposals);
@@ -699,6 +744,14 @@ fn on_plan(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, plan: RestructurePlan) {
             "Nothing to move",
             "Your library is already organized — every folder is a recognized anchor.",
         );
+    } else if truncated {
+        show_empty(
+            ui,
+            "Large plan ready",
+            &format!(
+                "The engine stored all {total_moves} moves as one bounded, undoable plan. Apply runs the complete plan without loading every path into the app."
+            ),
+        );
     } else {
         ui.sankey_stat
             .set_text(&sankey_header_stat(&state.borrow().proposals));
@@ -731,7 +784,15 @@ fn on_apply_result(
     };
     match result.privilege_error.as_ref().filter(|p| !p.is_empty()) {
         Some(p) => set_status(ui, p, true),
-        None if was_undo => set_status(ui, &format!("Put back {} file{}", result.applied, plural(result.applied as usize)), false),
+        None if was_undo => set_status(
+            ui,
+            &format!(
+                "Put back {} file{}",
+                result.applied,
+                plural(result.applied as usize)
+            ),
+            false,
+        ),
         None => set_status(
             ui,
             &format!("{} moved · {} failed", result.applied, result.failed),
@@ -795,11 +856,10 @@ fn confirm_apply(
     engine: &Rc<RefCell<EngineClient>>,
     state: &Rc<RefCell<State>>,
     ui: &Rc<Ui>,
-    moves: Vec<RestructureMove>,
+    request: ApplyRequest,
     use_symlinks: bool,
-    root: String,
 ) {
-    let n = moves.len();
+    let n = request.total;
     let body = if use_symlinks {
         "FileID will create a browsable shortcut tree mirroring the new layout. Your original files stay exactly where they are."
     } else {
@@ -832,7 +892,7 @@ fn confirm_apply(
             if resp != "apply" {
                 return;
             }
-            do_apply(&engine, &state, &ui, moves.clone(), use_symlinks, root.clone());
+            do_apply(&engine, &state, &ui, request.clone(), use_symlinks);
         }),
     );
     alert.present(&ui.root);
@@ -842,9 +902,8 @@ fn do_apply(
     engine: &Rc<RefCell<EngineClient>>,
     state: &Rc<RefCell<State>>,
     ui: &Rc<Ui>,
-    moves: Vec<RestructureMove>,
+    request: ApplyRequest,
     use_symlinks: bool,
-    root: String,
 ) {
     {
         let mut s = state.borrow_mut();
@@ -854,13 +913,15 @@ fn do_apply(
         s.applying = true;
         s.last_apply_symlinks = use_symlinks;
     }
-    let sent = engine
-        .borrow_mut()
-        .send(CommandPayload::ApplyRestructure(ApplyRestructurePayload {
-            library_root: root,
-            moves,
-            use_symlinks,
-        }));
+    let sent =
+        engine
+            .borrow_mut()
+            .send(CommandPayload::ApplyRestructure(ApplyRestructurePayload {
+                library_root: request.root,
+                plan_id: request.plan_id,
+                moves: request.moves,
+                use_symlinks,
+            }));
     if sent.is_err() {
         state.borrow_mut().applying = false;
         set_status(ui, "Engine is unavailable — try again in a moment.", true);
@@ -880,7 +941,11 @@ fn render_stat_hero(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     if sum.anchor_folders > 0 {
         ui.stat_hero.append(&stat_chip(
             "emblem-ok-symbolic",
-            &format!("Keep {} folder{}", sum.anchor_folders, plural(sum.anchor_folders as usize)),
+            &format!(
+                "Keep {} folder{}",
+                sum.anchor_folders,
+                plural(sum.anchor_folders as usize)
+            ),
             "Untouched",
             "gold-accent",
         ));
@@ -888,16 +953,32 @@ fn render_stat_hero(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     if sum.mixed_folders > 0 || sum.moved_out_files > 0 {
         ui.stat_hero.append(&stat_chip(
             "view-sort-ascending-symbolic",
-            &format!("Tidy {} folder{}", sum.mixed_folders, plural(sum.mixed_folders as usize)),
-            &format!("Move {} misplaced file{}", sum.moved_out_files, plural(sum.moved_out_files)),
+            &format!(
+                "Tidy {} folder{}",
+                sum.mixed_folders,
+                plural(sum.mixed_folders as usize)
+            ),
+            &format!(
+                "Move {} misplaced file{}",
+                sum.moved_out_files,
+                plural(sum.moved_out_files)
+            ),
             "lavender-accent",
         ));
     }
     if sum.junk_folders > 0 || sum.dissolved_files > 0 {
         ui.stat_hero.append(&stat_chip(
             "view-refresh-symbolic",
-            &format!("Reorganize {} folder{}", sum.junk_folders, plural(sum.junk_folders as usize)),
-            &format!("Sort {} file{}", sum.dissolved_files, plural(sum.dissolved_files)),
+            &format!(
+                "Reorganize {} folder{}",
+                sum.junk_folders,
+                plural(sum.junk_folders as usize)
+            ),
+            &format!(
+                "Sort {} file{}",
+                sum.dissolved_files,
+                plural(sum.dissolved_files)
+            ),
             "gold-accent",
         ));
     }
@@ -995,7 +1076,11 @@ fn build_bucket_card(
         props.iter().all(|p| s.selected.contains(&p.file_id))
     };
     let sel_btn = gtk::Button::builder()
-        .label(if all_selected { "Deselect all" } else { "Select all" })
+        .label(if all_selected {
+            "Deselect all"
+        } else {
+            "Select all"
+        })
         .css_classes(["flat", "caption"])
         .build();
     let ids: Vec<i64> = props.iter().map(|p| p.file_id).collect();
@@ -1096,7 +1181,11 @@ fn build_proposal_row(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, p: &Proposal) -> 
         &gtk::Label::builder()
             .label(format!(
                 "from {}",
-                if p.source_name.is_empty() { "root" } else { &p.source_name }
+                if p.source_name.is_empty() {
+                    "root"
+                } else {
+                    &p.source_name
+                }
             ))
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
@@ -1139,7 +1228,10 @@ fn open_drilldown(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, scope: DrillScope) {
             .filter(|p| matches_scope(&scope, p))
             .cloned()
             .collect();
-        (drill_title(&scope, matched.len()), group_by_bucket(&matched))
+        (
+            drill_title(&scope, matched.len()),
+            group_by_bucket(&matched),
+        )
     };
 
     let dialog = adw::Dialog::new();
@@ -1181,7 +1273,14 @@ fn open_drilldown(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, scope: DrillScope) {
         );
     } else {
         for (bucket, props) in &groups {
-            list.append(&build_bucket_card(state, ui, bucket, props, DRILL_ROW_CAP, false));
+            list.append(&build_bucket_card(
+                state,
+                ui,
+                bucket,
+                props,
+                DRILL_ROW_CAP,
+                false,
+            ));
         }
     }
     let scroller = gtk::ScrolledWindow::builder()
@@ -1215,6 +1314,14 @@ fn open_drilldown(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, scope: DrillScope) {
 
 fn update_apply_controls(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     let s = state.borrow();
+    if let Some(plan) = s.plan.as_ref().filter(|plan| plan.truncated) {
+        let total = plan.total_moves.unwrap_or(plan.moves.len() as u64);
+        ui.selected_count_label
+            .set_text(&format!("all {total} moves selected"));
+        ui.apply_btn
+            .set_sensitive(total > 0 && plan.plan_id.is_some() && !s.applying);
+        return;
+    }
     let total = s.proposals.len();
     let sel = s.selected.len();
     ui.selected_count_label
@@ -1397,7 +1504,8 @@ fn draw_ribbon(
     height: f64,
     opacity: f64,
 ) {
-    let (Some(&y0), Some(&y1)) = (px.src_mid.get(&flow.src_id), px.dst_mid.get(&flow.dst_id)) else {
+    let (Some(&y0), Some(&y1)) = (px.src_mid.get(&flow.src_id), px.dst_mid.get(&flow.dst_id))
+    else {
         return;
     };
     let (x0, x1) = (px.ribbon_x0, px.ribbon_x1);
@@ -1436,13 +1544,21 @@ fn draw_node(cr: &gtk::cairo::Context, n: &SankeyNode, rect: (f64, f64, f64, f64
     let text_x = sx + sw + 8.0;
     let avail_chars = (((x + w) - text_x - 8.0) / 7.0).max(4.0) as usize;
 
-    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+    cr.select_font_face(
+        "Sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
     cr.set_font_size(12.0);
     cr.set_source_rgba(1.0, 1.0, 1.0, if n.is_rollup { 0.70 } else { 0.92 });
     cr.move_to(text_x, y + h / 2.0 - 1.0);
     let _ = cr.show_text(&truncate(&n.label, avail_chars));
 
-    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
+    cr.select_font_face(
+        "Sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
     cr.set_font_size(9.5);
     cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
     cr.move_to(text_x, y + h / 2.0 + 11.0);
@@ -1469,7 +1585,10 @@ fn bezier_y(cursor_x: f64, start_x: f64, end_x: f64, start_y: f64, end_y: f64) -
     }
     let t = ((cursor_x - start_x) / (end_x - start_x)).clamp(0.0, 1.0);
     let om = 1.0 - t;
-    om * om * om * start_y + 3.0 * om * om * t * start_y + 3.0 * om * t * t * end_y + t * t * t * end_y
+    om * om * om * start_y
+        + 3.0 * om * om * t * start_y
+        + 3.0 * om * t * t * end_y
+        + t * t * t * end_y
 }
 
 fn hit_test_ribbon(
@@ -1658,7 +1777,11 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
         let count: usize = tail_srcs.iter().map(|(_, c)| *c).sum();
         sources.push(SankeyNode {
             id: SRC_OTHER.to_string(),
-            label: format!("+ {} more folder{}", tail_srcs.len(), plural(tail_srcs.len())),
+            label: format!(
+                "+ {} more folder{}",
+                tail_srcs.len(),
+                plural(tail_srcs.len())
+            ),
             identity: SRC_OTHER.to_string(),
             count,
             is_rollup: true,
@@ -1684,7 +1807,11 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
         let count: usize = tail_dsts.iter().map(|(_, c)| *c).sum();
         destinations.push(SankeyNode {
             id: DST_OTHER.to_string(),
-            label: format!("+ {} more bucket{}", tail_dsts.len(), plural(tail_dsts.len())),
+            label: format!(
+                "+ {} more bucket{}",
+                tail_dsts.len(),
+                plural(tail_dsts.len())
+            ),
             identity: DST_OTHER.to_string(),
             count,
             is_rollup: true,
@@ -1695,8 +1822,10 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
 
     let visible_src_ids: HashSet<String> = sources.iter().map(|n| n.id.clone()).collect();
     let visible_dst_ids: HashSet<String> = destinations.iter().map(|n| n.id.clone()).collect();
-    let tint_by_dst: HashMap<String, (f64, f64, f64)> =
-        destinations.iter().map(|n| (n.id.clone(), n.tint)).collect();
+    let tint_by_dst: HashMap<String, (f64, f64, f64)> = destinations
+        .iter()
+        .map(|n| (n.id.clone(), n.tint))
+        .collect();
 
     let mut flow_map: HashMap<(String, String), SankeyFlow> = HashMap::new();
     for p in props {
@@ -1713,12 +1842,14 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
             DST_OTHER.to_string()
         };
         let tint = *tint_by_dst.get(&dst_id).unwrap_or(&NEUTRAL);
-        let entry = flow_map.entry((src_id.clone(), dst_id.clone())).or_insert(SankeyFlow {
-            src_id,
-            dst_id,
-            tint,
-            count: 0,
-        });
+        let entry = flow_map
+            .entry((src_id.clone(), dst_id.clone()))
+            .or_insert(SankeyFlow {
+                src_id,
+                dst_id,
+                tint,
+                count: 0,
+            });
         entry.count += 1;
     }
     let flows: Vec<SankeyFlow> = flow_map.into_values().collect();
@@ -1728,8 +1859,11 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
     let mut src_order: Vec<String> = sources.iter().map(|n| n.id.clone()).collect();
     let mut dst_order: Vec<String> = destinations.iter().map(|n| n.id.clone()).collect();
     for _ in 0..2 {
-        let dst_index: HashMap<String, usize> =
-            dst_order.iter().enumerate().map(|(i, id)| (id.clone(), i)).collect();
+        let dst_index: HashMap<String, usize> = dst_order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
         let src_w = weighted_means(&flows, |f| &f.src_id, |f| &f.dst_id, &dst_index);
         src_order.sort_by(|a, b| {
             src_w
@@ -1738,8 +1872,11 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
                 .partial_cmp(src_w.get(b).unwrap_or(&0.0))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let src_index: HashMap<String, usize> =
-            src_order.iter().enumerate().map(|(i, id)| (id.clone(), i)).collect();
+        let src_index: HashMap<String, usize> = src_order
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.clone(), i))
+            .collect();
         let dst_w = weighted_means(&flows, |f| &f.dst_id, |f| &f.src_id, &src_index);
         dst_order.sort_by(|a, b| {
             dst_w
@@ -1752,12 +1889,18 @@ fn build_sankey(props: &[Proposal]) -> SankeyModel {
 
     let src_map: HashMap<String, SankeyNode> =
         sources.into_iter().map(|n| (n.id.clone(), n)).collect();
-    let dst_map: HashMap<String, SankeyNode> =
-        destinations.into_iter().map(|n| (n.id.clone(), n)).collect();
-    let mut sources: Vec<SankeyNode> =
-        src_order.iter().filter_map(|id| src_map.get(id).cloned()).collect();
-    let mut destinations: Vec<SankeyNode> =
-        dst_order.iter().filter_map(|id| dst_map.get(id).cloned()).collect();
+    let dst_map: HashMap<String, SankeyNode> = destinations
+        .into_iter()
+        .map(|n| (n.id.clone(), n))
+        .collect();
+    let mut sources: Vec<SankeyNode> = src_order
+        .iter()
+        .filter_map(|id| src_map.get(id).cloned())
+        .collect();
+    let mut destinations: Vec<SankeyNode> = dst_order
+        .iter()
+        .filter_map(|id| dst_map.get(id).cloned())
+        .collect();
 
     // Pin the "+ N more" rollups to the bottom of their column.
     if let Some(i) = sources.iter().position(|n| n.id == SRC_OTHER) {

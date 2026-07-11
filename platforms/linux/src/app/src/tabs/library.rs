@@ -22,10 +22,11 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
-use crate::engine_client::{
-    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent, FileRow, QuerySpec,
-};
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
+use crate::engine_client::{
+    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent, FileRow,
+    QuerySpec,
+};
 
 const QUERY_LIMIT: i64 = 1000;
 const TILE_THUMB_PX: i32 = 256;
@@ -115,7 +116,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let kind_filter = kind_filter.clone();
         let query_gen = query_gen.clone();
         Rc::new(move || {
-            run_reload(&engine, &model, &count_label, &search_text, &kind_filter, &query_gen);
+            run_reload(
+                &engine,
+                &model,
+                &count_label,
+                &search_text,
+                &kind_filter,
+                &query_gen,
+            );
         })
     };
 
@@ -239,7 +247,10 @@ fn build_pills(kind_filter: Rc<RefCell<Option<String>>>, reload: Rc<dyn Fn()>) -
     let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
 
     for (i, (label, value)) in kinds.iter().enumerate() {
-        let btn = gtk::Button::builder().label(*label).css_classes(["pill"]).build();
+        let btn = gtk::Button::builder()
+            .label(*label)
+            .css_classes(["pill"])
+            .build();
         if i == 0 {
             btn.add_css_class("pill-active");
         }
@@ -319,13 +330,35 @@ fn thumb_cache_put(path: String, tex: gtk::gdk::Texture) {
 
 fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     let Some(obj) = list_item.item() else { return };
-    let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else { return };
+    let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else {
+        return;
+    };
     let row = boxed.borrow::<FileRow>();
 
-    let Some(vbox) = list_item.child().and_then(|w| w.downcast::<gtk::Box>().ok()) else { return };
-    let Some(pic) = vbox.first_child().and_then(|w| w.downcast::<gtk::Picture>().ok()) else { return };
-    let Some(name) = pic.next_sibling().and_then(|w| w.downcast::<gtk::Label>().ok()) else { return };
-    let Some(caption) = name.next_sibling().and_then(|w| w.downcast::<gtk::Label>().ok()) else { return };
+    let Some(vbox) = list_item
+        .child()
+        .and_then(|w| w.downcast::<gtk::Box>().ok())
+    else {
+        return;
+    };
+    let Some(pic) = vbox
+        .first_child()
+        .and_then(|w| w.downcast::<gtk::Picture>().ok())
+    else {
+        return;
+    };
+    let Some(name) = pic
+        .next_sibling()
+        .and_then(|w| w.downcast::<gtk::Label>().ok())
+    else {
+        return;
+    };
+    let Some(caption) = name
+        .next_sibling()
+        .and_then(|w| w.downcast::<gtk::Label>().ok())
+    else {
+        return;
+    };
 
     // Filename — the Deep Analyze smart-name in gold when present (macOS parity).
     name.remove_css_class("gold-accent");
@@ -336,7 +369,11 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         }
         None => name.set_text(&row.name),
     }
-    caption.set_text(&format!("{} · {}", row.kind.to_uppercase(), format_bytes(row.size_bytes)));
+    caption.set_text(&format!(
+        "{} · {}",
+        row.kind.to_uppercase(),
+        format_bytes(row.size_bytes)
+    ));
 
     if row.kind == "image" {
         let path = row.path.clone();
@@ -350,7 +387,9 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         let pic_weak = pic.downgrade();
         let li_weak = list_item.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(bytes)) = rx.recv().await else { return };
+            let Ok(Some(bytes)) = rx.recv().await else {
+                return;
+            };
             // Skip the decode entirely if this tile was recycled onto another file.
             if !tile_still_wants(&li_weak, &want) {
                 return;
@@ -360,7 +399,9 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             std::thread::spawn(move || {
                 let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
             });
-            let Ok(Some(decoded)) = drx.recv().await else { return };
+            let Ok(Some(decoded)) = drx.recv().await else {
+                return;
+            };
             let tex: gtk::gdk::Texture = texture_from_decoded(&decoded).upcast();
             thumb_cache_put(want.clone(), tex.clone());
             // Re-check: the tile may have been recycled while we were decoding.
@@ -377,7 +418,10 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
 }
 
 fn clear_tile(tile: &gtk::Widget) {
-    if let Some(pic) = tile.first_child().and_then(|w| w.downcast::<gtk::Picture>().ok()) {
+    if let Some(pic) = tile
+        .first_child()
+        .and_then(|w| w.downcast::<gtk::Picture>().ok())
+    {
         pic.set_paintable(None::<&gtk::gdk::Texture>);
     }
 }
@@ -455,7 +499,9 @@ fn open_preview(
         let idx = idx.clone();
         Rc::new(move || {
             let pos = idx.get();
-            let Some(row) = row_at(&model, pos) else { return };
+            let Some(row) = row_at(&model, pos) else {
+                return;
+            };
             dialog.set_title(&row.name);
             counter.set_label(&format!("{} of {}", pos + 1, model.n_items()));
             prev_btn.set_sensitive(pos > 0);
@@ -468,25 +514,29 @@ fn open_preview(
     prev_btn.connect_clicked(clone!(@strong idx, @strong load => move |_| {
         if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
     }));
-    next_btn.connect_clicked(clone!(@strong idx, @strong model, @strong load => move |_| {
-        if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
-    }));
+    next_btn.connect_clicked(
+        clone!(@strong idx, @strong model, @strong load => move |_| {
+            if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
+        }),
+    );
 
     // ←/→ arrow keys page through the library.
     let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(clone!(@strong idx, @strong model, @strong load => move |_, key, _, _| {
-        match key {
-            gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
-                if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
-                glib::Propagation::Stop
+    keys.connect_key_pressed(
+        clone!(@strong idx, @strong model, @strong load => move |_, key, _, _| {
+            match key {
+                gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
+                    if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
+                    if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
             }
-            gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
-                if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
-        }
-    }));
+        }),
+    );
     dialog.add_controller(keys);
 
     load();
@@ -549,12 +599,16 @@ fn load_preview_image(engine: &Rc<RefCell<EngineClient>>, pic: &gtk::Picture, ro
         let rx = engine.borrow().request_thumbnail(row.path.clone());
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(bytes)) = rx.recv().await else { return };
+            let Ok(Some(bytes)) = rx.recv().await else {
+                return;
+            };
             let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
             std::thread::spawn(move || {
                 let _ = dtx.send_blocking(decode_scaled(bytes, PREVIEW_PX));
             });
-            let Ok(Some(decoded)) = drx.recv().await else { return };
+            let Ok(Some(decoded)) = drx.recv().await else {
+                return;
+            };
             if let Some(pic) = pic_weak.upgrade() {
                 pic.set_paintable(Some(&texture_from_decoded(&decoded)));
             }

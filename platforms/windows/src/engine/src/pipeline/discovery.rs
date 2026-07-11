@@ -39,6 +39,24 @@ use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
 
+/// Fixed-size key for the incremental-rescan cache. Keeping every catalogued
+/// `PathBuf` duplicated the full path string (and one heap allocation) for the
+/// duration of a scan: hundreds of MiB at million-file scale. A 128-bit BLAKE3
+/// fingerprint keeps the lookup collision risk negligible while making the
+/// cache's per-file footprint independent of path length.
+pub(crate) type SkipFingerprint = [u8; 16];
+
+pub(crate) fn path_fingerprint(path: &std::path::Path) -> SkipFingerprint {
+    path_fingerprint_text(&path.to_string_lossy())
+}
+
+pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
+    let digest = blake3::hash(path.as_bytes());
+    let mut fingerprint = [0_u8; 16];
+    fingerprint.copy_from_slice(&digest.as_bytes()[..16]);
+    fingerprint
+}
+
 // Zero-byte files are skipped (no content to embed/hash). No size cap —
 // all sizes go through the same pipeline.
 
@@ -139,7 +157,7 @@ pub struct Discovery {
     /// (DB `scanned_at >= modified_unix`). Discovery silently skips these,
     /// turning a re-run of a 1M-file corpus into a near-instant no-op.
     /// Empty = classic full-scan.
-    skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
+    skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
     /// User-excluded folders in `normalize_for_exclusion` form. The walk
     /// prunes an excluded directory at its parent's read_dir, so equality
     /// matching suffices — nothing beneath it is ever visited.
@@ -170,7 +188,7 @@ impl Discovery {
     pub fn new_with_skip_and_exclusions(
         root: impl Into<PathBuf>,
         coordinator: ScanCoordinator,
-        skip_paths: Arc<HashMap<PathBuf, (i64, Option<f64>)>>,
+        skip_paths: Arc<HashMap<SkipFingerprint, (i64, Option<f64>)>>,
         exclusions: Arc<Vec<String>>,
     ) -> Self {
         Self {
@@ -405,7 +423,7 @@ impl Discovery {
 /// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
 fn classify_entry(
     entry_path: &std::path::Path,
-    skip_paths: &HashMap<PathBuf, (i64, Option<f64>)>,
+    skip_paths: &HashMap<SkipFingerprint, (i64, Option<f64>)>,
     error_count: &AtomicU64,
 ) -> Option<DiscoveredFile> {
     // Strip the verbatim prefix back to normal form: this is what we store +
@@ -451,7 +469,7 @@ fn classify_entry(
     // "unchanged" contract. The previous bare path-membership skip stranded any
     // file edited after its last scan, because the stored modified_at is never
     // refreshed for a skipped row (its UPSERT never runs).
-    if let Some(&(db_size, db_modified)) = skip_paths.get(&path) {
+    if let Some(&(db_size, db_modified)) = skip_paths.get(&path_fingerprint(&path)) {
         let unchanged = db_size == size as i64
             && match db_modified {
                 Some(m) => (m - modified).abs() < 0.000_001,
@@ -895,15 +913,21 @@ mod tests {
         // R4-01: skip honors size+mtime, not bare membership. An entry whose
         // stored size+mtime MATCH the live file is skipped (unchanged)...
         let mut skip2 = HashMap::new();
-        skip2.insert(p.clone(), (df.size_bytes as i64, Some(df.modified_unix)));
+        skip2.insert(path_fingerprint(&p), (df.size_bytes as i64, Some(df.modified_unix)));
         assert!(classify_entry(&p, &skip2, &errors).is_none(), "unchanged file is skipped");
         // ...but a changed mtime defeats the skip so the edit is re-processed.
         let mut skip3 = HashMap::new();
-        skip3.insert(p.clone(), (df.size_bytes as i64, Some(df.modified_unix + 100.0)));
+        skip3.insert(
+            path_fingerprint(&p),
+            (df.size_bytes as i64, Some(df.modified_unix + 100.0)),
+        );
         assert!(classify_entry(&p, &skip3, &errors).is_some(), "mtime change defeats the skip");
         // A changed size likewise re-processes.
         let mut skip4 = HashMap::new();
-        skip4.insert(p.clone(), (df.size_bytes as i64 + 1, Some(df.modified_unix)));
+        skip4.insert(
+            path_fingerprint(&p),
+            (df.size_bytes as i64 + 1, Some(df.modified_unix)),
+        );
         assert!(classify_entry(&p, &skip4, &errors).is_some(), "size change defeats the skip");
     }
 

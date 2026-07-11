@@ -495,7 +495,7 @@ private struct GroupCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    BadgePill(label: "\(group.files.count) \(group.isSimilar ? "images" : "copies")")
+                    BadgePill(label: "\(group.totalFileCount) \(group.isSimilar ? "images" : "copies")")
                     if group.isSimilar {
                         BadgePill(label: "Visually similar", color: .orange)
                             .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
@@ -508,6 +508,11 @@ private struct GroupCard: View {
                                 Double(group.reclaimableBytes) / 1_048_576))
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
+                    if group.isTruncated {
+                        Text("showing \(group.files.count)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     if selectedInGroup > 0 {
                         Text(String(format: "%d selected · %.1f MB",
@@ -520,8 +525,10 @@ private struct GroupCard: View {
 
                 HStack(spacing: 6) {
                     Menu {
-                        Button("All except keeper") { onSelectAllExceptKeeper() }
-                        Button("All") { onSelectAll() }
+                        Button(group.isTruncated ? "All shown except keeper" : "All except keeper") {
+                            onSelectAllExceptKeeper()
+                        }
+                        Button(group.isTruncated ? "All shown" : "All") { onSelectAll() }
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {

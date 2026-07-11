@@ -176,7 +176,7 @@ impl App {
 
     /// Files visible under the current search filter (Library tab).
     pub fn visible_files(&self) -> Vec<&FileRow> {
-        if self.search.is_empty() {
+        if !self.search_active || self.search == self.data.query {
             self.data.files.iter().collect()
         } else {
             let q = self.search.to_lowercase();
@@ -329,11 +329,9 @@ impl App {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.should_quit = true,
             KeyCode::Tab => self.switch_tab(self.tab.next()),
             KeyCode::BackTab => self.switch_tab(self.tab.prev()),
-            KeyCode::Char(d @ '1'..='9') => {
+            KeyCode::Char(d @ '1'..='6') => {
                 let i = (d as u8 - b'1') as usize;
-                if i < Tab::ALL.len() {
-                    self.switch_tab(Tab::from_index(i));
-                }
+                self.switch_tab(Tab::from_index(i));
             }
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
@@ -342,7 +340,7 @@ impl App {
             KeyCode::Char('s') => self.open_browser(),
             KeyCode::Char('r') => self.request_reload(),
             KeyCode::Char('?') => self.show_help = !self.show_help,
-            KeyCode::Char('/') if self.tab == Tab::Library => {
+            KeyCode::Char('/') if self.tab == Tab::Library && !self.loading => {
                 self.search_active = true;
                 self.show_help = false;
             }
@@ -366,6 +364,10 @@ impl App {
     /// the same SQLite file (violating the single-writer invariant). Ignored while
     /// either runs.
     fn request_reload(&mut self) {
+        if self.loading {
+            self.status = "A library load is already running…".to_string();
+            return;
+        }
         if self.downloading {
             self.status =
                 "A model download is running — wait for it to finish before reloading…".to_string();
@@ -567,8 +569,18 @@ impl App {
                 self.search_active = false;
                 self.search.clear();
                 self.set_cursor(0);
+                if !self.data.query.is_empty() {
+                    self.request_reload();
+                }
             }
-            KeyCode::Enter => self.search_active = false,
+            KeyCode::Enter => {
+                self.search = self.search.trim().to_string();
+                self.search_active = false;
+                self.set_cursor(0);
+                if self.search != self.data.query {
+                    self.request_reload();
+                }
+            }
             KeyCode::Backspace => {
                 self.search.pop();
                 self.set_cursor(0);
@@ -974,6 +986,7 @@ mod tests {
         app.data.files = (0..n)
             .map(|i| file(i, &format!("/x/file{i}.jpg"), "image"))
             .collect();
+        app.loading = false;
         app
     }
 
@@ -1066,6 +1079,20 @@ mod tests {
         app.switch_tab(Tab::People);
         app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(!app.search_active);
+    }
+
+    #[test]
+    fn committed_search_requests_a_database_reload() {
+        let mut app = app_with_files(3);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "invoice".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.search_active);
+        assert!(app.loading);
+        assert!(app.reload_requested);
+        assert_eq!(app.search, "invoice");
     }
 
     #[test]
@@ -1682,7 +1709,7 @@ mod tests {
             Tab::Settings,
             "BackTab from the first tab must wrap to Settings"
         );
-        // The number key jumps straight to Settings (index 6 → '6').
+        // The number key jumps straight to Settings (index 5 → '6').
         app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Library);
         app.on_key(KeyCode::Char('6'), KeyModifiers::NONE);

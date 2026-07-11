@@ -85,11 +85,27 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         set { if (_mode != value) { _mode = value; OnPropertyChanged(); } }
     }
 
+    // Mode whose result currently populates Groups (UI-thread, set in ApplyOnUi).
+    // A failed reload for a DIFFERENT mode must clear the list — leaving it would
+    // render the old mode's groups under the new mode's header (e.g. Exact groups
+    // mislabeled after LoadSimilar's >20k cap exception). Same-mode failures keep
+    // the stale list so a transient DB error mid-scan doesn't wipe keeper/skip state.
+    private CleanupMode _groupsMode = CleanupMode.Exact;
+
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
         long myGen = Interlocked.Increment(ref _refreshGen);
         Interlocked.Increment(ref _activeLoads);
+        // Snapshot the mode before fanning out to the thread pool so a mode
+        // flip mid-refresh can't make the background Load read a torn value;
+        // the generation guard in ApplyOnUi still discards the stale result.
+        var mode = _mode;
+        var displayedMode = _groupsMode;
+        void ClearStaleModeGroups()
+        {
+            if (displayedMode != mode) ApplyOnUi(Array.Empty<DuplicateGroup>(), myGen, mode);
+        }
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -98,13 +114,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
-            // Snapshot the mode before fanning out to the thread pool so a mode
-            // flip mid-refresh can't make the background Load read a torn value;
-            // the generation guard in ApplyOnUi still discards the stale result.
-            var mode = _mode;
             var groups = await Task.Run(() => Load(mode, token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(groups, myGen);
+            ApplyOnUi(groups, myGen, mode);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -115,9 +127,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
         // them to the captured UI thread — else a native fast-fail
         // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); ClearStaleModeGroups(); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
@@ -140,6 +152,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     /// content_hash in the engine, not a full BLAKE3 — so matching hashes are
     /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
+    private const int MaxGroups = 200;
+    private const int MaxVisibleMembers = 5_000;
+    private const int MaxVisibleMembersPerGroup = 500;
 
     private List<DuplicateGroup> Load(CleanupMode mode, CancellationToken ct)
         => mode == CleanupMode.Similar ? LoadSimilar(ct) : LoadExact(ct);
@@ -158,108 +173,86 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Pull every file with a content hash and group by EXACT equality —
-        // identical content_hash AND size_bytes is byte-for-byte identical (1:1
-        // duplicates), not just visually similar. content_hash is a BLOB
-        // (BLAKE3 / composite, migration v8); read it as bytes and hex-encode
-        // for a stable dictionary key. Grouping is O(n) via a dictionary, so
-        // there's no per-pair scan and no candidate cap.
+        // Let SQLite's indexed content_hash grouping find only the largest
+        // duplicate groups. The old implementation materialized every hashed
+        // file and a second dictionary even though the UI rendered 200 groups.
+        // That made opening Cleanup proportional to the entire library.
         using var cmd = conn.CreateCommand();
-        // modified_at rides along so the per-member thumbnail request can use the
-        // same path|mtime cache key LibraryView uses (ReadStore reads the same
-        // column) — a file shown in both tabs then shares one L1/L2 cache entry
-        // instead of being decoded + cached twice under divergent keys.
-        // created_at + aesthetic ride along for keeper ranking (macOS parity); both
-        // are nullable DOUBLE on `files`, NULL when never scored.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, content_hash, modified_at, created_at, aesthetic
+            SELECT content_hash, size_bytes, COUNT(*) AS n
             FROM files
             WHERE content_hash IS NOT NULL AND failed = 0
+            GROUP BY content_hash, size_bytes
+            HAVING n > 1
+            ORDER BY n DESC, hex(content_hash), size_bytes
+            LIMIT $maxGroups
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt, double? CreatedAt, double? Aesthetic)>(2048);
+        cmd.Parameters.AddWithValue("$maxGroups", MaxGroups);
+        var keys = new List<(byte[] Hash, long Size, int Count)>(MaxGroups);
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
             {
                 ct.ThrowIfCancellationRequested();
-                if (reader.IsDBNull(3)) continue;
-                var hashBytes = (byte[])reader[3];
+                if (reader.IsDBNull(0)) continue;
+                var hashBytes = (byte[])reader[0];
                 if (hashBytes.Length == 0) continue;
-                var hashHex = Convert.ToHexString(hashBytes);
-                var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
-                var createdAt = reader.IsDBNull(5) ? (double?)null : reader.GetDouble(5);
-                var aesthetic = reader.IsDBNull(6) ? (double?)null : reader.GetDouble(6);
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt, createdAt, aesthetic));
+                keys.Add((hashBytes, reader.GetInt64(1), reader.GetInt32(2)));
             }
         }
 
-        // Group by composite key (content_hash + size): identical content AND
-        // size means byte-for-byte identical. O(n) via a dictionary.
-        var byHash = new Dictionary<string, List<int>>(rawMembers.Count);
-        for (int i = 0; i < rawMembers.Count; i++)
+        var groups = new List<DuplicateGroup>(keys.Count);
+        var remaining = MaxVisibleMembers;
+        foreach (var key in keys)
         {
-            ct.ThrowIfCancellationRequested();
-            var key = rawMembers[i].Hash + ":" + rawMembers[i].Size.ToString();
-            if (!byHash.TryGetValue(key, out var list)) { list = new List<int>(); byHash[key] = list; }
-            list.Add(i);
-        }
-
-        var groups = new List<DuplicateGroup>();
-        foreach (var (_, indices) in byHash)
-        {
-            if (indices.Count < 2) continue;
-            // Keeper rank (macOS parity): the member that sorts first becomes the
-            // default keeper, so the re-encoded / resized copies sort lower and get
-            // deleted. Rank by aesthetic DESC, then size DESC, then earliest
-            // created_at ASC, then shortest path ASC, with path ordinal as a stable
-            // final tiebreaker. The user can still re-pick in the UI.
-            indices.Sort((a, b) =>
+            if (remaining < 2) break;
+            var visible = Math.Min(Math.Min(key.Count, MaxVisibleMembersPerGroup), remaining);
+            using var membersCmd = conn.CreateCommand();
+            membersCmd.CommandText = """
+                SELECT id, path_text, size_bytes, modified_at
+                FROM files
+                WHERE content_hash = $hash AND size_bytes = $size AND failed = 0
+                ORDER BY COALESCE(aesthetic, 0) DESC,
+                         size_bytes DESC,
+                         COALESCE(created_at, 1e18) ASC,
+                         LENGTH(path_text) ASC,
+                         path_text ASC
+                LIMIT $limit
+                """;
+            membersCmd.Parameters.AddWithValue("$hash", key.Hash);
+            membersCmd.Parameters.AddWithValue("$size", key.Size);
+            membersCmd.Parameters.AddWithValue("$limit", visible);
+            var hash = Convert.ToHexString(key.Hash);
+            var groupKey = $"dup-{hash}:{key.Size}";
+            var members = new List<DuplicateMember>(visible);
+            using (var memberReader = membersCmd.ExecuteReader())
             {
-                var ma = rawMembers[a];
-                var mb = rawMembers[b];
-                var aestheticCmp = (mb.Aesthetic ?? 0).CompareTo(ma.Aesthetic ?? 0);
-                if (aestheticCmp != 0) return aestheticCmp;
-                if (ma.Size != mb.Size) return mb.Size.CompareTo(ma.Size);
-                var createdCmp = (ma.CreatedAt ?? double.MaxValue).CompareTo(mb.CreatedAt ?? double.MaxValue);
-                if (createdCmp != 0) return createdCmp;
-                if (ma.Path.Length != mb.Path.Length) return ma.Path.Length.CompareTo(mb.Path.Length);
-                return string.CompareOrdinal(ma.Path, mb.Path);
-            });
-            var hash = rawMembers[indices[0]].Hash;
-            // shared GroupName for the keeper RadioButton so mutual exclusion
-            // within a duplicate group works. The content hash uniquely
-            // identifies the group across the whole tab.
-            var groupKey = $"dup-{hash}";
-            var members = new List<DuplicateMember>(indices.Count);
-            for (int k = 0; k < indices.Count; k++)
-            {
-                var m = rawMembers[indices[k]];
-                members.Add(new DuplicateMember
+                while (memberReader.Read())
                 {
-                    Id = m.Id,
-                    Path = m.Path,
-                    FileName = System.IO.Path.GetFileName(m.Path),
-                    SizeBytes = m.Size,
-                    ModifiedAt = m.ModifiedAt,
-                    GroupKey = groupKey,
-                    IsKeeper = k == 0,
-                });
+                    ct.ThrowIfCancellationRequested();
+                    var path = memberReader.GetString(1);
+                    members.Add(new DuplicateMember
+                    {
+                        Id = memberReader.GetInt64(0),
+                        Path = path,
+                        FileName = System.IO.Path.GetFileName(path),
+                        SizeBytes = memberReader.GetInt64(2),
+                        ModifiedAt = memberReader.IsDBNull(3) ? null : memberReader.GetDouble(3),
+                        GroupKey = groupKey,
+                        IsKeeper = members.Count == 0,
+                    });
+                }
             }
+            if (members.Count < 2) continue;
             groups.Add(new DuplicateGroup
             {
                 ContentHash = hash,
                 Members = members,
-                // For files > 16 MB the engine's content_hash is a head+tail+size
-                // COMPOSITE, not a full BLAKE3 — matching composites are "likely
-                // duplicates", not byte-for-byte verified. Mark the group so the
-                // caption drops the false "identical" guarantee that drives the
-                // unsafe one-click delete (#3).
-                IsApproximate = rawMembers[indices[0]].Size > FullHashMaxBytes,
+                TotalMemberCount = key.Count,
+                IsApproximate = key.Size > FullHashMaxBytes,
             });
+            remaining -= members.Count;
         }
-
-        groups.Sort((a, b) => b.MemberCount.CompareTo(a.MemberCount));
-        if (groups.Count > 200) groups.RemoveRange(200, groups.Count - 200);
         return groups;
     }
 
@@ -305,6 +298,22 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
+        using (var countCmd = conn.CreateCommand())
+        {
+            countCmd.CommandText = """
+                SELECT COUNT(*) FROM files
+                WHERE kind = 'image' AND failed = 0
+                  AND phash IS NOT NULL AND phash != 0
+                """;
+            var candidateCount = Convert.ToInt64(countCmd.ExecuteScalar());
+            if (candidateCount > NearDupImageCap)
+            {
+                throw new InvalidOperationException(
+                    $"Visually similar comparison is unavailable for {candidateCount:N0} images: " +
+                    $"the exact Hamming matcher is capped at {NearDupImageCap:N0}. " +
+                    "Exact duplicate cleanup remains available.");
+            }
+        }
         // Only images carry a dHash. phash == 0 is the engine's "none / failed"
         // sentinel (see the Rust dbwriter), so exclude it alongside NULL — else
         // every blank-hash image would collapse into one giant false group.
@@ -335,13 +344,6 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         }
 
         if (rawMembers.Count <= 1) return new List<DuplicateGroup>();
-        if (rawMembers.Count > NearDupImageCap)
-        {
-            // Exceeds the O(N²) cap — skip perceptual grouping to protect the UI
-            // (mirrors macOS). The exact view stays available.
-            return new List<DuplicateGroup>();
-        }
-
         var indexById = new Dictionary<long, int>(rawMembers.Count);
         var items = new List<(long Id, long Phash)>(rawMembers.Count);
         for (int i = 0; i < rawMembers.Count; i++)
@@ -352,9 +354,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 
         var maxHamming = NearDupHammingThreshold;
         var groups = new List<DuplicateGroup>();
+        var remaining = MaxVisibleMembers;
         foreach (var ids in PerceptualGrouping.GroupByHamming(items, maxHamming))
         {
             ct.ThrowIfCancellationRequested();
+            if (remaining < 2) break;
             var indices = new List<int>(ids.Count);
             foreach (var id in ids)
             {
@@ -402,8 +406,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                 if (rawMembers[idx].Id < gid) gid = rawMembers[idx].Id;
             }
             var groupKey = $"sim-{gid}";
-            var members = new List<DuplicateMember>(indices.Count);
-            for (int k = 0; k < indices.Count; k++)
+            var visible = Math.Min(Math.Min(indices.Count, MaxVisibleMembersPerGroup), remaining);
+            var members = new List<DuplicateMember>(visible);
+            for (int k = 0; k < visible; k++)
             {
                 var m = rawMembers[indices[k]];
                 members.Add(new DuplicateMember
@@ -425,9 +430,11 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             {
                 ContentHash = groupKey,
                 Members = members,
+                TotalMemberCount = indices.Count,
                 IsApproximate = false,
                 IsSimilar = true,
             });
+            remaining -= members.Count;
         }
 
         // Largest clusters first, mirroring the exact view's ORDER BY n DESC.
@@ -436,7 +443,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         return groups;
     }
 
-    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
+    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen, CleanupMode mode)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -444,6 +451,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
+            _groupsMode = mode;
             Replace(rows);
         }
         if (_ui.HasThreadAccess) Apply();
@@ -526,6 +534,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     /// and its keeper/skip state worth preserving.</summary>
     private static bool SameMembers(DuplicateGroup a, DuplicateGroup b)
     {
+        if (a.MemberCount != b.MemberCount) return false;
         if (a.Members.Count != b.Members.Count) return false;
         var ids = new HashSet<long>(a.Members.Count);
         foreach (var m in a.Members) ids.Add(m.Id);
@@ -556,7 +565,9 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     /// member — the group's identity. Bound as the keeper RadioButton's Tag.</summary>
     public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
-    public int MemberCount => Members.Count;
+    public int TotalMemberCount { get; init; }
+    public int MemberCount => TotalMemberCount > 0 ? TotalMemberCount : Members.Count;
+    public bool IsTruncated => MemberCount > Members.Count;
 
     /// <summary>True when members exceed the engine's full-hash threshold, so
     /// the shared content_hash is a head+tail+size composite — "likely", not
@@ -610,6 +621,7 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
                     ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
                     : $"{MemberCount} identical copies · {ShortHash}";
             }
+            if (IsTruncated) label += $" · showing {Members.Count}";
             return IsSkipped ? $"{label} · SKIPPED" : label;
         }
     }

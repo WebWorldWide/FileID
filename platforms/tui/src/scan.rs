@@ -45,17 +45,18 @@ pub fn spawn_scan(
     db: PathBuf,
     root: PathBuf,
     engine_data_home: Option<PathBuf>,
+    query: String,
     tx: Sender<LoadMsg>,
 ) {
     std::thread::spawn(
         move || match run_scan(&db, &root, engine_data_home.as_deref(), &tx) {
             Ok(summary) => {
                 let _ = tx.send(LoadMsg::Status(format!("{summary} — reloading library…")));
-                match data::load(&db, &tx) {
+                match data::load(&db, &query, &tx) {
                     Ok(snap) => {
                         let _ = tx.send(LoadMsg::Status(format!(
                             "{summary} · {} files indexed",
-                            snap.files.len()
+                            snap.total_files
                         )));
                         let _ = tx.send(LoadMsg::Done(Box::new(snap)));
                     }
@@ -426,7 +427,8 @@ fn runtime_missing_message() -> String {
 
 fn message_for_missing(missing: &[(&'static str, String)]) -> String {
     if missing.is_empty() {
-        return "AI models not installed — press D to download them, then press s again."
+        return "AI models not installed — press D on the Settings tab to download them, then \
+                press s again."
             .to_string();
     }
     let kinds = missing

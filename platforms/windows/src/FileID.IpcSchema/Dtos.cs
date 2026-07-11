@@ -24,7 +24,11 @@ public sealed record RestructurePlan(
     System.Collections.Generic.IReadOnlyList<RestructureCategoryCount> CategoryCounts,
     /// <summary>Engine-authoritative Anchor/Mixed/Junk counts. Null on
     /// plans from older engine builds that didn't compute it.</summary>
-    FolderClassificationCounts? FolderClassifications = null);
+    FolderClassificationCounts? FolderClassifications = null,
+    [property: JsonPropertyName("planID")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PlanId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? TotalMoves = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Truncated = false);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
 

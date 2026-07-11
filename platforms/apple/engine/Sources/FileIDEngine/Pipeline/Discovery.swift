@@ -21,6 +21,7 @@
 // huge videos / archives and decode can OOM on 16 GB), and
 // non-regular files.
 import Foundation
+import CryptoKit
 import GRDB
 import FileIDShared
 
@@ -128,7 +129,7 @@ public actor Discovery {
             root: root, database: database, forceReprocess: forceReprocess)
         var collected: [DiscoveredFile] = []
         collected.reserveCapacity(8_192)
-        await enumerate(
+        _ = await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
             exclusions: exclusions, cancelCheck: cancelCheck, progress: progress
@@ -146,6 +147,7 @@ public actor Discovery {
     /// (the dominant NAS-prefetch win); the cross-directory alphabetical sort
     /// `walk` adds is intentionally traded away here for the streaming start.
     /// Honors the same incremental skip set as `walk`. (F-C6-005)
+    @discardableResult
     public func walkStreaming(
         root: URL,
         database: Database? = nil,
@@ -156,11 +158,11 @@ public actor Discovery {
         cancelCheck: @Sendable () -> Bool = { false },
         progress: @Sendable (Int) -> Void = { _ in },
         onFile: (DiscoveredFile) async -> Void
-    ) async {
+    ) async -> Int {
         let exclusions = Self.resolvedExclusions(root: root, rawPaths: excludedPaths)
         let skip = await Self.buildSkipSet(
             root: root, database: database, forceReprocess: forceReprocess)
-        await enumerate(
+        return await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
             exclusions: exclusions,
@@ -177,6 +179,31 @@ public actor Discovery {
     private struct SkipEntry: Sendable {
         let modifiedAt: Double?
         let size: Int64
+    }
+
+    /// Compact key for the incremental-rescan cache. Storing every full path
+    /// duplicated the path string and its heap allocation for the entire scan;
+    /// at a million files that can consume hundreds of MiB before tagging even
+    /// begins. SHA-256 truncated to 128 bits makes the retained size independent
+    /// of path length while keeping collision risk negligible.
+    private struct PathFingerprint: Hashable, Sendable {
+        let high: UInt64
+        let low: UInt64
+
+        init(_ path: String) {
+            let digest = SHA256.hash(data: Data(path.utf8))
+            var high: UInt64 = 0
+            var low: UInt64 = 0
+            for (index, byte) in digest.prefix(16).enumerated() {
+                if index < 8 {
+                    high = (high << 8) | UInt64(byte)
+                } else {
+                    low = (low << 8) | UInt64(byte)
+                }
+            }
+            self.high = high
+            self.low = low
+        }
     }
 
     public static func resolvedExclusionPaths(root: URL, rawPaths: [String]?) -> [String] {
@@ -236,13 +263,13 @@ public actor Discovery {
         root: URL,
         skipHidden: Bool,
         maxSizeMB: Int,
-        skip: [String: SkipEntry]?,
+        skip: [PathFingerprint: SkipEntry]?,
         database: Database?,
         exclusions: [Exclusion],
         cancelCheck: @Sendable () -> Bool,
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
-    ) async {
+    ) async -> Int {
         let resourceKeys: [URLResourceKey] = [
             .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
             .fileSizeKey, .creationDateKey, .contentModificationDateKey
@@ -267,7 +294,7 @@ public actor Discovery {
             }
         ) else {
             JSONLog.shared.error(ev: "discovery_enumerator_nil", path: redactPathForLog(root.path))
-            return
+            return 0
         }
 
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
@@ -310,7 +337,7 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row (R-14); a lookup miss
             // fails safe (the file is processed).
-            if let skip, let entry = skip[url.path],
+            if let skip, let entry = skip[PathFingerprint(url.path)],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: values?.contentModificationDate?.timeIntervalSince1970,
@@ -354,6 +381,7 @@ public actor Discovery {
                                 extra: ["skipped": AnyCodable(discoveryErrorCount),
                                         "kept": AnyCodable(kept)])
         }
+        return kept
     }
 
     /// re-audit R-08: bump `scanned_at` for files SKIPPED this scan. A skip never
@@ -448,7 +476,7 @@ public actor Discovery {
     /// incremental rescan instead of being filtered out here.
     private static func buildSkipSet(
         root: URL, database: Database?, forceReprocess: Bool
-    ) async -> [String: SkipEntry]? {
+    ) async -> [PathFingerprint: SkipEntry]? {
         guard !forceReprocess, let database else { return nil }
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         let prefixUpper: String = {
@@ -478,21 +506,20 @@ public actor Discovery {
         let textExclusion = BGETextService.isInstalledOnDisk
             ? "AND \(DBWriter.skipSetTextBackfillExclusionSQL)" : ""
         do {
-            return try await database.pool.read { db -> [String: SkipEntry] in
-                var map: [String: SkipEntry] = [:]
-                let rows = try Row.fetchAll(db, sql: """
+            return try await database.pool.read { db -> [PathFingerprint: SkipEntry] in
+                var map: [PathFingerprint: SkipEntry] = [:]
+                let cursor = try Row.fetchCursor(db, sql: """
                     SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
                       \(clipExclusion)
                       \(modelExclusion)
                       \(textExclusion)
                     """, arguments: [prefix, prefixUpper])
-                map.reserveCapacity(rows.count)
-                for row in rows {
+                while let row = try cursor.next() {
                     let path: String = row["path_text"]
                     let size: Int64 = row["size_bytes"] ?? -1
                     let modifiedAt: Double? = row["modified_at"]
-                    map[path] = SkipEntry(modifiedAt: modifiedAt, size: size)
+                    map[PathFingerprint(path)] = SkipEntry(modifiedAt: modifiedAt, size: size)
                 }
                 return map
             }

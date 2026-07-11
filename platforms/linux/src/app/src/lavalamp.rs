@@ -46,7 +46,15 @@ pub fn build() -> gtk::DrawingArea {
         // orange 0.30 / dark 0.55), so the motion language + warmth match.
         let blobs: [Blob; 3] = [
             (crate::theme::rgb::GOLD, 0.20, 0.23, 0.30, 0.30, 0.46, 0.44),
-            (crate::theme::rgb::ORANGE, 0.15, 0.18, 0.40, 0.40, 0.38, 0.34),
+            (
+                crate::theme::rgb::ORANGE,
+                0.15,
+                0.18,
+                0.40,
+                0.40,
+                0.38,
+                0.34,
+            ),
             (crate::theme::rgb::DARK, 0.10, 0.12, 0.20, 0.20, 0.50, 0.35),
         ];
 

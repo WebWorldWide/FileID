@@ -449,13 +449,15 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("█", Style::default().fg(GOLD)),
             ]
         } else if !app.search.is_empty() {
+            let matches = if app.data.files_truncated {
+                format!("{}+ matches", visible.len())
+            } else {
+                plural(visible.len(), "match", "matches")
+            };
             vec![
                 Span::styled("⌕ ", Style::default().fg(CYAN)),
                 Span::styled(format!("/{}", app.search), Style::default().fg(FG)),
-                Span::styled(
-                    format!("   {}", plural(visible.len(), "match", "matches")),
-                    Style::default().fg(DIM),
-                ),
+                Span::styled(format!("   {matches}"), Style::default().fg(DIM)),
             ]
         } else {
             vec![
@@ -466,12 +468,14 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
                 ),
             ]
         };
-        render_context(
-            f,
-            rows[0],
-            left,
-            Some(plural(visible.len(), "file", "files")),
-        );
+        let count = if app.search.is_empty() {
+            format!("{} files", app.data.total_files)
+        } else if app.data.files_truncated {
+            format!("{}+ matches", visible.len())
+        } else {
+            plural(visible.len(), "match", "matches")
+        };
+        render_context(f, rows[0], left, Some(count));
     }
 
     // Empty / no-match state: a full-width panel that says what to do, instead of
@@ -679,7 +683,7 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
             let mut lines = vec![
                 section(&format!(
                     "{} of this file",
-                    plural(g.paths.len(), "copy", "copies")
+                    plural(g.copies as usize, "copy", "copies")
                 )),
                 Line::from(""),
             ];
@@ -698,6 +702,12 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
                         Span::styled(short(p), Style::default().fg(DIM)),
                     ]));
                 }
+            }
+            if g.copies > g.paths.len() as i64 {
+                lines.push(Line::from(Span::styled(
+                    format!("… and {} more copies", g.copies - g.paths.len() as i64),
+                    Style::default().fg(FAINT),
+                )));
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -1567,7 +1577,7 @@ fn person_row(content_w: usize, p: &crate::data::PersonRow) -> Vec<Span<'static>
 /// One Cleanup duplicate-set row: a pink `N×` copy count, the file name, and a
 /// right-aligned per-copy size.
 fn dup_row(content_w: usize, g: &crate::data::DupGroup) -> Vec<Span<'static>> {
-    let count = format!("{}×", g.paths.len());
+    let count = format!("{}×", g.copies);
     let cw = count.chars().count();
     let name = g.paths.first().map_or_else(String::new, |p| basename(p));
     let size = human_size(g.size);
@@ -2275,8 +2285,8 @@ mod tests {
 
     /// Every tab's empty state now answers "how do I fill this?" instead of
     /// showing a blank panel: Library prompts a scan, a no-hit search shows a
-    /// distinct no-match state, and People/Cleanup/Deep Analyze/Restructure each
-    /// explain themselves and point at a next step.
+    /// distinct no-match state, and People/Cleanup/Restructure each explain
+    /// themselves and point at `s`.
     #[test]
     fn empty_states_explain_the_tab_and_offer_a_next_step() {
         use crate::app::{App, Tab};

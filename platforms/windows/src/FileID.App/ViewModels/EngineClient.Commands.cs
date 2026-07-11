@@ -718,9 +718,10 @@ internal sealed partial class EngineClient
     // user naming ≥1 person first).
 
     public Task PlanRestructureAsync(string libraryRoot) =>
-        SendCommandAsync(new PlanRestructureCommand(libraryRoot));
-    public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>
-        SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks));
+        SendCommandAsync(new PlanRestructureCommand(libraryRoot, SupportsPagedPlans: true));
+    public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves,
+        bool useSymlinks, string? planId = null) =>
+        SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks, planId));
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
     /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
     /// CanUndoRestructure. (R2)</summary>
