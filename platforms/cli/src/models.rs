@@ -41,15 +41,69 @@ struct Catalog {
 /// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
 /// commercially-usable Gemma Terms) per the commercial-clean posture.
 const CATALOG: &[Catalog] = &[
-    Catalog { name: "arcface",           kind: "arcface",           license: "MIT + Apache-2.0", category: "Faces (detect + embed)", required: true },
-    Catalog { name: "mobileclip_s2",     kind: "mobileclip_s2",     license: "MIT",              category: "Image search (CLIP)",    required: true },
-    Catalog { name: "clip_text",         kind: "clip_text",         license: "MIT",              category: "Text→image search",      required: false },
-    Catalog { name: "ram_plus",          kind: "ram_plus",          license: "Apache-2.0",       category: "Image tagging",          required: false },
-    Catalog { name: "bge_text",          kind: "bge_text",          license: "MIT",              category: "Document search",        required: false },
-    Catalog { name: "florence2",         kind: "florence2",         license: "MIT",              category: "Grounded regions",       required: false },
-    Catalog { name: "mistral_small_3_2", kind: "mistral_small_3_2", license: "Apache-2.0",       category: "Deep Analyze VLM",       required: false },
-    Catalog { name: "qwen2_5_vl_7b",     kind: "qwen2_5_vl_7b",     license: "Apache-2.0",       category: "Deep Analyze VLM",       required: false },
-    Catalog { name: "gemma_3_4b",        kind: "gemma_3_4b",        license: "Gemma Terms",      category: "Deep Analyze VLM",       required: false },
+    Catalog {
+        name: "arcface",
+        kind: "arcface",
+        license: "MIT + Apache-2.0",
+        category: "Faces (detect + embed)",
+        required: true,
+    },
+    Catalog {
+        name: "mobileclip_s2",
+        kind: "mobileclip_s2",
+        license: "MIT",
+        category: "Image search (CLIP)",
+        required: true,
+    },
+    Catalog {
+        name: "clip_text",
+        kind: "clip_text",
+        license: "MIT",
+        category: "Text→image search",
+        required: false,
+    },
+    Catalog {
+        name: "ram_plus",
+        kind: "ram_plus",
+        license: "Apache-2.0",
+        category: "Image tagging",
+        required: false,
+    },
+    Catalog {
+        name: "bge_text",
+        kind: "bge_text",
+        license: "MIT",
+        category: "Document search",
+        required: false,
+    },
+    Catalog {
+        name: "florence2",
+        kind: "florence2",
+        license: "MIT",
+        category: "Grounded regions",
+        required: false,
+    },
+    Catalog {
+        name: "mistral_small_3_2",
+        kind: "mistral_small_3_2",
+        license: "Apache-2.0",
+        category: "Deep Analyze VLM",
+        required: false,
+    },
+    Catalog {
+        name: "qwen2_5_vl_7b",
+        kind: "qwen2_5_vl_7b",
+        license: "Apache-2.0",
+        category: "Deep Analyze VLM",
+        required: false,
+    },
+    Catalog {
+        name: "gemma_3_4b",
+        kind: "gemma_3_4b",
+        license: "Gemma Terms",
+        category: "Deep Analyze VLM",
+        required: false,
+    },
 ];
 
 /// A catalog entry resolved against the live registry + on-disk install state.
@@ -69,7 +123,13 @@ fn resolve(cat: &'static Catalog) -> Option<Resolved> {
     let installed = registry::sentinel_path(&model).is_some_and(|p| p.exists());
     let size_bytes = model.files.iter().map(|f| f.approx_bytes).sum();
     let repo = hf_repo(model.files.first().map(|f| f.url.as_str()).unwrap_or(""));
-    Some(Resolved { cat, model, installed, size_bytes, repo })
+    Some(Resolved {
+        cat,
+        model,
+        installed,
+        size_bytes,
+        repo,
+    })
 }
 
 /// `https://huggingface.co/<org>/<repo>/resolve/...` → `<org>/<repo>`. Falls
@@ -127,7 +187,10 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     println!(
         "{}   {}",
         ctx.bold("FileID engine models"),
-        ctx.dim(&format!("{} = required for `fileid scan --models`", ctx.gold("★"))),
+        ctx.dim(&format!(
+            "{} = required for `fileid scan --models`",
+            ctx.gold("★")
+        )),
     );
     // Name field sized to the longest model id (`mistral_small_3_2`, 17 chars).
     println!(
@@ -142,11 +205,23 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         // skew the column widths.
         let marker = if r.cat.required { "★" } else { " " };
         let name_plain = format!("{marker} {:<17}", r.cat.name);
-        let name_cell = if r.cat.required { ctx.gold(&name_plain) } else { name_plain };
+        let name_cell = if r.cat.required {
+            ctx.gold(&name_plain)
+        } else {
+            name_plain
+        };
 
-        let status_plain = if r.installed { "✓ installed" } else { "· missing" };
+        let status_plain = if r.installed {
+            "✓ installed"
+        } else {
+            "· missing"
+        };
         let status_cell = format!("{status_plain:<11}");
-        let status_cell = if r.installed { ctx.green(&status_cell) } else { ctx.dim(&status_cell) };
+        let status_cell = if r.installed {
+            ctx.green(&status_cell)
+        } else {
+            ctx.dim(&status_cell)
+        };
 
         println!(
             "  {name_cell} {status_cell} {:>9}  {:<16} {}",
@@ -179,15 +254,21 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         println!("  Models dir: {}", dir.display());
     }
     if !missing.is_empty() {
-        let req_missing: Vec<&str> =
-            missing.iter().filter(|r| r.cat.required).map(|r| r.cat.name).collect();
+        let req_missing: Vec<&str> = missing
+            .iter()
+            .filter(|r| r.cat.required)
+            .map(|r| r.cat.name)
+            .collect();
         if !req_missing.is_empty() {
             println!(
                 "  Required for AI scans:  {}",
                 ctx.bold(&format!("fileid models download {}", req_missing.join(" ")))
             );
         }
-        println!("  Install everything:     {}", ctx.bold("fileid models download --all"));
+        println!(
+            "  Install everything:     {}",
+            ctx.bold("fileid models download --all")
+        );
         println!(
             "  {}",
             ctx.dim("Preview sizes first with `fileid models download --all --dry-run`.")
@@ -444,7 +525,13 @@ impl ProgressUi {
             ProgressMode::NonTty
         };
         let color = ctx.color_allowed && std::io::stderr().is_terminal();
-        Self { mode, color, pending_bytes, model_count, max_bp: Arc::new(AtomicU64::new(0)) }
+        Self {
+            mode,
+            color,
+            pending_bytes,
+            model_count,
+            max_bp: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// The "Downloading <name> (size, repo)" provenance line — human stderr only.
@@ -624,11 +711,18 @@ fn render_bar(
     let (bar, pct_s) = if color {
         (
             // Brand gold (#FFCC00 ≈ xterm 220) for the filled cells.
-            format!("[\x1b[38;5;220m{}\x1b[0m{}]", "█".repeat(filled), "░".repeat(empty)),
+            format!(
+                "[\x1b[38;5;220m{}\x1b[0m{}]",
+                "█".repeat(filled),
+                "░".repeat(empty)
+            ),
             format!("\x1b[1m{pct:>3}%\x1b[0m"),
         )
     } else {
-        (format!("[{}{}]", "█".repeat(filled), "░".repeat(empty)), format!("{pct:>3}%"))
+        (
+            format!("[{}{}]", "█".repeat(filled), "░".repeat(empty)),
+            format!("{pct:>3}%"),
+        )
     };
     format!(
         "{bar} {pct_s}  {} · {} · {} · {} · model {}/{}",
@@ -735,7 +829,10 @@ mod tests {
     fn size_pair_picks_a_shared_unit() {
         assert_eq!(size_pair(182 * MB, Some(271 * MB)), "182/271 MB");
         let gb = 1024 * MB;
-        assert_eq!(size_pair(3 * gb + gb / 2, Some(24 * gb + gb * 9 / 10)), "3.5/24.9 GB");
+        assert_eq!(
+            size_pair(3 * gb + gb / 2, Some(24 * gb + gb * 9 / 10)),
+            "3.5/24.9 GB"
+        );
         assert_eq!(size_pair(5 * MB, None), "5.0 MB");
     }
 
@@ -770,7 +867,10 @@ mod tests {
             last = bp;
             displayed_final = bp;
         }
-        assert_eq!(displayed_final, 10_000, "must reach 100% when the last model completes");
+        assert_eq!(
+            displayed_final, 10_000,
+            "must reach 100% when the last model completes"
+        );
         assert_eq!(bp_to_percent(displayed_final), 100);
     }
 }

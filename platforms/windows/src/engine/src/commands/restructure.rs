@@ -4,7 +4,12 @@
 //! `pipeline::restructure`. These handlers wire app payloads through to
 //! those modules.
 
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
 use crate::ipc::{
     self, sink::Sink, EngineError, EventPayload, FolderClassificationCounts, IpcEvent,
@@ -15,6 +20,442 @@ use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassi
 use crate::pipeline::restructure_apply::RestructureApply;
 use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
+
+const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
+const LARGE_PLAN_STREAM_THRESHOLD: i64 = 50_000;
+const LARGE_PLAN_CHUNK: usize = 4_096;
+const STORED_PLAN_VERSION: u8 = 1;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPlanHeader {
+    version: u8,
+    library_root: String,
+    total_moves: usize,
+}
+
+struct StoredPlanMoveIter {
+    lines: std::io::Lines<BufReader<File>>,
+}
+
+impl Iterator for StoredPlanMoveIter {
+    type Item = anyhow::Result<IpcMove>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.lines.next().map(|line| {
+            let line = line.context("reading persisted restructure plan")?;
+            serde_json::from_str(&line).context("decoding persisted restructure move")
+        })
+    }
+}
+
+fn plan_path_in(dir: &std::path::Path, plan_id: &str) -> anyhow::Result<PathBuf> {
+    let parsed = uuid::Uuid::parse_str(plan_id).context("invalid restructure plan ID")?;
+    Ok(dir.join(format!("{parsed}.ndjson")))
+}
+
+fn write_stored_plan(
+    library_root: &str,
+    moves: impl IntoIterator<Item = anyhow::Result<IpcMove>>,
+    total_moves: usize,
+) -> anyhow::Result<(String, Vec<IpcMove>)> {
+    let dir = crate::paths::restructure_plans_dir()?;
+    write_stored_plan_in(&dir, library_root, moves, total_moves)
+}
+
+fn write_stored_plan_in(
+    dir: &std::path::Path,
+    library_root: &str,
+    moves: impl IntoIterator<Item = anyhow::Result<IpcMove>>,
+    total_moves: usize,
+) -> anyhow::Result<(String, Vec<IpcMove>)> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating restructure plan directory {}", dir.display()))?;
+    // Only one plan is actionable in the UI at a time. Remove stale spools so
+    // repeated planning cannot grow engine state without bound.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if matches!(path.extension().and_then(|e| e.to_str()), Some("ndjson" | "tmp")) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let final_path = plan_path_in(dir, &plan_id)?;
+    let tmp_path = dir.join(format!("{plan_id}.tmp"));
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)
+        .with_context(|| format!("creating restructure plan {}", tmp_path.display()))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(
+        &mut writer,
+        &StoredPlanHeader {
+            version: STORED_PLAN_VERSION,
+            library_root: library_root.to_string(),
+            total_moves,
+        },
+    )?;
+    writer.write_all(b"\n")?;
+    let mut preview = Vec::with_capacity(RESTRUCTURE_PREVIEW_CAP);
+    let write_result = (|| -> anyhow::Result<()> {
+        for move_ in moves {
+            let move_ = move_?;
+            if preview.len() < RESTRUCTURE_PREVIEW_CAP {
+                preview.push(move_.clone());
+            }
+            serde_json::to_writer(&mut writer, &move_)?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        drop(writer);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error.context("persisting restructure plan"));
+    }
+    drop(writer);
+    std::fs::rename(&tmp_path, &final_path).with_context(|| {
+        format!(
+            "publishing restructure plan {} -> {}",
+            tmp_path.display(),
+            final_path.display()
+        )
+    })?;
+    Ok((plan_id, preview))
+}
+
+fn open_stored_plan(
+    plan_id: &str,
+    expected_root: &str,
+) -> anyhow::Result<(StoredPlanMoveIter, usize)> {
+    let dir = crate::paths::restructure_plans_dir()?;
+    open_stored_plan_in(&dir, plan_id, expected_root)
+}
+
+fn open_stored_plan_in(
+    dir: &std::path::Path,
+    plan_id: &str,
+    expected_root: &str,
+) -> anyhow::Result<(StoredPlanMoveIter, usize)> {
+    let path = plan_path_in(dir, plan_id)?;
+    let file = File::open(&path)
+        .with_context(|| format!("opening restructure plan {}", path.display()))?;
+    let mut lines = BufReader::new(file).lines();
+    let header_line = lines
+        .next()
+        .context("persisted restructure plan is empty")??;
+    let header: StoredPlanHeader =
+        serde_json::from_str(&header_line).context("decoding restructure plan header")?;
+    anyhow::ensure!(
+        header.version == STORED_PLAN_VERSION,
+        "unsupported restructure plan version {}",
+        header.version
+    );
+    anyhow::ensure!(
+        roots_equal(&header.library_root, expected_root),
+        "restructure plan belongs to a different library root"
+    );
+    Ok((StoredPlanMoveIter { lines }, header.total_moves))
+}
+
+fn roots_equal(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
+    let kind_str: String = row.get(2)?;
+    let kind = match kind_str.as_str() {
+        "image" => FileKind::Image,
+        "video" => FileKind::Video,
+        "pdf" => FileKind::Pdf,
+        "doc" => FileKind::Doc,
+        "audio" => FileKind::Audio,
+        "model" => FileKind::Model,
+        _ => FileKind::Other,
+    };
+    let names: Option<String> = row.get(8)?;
+    let person_name = names
+        .as_deref()
+        .and_then(|s| s.split('\x1F').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok(FileForClassify {
+        file_id: row.get(0)?,
+        source: PathBuf::from(row.get::<_, String>(1)?),
+        kind,
+        modified_unix: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+        created_unix: row.get(4)?,
+        person_name,
+        location_lat: row.get(5)?,
+        location_lon: row.get(6)?,
+        has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
+    })
+}
+
+fn folder_tier(folder: &str, total: i64, top: i64) -> &'static str {
+    let name = Path::new(folder)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let generic = matches!(
+        name.as_str(),
+        "downloads"
+            | "downloaded"
+            | "new folder"
+            | "untitled"
+            | "temp"
+            | "tmp"
+            | "misc"
+            | "other"
+            | "stuff"
+            | "things"
+            | "files"
+    );
+    if generic || total <= 2 {
+        "Junk"
+    } else if top.saturating_mul(100) >= total.saturating_mul(80) {
+        "Anchor"
+    } else {
+        "Mixed"
+    }
+}
+
+fn persist_rule_chunk(
+    tx: &rusqlite::Transaction<'_>,
+    chunk: &mut Vec<FileForClassify>,
+    library_root: &Path,
+    sequence: &mut i64,
+) -> anyhow::Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    let mut insert_move = tx.prepare_cached(
+        "INSERT INTO raw_moves
+         (seq,file_id,source,source_folder,destination,category,confidence,reason)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+    )?;
+    let mut insert_stat = tx.prepare_cached(
+        "INSERT INTO folder_stats(folder,category,count) VALUES (?1,?2,1)
+         ON CONFLICT(folder,category) DO UPDATE SET count=count+1",
+    )?;
+    for move_ in classify(chunk, library_root) {
+        let source_folder = move_
+            .source
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_string_lossy()
+            .into_owned();
+        insert_move.execute(rusqlite::params![
+            *sequence,
+            move_.file_id,
+            move_.source.to_string_lossy(),
+            source_folder,
+            move_.destination.to_string_lossy(),
+            move_.category,
+            move_.confidence.as_str(),
+            move_.reason,
+        ])?;
+        insert_stat.execute(rusqlite::params![source_folder, move_.category])?;
+        *sequence += 1;
+    }
+    chunk.clear();
+    Ok(())
+}
+
+fn plan_large_library(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    library_root: &str,
+) -> anyhow::Result<RestructurePlan> {
+    let dir = crate::paths::restructure_plans_dir()?;
+    plan_large_library_in(db, library_root, &dir)
+}
+
+fn plan_large_library_in(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    library_root: &str,
+    dir: &Path,
+) -> anyhow::Result<RestructurePlan> {
+    std::fs::create_dir_all(dir)?;
+    let planning_path = dir.join(format!("{}.planning.sqlite", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<RestructurePlan> {
+        let mut plan_db = rusqlite::Connection::open(&planning_path)?;
+        plan_db.execute_batch(
+            "PRAGMA journal_mode=OFF;
+             PRAGMA synchronous=OFF;
+             PRAGMA temp_store=FILE;
+             CREATE TABLE raw_moves(
+                 seq INTEGER PRIMARY KEY,
+                 file_id INTEGER NOT NULL,
+                 source TEXT NOT NULL,
+                 source_folder TEXT NOT NULL,
+                 destination TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 confidence TEXT NOT NULL,
+                 reason TEXT);
+             CREATE TABLE folder_stats(
+                 folder TEXT NOT NULL,
+                 category TEXT NOT NULL,
+                 count INTEGER NOT NULL,
+                 PRIMARY KEY(folder,category));
+             CREATE TABLE folder_tiers(
+                 folder TEXT PRIMARY KEY,
+                 tier TEXT NOT NULL);",
+        )?;
+
+        let tx = plan_db.transaction()?;
+        let bounds = plan_root_bounds(library_root);
+        let mut sequence = 0_i64;
+        let mut last_id = i64::MIN;
+        loop {
+            // Keyset-page the shared connection so a million-file plan does not
+            // monopolize the engine's single SQLite mutex for the whole scan.
+            // Each lock holds only while 4,096 compact metadata rows are copied.
+            let mut chunk = {
+                let source = db.lock();
+                let mut stmt = source.prepare(PLAN_FILES_PAGE_SQL)?;
+                let rows = stmt.query_map(
+                    rusqlite::params![
+                        &bounds.0,
+                        &bounds.1,
+                        &bounds.2,
+                        last_id,
+                        LARGE_PLAN_CHUNK as i64
+                    ],
+                    plan_row_to_file,
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if chunk.is_empty() {
+                break;
+            }
+            last_id = chunk.last().map_or(last_id, |file| file.file_id);
+            let page_was_full = chunk.len() == LARGE_PLAN_CHUNK;
+            persist_rule_chunk(
+                &tx,
+                &mut chunk,
+                Path::new(library_root),
+                &mut sequence,
+            )?;
+            if !page_was_full {
+                break;
+            }
+        }
+        tx.commit()?;
+
+        let mut anchor = 0_u32;
+        let mut mixed = 0_u32;
+        let mut junk = 0_u32;
+        {
+            let mut stats = plan_db.prepare(
+                "SELECT folder, SUM(count), MAX(count)
+                 FROM folder_stats GROUP BY folder ORDER BY folder",
+            )?;
+            let mut rows = stats.query([])?;
+            let mut insert = plan_db.prepare_cached(
+                "INSERT INTO folder_tiers(folder,tier) VALUES (?1,?2)",
+            )?;
+            while let Some(row) = rows.next()? {
+                let folder: String = row.get(0)?;
+                let total: i64 = row.get(1)?;
+                let top: i64 = row.get(2)?;
+                let tier = folder_tier(&folder, total, top);
+                match tier {
+                    "Anchor" => anchor = anchor.saturating_add(1),
+                    "Mixed" => mixed = mixed.saturating_add(1),
+                    _ => junk = junk.saturating_add(1),
+                }
+                insert.execute(rusqlite::params![folder, tier])?;
+            }
+        }
+
+        let category_counts = {
+            let mut stmt = plan_db.prepare(
+                "SELECT r.category, COUNT(*) AS n
+                 FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
+                 WHERE t.tier <> 'Anchor'
+                 GROUP BY r.category ORDER BY n DESC, r.category ASC",
+            )?;
+            let counts = stmt.query_map([], |row| {
+                let count: i64 = row.get(1)?;
+                Ok(RestructureCategoryCount {
+                    category: row.get(0)?,
+                    count: count.clamp(0, u32::MAX as i64) as u32,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+            counts
+        };
+        let total_moves: i64 = plan_db.query_row(
+            "SELECT COUNT(*) FROM raw_moves r
+             JOIN folder_tiers t ON t.folder=r.source_folder
+             WHERE t.tier <> 'Anchor'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let (plan_id, preview) = {
+            let mut stmt = plan_db.prepare(
+                "SELECT r.file_id,r.source,r.destination,r.category,t.tier,
+                        r.confidence,r.reason
+                 FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
+                 WHERE t.tier <> 'Anchor' ORDER BY r.seq",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(IpcMove {
+                    file_id: row.get(0)?,
+                    source: row.get(1)?,
+                    destination: row.get(2)?,
+                    category: row.get(3)?,
+                    tier: Some(row.get(4)?),
+                    confidence: row.get(5)?,
+                    reason: row.get(6)?,
+                })
+            })?;
+            write_stored_plan_in(
+                dir,
+                library_root,
+                rows.map(|row| row.map_err(anyhow::Error::from)),
+                total_moves.max(0) as usize,
+            )?
+        };
+
+        let truncated = total_moves as usize > RESTRUCTURE_PREVIEW_CAP;
+        if !truncated {
+            if let Ok(path) = plan_path_in(dir, &plan_id) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        Ok(RestructurePlan {
+            library_root: library_root.to_string(),
+            plan_id: truncated.then_some(plan_id),
+            total_moves: truncated.then_some(total_moves.max(0) as u64),
+            truncated,
+            moves: preview,
+            category_counts,
+            folder_classifications: Some(FolderClassificationCounts {
+                anchor_folders: anchor,
+                mixed_folders: mixed,
+                junk_folders: junk,
+            }),
+        })
+    })();
+    let _ = std::fs::remove_file(&planning_path);
+    result
+}
 
 /// Files + per-file person names for restructure planning. Person names come
 /// from a deduped, ordered correlated subquery — NOT
@@ -32,17 +473,50 @@ const PLAN_FILES_SQL: &str = "SELECT
                AND p.name IS NOT NULL AND p.name <> ''
              ORDER BY p.name)) AS names
  FROM files f
- WHERE f.failed = 0";
+ WHERE f.failed = 0
+   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+ ORDER BY f.id";
 
-/// Max CLIP embeddings to hold resident for one restructure plan, by memory
-/// tier. Each ViT-B/32 image embedding is ~2 KiB, so the Low cap bounds the
-/// transient to ~100 MiB; Balanced/High are effectively uncapped (preserving
-/// the prior full-table behavior on boxes with headroom). Files past the cap
-/// fall through to the rule cascade. (audit F-C6-016)
+const PLAN_FILES_PAGE_SQL: &str = "SELECT
+   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
+   f.location_lat, f.location_lon, f.has_text,
+   (SELECT GROUP_CONCAT(name, char(31))
+      FROM (SELECT DISTINCT p.name
+              FROM persons p
+              JOIN face_prints fp ON fp.person_id = p.id
+             WHERE fp.file_id = f.id
+               AND p.name IS NOT NULL AND p.name <> ''
+             ORDER BY p.name)) AS names
+ FROM files f
+ WHERE f.failed = 0
+   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+   AND f.id > ?4
+ ORDER BY f.id
+ LIMIT ?5";
+
+fn plan_root_bounds(root: &str) -> (String, String, String) {
+    let root = root.trim_end_matches(['/', '\\']).to_string();
+    let separator = if root.contains('\\') { '\\' } else { '/' };
+    let prefix = format!("{root}{separator}");
+    let mut bytes = prefix.as_bytes().to_vec();
+    for index in (0..bytes.len()).rev() {
+        if bytes[index] != u8::MAX {
+            bytes[index] += 1;
+            bytes.truncate(index + 1);
+            return (root, prefix, String::from_utf8_lossy(&bytes).into_owned());
+        }
+    }
+    (root, prefix, "\u{10ffff}".into())
+}
+
+/// Max embeddings of each modality retained for one restructure plan. Every
+/// tier is bounded: "high memory" cannot mean unbounded when the library can
+/// contain millions of 2 KiB vectors.
 fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
     match tier {
-        crate::platform::MemoryTier::Low => 50_000,
-        crate::platform::MemoryTier::Balanced | crate::platform::MemoryTier::High => usize::MAX,
+        crate::platform::MemoryTier::Low => 20_000,
+        crate::platform::MemoryTier::Balanced => 50_000,
+        crate::platform::MemoryTier::High => 100_000,
     }
 }
 
@@ -53,6 +527,7 @@ fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
 fn load_capped_embeddings(
     conn: &rusqlite::Connection,
     cap: usize,
+    bounds: &(String, String, String),
 ) -> rusqlite::Result<std::collections::HashMap<i64, Vec<f32>>> {
     let mut embeddings = std::collections::HashMap::new();
     if cap == 0 {
@@ -61,9 +536,10 @@ fn load_capped_embeddings(
     let mut stmt = conn.prepare(
         "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
          JOIN files f ON f.id = ce.file_id
-         WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')",
+         WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')
+           AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(rusqlite::params![bounds.0, bounds.1, bounds.2], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     for r in rows {
@@ -86,17 +562,23 @@ fn load_capped_embeddings(
 /// Not capped: documents are a small fraction of a library and the vectors are 384-d.
 fn load_text_embeddings(
     conn: &rusqlite::Connection,
+    cap: usize,
+    bounds: &(String, String, String),
 ) -> rusqlite::Result<std::collections::HashMap<i64, Vec<f32>>> {
     let mut out = std::collections::HashMap::new();
     let mut stmt = conn.prepare(
         "SELECT te.file_id, te.embedding FROM text_embeddings te
          JOIN files f ON f.id = te.file_id
-         WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')",
+         WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')
+           AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(rusqlite::params![bounds.0, bounds.1, bounds.2], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     for r in rows {
+        if out.len() >= cap {
+            break;
+        }
         let (id, blob) = r?;
         if !blob.is_empty() && blob.len() % 4 == 0 {
             let v = blob
@@ -134,16 +616,78 @@ pub(crate) async fn handle_plan_restructure(
     payload: ipc::PlanRestructurePayload,
 ) {
     let library_root = payload.library_root.clone();
+    let supports_paged_plans = payload.supports_paged_plans;
+    let query_root = library_root.clone();
     let db_for_semantic = std::sync::Arc::clone(&db);
     // Kept alive past the query/signals spawn_blocking closures (which move `db` and
     // `db_for_semantic`) so the learn-from-corrections boost can read the feedback
     // table after the proposal set is built.
     let db_for_boost = std::sync::Arc::clone(&db);
+    if supports_paged_plans {
+        let count_db = std::sync::Arc::clone(&db);
+        let count_root = library_root.clone();
+        let scoped_count = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+            let conn = count_db.lock();
+            let bounds = plan_root_bounds(&count_root);
+            conn.query_row(
+                "SELECT COUNT(*) FROM files f WHERE f.failed=0
+                 AND (?1='' OR f.path_text=?1 OR (f.path_text>=?2 AND f.path_text<?3))",
+                rusqlite::params![bounds.0, bounds.1, bounds.2],
+                |row| row.get(0),
+            )
+        })
+        .await;
+        match scoped_count {
+            Ok(Ok(count)) if count > LARGE_PLAN_STREAM_THRESHOLD => {
+                let plan_db = std::sync::Arc::clone(&db);
+                let plan_root = library_root.clone();
+                let planned = tokio::task::spawn_blocking(move || {
+                    plan_large_library(&plan_db, &plan_root)
+                })
+                .await;
+                match planned {
+                    Ok(Ok(plan)) => {
+                        sink.send(IpcEvent::now(EventPayload::RestructurePlan(Wrap::new(plan))))
+                            .await;
+                    }
+                    Ok(Err(err)) => {
+                        tracing::warn!(?err, "large restructure planning failed");
+                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                            kind: "plan_restructure_failed".into(),
+                            message: format!("Restructure planning did not complete: {err}"),
+                            path: None,
+                            model_kind: None,
+                        }))))
+                        .await;
+                    }
+                    Err(err) => {
+                        tracing::warn!(?err, "large restructure planning task failed");
+                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                            kind: "plan_restructure_failed".into(),
+                            message: format!("Restructure planning did not complete: {err}"),
+                            path: None,
+                            model_kind: None,
+                        }))))
+                        .await;
+                    }
+                }
+                return;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(?err, "counting restructure scope failed");
+            }
+            Err(err) => {
+                tracing::warn!(?err, "counting restructure scope task failed");
+            }
+        }
+    }
     let files: Vec<FileForClassify> =
         match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
             let conn = db.lock();
             let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
-            let rows = stmt.query_map([], |row| {
+            let (root, prefix, upper) = plan_root_bounds(&query_root);
+            let rows = stmt.query_map(rusqlite::params![root, prefix, upper], |row| {
                 let kind_str: String = row.get(2)?;
                 let kind = match kind_str.as_str() {
                     "image" => FileKind::Image,
@@ -225,6 +769,7 @@ pub(crate) async fn handle_plan_restructure(
     // embedding. Tags are then loaded only for the ids we kept, so neither map
     // grows unbounded under pressure. (audit F-C6-016)
     let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
+    let signal_bounds = plan_root_bounds(&library_root);
     let signals = tokio::task::spawn_blocking(
         move || -> rusqlite::Result<(
             std::collections::HashMap<i64, Vec<f32>>,
@@ -232,17 +777,31 @@ pub(crate) async fn handle_plan_restructure(
             std::collections::HashMap<i64, Vec<f32>>,
         )> {
             let conn = db_for_semantic.lock();
-            let embeddings = load_capped_embeddings(&conn, embedding_cap)?;
-            let text_embeddings = load_text_embeddings(&conn)?;
+            let embeddings = load_capped_embeddings(&conn, embedding_cap, &signal_bounds)?;
+            let text_embeddings =
+                load_text_embeddings(&conn, embedding_cap, &signal_bounds)?;
             let mut tags: std::collections::HashMap<i64, Vec<String>> =
                 std::collections::HashMap::new();
             // DISTINCT so a tag carried under multiple sources for the same
             // file counts ONCE — otherwise c-TF-IDF tf/df double-counts it and
             // skews distinctive_terms group naming (#18).
-            let mut tstmt =
-                conn.prepare("SELECT DISTINCT file_id, tag FROM tags WHERE source IN ('auto','vlm','user')")?;
-            let trows =
-                tstmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))?;
+            let mut tstmt = conn.prepare(
+                "SELECT DISTINCT t.file_id, t.tag FROM tags t
+                 JOIN files f ON f.id = t.file_id
+                 WHERE t.source IN ('auto','vlm','user') AND f.failed = 0
+                   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+                 LIMIT ?4",
+            )?;
+            let tag_cap = embedding_cap.saturating_mul(8).min(i64::MAX as usize) as i64;
+            let trows = tstmt.query_map(
+                rusqlite::params![
+                    signal_bounds.0,
+                    signal_bounds.1,
+                    signal_bounds.2,
+                    tag_cap
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )?;
             for r in trows {
                 let (id, tag) = r?;
                 // Load tags for ALL files, not just embedded images: the R1
@@ -437,11 +996,10 @@ pub(crate) async fn handle_plan_restructure(
     );
     let category_summary = restructure::category_counts(&proposed);
 
-    let plan = RestructurePlan {
-        library_root,
-        moves: proposed
-            .into_iter()
-            .map(|m| {
+    let total_moves = proposed.len();
+    let library_root_for_spool = library_root.clone();
+    let encoded = tokio::task::spawn_blocking(move || {
+        let moves = proposed.into_iter().map(|m| {
                 let tier = m
                     .source
                     .parent()
@@ -456,8 +1014,52 @@ pub(crate) async fn handle_plan_restructure(
                     confidence: m.confidence.as_str().to_string(),
                     reason: m.reason,
                 }
-            })
-            .collect(),
+            });
+        if supports_paged_plans && total_moves > RESTRUCTURE_PREVIEW_CAP {
+            let (plan_id, preview) =
+                write_stored_plan(
+                    &library_root_for_spool,
+                    moves.map(Ok),
+                    total_moves,
+                )?;
+            Ok::<_, anyhow::Error>((Some(plan_id), preview, Some(total_moves as u64), true))
+        } else {
+            Ok((None, moves.collect(), None, false))
+        }
+    })
+    .await;
+    let (plan_id, moves, total_moves, truncated) = match encoded {
+        Ok(Ok(encoded)) => encoded,
+        Ok(Err(err)) => {
+            tracing::warn!(?err, "persisting paged restructure plan failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "plan_restructure_store".into(),
+                message: format!("Could not store the restructure plan: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "encoding restructure plan task failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "plan_restructure_failed".into(),
+                message: format!("Restructure planning did not complete: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+            return;
+        }
+    };
+
+    let plan = RestructurePlan {
+        library_root,
+        plan_id,
+        total_moves,
+        truncated,
+        moves,
         category_counts: category_summary
             .into_iter()
             .map(|c| RestructureCategoryCount {
@@ -536,13 +1138,26 @@ pub(crate) async fn handle_apply_restructure(
             // cancel poll was dead in production. (The flag is reset to false in
             // the ApplyRestructure dispatch arm so a stale cancel can't pre-stop
             // a fresh apply.)
+            let ipc::ApplyRestructurePayload {
+                library_root,
+                plan_id,
+                moves,
+                use_symlinks,
+            } = payload;
             let apply = RestructureApply::new(
                 db,
-                PathBuf::from(payload.library_root),
-                payload.use_symlinks,
+                PathBuf::from(&library_root),
+                use_symlinks,
             )
             .with_cancel(cancel);
-            apply.apply(&payload.moves)
+            if let Some(plan_id) = plan_id {
+                anyhow::ensure!(moves.is_empty(), "paged plan apply must not also include moves");
+                let (moves, total) = open_stored_plan(&plan_id, &library_root)?;
+                apply.apply_iter(moves, Some(total))
+            } else {
+                let total = moves.len();
+                apply.apply_iter(moves.into_iter().map(Ok), Some(total))
+            }
         },
     )
     .await;
@@ -611,7 +1226,9 @@ mod tests {
 
         let mut stmt = conn.prepare(PLAN_FILES_SQL).expect("planner SQL prepares");
         let mut rows: Vec<(i64, Option<String>)> = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(8)?)))
+            .query_map(rusqlite::params!["", "", ""], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(8)?))
+            })
             .unwrap()
             .map(Result::unwrap)
             .collect();
@@ -627,15 +1244,45 @@ mod tests {
         assert_eq!(rows[1].1, None);
     }
 
-    /// The embedding load must be tier-gated: Low caps the resident map, while
-    /// Balanced/High preserve the prior full-table behavior. (audit F-C6-016)
     #[test]
-    fn embedding_load_cap_is_bounded_on_low_only() {
+    fn plan_files_sql_is_scoped_to_the_selected_library_root() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(
+                 id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT,
+                 modified_at REAL, created_at REAL,
+                 location_lat REAL, location_lon REAL,
+                 has_text INTEGER, failed INTEGER DEFAULT 0);
+             CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             INSERT INTO files(id,path_text,kind,failed) VALUES
+                 (1,'/library/a.jpg','image',0),
+                 (2,'/library/nested/b.jpg','image',0),
+                 (3,'/library-old/not-ours.jpg','image',0),
+                 (4,'/other/c.jpg','image',0);",
+        )
+        .unwrap();
+        let (root, prefix, upper) = plan_root_bounds("/library/");
+        let ids: Vec<i64> = conn
+            .prepare(PLAN_FILES_SQL)
+            .unwrap()
+            .query_map(rusqlite::params![root, prefix, upper], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(ids, [1, 2]);
+    }
+
+    /// Every tier must cap the resident map; larger machines get a larger
+    /// quality sample, never an unbounded full-table allocation.
+    #[test]
+    fn embedding_load_cap_is_bounded_on_every_tier() {
         use crate::platform::MemoryTier;
         let low = embedding_load_cap(MemoryTier::Low);
-        assert!(low < usize::MAX, "Low tier must cap the embedding load: {low}");
-        assert_eq!(embedding_load_cap(MemoryTier::Balanced), usize::MAX);
-        assert_eq!(embedding_load_cap(MemoryTier::High), usize::MAX);
+        let balanced = embedding_load_cap(MemoryTier::Balanced);
+        let high = embedding_load_cap(MemoryTier::High);
+        assert!(low < balanced && balanced < high);
+        assert!(high < usize::MAX);
     }
 
     /// The load streams and stops at the cap, so a large corpus never
@@ -646,7 +1293,7 @@ mod tests {
     fn capped_embedding_load_bounds_the_resident_map() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE files(id INTEGER PRIMARY KEY, kind TEXT, failed INTEGER DEFAULT 0);
+            "CREATE TABLE files(id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT, failed INTEGER DEFAULT 0);
              CREATE TABLE clip_embeddings(file_id INTEGER PRIMARY KEY, embedding BLOB);",
         )
         .unwrap();
@@ -655,7 +1302,10 @@ mod tests {
             .flat_map(|i| (i as f32).to_le_bytes())
             .collect();
         for id in 1..=100i64 {
-            conn.execute("INSERT INTO files(id,kind,failed) VALUES (?1,'image',0)", [id])
+            conn.execute(
+                "INSERT INTO files(id,path_text,kind,failed) VALUES (?1,?2,'image',0)",
+                rusqlite::params![id, format!("/library/{id}.jpg")],
+            )
                 .unwrap();
             conn.execute(
                 "INSERT INTO clip_embeddings(file_id,embedding) VALUES (?1,?2)",
@@ -665,12 +1315,89 @@ mod tests {
         }
 
         // A small cap bounds the resident map even though 100 rows qualify.
-        let capped = load_capped_embeddings(&conn, 10).unwrap();
+        let bounds = plan_root_bounds("");
+        let capped = load_capped_embeddings(&conn, 10, &bounds).unwrap();
         assert_eq!(capped.len(), 10, "cap must bound the resident map");
 
         // An effectively-uncapped load (Balanced/High) returns the full table.
-        let full = load_capped_embeddings(&conn, usize::MAX).unwrap();
+        let full = load_capped_embeddings(&conn, usize::MAX, &bounds).unwrap();
         assert_eq!(full.len(), 100, "uncapped load returns every qualifying row");
+    }
+
+    #[test]
+    fn stored_plan_preview_is_bounded_and_root_bound() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-plan-spool-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root = "/library";
+        let total = RESTRUCTURE_PREVIEW_CAP + 37;
+        let moves = (0..total).map(|index| IpcMove {
+            file_id: index as i64,
+            source: format!("{root}/incoming/{index}.jpg"),
+            destination: format!("{root}/Photos/2024/{index}.jpg"),
+            category: "photo".into(),
+            tier: Some("Mixed".into()),
+            confidence: "review".into(),
+            reason: Some("Photo from 2024".into()),
+        });
+
+        let (plan_id, preview) =
+            write_stored_plan_in(&dir, root, moves.map(Ok), total).unwrap();
+        assert_eq!(preview.len(), RESTRUCTURE_PREVIEW_CAP);
+        assert!(plan_path_in(&dir, &plan_id).unwrap().is_file());
+
+        let (stream, stored_total) = open_stored_plan_in(&dir, &plan_id, root).unwrap();
+        assert_eq!(stored_total, total);
+        assert_eq!(stream.collect::<anyhow::Result<Vec<_>>>().unwrap().len(), total);
+        assert!(
+            open_stored_plan_in(&dir, &plan_id, "/different-library").is_err(),
+            "an opaque plan cannot be replayed under a broader or different root"
+        );
+        assert!(plan_path_in(&dir, "../escape").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "explicit million-file disk-backed planner regression"]
+    fn million_file_large_plan_is_disk_backed_and_preview_bounded() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for start in (1..=1_000_000_i64).step_by(10_000) {
+            let end = (start + 9_999).min(1_000_000);
+            conn.execute(
+                "WITH RECURSIVE ids(x) AS (
+                     SELECT ?1 UNION ALL SELECT x+1 FROM ids WHERE x < ?2
+                 )
+                 INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+                 SELECT x, printf('/library/downloads/%d.jpg',x), x, 1, 1.0,
+                        'image','jpg',0 FROM ids",
+                rusqlite::params![start, end],
+            )
+            .unwrap();
+        }
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-million-plan-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let started = std::time::Instant::now();
+        let plan = plan_large_library_in(&db, "/library", &dir).unwrap();
+        assert!(plan.truncated);
+        assert_eq!(plan.total_moves, Some(1_000_000));
+        assert_eq!(plan.moves.len(), RESTRUCTURE_PREVIEW_CAP);
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
+            "temporary planning database must be removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// F-C6-013 dispatch wiring: `handle_apply_restructure` must honor the
@@ -701,6 +1428,7 @@ mod tests {
         let dest = root.join("Sorted").join("a.jpg").to_string_lossy().into_owned();
         let payload = ipc::ApplyRestructurePayload {
             library_root: root.to_string_lossy().into_owned(),
+            plan_id: None,
             moves: vec![ipc::RestructureMove {
                 file_id: 1,
                 source: src.to_string_lossy().into_owned(),

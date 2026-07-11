@@ -280,12 +280,20 @@ pub struct PlanRestructurePayload {
     /// destination is canonicalized + verified to fall inside this root
     /// (path-traversal guard before apply).
     pub library_root: String,
+    /// Opt in to a bounded preview backed by an engine-owned plan spool. Old
+    /// clients omit this and retain the legacy full-plan response.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub supports_paged_plans: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyRestructurePayload {
     pub library_root: String,
+    /// Apply an engine-owned paged plan in full. `moves` is empty in this mode.
+    #[serde(default, rename = "planID", skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default)]
     pub moves: Vec<RestructureMove>,
     /// `false` (default): real `MoveFileExW` move on disk + DB update.
     /// `true`: create a `CreateSymbolicLinkW` next to the original so the
@@ -922,6 +930,12 @@ pub enum JobCategory { Scan, FaceCluster, DeepAnalyze }
 #[serde(rename_all = "camelCase")]
 pub struct RestructurePlan {
     pub library_root: String,
+    #[serde(default, rename = "planID", skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_moves: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
     pub moves: Vec<RestructureMove>,
     pub category_counts: Vec<RestructureCategoryCount>,
     /// Engine-authoritative folder classification — Anchor / Mixed / Junk
@@ -1214,12 +1228,14 @@ mod tests {
             CommandPayload::CancelPrewarm(CancelPrewarmPayload { model_kind: None }),
             CommandPayload::PlanRestructure(PlanRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
+                supports_paged_plans: false,
             }),
             CommandPayload::UndoRestructure(UndoRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
             }),
             CommandPayload::ApplyRestructure(ApplyRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
+                plan_id: None,
                 moves: vec![RestructureMove {
                     file_id: 1,
                     source: r"C:\Users\adam\Pictures\IMG_0001.jpg".into(),

@@ -27,7 +27,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
@@ -97,7 +99,7 @@ fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
     app.missing_models = scan::missing_models_display();
 
     let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
-    data::spawn_load(ctx.db.clone(), tx.clone());
+    data::spawn_load(ctx.db.clone(), String::new(), tx.clone());
 
     // RAII: the guard owns the terminal and its `Drop` is the single source of
     // truth for teardown — it restores cooked mode + the main screen on a normal
@@ -165,20 +167,30 @@ fn event_loop(
 
         if app.reload_requested {
             app.reload_requested = false;
-            data::spawn_load(ctx.db.clone(), tx.clone());
+            data::spawn_load(ctx.db.clone(), app.search.clone(), tx.clone());
         }
         // A confirmed folder-pick arms a scan; drive it on a worker thread so
         // the UI stays live (q keeps quitting; the TerminalGuard still restores
         // the terminal). The thread streams status + reloads on completion.
         if let Some(root) = app.scan_requested.take() {
-            scan::spawn_scan(ctx.db.clone(), root, ctx.engine_data_home.clone(), tx.clone());
+            scan::spawn_scan(
+                ctx.db.clone(),
+                root,
+                ctx.engine_data_home.clone(),
+                app.search.clone(),
+                tx.clone(),
+            );
         }
         // A Settings `D` arms an AI-model download; drive it on a worker thread
         // so the UI stays live (q keeps quitting; TerminalGuard still restores).
         // The thread streams progress to the status line and reloads on success.
         if app.download_requested {
             app.download_requested = false;
-            download = Some(models::spawn_download(ctx.db.clone(), tx.clone()));
+            download = Some(models::spawn_download(
+                ctx.db.clone(),
+                app.search.clone(),
+                tx.clone(),
+            ));
         }
         if app.should_quit {
             // Kill (don't take) an in-flight download child so it can't keep

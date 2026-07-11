@@ -37,7 +37,10 @@ impl Ctx {
             std::env::var("CFFIXED_USER_HOME").ok(),
             default_scratch_home,
         )?;
-        Ok(Self { db: t.db, engine_data_home: t.engine_data_home })
+        Ok(Self {
+            db: t.db,
+            engine_data_home: t.engine_data_home,
+        })
     }
 
     /// True when running against the default scratch library (no explicit `--db`
@@ -68,13 +71,22 @@ fn resolve_target(
     scratch_home: impl FnOnce() -> Result<PathBuf>,
 ) -> Result<Target> {
     if let Some(p) = db_flag {
-        return Ok(Target { db: p, engine_data_home: None });
+        return Ok(Target {
+            db: p,
+            engine_data_home: None,
+        });
     }
     if let Some(s) = fileid_db {
-        return Ok(Target { db: PathBuf::from(s), engine_data_home: None });
+        return Ok(Target {
+            db: PathBuf::from(s),
+            engine_data_home: None,
+        });
     }
     if let Some(home) = cffixed_home {
-        return Ok(Target { db: PathBuf::from(home).join("fileid.sqlite"), engine_data_home: None });
+        return Ok(Target {
+            db: PathBuf::from(home).join("fileid.sqlite"),
+            engine_data_home: None,
+        });
     }
     // No explicit library → SCRATCH. The engine appends `FileID/` to whatever
     // we hand it as its data home, so the scratch library is at
@@ -82,7 +94,10 @@ fn resolve_target(
     // makes a scan write exactly the file the TUI reads.
     let base = scratch_home().context("resolving scratch library location")?;
     let db = base.join("FileID").join("fileid.sqlite");
-    Ok(Target { db, engine_data_home: Some(base) })
+    Ok(Target {
+        db,
+        engine_data_home: Some(base),
+    })
 }
 
 /// The persistent scratch data-dir base used when no `--db`/env is given. Placed
@@ -206,9 +221,10 @@ mod tests {
 
     #[test]
     fn cffixed_home_joins_fileid_sqlite() {
-        let got =
-            resolve_target(None, None, Some("/sandbox/home".into()), || Ok(PathBuf::from("/scratch")))
-                .unwrap();
+        let got = resolve_target(None, None, Some("/sandbox/home".into()), || {
+            Ok(PathBuf::from("/scratch"))
+        })
+        .unwrap();
         assert_eq!(got.db, PathBuf::from("/sandbox/home/fileid.sqlite"));
         assert_eq!(got.engine_data_home, None);
     }
@@ -237,8 +253,17 @@ mod tests {
 
     #[test]
     fn parse_help_and_unknown() {
-        assert!(matches!(parse_args(["--help".to_string()]), Invocation::Print(_)));
-        assert!(matches!(parse_args(["--bogus".to_string()]), Invocation::Error(_)));
-        assert!(matches!(parse_args(["--db".to_string()]), Invocation::Error(_)));
+        assert!(matches!(
+            parse_args(["--help".to_string()]),
+            Invocation::Print(_)
+        ));
+        assert!(matches!(
+            parse_args(["--bogus".to_string()]),
+            Invocation::Error(_)
+        ));
+        assert!(matches!(
+            parse_args(["--db".to_string()]),
+            Invocation::Error(_)
+        ));
     }
 }

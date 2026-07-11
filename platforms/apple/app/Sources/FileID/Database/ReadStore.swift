@@ -234,18 +234,21 @@ public final class ReadStore: @unchecked Sendable {
                     WITH ranked AS (
                         SELECT content_hash, size_bytes,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY content_hash
+                                   PARTITION BY content_hash, size_bytes
                                    ORDER BY COALESCE(aesthetic, 0) DESC,
                                             size_bytes DESC,
                                             COALESCE(created_at, 1e18) ASC,
                                             LENGTH(path_text) ASC
                                ) AS rk,
-                               COUNT(*) OVER (PARTITION BY content_hash) AS n
+                               COUNT(*) OVER (PARTITION BY content_hash, size_bytes) AS n
                         FROM files
                         WHERE content_hash IS NOT NULL AND failed = 0
                     )
                     SELECT
-                        (SELECT COUNT(DISTINCT content_hash) FROM ranked WHERE n > 1) AS groups,
+                        (SELECT COUNT(*) FROM (
+                            SELECT content_hash, size_bytes FROM ranked
+                            WHERE n > 1 GROUP BY content_hash, size_bytes
+                        )) AS groups,
                         COALESCE((SELECT SUM(size_bytes) FROM ranked WHERE n > 1 AND rk > 1), 0) AS reclaimable
                     """)
                 let groups: Int = dupRow?["groups"] ?? 0
@@ -552,74 +555,75 @@ public final class ReadStore: @unchecked Sendable {
         return Int64(bitPattern: v)
     }
 
+    private struct ExactDuplicateKey: Hashable {
+        let hash: Data
+        let size: Int64
+    }
+
+    private static let cleanupMaxGroups = 200
+    private static let cleanupMaxVisibleMembers = 5_000
+    private static let cleanupMaxVisibleMembersPerGroup = 500
+
     public func duplicateGroups() -> [DuplicateGroup] {
         guard let q = queue else { return [] }
         do {
             return try q.read { db in
-                // Single-pass query: pull every duplicate-group file in
-                // one read instead of N+1 (a SELECT per phash). On a
-                // 50K library with thousands of duplicate groups, the
-                // old shape was ~5K reads each holding a read lock —
-                // 10–50 s of UI lag. Now it's two reads total.
-                // Byte-exact dedup (item 1): two files are duplicates only when
-                // their content_hash (SHA-256 of the bytes) is identical — i.e.
-                // literally byte-for-byte the same file, not just perceptually
-                // similar (the prior phash grouping). Non-images have a NULL
-                // content_hash and are excluded, as before. Single-pass: GROUP BY
-                // then one chunked SELECT, same shape as the prior phash query.
-                let groupCounts = try Row.fetchAll(db, sql: """
-                    SELECT content_hash, COUNT(*) AS n
-                    FROM files
-                    WHERE content_hash IS NOT NULL AND failed = 0
-                    GROUP BY content_hash
-                    HAVING n > 1
-                    ORDER BY n DESC
-                    """)
-                guard !groupCounts.isEmpty else { return [] }
-
-                // Order-preserving content_hash list + lookup-by-hash.
-                let orderedHashes: [Data] = groupCounts.compactMap { $0["content_hash"] }
-
-                // Chunked reads — SQLite's default SQLITE_MAX_VARIABLE_NUMBER
-                // is 999 per query. A library with 1000+ duplicate groups
-                // would silently fail without chunking.
-                var byHash: [Data: [FileRow]] = [:]
-                byHash.reserveCapacity(orderedHashes.count)
-                let chunkSize = 500
-                var idx = 0
-                while idx < orderedHashes.count {
-                    let end = min(idx + chunkSize, orderedHashes.count)
-                    let chunk = Array(orderedHashes[idx..<end])
-                    let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
-                    let chunkFiles = try Row.fetchAll(db, sql: """
-                        SELECT * FROM files
-                        WHERE content_hash IN (\(placeholders)) AND failed = 0
-                        """, arguments: StatementArguments(chunk))
-                    for r in chunkFiles {
-                        guard let h: Data = r["content_hash"] else { continue }
-                        byHash[h, default: []].append(Self.toFileRow(r))
-                    }
-                    idx = end
+                // Indexed grouping + windowed member preview. The old query
+                // materialized every duplicate file in the library even though
+                // Cleanup is an interactive review surface. This returns at most
+                // 5,000 ranked rows while preserving exact group totals.
+                let rows = try Row.fetchAll(db, sql: """
+                    WITH top_groups AS (
+                        SELECT content_hash, size_bytes, COUNT(*) AS n
+                        FROM files
+                        WHERE content_hash IS NOT NULL AND failed = 0
+                        GROUP BY content_hash, size_bytes
+                        HAVING n > 1
+                        ORDER BY n DESC, hex(content_hash), size_bytes
+                        LIMIT ?
+                    ), ranked AS (
+                        SELECT f.*, tg.n AS group_count,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY f.content_hash, f.size_bytes
+                                   ORDER BY COALESCE(f.aesthetic, 0) DESC,
+                                            f.size_bytes DESC,
+                                            COALESCE(f.created_at, 1e18) ASC,
+                                            LENGTH(f.path_text) ASC,
+                                            f.path_text ASC
+                               ) AS member_rank
+                        FROM files f
+                        JOIN top_groups tg
+                          ON tg.content_hash = f.content_hash
+                         AND tg.size_bytes = f.size_bytes
+                        WHERE f.failed = 0
+                    )
+                    SELECT * FROM ranked
+                    WHERE member_rank <= ?
+                    ORDER BY group_count DESC, hex(content_hash), size_bytes, member_rank
+                    LIMIT ?
+                    """, arguments: [
+                        Self.cleanupMaxGroups,
+                        Self.cleanupMaxVisibleMembersPerGroup,
+                        Self.cleanupMaxVisibleMembers
+                    ])
+                var order: [ExactDuplicateKey] = []
+                var filesByKey: [ExactDuplicateKey: [FileRow]] = [:]
+                var counts: [ExactDuplicateKey: Int] = [:]
+                for row in rows {
+                    guard let hash: Data = row["content_hash"] else { continue }
+                    let key = ExactDuplicateKey(hash: hash, size: row["size_bytes"] ?? 0)
+                    if filesByKey[key] == nil { order.append(key) }
+                    filesByKey[key, default: []].append(Self.toFileRow(row))
+                    counts[key] = row["group_count"] ?? 0
                 }
-
-                var groups: [DuplicateGroup] = []
-                groups.reserveCapacity(orderedHashes.count)
-                for hash in orderedHashes {
-                    guard var files = byHash[hash], files.count > 1 else { continue }
-                    // Keeper rank: aesthetic ↓, size ↓, earliest createdAt ↑, path depth ↑.
-                    files.sort { a, b in
-                        if (a.aesthetic ?? 0) != (b.aesthetic ?? 0) {
-                            return (a.aesthetic ?? 0) > (b.aesthetic ?? 0)
-                        }
-                        if a.sizeBytes != b.sizeBytes { return a.sizeBytes > b.sizeBytes }
-                        let ad = a.createdAt ?? .distantFuture
-                        let bd = b.createdAt ?? .distantFuture
-                        if ad != bd { return ad < bd }
-                        return a.pathText.count < b.pathText.count
-                    }
-                    groups.append(DuplicateGroup(id: Self.dupGroupID(hash), files: files))
+                return order.compactMap { key in
+                    guard let files = filesByKey[key], files.count > 1 else { return nil }
+                    let count = counts[key] ?? files.count
+                    return DuplicateGroup(
+                        id: Self.dupGroupID(key.hash), files: files,
+                        totalFileCount: count,
+                        totalBytes: Int64(count) * key.size)
                 }
-                return groups
             }
         } catch {
             reportError("Duplicate query failed: \(error)")
@@ -668,6 +672,20 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return [] }
         let rows: [Row]
         do {
+            let candidateCount = try q.read { db in
+                try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM files
+                    WHERE kind = 'image' AND failed = 0
+                      AND phash IS NOT NULL AND phash != 0
+                    """) ?? 0
+            }
+            guard candidateCount <= Self.nearDupImageCap else {
+                reportError(
+                    "Visually similar comparison is unavailable for \(candidateCount.formatted()) images: " +
+                    "the exact Hamming matcher is capped at \(Self.nearDupImageCap.formatted()). " +
+                    "Exact duplicate cleanup remains available.")
+                return []
+            }
             // phash == 0 is the engine's "none / failed" sentinel (see DBWriter),
             // so exclude it alongside NULL — otherwise every blank-hash image would
             // collapse into one giant false group.
@@ -684,11 +702,6 @@ public final class ReadStore: @unchecked Sendable {
         }
 
         guard rows.count > 1 else { return [] }
-        if rows.count > Self.nearDupImageCap {
-            NSLog("FileID v2 cleanup: %ld images with a dHash exceeds the %ld near-duplicate cap — skipping perceptual grouping to protect the UI.", rows.count, Self.nearDupImageCap)
-            return []
-        }
-
         var fileByID: [Int64: FileRow] = [:]
         fileByID.reserveCapacity(rows.count)
         var contentHashByID: [Int64: Data] = [:]
@@ -703,6 +716,7 @@ public final class ReadStore: @unchecked Sendable {
         }
 
         var groups: [DuplicateGroup] = []
+        var remaining = Self.cleanupMaxVisibleMembers
         for ids in PerceptualGrouping.groupByHamming(items, maxHamming: maxHamming) {
             var files = ids.compactMap { fileByID[$0] }
             guard files.count > 1 else { continue }
@@ -724,11 +738,20 @@ public final class ReadStore: @unchecked Sendable {
             // which copy currently ranks as keeper, so SwiftUI identity (and the
             // user's skip state) survives a mid-scan re-rank.
             let gid = files.map(\.id).min() ?? files[0].id
-            groups.append(DuplicateGroup(id: gid, files: files, isSimilar: true))
+            guard remaining >= 2 else { break }
+            let totalCount = files.count
+            let totalBytes = files.reduce(Int64(0)) { $0 + $1.sizeBytes }
+            let visibleCount = min(
+                totalCount, Self.cleanupMaxVisibleMembersPerGroup, remaining)
+            files = Array(files.prefix(visibleCount))
+            groups.append(DuplicateGroup(
+                id: gid, files: files, isSimilar: true,
+                totalFileCount: totalCount, totalBytes: totalBytes))
+            remaining -= files.count
         }
         // Largest clusters first, mirroring the exact view's ORDER BY n DESC.
         groups.sort { $0.files.count > $1.files.count }
-        return groups
+        return Array(groups.prefix(Self.cleanupMaxGroups))
     }
 
     /// Off-main twin of `similarImageGroups`. The O(N²) Hamming scan + per-group

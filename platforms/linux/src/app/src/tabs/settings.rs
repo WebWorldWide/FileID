@@ -29,8 +29,8 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::glib::clone;
 
-use crate::engine_client::{EngineClient, EngineEvent};
 use super::util::glass_card;
+use crate::engine_client::{EngineClient, EngineEvent};
 use fileid_engine::ipc::{CancelPrewarmPayload, CommandPayload, Empty, PrewarmModelPayload};
 
 /// Installable model slots, in macOS card order. Each `model_kind` is resolved
@@ -147,7 +147,11 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 /// renders an install-state-aware footer, and drives download / cancel /
 /// remove. State recomputes from disk (the registry's `dest` paths), so a
 /// model installed out-of-band (CLI, another platform) is detected too.
-fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blurb: &str) -> gtk::Widget {
+fn build_model_card(
+    engine: &Rc<RefCell<EngineClient>>,
+    kind: &'static str,
+    blurb: &str,
+) -> gtk::Widget {
     let (display_name, files) = resolve_slot(kind);
     let total_bytes: u64 = files.iter().map(|(_, b)| *b).sum();
 
@@ -248,7 +252,10 @@ fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blur
                         .build(),
                 );
                 let open_btn = gtk::Button::with_label("Show files");
-                if let Some(dir) = files.first().and_then(|(p, _)| p.parent().map(|d| d.to_path_buf())) {
+                if let Some(dir) = files
+                    .first()
+                    .and_then(|(p, _)| p.parent().map(|d| d.to_path_buf()))
+                {
                     open_btn.connect_clicked(move |_| open_path(&dir));
                 }
                 row.append(&open_btn);
@@ -304,7 +311,9 @@ fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blur
                     let downloading = downloading.clone();
                     cancel_btn.connect_clicked(move |_| {
                         let _ = engine.borrow_mut().send(CommandPayload::CancelPrewarm(
-                            CancelPrewarmPayload { model_kind: Some(kind.to_string()) },
+                            CancelPrewarmPayload {
+                                model_kind: Some(kind.to_string()),
+                            },
                         ));
                         downloading.set(false);
                         rerender(&again);
@@ -333,7 +342,9 @@ fn build_model_card(engine: &Rc<RefCell<EngineClient>>, kind: &'static str, blur
                     let files = files.clone();
                     dl_btn.connect_clicked(move |_| {
                         let _ = engine.borrow_mut().send(CommandPayload::PrewarmModel(
-                            PrewarmModelPayload { model_kind: kind.to_string() },
+                            PrewarmModelPayload {
+                                model_kind: kind.to_string(),
+                            },
                         ));
                         downloading.set(true);
                         rerender(&again);
@@ -382,7 +393,11 @@ fn resolve_slot(kind: &str) -> (String, Vec<(PathBuf, u64)>) {
     match lookup_full(kind) {
         LookupResult::Found(model) => (
             model.display_name.to_string(),
-            model.files.iter().map(|f| (f.dest.clone(), f.approx_bytes)).collect(),
+            model
+                .files
+                .iter()
+                .map(|f| (f.dest.clone(), f.approx_bytes))
+                .collect(),
         ),
         LookupResult::Unknown => (kind.to_string(), Vec::new()),
     }
@@ -621,7 +636,11 @@ fn scan_row(s: &ScanRow) -> gtk::Widget {
     };
     let marker = gtk::Label::builder()
         .label(mark)
-        .css_classes(if s.status == "completed" { ["gold-accent"] } else { ["dim-label"] })
+        .css_classes(if s.status == "completed" {
+            ["gold-accent"]
+        } else {
+            ["dim-label"]
+        })
         .build();
     row.append(&marker);
 
@@ -639,10 +658,18 @@ fn scan_row(s: &ScanRow) -> gtk::Widget {
             .css_classes(["monospace"])
             .build(),
     );
-    let count = s.last_file_index.map(|n| format!(" · {n} files")).unwrap_or_default();
+    let count = s
+        .last_file_index
+        .map(|n| format!(" · {n} files"))
+        .unwrap_or_default();
     detail.append(
         &gtk::Label::builder()
-            .label(format!("{} · {}{}", fmt_unix(s.started_at), s.status, count))
+            .label(format!(
+                "{} · {}{}",
+                fmt_unix(s.started_at),
+                s.status,
+                count
+            ))
             .xalign(0.0)
             .css_classes(["dim-label", "monospace"])
             .build(),
@@ -664,7 +691,9 @@ fn build_logs_card() -> gtk::Widget {
     );
     card.append(
         &gtk::Label::builder()
-            .label("The tail of the engine's local-only log, for troubleshooting. Never transmitted.")
+            .label(
+                "The tail of the engine's local-only log, for troubleshooting. Never transmitted.",
+            )
             .xalign(0.0)
             .wrap(true)
             .css_classes(["dim-label"])
@@ -781,7 +810,10 @@ fn info_row(key: &str, value: &str) -> gtk::Box {
 }
 
 fn set_info_value(row: &gtk::Box, value: &str) {
-    if let Some(label) = row.last_child().and_then(|w| w.downcast::<gtk::Label>().ok()) {
+    if let Some(label) = row
+        .last_child()
+        .and_then(|w| w.downcast::<gtk::Label>().ok())
+    {
         label.set_label(value);
     }
 }
@@ -842,7 +874,9 @@ fn read_storage() -> StorageStats {
         }
         let conn = fileid_engine::db::open_read(&p).ok()?;
         let tf: i64 = conn
-            .query_row("SELECT COUNT(*) FROM files", rusqlite::params![], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM files", rusqlite::params![], |r| {
+                r.get(0)
+            })
             .ok()?;
         let ti: i64 = conn
             .query_row(
@@ -855,7 +889,13 @@ fn read_storage() -> StorageStats {
     })()
     .unwrap_or((0, 0));
 
-    StorageStats { total_files, total_images, db_bytes, db_path: db_path_str, models_dir }
+    StorageStats {
+        total_files,
+        total_images,
+        db_bytes,
+        db_path: db_path_str,
+        models_dir,
+    }
 }
 
 #[derive(Default)]

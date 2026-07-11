@@ -107,9 +107,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             let created = system_time_to_unix(meta.created().ok());
 
             if !rescan {
-                let prior: Option<f64> = sel
-                    .query_row(params![path_text], |r| r.get(0))
-                    .ok();
+                let prior: Option<f64> = sel.query_row(params![path_text], |r| r.get(0)).ok();
                 if let (Some(prev), Some(modi)) = (prior, modified) {
                     if prev >= modi {
                         skipped += 1;
@@ -190,13 +188,13 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             "  Indexed:      {indexed}  {}",
             ctx.dim(&format!("({discovered} found, {skipped} unchanged)"))
         );
-        println!("  Text-indexed: {text_indexed} {}", ctx.dim("(full-text search)"));
+        println!(
+            "  Text-indexed: {text_indexed} {}",
+            ctx.dim("(full-text search)")
+        );
         println!("  Duration:     {secs:.2}s{rate}");
         if indexed > 0 {
-            println!(
-                "  Search it:    {}",
-                ctx.bold("fileid search \"<words>\"")
-            );
+            println!("  Search it:    {}", ctx.bold("fileid search \"<words>\""));
         }
         println!(
             "  Add AI tags · faces · visual search: {}",
@@ -205,7 +203,9 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         if text_indexed == 0 {
             println!(
                 "  {}",
-                ctx.dim("note: no plain-text files here; image tags/faces need an AI scan (`--models`)")
+                ctx.dim(
+                    "note: no plain-text files here; image tags/faces need an AI scan (`--models`)"
+                )
             );
         }
     }

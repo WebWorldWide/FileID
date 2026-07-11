@@ -84,8 +84,10 @@ struct IPCProtocolTests {
         ]
         let renames = [RenameEntry(fileID: 1, newName: "vacation_beach")]
         let commands: [IPCCommand.Payload] = [
-            .planRestructure(libraryRoot: "/Users/x/Pictures"),
-            .applyRestructure(libraryRoot: "/Users/x/Pictures", moves: moves, useSymlinks: true),
+            .planRestructure(libraryRoot: "/Users/x/Pictures", supportsPagedPlans: false),
+            .applyRestructure(
+                libraryRoot: "/Users/x/Pictures", moves: moves,
+                useSymlinks: true, planID: nil),
             .applyTags(fileIDs: [1, 2, 3], tags: ["beach", "summer"], mode: "add"),
             .renameFiles(renames: renames),
             .purgeExcluded(excludedPaths: ["/Users/x/Pictures/.cache"]),

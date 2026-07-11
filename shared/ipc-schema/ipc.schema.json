@@ -125,13 +125,17 @@
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": { "libraryRoot": { "type": "string" } } } } },
+            "properties": {
+              "libraryRoot": { "type": "string" },
+              "supportsPagedPlans": { "type": "boolean", "default": false, "description": "Opt in to a bounded move preview backed by an engine-owned plan spool. Older clients omit this and receive the legacy full plan." }
+            } } } },
 
         { "type": "object", "required": ["applyRestructure"], "additionalProperties": false,
           "properties": { "applyRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot", "moves", "useSymlinks"],
             "properties": {
               "libraryRoot": { "type": "string" },
+              "planID": { "type": ["string", "null"], "description": "Engine-owned paged plan to apply in full. When present, moves is normally empty." },
               "moves": { "type": "array", "items": {
                 "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
@@ -640,6 +644,9 @@
             "required": ["libraryRoot", "moves", "categoryCounts"],
             "properties": {
               "libraryRoot":           { "type": "string" },
+              "planID":                { "type": ["string", "null"], "description": "Opaque engine-owned plan handle. Present only for an opt-in truncated preview." },
+              "totalMoves":            { "type": ["integer", "null"], "minimum": 0, "description": "Exact move count when moves is a bounded preview." },
+              "truncated":             { "type": "boolean", "default": false, "description": "True when moves contains only a bounded preview; apply using planID rather than echoing moves." },
               "moves":                 { "type": "array", "items": { "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
                 "properties": {

@@ -90,9 +90,10 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     // silent macOS default through, so info/search/people/dedupe/restructure all
     // reported no AI data immediately after a successful scan.
     if engine_writes_unseen_library(engine_db.as_deref(), ctx.db.as_path()) {
-        let where_ = engine_db
-            .as_ref()
-            .map_or_else(|| "<engine default>".to_string(), |p| p.display().to_string());
+        let where_ = engine_db.as_ref().map_or_else(
+            || "<engine default>".to_string(),
+            |p| p.display().to_string(),
+        );
         let reader = if ctx.db_explicit {
             "your pinned --db"
         } else {
@@ -191,7 +192,10 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
         return;
     }
 
-    println!("{}", ctx.bold("Full-pipeline scan unavailable — AI models not installed."));
+    println!(
+        "{}",
+        ctx.bold("Full-pipeline scan unavailable — AI models not installed.")
+    );
     println!("  Missing:");
     for (kind, name) in missing {
         println!("    {} {}", name, ctx.dim(&format!("({kind})")));
@@ -240,7 +244,10 @@ fn report_runtime_missing(ctx: &Ctx) {
         }));
         return;
     }
-    println!("{}", ctx.bold("Full-pipeline scan unavailable — ONNX Runtime not installed."));
+    println!(
+        "{}",
+        ctx.bold("Full-pipeline scan unavailable — ONNX Runtime not installed.")
+    );
     println!(
         "  {}",
         ctx.dim("The AI models are installed, but the runtime that loads them isn't.")
@@ -267,7 +274,10 @@ fn report_no_engine(ctx: &Ctx) {
         }));
         return;
     }
-    println!("{}", ctx.bold("Full-pipeline scan unavailable — engine binary not found."));
+    println!(
+        "{}",
+        ctx.bold("Full-pipeline scan unavailable — engine binary not found.")
+    );
     println!("  Models are installed, but the {exe} binary could not be located.");
     println!("  {}", ctx.bold("Provide it via any of:"));
     println!("    • FILEID_ENGINE_BIN=/path/to/{exe}");
@@ -283,7 +293,10 @@ fn report_no_engine(ctx: &Ctx) {
 /// the outcome. Closes the engine's stdin on completion so its parent-EOF
 /// watchdog shuts it down cleanly.
 fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result<()> {
-    ctx.progress(&format!("  {}", ctx.dim(&format!("starting engine: {}", engine_bin.display()))));
+    ctx.progress(&format!(
+        "  {}",
+        ctx.dim(&format!("starting engine: {}", engine_bin.display()))
+    ));
 
     let mut child = Command::new(engine_bin)
         .stdin(Stdio::piped())
@@ -318,7 +331,12 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
     let _ = wait_briefly(&mut child);
 
     match outcome {
-        ScanOutcome::Complete { total, processed, failed, seconds } => {
+        ScanOutcome::Complete {
+            total,
+            processed,
+            failed,
+            seconds,
+        } => {
             if ctx.json {
                 print_json(&serde_json::json!({
                     "command": "scan",
@@ -346,9 +364,7 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                     }
                 );
                 let engine_db = fileid_engine::paths::db_path().ok();
-                if let Some((tags, faces, people)) =
-                    engine_db.as_deref().and_then(count_results)
-                {
+                if let Some((tags, faces, people)) = engine_db.as_deref().and_then(count_results) {
                     println!(
                         "  Results:    {tags} tags · {faces} files with faces · {people} people"
                     );
@@ -395,8 +411,16 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
 }
 
 enum ScanOutcome {
-    Complete { total: u64, processed: u64, failed: u64, seconds: f64 },
-    Error { kind: String, message: String },
+    Complete {
+        total: u64,
+        processed: u64,
+        failed: u64,
+        seconds: f64,
+    },
+    Error {
+        kind: String,
+        message: String,
+    },
     Aborted,
 }
 
@@ -477,7 +501,10 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
                 let e = w.inner;
                 // A transient phase=Failed often precedes the real error; the
                 // error event carries the actionable kind/message.
-                return ScanOutcome::Error { kind: e.kind, message: e.message };
+                return ScanOutcome::Error {
+                    kind: e.kind,
+                    message: e.message,
+                };
             }
             _ => {}
         }
@@ -491,12 +518,17 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
 /// the time we call this (the scan is done).
 fn count_results(db: &Path) -> Option<(i64, i64, i64)> {
     let conn = fileid_engine::db::open_read(db).ok()?;
-    let tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).ok()?;
+    let tags: i64 = conn
+        .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
+        .ok()?;
     let faces: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE has_faces = 1", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM files WHERE has_faces = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(0);
-    let people: i64 =
-        conn.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0)).unwrap_or(0);
+    let people: i64 = conn
+        .query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))
+        .unwrap_or(0);
     Some((tags, faces, people))
 }
 

@@ -155,10 +155,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         }
     }
     if let Some(s) = &source {
-        println!(
-            "  {}",
-            ctx.dim(&format!("Download source: {}", s.url))
-        );
+        println!("  {}", ctx.dim(&format!("Download source: {}", s.url)));
         if let Some(sha) = &s.archive_sha256 {
             println!("  {}", ctx.dim(&format!("Pinned SHA256:   {sha}")));
         }
@@ -198,7 +195,12 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
                     ctx.bold("ONNX Runtime already available:"),
                     ctx.dim(&p.display().to_string())
                 );
-                println!("  {}", ctx.dim("Pass --force to reinstall the pinned build into the engine runtime dir."));
+                println!(
+                    "  {}",
+                    ctx.dim(
+                        "Pass --force to reinstall the pinned build into the engine runtime dir."
+                    )
+                );
             }
             return Ok(());
         }
@@ -214,7 +216,10 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
     //    overridden runtime via the engine's CA-pinned, allow-listed path. ──
     if let Some(source) = configured_source() {
         if !ctx.confirm(
-            &format!("Download ONNX Runtime from {}? (one-time, ~10 MB)", source.url),
+            &format!(
+                "Download ONNX Runtime from {}? (one-time, ~10 MB)",
+                source.url
+            ),
             yes,
         ) {
             println!("Aborted. (nothing downloaded)");
@@ -223,7 +228,11 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        ctx.progress(&format!("  {} {}", ctx.bold("Downloading ONNX Runtime"), ctx.dim(&source.url)));
+        ctx.progress(&format!(
+            "  {} {}",
+            ctx.bold("Downloading ONNX Runtime"),
+            ctx.dim(&source.url)
+        ));
         provision_from_source(&source, &target)?;
         return report_installed(ctx, &target, "downloaded");
     }
@@ -254,8 +263,7 @@ fn copy_into_place(src: &std::path::Path, target: &std::path::Path) -> Result<()
     let parent = target
         .parent()
         .ok_or_else(|| anyhow::anyhow!("install target {} has no parent", target.display()))?;
-    std::fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
 
     let tmp = unique_temp_file(parent);
     std::fs::copy(src, &tmp)
@@ -284,7 +292,11 @@ fn provision_from_source(source: &RuntimeSource, target: &std::path::Path) -> Re
 /// `?query`/`#fragment` so a signed-URL mirror still classifies correctly.
 #[cfg(target_os = "macos")]
 fn url_is_tarball(url: &str) -> bool {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     path.ends_with(".tgz") || path.ends_with(".tar.gz")
 }
 
@@ -297,7 +309,8 @@ fn download_and_extract(source: &RuntimeSource, target: &std::path::Path) -> Res
     use anyhow::Context as _;
 
     let tmp = unique_temp_dir();
-    std::fs::create_dir_all(&tmp).with_context(|| format!("creating temp dir {}", tmp.display()))?;
+    std::fs::create_dir_all(&tmp)
+        .with_context(|| format!("creating temp dir {}", tmp.display()))?;
 
     let outcome = (|| -> Result<()> {
         let archive = tmp.join("onnxruntime.tgz");
@@ -311,7 +324,8 @@ fn download_and_extract(source: &RuntimeSource, target: &std::path::Path) -> Res
         })?;
 
         if let Some(expected) = source.extracted_dylib_sha256.as_deref() {
-            verify_sha256(&dylib, expected).context("verifying the extracted ONNX Runtime dylib")?;
+            verify_sha256(&dylib, expected)
+                .context("verifying the extracted ONNX Runtime dylib")?;
         }
 
         copy_into_place(&dylib, target)
@@ -360,7 +374,9 @@ fn locate_extracted_dylib(root: &std::path::Path) -> Option<std::path::PathBuf> 
         if path_has_dsym_component(path) {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !(name.starts_with("libonnxruntime.") && name.ends_with(".dylib")) {
             continue;
         }
@@ -493,7 +509,10 @@ fn report_installed(ctx: &Ctx, target: &std::path::Path, how: &str) -> Result<()
             ctx.dim(&format!("({how})")),
             ctx.dim(&target.display().to_string()),
         );
-        println!("  {}", ctx.dim("Run `fileid scan <folder> --models` for a full AI scan."));
+        println!(
+            "  {}",
+            ctx.dim("Run `fileid scan <folder> --models` for a full AI scan.")
+        );
     }
     Ok(())
 }
@@ -624,7 +643,11 @@ mod tests {
             .join("Resources")
             .join("DWARF");
         std::fs::create_dir_all(&dwarf).unwrap();
-        std::fs::write(dwarf.join("libonnxruntime.1.22.0.dylib"), b"dwarf-not-the-real-dylib").unwrap();
+        std::fs::write(
+            dwarf.join("libonnxruntime.1.22.0.dylib"),
+            b"dwarf-not-the-real-dylib",
+        )
+        .unwrap();
 
         let found = locate_extracted_dylib(&dir).expect("a core dylib must be located");
         assert_eq!(
@@ -666,7 +689,11 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "a successful install must leave no temp file: {names:?}");
+        assert_eq!(
+            names.len(),
+            2,
+            "a successful install must leave no temp file: {names:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -691,7 +718,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert!(leftovers.is_empty(), "a failed install must clean up its temp file: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "a failed install must clean up its temp file: {leftovers:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -702,7 +732,9 @@ mod tests {
             "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz"
         ));
         assert!(url_is_tarball("https://example.test/foo.tar.gz"));
-        assert!(url_is_tarball("https://example.test/foo.TGZ?token=abc#frag"));
+        assert!(url_is_tarball(
+            "https://example.test/foo.TGZ?token=abc#frag"
+        ));
         assert!(!url_is_tarball("https://example.test/libonnxruntime.dylib"));
     }
 }

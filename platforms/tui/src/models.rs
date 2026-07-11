@@ -63,17 +63,19 @@ const DOWNLOAD_ARGS: [&str; 9] = [
 /// `Done` (which clears the gauge); any failure becomes a single `LoadMsg::Error`.
 /// Returns a [`DownloadHandle`] the caller keeps so it can `kill()` the child on
 /// quit (the CLI has no parent watchdog, so it would otherwise orphan).
-pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) -> DownloadHandle {
+pub fn spawn_download(db: PathBuf, query: String, tx: Sender<LoadMsg>) -> DownloadHandle {
     let child_slot: DownloadHandle = Arc::new(Mutex::new(None));
     let worker_slot = Arc::clone(&child_slot);
     std::thread::spawn(move || match run_download(&tx, &worker_slot) {
         Ok(()) => {
-            let _ = tx.send(LoadMsg::Status("AI models installed — refreshing…".to_string()));
+            let _ = tx.send(LoadMsg::Status(
+                "AI models installed — refreshing…".to_string(),
+            ));
             // Reloading after a model install never adds files (it fetches
             // weights, not library rows), but it refreshes state and clears the
             // `downloading`/`loading` flags. A not-yet-created scratch DB loads
             // as an empty snapshot rather than erroring.
-            match data::load(&db, &tx) {
+            match data::load(&db, &query, &tx) {
                 Ok(snap) => {
                     let _ = tx.send(LoadMsg::Status(
                         "AI models ready. Press s to scan a folder with full AI.".to_string(),
@@ -81,7 +83,9 @@ pub fn spawn_download(db: PathBuf, tx: Sender<LoadMsg>) -> DownloadHandle {
                     let _ = tx.send(LoadMsg::Done(Box::new(snap)));
                 }
                 Err(e) => {
-                    let _ = tx.send(LoadMsg::Error(format!("models installed, but reload failed: {e}")));
+                    let _ = tx.send(LoadMsg::Error(format!(
+                        "models installed, but reload failed: {e}"
+                    )));
                 }
             }
         }
@@ -150,7 +154,9 @@ fn run_download(tx: &Sender<LoadMsg>, child_slot: &DownloadHandle) -> Result<()>
     let Some(mut child) = child_slot.lock().ok().and_then(|mut s| s.take()) else {
         anyhow::bail!("model download was cancelled");
     };
-    let status = child.wait().context("waiting for the model download to finish")?;
+    let status = child
+        .wait()
+        .context("waiting for the model download to finish")?;
     if status.success() {
         Ok(())
     } else {
@@ -204,7 +210,10 @@ fn parse_porcelain_line(line: &str) -> ParsedLine {
         let pct = parts.next().unwrap_or("").trim();
         let label = parts.next().unwrap_or("").trim();
         if let Ok(percent) = pct.parse::<u16>() {
-            return ParsedLine::Progress { percent: percent.min(100), label: label.to_string() };
+            return ParsedLine::Progress {
+                percent: percent.min(100),
+                label: label.to_string(),
+            };
         }
     }
     ParsedLine::Status(line.trim().to_string())
@@ -254,7 +263,9 @@ fn locate_fileid_cli() -> Option<PathBuf> {
 
 fn which_on_path(exe: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(exe)).find(|cand| cand.is_file())
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|cand| cand.is_file())
 }
 
 #[cfg(test)]
@@ -311,7 +322,10 @@ mod tests {
         let label = "arcface · 182/271 MB · 3.4 MB/s · model 2/9";
         assert_eq!(
             parse_porcelain_line(&format!("PROGRESS\t62\t{label}")),
-            ParsedLine::Progress { percent: 62, label: label.to_string() },
+            ParsedLine::Progress {
+                percent: 62,
+                label: label.to_string()
+            },
         );
     }
 
@@ -320,7 +334,10 @@ mod tests {
     fn final_progress_line_is_100_done() {
         assert_eq!(
             parse_porcelain_line("PROGRESS\t100\tdone"),
-            ParsedLine::Progress { percent: 100, label: "done".to_string() },
+            ParsedLine::Progress {
+                percent: 100,
+                label: "done".to_string()
+            },
         );
     }
 
@@ -343,8 +360,14 @@ mod tests {
     /// status message rather than panicking (defensive against wire corruption).
     #[test]
     fn malformed_progress_line_degrades_to_status_not_panic() {
-        assert!(matches!(parse_porcelain_line("PROGRESS\tNaN\tlabel"), ParsedLine::Status(_)));
-        assert!(matches!(parse_porcelain_line("PROGRESS\t\t"), ParsedLine::Status(_)));
+        assert!(matches!(
+            parse_porcelain_line("PROGRESS\tNaN\tlabel"),
+            ParsedLine::Status(_)
+        ));
+        assert!(matches!(
+            parse_porcelain_line("PROGRESS\t\t"),
+            ParsedLine::Status(_)
+        ));
     }
 
     /// An out-of-range percent is clamped to 0–100 so `Gauge::percent` (which
@@ -353,7 +376,10 @@ mod tests {
     fn progress_percent_is_clamped_to_100() {
         assert_eq!(
             parse_porcelain_line("PROGRESS\t150\tx"),
-            ParsedLine::Progress { percent: 100, label: "x".to_string() },
+            ParsedLine::Progress {
+                percent: 100,
+                label: "x".to_string()
+            },
         );
     }
 }
