@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-11 (cont.) — CRITICAL native crash on real data root-caused + fixed; full 71k Adlon scan GREEN at 43 f/s
+
+**The bug (0xC0000005, mid-scan, silent):** scanning the real family drive (`F:\Adlon Drive\Family Shared`, 71,333 files) killed the engine ~2 min in — reproduced **4/4 times at the identical corpus position**, with nothing in the engine log (native AV never reaches tracing), nothing in WER, and the iterate harness blind to it. Root-caused via procdump minidump: **fault READ inside the former address range of WinTypes.dll, which sat in the dump's unloaded-module list** next to Windows.Media.Ocr.dll / windowscodecs.dll / Bcp47Langs.dll. Mechanism: every shell/WinRT call site (OCR/HEIC/video) does per-call `CoInitializeEx`/`CoUninitialize` on tokio blocking-pool threads; when a corpus stretch produced an OCR-idle gap, the last uninit dropped the process MTA to zero → Windows **unloaded the WinRT stack** → the `windows` crate's process-wide factory cache kept dangling pointers → the next OCR call read a dead vtable. Timing-dependent: the harness's slow async stdout consumer created the gap (4/4 deaths); a fast-consumer driver never crashed (30+ min). The 1,955-file subset containing the "suspect" PNG passed — the last-logged file was pipeline position, not the victim.
+
+**The fix:** pin the MTA for process lifetime with `CoIncrementMTAUsage()` at engine startup (`main.rs`, before the tokio runtime) — the WinRT DLLs and cached factories can then never unload. Cookie intentionally never decremented.
+
+**Verification (on-hardware, RTX 5080 + USB-SSD Adlon drive):** full 71,333-file iterate run — **all assertions GREEN, 43 files/sec** (above the 40 f/s internal-drive baseline; the drive is a Micron X9 USB SSD, no seek penalty, so the new decode clamp correctly does not engage), peak RAM 6,992 MB (< 8,500 cap), 84,582 SFace embeddings, person clusters sane (largest 6,782 faces). Scan+cluster 1,478 s, zero crashes, procdump armed and silent.
+
+**Also landed with this:** iterate.ps1 now registers an `Exited` handler that prints the **engine exit code** on any mid-scan death (this run's `0xC0000005` line was the pivotal clue); a Trace-gated `decode start` forensic line in the decoder pool; AppImage script hardening (raster icon fallback + root-icon pre-place) — the AppImage refresh itself is **blocked by a linuxdeploy-continuous icon regression** ("Could not find suitable icon" even with valid 256px PNG + .DirIcon pre-placed, 3 attempts) — the v0.0.1 release keeps the 07-05 AppImage; Windows installers were rebuilt post-fix and re-uploaded.
+
 ## 2026-07-11 — Post-merge multi-agent audit: 12 findings, 11 fixed (2 HIGH data-integrity), macOS CI fixed
 
 Ran an adversarially-verified multi-agent audit over the merged `scale-and-paged-plans` branch (4 dimensions: merge-loss, engine coherence, WinUI runtime, perf-scaling). 12 findings, 8 confirmed by refutation agents (0 refuted), 4 verified by hand (all real). All fixed except two deliberately deferred (NEXT.md).

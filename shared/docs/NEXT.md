@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## STATUS 2026-07-11 (later) — WinRT-unload crash fixed + 71k on-hardware GREEN; remaining follow-ups
+
+The critical mid-scan 0xC0000005 is fixed (CoIncrementMTAUsage pin; STATE top entry) and the full Adlon 71k scan passes at 43 f/s. New follow-ups from this session:
+
+1. **AppImage refresh blocked by linuxdeploy-continuous icon regression.** `packaging/appimage/build-appimage.sh` (now hardened: raster fallback + root-icon pre-place) still dies with "Could not find suitable icon for Icon entry" on today's linuxdeploy continuous — 3 attempts incl. valid 256×256 PNG + `.DirIcon` pre-placed. The v0.0.1 release keeps the 2026-07-05 AppImage. Options: vendor a known-good linuxdeploy build, drive `appimagetool` directly after the GTK plugin stage, or wait out upstream. Re-try at the next release cut.
+2. **Transient 15.8 GB RSS observed once** during a fast-consumer full-corpus run (steady ~7 GB on the harness run that passed). Likely decode read-ahead ballooning when stdout never backpressures. Watch peak RSS on the next few full scans; if it recurs, bound the pre-decode budget harder on >8-thread pools.
+3. Engine exit-code forensics (iterate.ps1 `Exited` handler) and the Trace-gated `decode start` line are now permanent harness features — reach for them first on any future silent death.
+
 ## STATUS 2026-07-11 — audit fixes landed on the branch; two deferred CLI-dedupe scale items
 
 The post-merge audit (STATE top entry) fixed 11/12 findings. The two deliberately deferred (both CLI `dedupe`, medium, not blocking daily app use):

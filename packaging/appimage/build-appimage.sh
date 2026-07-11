@@ -70,6 +70,18 @@ install -Dm644 "${DATA}/${APP_ID}.desktop"      "${APPDIR}/usr/share/application
 install -Dm644 "${DATA}/${APP_ID}.metainfo.xml" "${APPDIR}/usr/share/metainfo/${APP_ID}.metainfo.xml"
 install -Dm644 "${DATA}/${APP_ID}.svg"          "${APPDIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
 
+# linuxdeploy's root-icon (.DirIcon) step rejects a scalable-only theme on
+# some continuous builds — give it a 256px raster fallback when a
+# rasterizer is available.
+PNG_DIR="${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+if command -v rsvg-convert >/dev/null 2>&1; then
+  mkdir -p "${PNG_DIR}"
+  rsvg-convert -w 256 -h 256 "${DATA}/${APP_ID}.svg" -o "${PNG_DIR}/${APP_ID}.png"
+elif command -v convert >/dev/null 2>&1; then
+  mkdir -p "${PNG_DIR}"
+  convert -background none -resize 256x256 "${DATA}/${APP_ID}.svg" "${PNG_DIR}/${APP_ID}.png"
+fi
+
 # --- 4. AppRun hook: point load-dynamic ONNX Runtime at the bundled .so -------
 # Files in AppDir/apprun-hooks/*.sh are sourced by linuxdeploy's generated
 # AppRun (which the GTK plugin extends with its own GTK/GdkPixbuf env). The
@@ -87,11 +99,22 @@ export DEPLOY_GTK_VERSION=4
 export OUTPUT="FileID-x86_64.AppImage"
 export LDAI_OUTPUT="${OUTPUT}"
 
+# Prefer handing linuxdeploy the raster: some continuous builds fail the
+# desktop-root icon lookup when given only an SVG. The icon must come from
+# OUTSIDE the AppDir (an in-AppDir path can be deduped into an empty icon
+# list), and pre-placing the root icons short-circuits the flaky lookup.
+ICON_ARG="${DATA}/${APP_ID}.svg"
+if [ -f "${PNG_DIR}/${APP_ID}.png" ]; then
+  ICON_ARG="${WORK}/${APP_ID}.png"
+  cp "${PNG_DIR}/${APP_ID}.png" "${ICON_ARG}"
+  cp "${PNG_DIR}/${APP_ID}.png" "${APPDIR}/${APP_ID}.png"
+  cp "${PNG_DIR}/${APP_ID}.png" "${APPDIR}/.DirIcon"
+fi
 ( cd "${WORK}" && "${LD}" --appimage-extract-and-run \
     --appdir "${APPDIR}" \
     --plugin gtk \
     --desktop-file "${APPDIR}/usr/share/applications/${APP_ID}.desktop" \
-    --icon-file "${APPDIR}/usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg" \
+    --icon-file "${ICON_ARG}" \
     --output appimage )
 
 echo "Done: ${WORK}/${OUTPUT}"
