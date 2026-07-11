@@ -13,12 +13,20 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use parking_lot::Mutex;
+use sha2::Digest;
 use tokio::sync::{mpsc, Semaphore};
 
 /// Opt-in per-stage tracing for perf investigations. Default off — toggle via
 /// `FILEID_PERF_TRACE=1`. When on, `process_file` emits a `[PERF]` debug line
 /// for each pipeline stage with `path` + `elapsed_ms` so a 100-file run can be
 /// distilled into a stage-cost table.
+fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+    let digest = sha2::Sha256::digest(bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 fn perf_trace_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| {
@@ -182,7 +190,7 @@ pub struct TaggedFile {
     pub error_message: Option<String>,
 
     /// Volume-local file identity (propagated from `DiscoveredFile.file_ref`)
-    /// and BLAKE3 content identity (computed here). Together they drive the
+    /// and SHA-256 content identity (computed here). Together they drive the
     /// dbwriter's rename/move heal: a moved file with a matching `file_ref`
     /// (same volume) or `content_hash` (cross-volume) re-binds to its
     /// existing catalog row instead of orphaning its tags + embeddings +
@@ -1098,8 +1106,8 @@ fn run_decoder_thread(
                             // unparsed downstream.
                             exif_data =
                                 Some(parse_exif_fields(&bytes).unwrap_or((None, None, None)));
-                            // ≤16 MB → full BLAKE3.
-                            content_hash = Some(*blake3::hash(&bytes).as_bytes());
+                            // ≤16 MB → full SHA-256 (cross-platform with Swift).
+                            content_hash = Some(sha256_bytes(&bytes));
                             file_bytes = Some(bytes);
                         }
                     }
@@ -1122,7 +1130,7 @@ fn run_decoder_thread(
                 }
                 // Doc / PDF / Audio share the image-style single-read pattern
                 // when the file fits in the full-hash window (16 MB). The
-                // buffer feeds both BLAKE3 and the kind-specific extractor,
+                // buffer feeds both SHA-256 and the kind-specific extractor,
                 // skipping the worker's content_hash fallback re-open. Files
                 // above the cap fall through to the composite-hash + path-
                 // based extractor path (a head+tail+size read of 2 MB total),
@@ -1133,7 +1141,7 @@ fn run_decoder_thread(
                     if let Ok(mut f) = open_image_file(&file.path) {
                         let mut bytes = Vec::with_capacity((file.size_bytes as usize).min(MAX_PREALLOC_BYTES));
                         if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
-                            content_hash = Some(*blake3::hash(&bytes).as_bytes());
+                            content_hash = Some(sha256_bytes(&bytes));
                             file_bytes = Some(bytes);
                         }
                     }
