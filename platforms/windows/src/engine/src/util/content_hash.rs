@@ -20,63 +20,43 @@ use sha2::Digest;
 pub(crate) const FULL_HASH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// Bytes read from the head and (separately) the tail for the composite.
 const CHUNK: usize = 1024 * 1024;
+const INTERIOR_SAMPLES: u64 = 4;
+const INTERIOR_CHUNK: usize = 64 * 1024;
 
 /// 32-byte SHA-256 content identity for `path` (whose length is `size`). Same
 /// bytes -> same hash, so a moved/renamed file re-binds to its existing
 /// catalog row instead of being recomputed. Opens long paths safely.
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, true)
+    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES)
 }
 
-/// Legacy Rust recipe: BLAKE3, and for over-cap files head ‖ tail ‖ size_le
-/// with no interior samples. Kept for rename-heal compatibility — rows stamped
-/// before the cross-platform SHA-256 switch carry this digest, so the heal lookup
-/// must be able to reproduce it or upgraded DBs lose rows on first post-upgrade
-/// move. New writes always use `content_hash`; the heal upsert re-stamps the
-/// current SHA-256 recipe.
-pub(crate) fn legacy_content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
-    legacy_hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, false)
+/// Every BLAKE3 digest a pre-SHA-256 build could have stamped for this file.
+/// Rows written by those builds (released v0.0.1 stamped BLAKE3) only
+/// rename-heal if the lookup reproduces the exact digest they hold; the heal
+/// upsert then re-stamps the current SHA-256 recipe, retiring the probe per row.
+pub(crate) struct LegacyHashes {
+    /// The digest v0.0.1 stamped: full-file BLAKE3 at or under the cap,
+    /// blake3(head ‖ interior samples ‖ tail ‖ size_le) over it.
+    pub v2: [u8; 32],
+    /// blake3(head ‖ tail ‖ size_le) — the pre-interior-sample composite that
+    /// pre-v0.0.1 dev builds stamped for over-cap files (rows never rescanned
+    /// since may still hold it). `None` at or under the cap, where every
+    /// legacy build stamped the same full-file BLAKE3 as `v2`.
+    pub v1: Option<[u8; 32]>,
+}
+
+/// Both legacy digests in one read: the shared head/tail bytes feed both
+/// hashers, only `v2` sees the interior samples. The recipes are frozen —
+/// they reproduce digests already sitting in shipped databases.
+pub(crate) fn legacy_content_hashes(path: &Path, size: u64) -> std::io::Result<LegacyHashes> {
+    legacy_hashes_with_threshold(path, size, FULL_HASH_MAX_BYTES)
 }
 
 /// Testable core: `content_hash` with the full-vs-composite threshold injected
-/// so the composite path can be exercised on small fixtures. `interior_samples`
-/// selects the current composite recipe; `legacy_blake3` reproduces the old Rust
-/// BLAKE3 digests for move-heal compatibility.
-fn hash_with_threshold(
-    path: &Path,
-    size: u64,
-    full_max: u64,
-    interior_samples: bool,
-) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold_impl(path, size, full_max, interior_samples, false)
-}
-
-fn legacy_hash_with_threshold(
-    path: &Path,
-    size: u64,
-    full_max: u64,
-    interior_samples: bool,
-) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold_impl(path, size, full_max, interior_samples, true)
-}
-
-fn hash_with_threshold_impl(
-    path: &Path,
-    size: u64,
-    full_max: u64,
-    interior_samples: bool,
-    legacy_blake3: bool,
-) -> std::io::Result<[u8; 32]> {
+/// so the composite path can be exercised on small fixtures.
+fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result<[u8; 32]> {
     let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
     let mut sha = sha2::Sha256::new();
-    let mut blake = blake3::Hasher::new();
-    let mut update = |bytes: &[u8]| {
-        if legacy_blake3 {
-            blake.update(bytes);
-        } else {
-            sha.update(bytes);
-        }
-    };
     if size <= full_max {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -84,7 +64,7 @@ fn hash_with_threshold_impl(
             if n == 0 {
                 break;
             }
-            update(&buf[..n]);
+            sha.update(&buf[..n]);
         }
     } else {
         // Clamp to the file size so a file between `full_max` and CHUNK
@@ -94,47 +74,93 @@ fn hash_with_threshold_impl(
 
         let mut head = vec![0u8; span];
         let n = read_fill(&mut f, &mut head)?;
-        update(&head[..n]);
+        sha.update(&head[..n]);
 
         // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
         // same-size files that happen to share their head+tail (camera bursts,
         // container formats with identical headers/footers, padded archives)
         // don't collide and trigger a false rename-heal. Deterministic offsets;
         // skipped on files too small for interior reads to clear head/tail.
-        if interior_samples {
-            const INTERIOR_SAMPLES: u64 = 4;
-            const INTERIOR_CHUNK: usize = 64 * 1024;
-            for k in 1..=INTERIOR_SAMPLES {
-                let off = size.saturating_mul(k) / (INTERIOR_SAMPLES + 1);
-                if off < span as u64
-                    || off + INTERIOR_CHUNK as u64 > size.saturating_sub(span as u64)
-                {
-                    continue;
-                }
-                if f.seek(SeekFrom::Start(off)).is_ok() {
-                    let mut mid = vec![0u8; INTERIOR_CHUNK];
-                    let n = read_fill(&mut f, &mut mid)?;
-                    update(&mid[..n]);
-                }
+        for off in interior_offsets(size, span) {
+            if f.seek(SeekFrom::Start(off)).is_ok() {
+                let mut mid = vec![0u8; INTERIOR_CHUNK];
+                let n = read_fill(&mut f, &mut mid)?;
+                sha.update(&mid[..n]);
             }
         }
 
         f.seek(SeekFrom::End(-(span as i64)))?;
         let mut tail = vec![0u8; span];
         let n = read_fill(&mut f, &mut tail)?;
-        update(&tail[..n]);
+        sha.update(&tail[..n]);
 
         // Size disambiguates files that share head+tail but differ in the middle.
-        update(&size.to_le_bytes());
+        sha.update(size.to_le_bytes());
     }
-    if legacy_blake3 {
-        Ok(*blake.finalize().as_bytes())
-    } else {
-        let digest = sha.finalize();
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
-        Ok(out)
+    let digest = sha.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    Ok(out)
+}
+
+fn legacy_hashes_with_threshold(
+    path: &Path,
+    size: u64,
+    full_max: u64,
+) -> std::io::Result<LegacyHashes> {
+    let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
+    let mut v2 = blake3::Hasher::new();
+    if size <= full_max {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            v2.update(&buf[..n]);
+        }
+        return Ok(LegacyHashes {
+            v2: *v2.finalize().as_bytes(),
+            v1: None,
+        });
     }
+
+    let mut v1 = blake3::Hasher::new();
+    let span = size.min(CHUNK as u64) as usize;
+
+    let mut head = vec![0u8; span];
+    let n = read_fill(&mut f, &mut head)?;
+    v2.update(&head[..n]);
+    v1.update(&head[..n]);
+
+    for off in interior_offsets(size, span) {
+        if f.seek(SeekFrom::Start(off)).is_ok() {
+            let mut mid = vec![0u8; INTERIOR_CHUNK];
+            let n = read_fill(&mut f, &mut mid)?;
+            v2.update(&mid[..n]);
+        }
+    }
+
+    f.seek(SeekFrom::End(-(span as i64)))?;
+    let mut tail = vec![0u8; span];
+    let n = read_fill(&mut f, &mut tail)?;
+    v2.update(&tail[..n]);
+    v1.update(&tail[..n]);
+
+    v2.update(&size.to_le_bytes());
+    v1.update(&size.to_le_bytes());
+    Ok(LegacyHashes {
+        v2: *v2.finalize().as_bytes(),
+        v1: Some(*v1.finalize().as_bytes()),
+    })
+}
+
+fn interior_offsets(size: u64, span: usize) -> impl Iterator<Item = u64> {
+    (1..=INTERIOR_SAMPLES)
+        .map(move |k| size.saturating_mul(k) / (INTERIOR_SAMPLES + 1))
+        .filter(move |&off| {
+            off >= span as u64 && off + INTERIOR_CHUNK as u64 <= size.saturating_sub(span as u64)
+        })
 }
 
 /// Read until `buf` is full or EOF; returns bytes filled. A single `read`
@@ -204,10 +230,10 @@ mod tests {
         let body: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;
-        let c1 = hash_with_threshold(&p, size, 64, true).unwrap();
-        let c2 = hash_with_threshold(&p, size, 64, true).unwrap();
+        let c1 = hash_with_threshold(&p, size, 64).unwrap();
+        let c2 = hash_with_threshold(&p, size, 64).unwrap();
         assert_eq!(c1, c2, "composite hash must be deterministic");
-        let full = hash_with_threshold(&p, size, u64::MAX, true).unwrap();
+        let full = hash_with_threshold(&p, size, u64::MAX).unwrap();
         assert_ne!(c1, full, "composite (head+tail+size) differs from full hash");
         let _ = std::fs::remove_file(&p);
     }
@@ -222,15 +248,42 @@ mod tests {
         b[4095] = 2; // tail differs
         let pa = tmp_with(&a);
         let pb = tmp_with(&b);
-        let ha = hash_with_threshold(&pa, 4096, 64, true).unwrap();
-        let hb = hash_with_threshold(&pb, 4096, 64, true).unwrap();
+        let ha = hash_with_threshold(&pa, 4096, 64).unwrap();
+        let hb = hash_with_threshold(&pb, 4096, 64).unwrap();
         assert_ne!(ha, hb);
         let _ = std::fs::remove_file(&pa);
         let _ = std::fs::remove_file(&pb);
     }
 
     #[test]
-    fn legacy_fallback_reproduces_pre_interior_sample_recipe() {
+    fn legacy_under_cap_reproduces_the_full_blake3_v001_stamped() {
+        // v0.0.1 tagging.rs stamped blake3::hash(&bytes) for files that fit
+        // the full-hash window — the digest sitting in every shipped DB for
+        // ≤16 MB files.
+        let body: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let p = tmp_with(&body);
+        let size = body.len() as u64;
+        let stamped_by_v001 = *blake3::hash(&body).as_bytes();
+
+        let legacy = legacy_content_hashes(&p, size).unwrap();
+        assert_eq!(
+            legacy.v2, stamped_by_v001,
+            "under-cap legacy probe must reproduce the full-file BLAKE3 v0.0.1 stamped"
+        );
+        assert!(
+            legacy.v1.is_none(),
+            "under-cap files had one legacy recipe; no second candidate needed"
+        );
+        assert_ne!(
+            content_hash(&p, size).unwrap(),
+            stamped_by_v001,
+            "current SHA-256 must differ or the fallback is moot"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn legacy_v2_reproduces_the_v001_over_cap_recipe() {
         const MB: usize = 1024 * 1024;
         // >16 MB so the real public functions take the composite branch and
         // the interior samples genuinely fire (offsets clear the 1 MB edges).
@@ -238,7 +291,48 @@ mod tests {
         let p = tmp_with(&body);
         let size = body.len() as u64;
 
-        // The digest an origin/main build stamped into the DB:
+        // The digest released v0.0.1 stamped for over-cap files:
+        // blake3(head 1MB ‖ 4×64KB interior samples ‖ tail 1MB ‖ size_le),
+        // written out here from the v0.0.1 source, not via the code under test.
+        let mut h = blake3::Hasher::new();
+        h.update(&body[..MB]);
+        for k in 1..=4u64 {
+            let off = size.saturating_mul(k) / 5;
+            if off < MB as u64 || off + 64 * 1024 > size - MB as u64 {
+                continue;
+            }
+            h.update(&body[off as usize..off as usize + 64 * 1024]);
+        }
+        h.update(&body[body.len() - MB..]);
+        h.update(&size.to_le_bytes());
+        let stamped_by_v001 = *h.finalize().as_bytes();
+
+        let legacy = legacy_content_hashes(&p, size).unwrap();
+        assert_eq!(
+            legacy.v2, stamped_by_v001,
+            "legacy v2 must reproduce the v0.0.1 interior-sample recipe"
+        );
+        assert_ne!(
+            legacy.v1.unwrap(),
+            stamped_by_v001,
+            "interior samples must actually fire on this fixture"
+        );
+        assert_ne!(
+            content_hash(&p, size).unwrap(),
+            stamped_by_v001,
+            "current SHA-256 recipe must differ or the fallback is moot"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn legacy_v1_reproduces_pre_interior_sample_recipe() {
+        const MB: usize = 1024 * 1024;
+        let body: Vec<u8> = (0..17 * MB).map(|i| (i % 251) as u8).collect();
+        let p = tmp_with(&body);
+        let size = body.len() as u64;
+
+        // The digest a pre-interior-sample dev build stamped:
         // blake3(head 1MB ‖ tail 1MB ‖ size_le), no interior block.
         let mut h = blake3::Hasher::new();
         h.update(&body[..MB]);
@@ -247,14 +341,9 @@ mod tests {
         let stamped_by_old_build = *h.finalize().as_bytes();
 
         assert_eq!(
-            legacy_content_hash(&p, size).unwrap(),
-            stamped_by_old_build,
-            "legacy fallback must reproduce the recipe-v1 digest"
-        );
-        assert_ne!(
-            content_hash(&p, size).unwrap(),
-            stamped_by_old_build,
-            "current recipe must differ (interior samples) or the fallback is moot"
+            legacy_content_hashes(&p, size).unwrap().v1,
+            Some(stamped_by_old_build),
+            "legacy v1 must reproduce the recipe-v1 digest"
         );
         let _ = std::fs::remove_file(&p);
     }

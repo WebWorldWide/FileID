@@ -276,6 +276,25 @@ fn persist_rule_chunk(
     Ok(())
 }
 
+// An engine kill mid-plan orphans the `{uuid}.planning.sqlite` scratch DB (the
+// `remove_file` at the end of `plan_large_library_in` never runs). The
+// ndjson/tmp sweep in `write_stored_plan_in` executes while the live scratch is
+// still open, so stale scratch files are swept here — before a new one exists.
+fn sweep_stale_planning_scratch(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".planning.sqlite"))
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 fn plan_large_library(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     library_root: &str,
@@ -290,6 +309,7 @@ fn plan_large_library_in(
     dir: &Path,
 ) -> anyhow::Result<RestructurePlan> {
     std::fs::create_dir_all(dir)?;
+    sweep_stale_planning_scratch(dir);
     let planning_path = dir.join(format!("{}.planning.sqlite", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<RestructurePlan> {
         let mut plan_db = rusqlite::Connection::open(&planning_path)?;
@@ -1475,6 +1495,39 @@ mod tests {
                 .flatten()
                 .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
             "temporary planning database must be removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine kill mid-plan leaves the `{uuid}.planning.sqlite` scratch DB
+    /// behind (the end-of-plan `remove_file` never runs). The next large plan
+    /// must sweep those orphans, or they accumulate without bound.
+    #[test]
+    fn large_plan_sweeps_stale_planning_scratch() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-stale-scratch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale = dir.join(format!("{}.planning.sqlite", uuid::Uuid::new_v4()));
+        std::fs::write(&stale, b"orphaned by an engine kill mid-plan").unwrap();
+
+        plan_large_library_in(&db, "/library", &dir).unwrap();
+
+        assert!(
+            !stale.exists(),
+            "stale planning scratch swept before a new plan"
+        );
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
+            "no planning scratch left behind after planning"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

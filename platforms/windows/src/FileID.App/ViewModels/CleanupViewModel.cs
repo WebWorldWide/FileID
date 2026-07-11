@@ -85,11 +85,27 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         set { if (_mode != value) { _mode = value; OnPropertyChanged(); } }
     }
 
+    // Mode whose result currently populates Groups (UI-thread, set in ApplyOnUi).
+    // A failed reload for a DIFFERENT mode must clear the list — leaving it would
+    // render the old mode's groups under the new mode's header (e.g. Exact groups
+    // mislabeled after LoadSimilar's >20k cap exception). Same-mode failures keep
+    // the stale list so a transient DB error mid-scan doesn't wipe keeper/skip state.
+    private CleanupMode _groupsMode = CleanupMode.Exact;
+
     public async Task RefreshAsync(CancellationToken ct)
     {
         if (_disposed) return;
         long myGen = Interlocked.Increment(ref _refreshGen);
         Interlocked.Increment(ref _activeLoads);
+        // Snapshot the mode before fanning out to the thread pool so a mode
+        // flip mid-refresh can't make the background Load read a torn value;
+        // the generation guard in ApplyOnUi still discards the stale result.
+        var mode = _mode;
+        var displayedMode = _groupsMode;
+        void ClearStaleModeGroups()
+        {
+            if (displayedMode != mode) ApplyOnUi(Array.Empty<DuplicateGroup>(), myGen, mode);
+        }
         try
         {
             // Linked token created inside the try: a Dispose() race after the
@@ -98,13 +114,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
-            // Snapshot the mode before fanning out to the thread pool so a mode
-            // flip mid-refresh can't make the background Load read a torn value;
-            // the generation guard in ApplyOnUi still discards the stale result.
-            var mode = _mode;
             var groups = await Task.Run(() => Load(mode, token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(groups, myGen);
+            ApplyOnUi(groups, myGen, mode);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -115,9 +127,9 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
         // them to the captured UI thread — else a native fast-fail
         // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); ClearStaleModeGroups(); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
@@ -431,7 +443,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         return groups;
     }
 
-    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
+    private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen, CleanupMode mode)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -439,6 +451,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
+            _groupsMode = mode;
             Replace(rows);
         }
         if (_ui.HasThreadAccess) Apply();

@@ -57,6 +57,11 @@ public sealed partial class RestructureView : UserControl
     // re-rendering the SAME cached pre-apply plan (keep it engaged).
     private static bool _applying;
     private static RestructurePlan? _applyingPlan;
+    // True from the apply command send until its result/error arrives. A fresh
+    // plan landing in that window (user re-plan, DeepAnalyzeComplete auto
+    // re-plan) must NOT release _applying: a second concurrent apply truncates
+    // the first run's undo journal (open_undo_journal_truncating).
+    private static bool _applyInFlight;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     // R6-05: static (like _applying / _applyingPlan) so "the completion we've
@@ -249,7 +254,10 @@ public sealed partial class RestructureView : UserControl
         // sources (the false "some changes couldn't be applied" alarm this guard
         // exists to prevent). Every plan event deserializes a NEW record instance,
         // so the post-apply re-plan is a different reference and still releases.
-        if (!ReferenceEquals(plan, _applyingPlan))
+        // A new instance releases only once the apply's result/error has arrived
+        // (_applyInFlight false) — a fresh plan generated DURING the apply must
+        // keep Apply disabled or the concurrent run corrupts the undo journal.
+        if (ShouldReleaseApplyGuardOnPlanArrival(_applyInFlight, plan, _applyingPlan))
         {
             _applying = false;
             _applyingPlan = null;
@@ -722,6 +730,7 @@ public sealed partial class RestructureView : UserControl
             ? (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue)
             : sel.Count;
         _applying = true;
+        _applyInFlight = true;
         _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
@@ -739,6 +748,7 @@ public sealed partial class RestructureView : UserControl
             // the status freezes on "Moving N files..." (the apply-result event
             // never arrives). Surface it instead of a silent hang.
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
+            _applyInFlight = false;
             _applying = false;
             RecomputeSelection();
             ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
@@ -806,6 +816,7 @@ public sealed partial class RestructureView : UserControl
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (!IsUnhandledCompletion(r, _lastHandledApplyResult)) return;
         _lastHandledApplyResult = r;
+        _applyInFlight = false;
 
         // Anything actually moved -> the current plan is stale (real moves
         // updated the DB; applied rows must leave the view). Re-plan, exactly as
@@ -899,22 +910,30 @@ public sealed partial class RestructureView : UserControl
 
     // A plan/apply that dies engine-side surfaces as EngineClient.LastError with
     // a restructure kind (restructure.rs: "plan_restructure_failed" /
-    // "apply_restructure") - never as a Plan/ApplyResult event. Without handling
-    // it the tab freezes on "Computing plan..." / "Moving N files..." forever.
+    // "plan_restructure_db" / "plan_restructure_store" / "apply_restructure") -
+    // never as a Plan/ApplyResult event. Without handling it the tab freezes on
+    // "Computing plan..." / "Moving N files..." forever.
     // Only react to restructure kinds (LastError is a shared slot) and de-dupe.
     private void SyncEngineError()
     {
         var err = EngineClient.Instance.LastError;
         if (err is null || ReferenceEquals(err, _lastHandledError)) return;
-        if (err.Kind != "plan_restructure_failed" && err.Kind != "apply_restructure") return;
+        bool planError = IsPlanRestructureErrorKind(err.Kind);
+        if (!planError && err.Kind != "apply_restructure") return;
         _lastHandledError = err;
 
+        if (!planError) _applyInFlight = false;
         // The apply itself, or the post-apply re-plan, failed - release the
         // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
-        _applying = false;
-        RecomputeSelection();
+        // Except a plan failure while an apply is STILL in flight: releasing
+        // then would re-enable Apply for a concurrent run (see _applyInFlight).
+        if (!_applyInFlight)
+        {
+            _applying = false;
+            RecomputeSelection();
+        }
 
-        if (err.Kind == "plan_restructure_failed")
+        if (planError)
         {
             PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
             _ = ShowAlertAsync("Couldn't plan the reorganization",
@@ -924,12 +943,15 @@ public sealed partial class RestructureView : UserControl
         }
         else
         {
-            ApplyStatusText.Text = "Apply didn't complete - your files are unchanged. Try again.";
+            // No "your files are unchanged" claim: an apply that dies mid-run
+            // (task panic) may already have moved files; every completed move
+            // is in the engine's undo journal.
+            ApplyStatusText.Text = "Apply didn't complete - try again.";
             _ = ShowAlertAsync("Couldn't apply changes",
                 (string.IsNullOrWhiteSpace(err.Message)
                     ? "FileID couldn't finish applying your reorganization."
                     : err.Message) +
-                "\n\nYour originals are unchanged. Try again; if it keeps failing, check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+                "\n\nIf the run stopped partway, every move that completed was journaled and can be undone. Try again; if it keeps failing, check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
         }
     }
 
@@ -946,6 +968,20 @@ public sealed partial class RestructureView : UserControl
     // no-op and an already-surfaced completion can't re-alert.
     internal static bool IsUnhandledCompletion<T>([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] T? completion, T? lastSurfaced) where T : class
         => completion is not null && !ReferenceEquals(completion, lastSurfaced);
+
+    // Every plan-path failure kind the engine emits (restructure.rs:
+    // plan_restructure_failed / plan_restructure_db / plan_restructure_store).
+    // Prefix match so a new plan_restructure_* kind can't silently re-freeze
+    // the tab on "Computing plan...".
+    internal static bool IsPlanRestructureErrorKind(string kind)
+        => kind.StartsWith("plan_restructure", StringComparison.Ordinal);
+
+    // SyncPlan's guard-release rule: a new plan instance releases the apply
+    // single-flight guard only once the in-flight apply has completed
+    // (result or error arrived). See _applyInFlight.
+    internal static bool ShouldReleaseApplyGuardOnPlanArrival(
+        bool applyInFlight, object? incomingPlan, object? applyingPlan)
+        => !applyInFlight && !ReferenceEquals(incomingPlan, applyingPlan);
 
     // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible ContentDialog
     // that never escalates to App.UnhandledException on a broken XamlRoot.

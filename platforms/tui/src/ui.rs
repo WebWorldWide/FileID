@@ -187,6 +187,7 @@ fn render_body(f: &mut Frame, app: &App, area: Rect) {
         Tab::Library => render_library(f, app, area),
         Tab::People => render_people(f, app, area),
         Tab::Cleanup => render_cleanup(f, app, area),
+        Tab::DeepAnalyze => render_deep_analyze(f, app, area),
         Tab::Restructure => render_restructure(f, app, area),
         Tab::Settings => render_settings(f, app, area),
     }
@@ -718,6 +719,27 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
         None => Paragraph::new(Span::styled("—", Style::default().fg(DIM))),
     };
     f.render_widget(detail.block(block), cols[1]);
+}
+
+fn render_deep_analyze(f: &mut Frame, _app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    render_context(
+        f,
+        rows[0],
+        vec![Span::styled(
+            "Deep Analyze — VLM captions and smart names.",
+            Style::default().fg(DIM),
+        )],
+        None,
+    );
+    render_empty(
+        f,
+        rows[1],
+        "Deep Analyze",
+        "Use the desktop app for VLM review.",
+        "The terminal client can install the required AI models and scan folders, but the rich Deep Analyze review/rename workflow still lives in the native desktop app.",
+        Some(cta("D", "download models, then use FileID.app for Deep Analyze")),
+    );
 }
 
 fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
@@ -2305,10 +2327,15 @@ mod tests {
             "Library no-match CTA missing"
         );
 
-        // People / Cleanup / Restructure: each explains itself + offers a step.
+        // People / Cleanup / Deep Analyze / Restructure: each explains itself + offers a step.
         for (tab, headline, cta_text) in [
             (Tab::People, "No people yet.", "detect & group faces"),
             (Tab::Cleanup, "No duplicates found.", "check for duplicates"),
+            (
+                Tab::DeepAnalyze,
+                "Use the desktop app for VLM review.",
+                "download models",
+            ),
             (
                 Tab::Restructure,
                 "No moves to suggest yet.",

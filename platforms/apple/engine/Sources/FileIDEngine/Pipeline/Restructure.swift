@@ -88,11 +88,20 @@ public enum Restructure {
         }
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
+        // An engine kill mid-plan orphans the planning scratch DB (the defer
+        // below never runs); sweep stale ones before creating a new scratch.
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)
+        {
+            for file in files where file.lastPathComponent.contains(".planning.sqlite") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
         let planningURL = directory.appendingPathComponent(
             "\(UUID().uuidString.lowercased()).planning.sqlite")
         defer { try? FileManager.default.removeItem(at: planningURL) }
         let planDB = try DatabaseQueue(path: planningURL.path)
-        try planDB.write { db in
+        try await planDB.write { db in
             try db.execute(sql: """
                 CREATE TABLE raw_moves(
                     seq INTEGER PRIMARY KEY,
@@ -121,6 +130,7 @@ public enum Restructure {
             // Keyset pages release the pool read transaction between chunks, so
             // a million-file plan cannot pin one long-lived SQLite snapshot and
             // prevent WAL checkpoints while scanning continues.
+            let cursorID = lastID
             let chunk = try await database.pool.read { sourceDB -> [FileForClassify] in
                 let rows = try Row.fetchAll(sourceDB, sql: """
                     SELECT
@@ -141,7 +151,7 @@ public enum Restructure {
                     LIMIT ?
                     """, arguments: [
                         bounds.root, bounds.root, bounds.prefix, bounds.upper,
-                        lastID, largePlanChunk])
+                        cursorID, largePlanChunk])
                 return rows.map { row in
                     let names: String? = row["names"]
                     return FileForClassify(
@@ -159,28 +169,29 @@ public enum Restructure {
             guard !chunk.isEmpty else { break }
             lastID = chunk.last?.fileID ?? lastID
             let proposals = ruleClassify(chunk, libraryRoot: libraryRoot)
-            try planDB.write { plan in
-                for proposal in proposals {
+            let chunkBase = sequence
+            try await planDB.write { plan in
+                for (offset, proposal) in proposals.enumerated() {
                     let folder = (proposal.oldPath as NSString).deletingLastPathComponent
                     try plan.execute(sql: """
                         INSERT INTO raw_moves
                           (seq,file_id,source,source_folder,destination,category,confidence,reason)
                         VALUES (?,?,?,?,?,?,?,?)
                         """, arguments: [
-                            sequence, proposal.fileID, proposal.oldPath, folder,
+                            chunkBase + offset, proposal.fileID, proposal.oldPath, folder,
                             proposal.newPath, proposal.bucket,
                             proposal.confidence, proposal.reason])
                     try plan.execute(sql: """
                         INSERT INTO folder_stats(folder,category,count) VALUES (?,?,1)
                         ON CONFLICT(folder,category) DO UPDATE SET count=count+1
                         """, arguments: [folder, proposal.bucket])
-                    sequence += 1
                 }
             }
+            sequence = chunkBase + proposals.count
             if chunk.count < largePlanChunk { break }
         }
 
-        try planDB.write { db in
+        try await planDB.write { db in
             try db.execute(sql: """
                 INSERT INTO folder_tiers(folder,tier)
                 SELECT folder,
@@ -207,7 +218,7 @@ public enum Restructure {
                 """)
         }
 
-        let summary = try planDB.read { db -> (
+        let summary = try await planDB.read { db -> (
             total: Int, categories: [RestructureCategoryCount], folders: FolderClassificationCounts
         ) in
             let total = try Int.fetchOne(db, sql: """
@@ -235,7 +246,7 @@ public enum Restructure {
                 junkFolders: try tierCount("Junk")))
         }
 
-        let stored = try planDB.read { db in
+        let stored = try await planDB.read { db in
             let cursor = try Row.fetchCursor(db, sql: """
                 SELECT r.file_id,r.source,r.destination,r.category,t.tier,
                        r.confidence,r.reason

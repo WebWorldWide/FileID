@@ -190,7 +190,27 @@ impl RestructureApply {
         // 100k+ moves the user got no feedback and no stop.
         let total = total_hint.unwrap_or(0);
         for (idx, m) in moves.into_iter().enumerate() {
-            let m = m.context("reading streamed restructure plan")?;
+            // A failed stream read (corrupt / vanished spooled plan) must NOT
+            // discard the partial result via `?`: every move already applied is
+            // real and journaled, and an Err reply makes the app report "your
+            // files are unchanged" with no Undo affordance. Stop, count the
+            // unread remainder as failed, and return the truthful partial.
+            let m = match m {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        applied,
+                        failed,
+                        processed = idx,
+                        total,
+                        "[RESTRUCTURE] plan stream read failed mid-apply; stopping"
+                    );
+                    let remainder = total.saturating_sub(idx).max(1);
+                    failed = failed.saturating_add(u32::try_from(remainder).unwrap_or(u32::MAX));
+                    break;
+                }
+            };
             // Poll the cancel flag at the TOP of every iteration. Every move
             // already completed is durable (per-move FS op + DB update), so
             // stopping BETWEEN moves is safe and preserves per-move atomicity.
@@ -1031,6 +1051,43 @@ mod tests {
         assert_eq!(res.failed, 0, "a cancel is not a failure");
         assert!(src.exists(), "source untouched by a cancelled apply");
         assert!(!root.join("Sorted").join("a.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A mid-stream plan read error (corrupt/vanished spool during a paged
+    /// apply) must return the truthful PARTIAL result — moves already applied
+    /// stay counted (so the app surfaces Undo) and the unread remainder is
+    /// reported as failed — instead of aborting with Err, which the app maps
+    /// to "your files are unchanged".
+    #[test]
+    fn stream_error_mid_apply_returns_partial_result() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-apply-stream-err-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("a.jpg");
+        std::fs::write(&src, b"data").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let dest = root.join("Sorted").join("a.jpg").to_string_lossy().into_owned();
+        let stream = vec![
+            Ok(move_fixture(1, &src.to_string_lossy(), &dest)),
+            Err(anyhow::anyhow!("spooled plan truncated")),
+        ];
+        let res = apply.apply_iter(stream, Some(3)).unwrap();
+
+        assert_eq!(res.applied, 1, "the completed move stays counted");
+        assert_eq!(res.failed, 2, "unread remainder (total 3 - 1 processed) reported as failed");
+        assert!(!src.exists(), "first move really happened on disk");
+        assert!(root.join("Sorted").join("a.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

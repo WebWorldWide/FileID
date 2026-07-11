@@ -181,7 +181,7 @@ fn help_text() -> String {
          -V, --version  Print version.\n\
          \n\
          KEYS (in-app):\n    \
-         Tab / Shift-Tab   switch tab        1-5   jump to tab\n    \
+         Tab / Shift-Tab   switch tab        1-6   jump to tab\n    \
          Up/Down or j/k    move selection    s     scan a folder (engine)\n    \
          /                 search (Library)  r     reload from DB\n    \
          ?                 toggle help       q     quit\n",
