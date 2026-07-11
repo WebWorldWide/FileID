@@ -168,6 +168,16 @@ if ($env:FILEID_CLIP_BATCH_SIZE) {
 
 $engineProc = New-Object System.Diagnostics.Process
 $engineProc.StartInfo = $psi
+$engineProc.EnableRaisingEvents = $true
+# Forensics for a mid-scan engine death: the exit code names the failure
+# class (0xC0000005 AV, 0xC0000409 fail-fast/alloc-abort, 0 clean) that
+# neither the engine log (native deaths never reach it) nor WER records.
+Register-ObjectEvent -InputObject $engineProc -EventName 'Exited' -Action {
+    $p = $Event.Sender
+    $msg = "ENGINE EXITED code={0} (0x{0:X8}) at {1}" -f $p.ExitCode, (Get-Date -Format HH:mm:ss)
+    Write-Host "  [!!] $msg" -ForegroundColor Red
+    Add-Content -Path $event.MessageData -Value $msg
+} -MessageData $eventLog | Out-Null
 [void]$engineProc.Start()
 
 # Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7;

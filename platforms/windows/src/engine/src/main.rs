@@ -87,6 +87,29 @@ fn main() -> Result<()> {
         ));
     }
 
+    // Pin the COM MTA for the life of the process. Shell/WinRT call sites
+    // (OCR, HEIC, video) each CoInitializeEx/CoUninitialize around their
+    // work on tokio blocking-pool threads; when the LAST uninit dropped the
+    // process MTA to zero, Windows unloaded the WinRT stack
+    // (WinTypes/Windows.Media.Ocr/windowscodecs) while the `windows` crate's
+    // process-wide factory cache still held pointers into it — the next OCR
+    // call then dereferenced a dangling factory and died with a native
+    // 0xC0000005 (proven by minidump: fault READ inside unloaded
+    // WinTypes.dll; reproduced 4x mid-scan on a 71k-file corpus).
+    // CoIncrementMTAUsage keeps the MTA (and therefore the loaded WinRT
+    // DLLs + cached factories) alive without initializing this thread's
+    // apartment. The cookie is intentionally leaked — decrementing at exit
+    // would only re-open the teardown race.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Com::CoIncrementMTAUsage;
+        // The cookie is only needed for CoDecrementMTAUsage, which we never
+        // call — dropping it does not release the pin.
+        if let Err(e) = CoIncrementMTAUsage() {
+            eprintln!("CoIncrementMTAUsage failed: {e} — WinRT unload race unmitigated");
+        }
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
