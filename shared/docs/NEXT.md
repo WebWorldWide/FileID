@@ -1,5 +1,14 @@
 # NEXT — resume here
 
+## STATUS 2026-07-11 — audit fixes landed on the branch; two deferred CLI-dedupe scale items
+
+The post-merge audit (STATE top entry) fixed 11/12 findings. The two deliberately deferred (both CLI `dedupe`, medium, not blocking daily app use):
+
+1. **Mixed-recipe `--exact` dedupe misses cross-upgrade duplicate pairs.** `fileid dedupe --exact` groups on stored `files.content_hash` only; after the BLAKE3→SHA-256 switch a DB holds old BLAKE3 rows (kept by the discovery skip set) alongside new SHA-256 rows, so byte-identical duplicates that straddle the upgrade boundary land in different buckets and are silently missed. The heal fix (STATE 2026-07-11) does NOT re-stamp untouched rows. Options: (a) a one-time backfill migration re-hashing rows whose digest length/prefix marks them legacy (slow — full re-read of the library), (b) dedupe-time re-hash of singleton-bucket rows whose sizes collide (cheap, targeted), (c) document as a known one-upgrade-cycle limitation (rows re-stamp whenever a file is modified/moved). Leaning (b); decide with real data.
+2. **`--similar` pigeonhole index degrades ~O(N²/14) at scale.** With the default threshold 8, the multi-index uses 9 blocks of ~7 bits → each new phash probes ~7 % of all previously seen hashes (single-threaded). Fine ≤20k images; slow at 100k+. Fix shape: wider blocks (4×16-bit) + Hamming verify, or a BK-tree. The engine/app Cleanup path is unaffected (its own grouping).
+
+Everything else from the 2026-07-10 entry still applies (below), minus items completed by this session: the Apple `Restructure.swift` async/await breakage is FIXED (compile-verified by macOS CI once green); the spool→apply integration test EXISTS (`stored_plan_applies_end_to_end_by_plan_id`); on-hardware Adlon scan pending re-run against the final engine.
+
 ## STATUS 2026-07-10 — paged restructure plans finished + Windows-verified; needs landing + on-Mac/on-Linux confirm
 
 Completed the previously-uncommitted "paged/truncated restructure plans" feature (STATE top entry + DECISIONS 2026-07-10). Everything buildable on the Windows dev box is green (engine clippy + 414 tests; IpcSchema 48; app build 0/0 + 174 tests + `dotnet format`; CLI 8; TUI 83). A fresh **Release self-contained build** was produced (LocalAppData install + Desktop shortcut) for owner runtime testing.

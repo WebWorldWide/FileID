@@ -410,7 +410,8 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
-        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone());
+        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
+            .with_scan_root(root.to_path_buf());
         let tagged_rx: mpsc::Receiver<TaggedFile> = tagger.spawn(discovered_rx);
 
         // Throttle progress emission: at most one event per 100 ms OR

@@ -176,21 +176,22 @@ impl DbWriter {
         // lock — the JPEG encode + fs::write must not run inside the tx. (audit P1)
         let mut crops_to_write: Vec<(i64, Vec<u8>)> = Vec::new();
 
-        // Recipe-v1 legacy digests for over-cap files (>FULL_HASH_MAX_BYTES):
-        // computing one re-reads ~2 MB (head ‖ tail) off disk. Done BEFORE the
-        // writer lock so the blocking IO never runs inside the single-writer tx —
-        // a slow/sleeping disk on one over-cap file would otherwise stall every
-        // reader-blocking writer-lock holder for the whole batch. (F-C1-025)
+        // Legacy BLAKE3 digests for rows stamped before the cross-platform
+        // SHA-256 switch: computing them re-reads the file off disk (full read
+        // at or under the cap, ~2.25 MB head ‖ samples ‖ tail over it). Done
+        // BEFORE the writer lock so the blocking IO never runs inside the
+        // single-writer tx — a slow/sleeping disk on one file would otherwise
+        // stall every reader-blocking writer-lock holder for the whole batch.
+        // (F-C1-025)
         // Index-parallel to `buffer`; `None` for files that need no legacy probe.
-        // Same guard the inline read used: only over-cap rows that carry a
-        // content_hash can match the recipe-v1 fallback (?4) below.
-        let legacy_hashes: Vec<Option<[u8; 32]>> = buffer
+        // Computed for EVERY hashed size — v0.0.1 stamped full-file BLAKE3 for
+        // under-cap files too, so gating this on over-cap orphaned every ≤16 MB
+        // legacy row on its first cross-volume move.
+        let legacy_hashes: Vec<Option<crate::util::content_hash::LegacyHashes>> = buffer
             .iter()
             .map(|f| {
-                if f.content_hash.is_some()
-                    && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
-                {
-                    crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
+                if f.content_hash.is_some() {
+                    crate::util::content_hash::legacy_content_hashes(&f.path, f.size_bytes).ok()
                 } else {
                     None
                 }
@@ -225,8 +226,12 @@ impl DbWriter {
                                 f.file_ref.map(|r| r as i64),
                                 f.content_hash.as_ref().map(|h| h.as_slice()),
                                 path_text.as_ref(),
-                                legacy_hashes[i].as_ref().map(|h| h.as_slice()),
-                                f.size_bytes as i64
+                                legacy_hashes[i].as_ref().map(|h| h.v2.as_slice()),
+                                f.size_bytes as i64,
+                                legacy_hashes[i]
+                                    .as_ref()
+                                    .and_then(|h| h.v1.as_ref())
+                                    .map(|h| h.as_slice())
                             ],
                             |r| r.get::<_, String>(1),
                         )
@@ -344,22 +349,24 @@ impl DbWriter {
                 // have neither identity (no heal possible).
                 if f.file_ref.is_some() || f.content_hash.is_some() {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-                    // Recipe-v1 fallback (?4): over-cap rows stamped by builds
-                    // before the cross-platform SHA-256 recipe (and before the
-                    // composite hash gained interior samples) hold legacy
-                    // BLAKE3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
-                    // those rows still heal; the upsert below re-stamps the
-                    // current recipe. The read was hoisted out of the writer lock
-                    // (computed into `legacy_hashes` before `conn.lock()`). (F-C1-025)
-                    let legacy_hash = legacy_hashes[i];
+                    // Legacy fallbacks (?4/?6): rows stamped by pre-SHA-256
+                    // builds hold BLAKE3 — full-file at or under the cap, the
+                    // v0.0.1 head ‖ samples ‖ tail ‖ size composite (?4) or the
+                    // earlier pre-interior-sample head ‖ tail ‖ size composite
+                    // (?6) over it. Reproduced so those rows still heal; the
+                    // upsert below re-stamps the current recipe. The read was
+                    // hoisted out of the writer lock (computed into
+                    // `legacy_hashes` before `conn.lock()`). (F-C1-025)
+                    let legacy_hash = legacy_hashes[i].as_ref();
                     let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
                         .query_map(
                             params![
                                 f.file_ref.map(|r| r as i64),
                                 ch_bytes,
                                 path_text.as_ref(),
-                                legacy_hash.as_ref().map(|h| h.as_slice()),
-                                f.size_bytes as i64
+                                legacy_hash.map(|h| h.v2.as_slice()),
+                                f.size_bytes as i64,
+                                legacy_hash.and_then(|h| h.v1.as_ref()).map(|h| h.as_slice())
                             ],
                             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                         )
@@ -782,11 +789,12 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
 // distinguish a true MOVE (file_ref reused only for the same file) from a
 // coexisting byte-identical COPY (two distinct files share a content_hash);
 // only the former may heal unconditionally — see the call site.
-// ?4 is the recipe-v1 digest (head+tail+size, no interior samples; NULL for
-// files at or below the full-hash cap): rows stamped by pre-interior-sample
-// builds hold that digest for >16 MB files, so without it the recipe change
-// would orphan every large file's row on its first post-upgrade move. The
-// upsert after the heal re-stamps the current recipe.
+// ?4/?6 are the legacy BLAKE3 digests rows stamped by pre-SHA-256 builds hold
+// (released v0.0.1 stamped BLAKE3): ?4 is the v0.0.1 recipe — full-file at or
+// under the cap, head ‖ interior samples ‖ tail ‖ size over it — and ?6 the
+// pre-interior-sample over-cap composite (NULL at or under the cap). Without
+// them the recipe change would orphan every legacy row on its first
+// post-upgrade move. The upsert after the heal re-stamps the current recipe.
 const HEAL_LOOKUP_SQL: &str = r#"
     SELECT id, path_text,
            (?1 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5) AS by_ref
@@ -794,7 +802,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
     WHERE path_text != ?3
       AND (
           (file_ref IS NOT NULL AND file_ref = ?1 AND size_bytes = ?5)
-          OR (content_hash IS NOT NULL AND content_hash IN (?2, ?4))
+          OR (content_hash IS NOT NULL AND content_hash IN (?2, ?4, ?6))
       )
     ORDER BY by_ref DESC
     LIMIT 32
@@ -1344,13 +1352,12 @@ mod tests {
             .to_ascii_lowercase();
         if f.file_ref.is_some() || f.content_hash.is_some() {
             let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-            let legacy_hash = if f.content_hash.is_some()
-                && f.size_bytes > crate::util::content_hash::FULL_HASH_MAX_BYTES
-            {
-                crate::util::content_hash::legacy_content_hash(&f.path, f.size_bytes).ok()
+            let legacy_hash = if f.content_hash.is_some() {
+                crate::util::content_hash::legacy_content_hashes(&f.path, f.size_bytes).ok()
             } else {
                 None
             };
+            let legacy_hash = legacy_hash.as_ref();
             let healed: Option<(i64, String, bool)> = conn
                 .query_row(
                     HEAL_LOOKUP_SQL,
@@ -1358,8 +1365,9 @@ mod tests {
                         f.file_ref.map(|r| r as i64),
                         ch_bytes,
                         path_text.as_ref(),
-                        legacy_hash.as_ref().map(|h| h.as_slice()),
-                        f.size_bytes as i64
+                        legacy_hash.map(|h| h.v2.as_slice()),
+                        f.size_bytes as i64,
+                        legacy_hash.and_then(|h| h.v1.as_ref()).map(|h| h.as_slice())
                     ],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
                 )
@@ -1427,7 +1435,7 @@ mod tests {
         let by_ref: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64],
+                params![Some(0xABCDu64), Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64, None::<&[u8]>],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
@@ -1438,39 +1446,52 @@ mod tests {
         let by_ref_none: bool = conn
             .query_row(
                 HEAL_LOOKUP_SQL,
-                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64],
+                params![None::<u64>, Some([7u8; 32].as_slice()), r"C:\lib\new\IMG.jpg", None::<&[u8]>, 1234i64, None::<&[u8]>],
                 |r| Ok(r.get::<_, i64>(2)? != 0),
             )
             .unwrap();
         assert!(!by_ref_none, "content_hash-only match must clear by_ref");
     }
 
-    /// C4: an over-cap row stamped by a pre-interior-sample build carries the
-    /// recipe-v1 digest. The lookup must match it via the ?4 fallback even
-    /// though the current-recipe digest (?2) differs, or the row never heals.
+    /// C4: a row stamped by a pre-SHA-256 build carries a BLAKE3 digest. The
+    /// lookup must match it via the legacy fallbacks — ?4 (v0.0.1 recipe) or
+    /// ?6 (pre-interior-sample recipe) — even though the current-recipe
+    /// digest (?2) differs, or the row never heals.
     #[test]
     fn heal_lookup_matches_legacy_recipe_digest_via_fallback() {
         let conn = in_memory_db();
         let mut old = fixture(r"C:\lib\old\HUGE.tif");
-        old.content_hash = Some([0x22; 32]); // recipe-v1 digest stamped by main
+        old.content_hash = Some([0x22; 32]); // legacy BLAKE3 digest stamped by main
         ingest_with_heal(&conn, &old);
 
-        let matched: Option<(i64, bool)> = conn
-            .query_row(
+        let probe = |v2: [u8; 32], v1: Option<[u8; 32]>| -> Option<(i64, bool)> {
+            conn.query_row(
                 HEAL_LOOKUP_SQL,
                 params![
                     None::<u64>,
                     Some([0x33u8; 32].as_slice()), // current-recipe digest: no row has it
                     r"C:\lib\new\HUGE.tif",
-                    Some([0x22u8; 32].as_slice()),
-                    1234i64
+                    Some(v2.as_slice()),
+                    1234i64,
+                    v1.as_ref().map(|h| h.as_slice())
                 ],
                 |r| Ok((r.get(0)?, r.get::<_, i64>(2)? != 0)),
             )
             .optional()
-            .unwrap();
-        let (_, by_ref) = matched.expect("legacy digest must match via the ?4 fallback");
+            .unwrap()
+        };
+
+        let (_, by_ref) = probe([0x22; 32], None).expect("legacy digest must match via ?4");
         assert!(!by_ref, "legacy-hash match is a content match, not a ref match");
+
+        let (_, by_ref) = probe([0x44; 32], Some([0x22; 32]))
+            .expect("pre-interior-sample digest must match via ?6");
+        assert!(!by_ref, "legacy-hash match is a content match, not a ref match");
+
+        assert!(
+            probe([0x44; 32], Some([0x55; 32])).is_none(),
+            "non-matching legacy digests must not heal"
+        );
     }
 
     /// B1 core: two byte-identical files that COEXIST (a copy, not a move)
@@ -1902,7 +1923,7 @@ mod tests {
     // transaction. This test drives the real `flush`: it seeds a row stamped
     // with the legacy digest of an over-cap temp file at a now-gone path, then
     // flushes the same content at a new path. The heal can only fire if `flush`
-    // read the legacy digest off disk and matched it via the `?4` fallback —
+    // read the legacy digest off disk and matched it via the `?6` fallback —
     // exercising the hoisted (pre-lock) read path end-to-end.
     #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
@@ -1916,11 +1937,14 @@ mod tests {
         }
         std::fs::write(&new_path, &content).unwrap();
 
-        // The recipe-v1 digest the decoder thread would NOT have stamped (the
-        // current recipe adds interior samples) — `flush` reproduces it by
-        // re-reading head+tail+size, which is the read we hoisted off the lock.
+        // The pre-interior-sample digest the decoder thread would NOT have
+        // stamped — `flush` reproduces it by re-reading the file, which is the
+        // read we hoisted off the lock.
         let legacy_digest =
-            crate::util::content_hash::legacy_content_hash(&new_path, over_cap_bytes).unwrap();
+            crate::util::content_hash::legacy_content_hashes(&new_path, over_cap_bytes)
+                .unwrap()
+                .v1
+                .unwrap();
 
         let conn = Arc::new(Mutex::new(in_memory_db()));
 
@@ -1964,6 +1988,131 @@ mod tests {
             new_path.to_string_lossy(),
             "over-cap row must heal to the new path via the legacy-digest fallback"
         );
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Pre-SHA-256 builds (released v0.0.1 tagging.rs) stamped full-file BLAKE3
+    // for under-cap files. On a cross-volume move file_ref is useless, so the
+    // heal can only match by reproducing that digest — gating the legacy probe
+    // on over-cap orphaned every ≤16 MB legacy row (fresh row inserted, the old
+    // row's user tags / person assignments / embeddings pruned).
+    #[test]
+    fn under_cap_legacy_blake3_row_heals_instead_of_orphaning() {
+        let dir = unique_tmp_dir("undercap_legacy");
+        let new_path = dir.join("moved_here.bin");
+        let content: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+        let size = content.len() as u64;
+        std::fs::write(&new_path, &content).unwrap();
+
+        // Exactly what v0.0.1 stamped for a file within the full-hash window.
+        let v001_digest = *blake3::hash(&content).as_bytes();
+
+        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let old_path = dir.join("was_here.bin"); // never written → gone from disk
+        let seed_id: i64;
+        {
+            let c = conn.lock();
+            let mut seed = fixture(old_path.to_str().unwrap());
+            seed.size_bytes = size;
+            seed.kind = FileKind::Other;
+            seed.content_hash = Some(v001_digest);
+            insert_one(&c, &seed).unwrap();
+            seed_id = c.query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        }
+
+        // Rescan-style ingest at the new path: current build stamps SHA-256,
+        // no file_ref match possible (cross-volume move).
+        let mut incoming = fixture(new_path.to_str().unwrap());
+        incoming.size_bytes = size;
+        incoming.kind = FileKind::Other;
+        incoming.content_hash =
+            Some(crate::util::content_hash::content_hash(&new_path, size).unwrap());
+
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut buffer = vec![incoming];
+        let mut total = 0u64;
+        let mut failed = 0u64;
+        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+
+        let c = conn.lock();
+        let row_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "under-cap legacy row must heal, not be orphaned");
+        let (id, path): (i64, String) = c
+            .query_row("SELECT id, path_text FROM files", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(id, seed_id, "heal must preserve the row id (its tags/faces/embeddings)");
+        assert_eq!(path, new_path.to_string_lossy());
+
+        drop(c);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Released v0.0.1 stamped over-cap files with blake3(head ‖ interior
+    // samples ‖ tail ‖ size_le). Reproducing only the older head ‖ tail ‖ size
+    // composite left every v0.0.1-stamped over-cap row unable to heal — the
+    // seed digest here can only match via the v0.0.1-recipe probe (?4).
+    #[test]
+    fn over_cap_v001_interior_sample_row_heals() {
+        let dir = unique_tmp_dir("overcap_v001");
+        let size = crate::util::content_hash::FULL_HASH_MAX_BYTES + 4096;
+        let new_path = dir.join("moved_here.bin");
+        let mut content = vec![0u8; size as usize];
+        for (i, b) in content.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        std::fs::write(&new_path, &content).unwrap();
+
+        let legacy = crate::util::content_hash::legacy_content_hashes(&new_path, size).unwrap();
+        let v001_digest = legacy.v2;
+        assert_ne!(
+            Some(v001_digest),
+            legacy.v1,
+            "fixture must make the interior samples fire (v2 != v1)"
+        );
+
+        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let old_path = dir.join("was_here.bin"); // never written → gone from disk
+        let seed_id: i64;
+        {
+            let c = conn.lock();
+            let mut seed = fixture(old_path.to_str().unwrap());
+            seed.size_bytes = size;
+            seed.kind = FileKind::Other;
+            seed.content_hash = Some(v001_digest);
+            insert_one(&c, &seed).unwrap();
+            seed_id = c.query_row("SELECT id FROM files", [], |r| r.get(0)).unwrap();
+        }
+
+        let mut incoming = fixture(new_path.to_str().unwrap());
+        incoming.size_bytes = size;
+        incoming.kind = FileKind::Other;
+        incoming.content_hash =
+            Some(crate::util::content_hash::content_hash(&new_path, size).unwrap());
+
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut buffer = vec![incoming];
+        let mut total = 0u64;
+        let mut failed = 0u64;
+        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+
+        let c = conn.lock();
+        let row_count: i64 = c
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(row_count, 1, "v0.0.1-recipe over-cap row must heal, not be orphaned");
+        let (id, path): (i64, String) = c
+            .query_row("SELECT id, path_text FROM files", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(id, seed_id, "heal must preserve the row id (its tags/faces/embeddings)");
+        assert_eq!(path, new_path.to_string_lossy());
 
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);

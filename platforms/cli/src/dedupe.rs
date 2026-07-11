@@ -554,6 +554,26 @@ fn apply_run(
         }
     }
 
+    if !delete && trash_unavailable_on_this_platform() {
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "dedupe", "mode": "apply", "aborted": true,
+                "reason": "trash_unavailable_on_platform",
+                "message": "recoverable trash is unavailable for the Rust engine on this platform; re-run with --delete for permanent removal",
+            }));
+        } else {
+            println!(
+                "{} Recoverable Trash is unavailable for the Rust engine on this platform.",
+                ctx.bold("Refusing:")
+            );
+            println!(
+                "  Re-run with {} only if you want permanent deletion.",
+                ctx.bold("--delete")
+            );
+        }
+        return Ok(());
+    }
+
     let prompt = format!(
         "{} {} file(s) ({})? {}",
         if delete {
@@ -631,6 +651,16 @@ struct ApplyResult {
     failed: usize,
     unsupported: usize,
     reclaimed: i64,
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+fn trash_unavailable_on_this_platform() -> bool {
+    true
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn trash_unavailable_on_this_platform() -> bool {
+    false
 }
 
 /// Trash (default) or permanently delete each victim, then drop its `files`

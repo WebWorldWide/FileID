@@ -26,15 +26,17 @@ pub enum Tab {
     Library,
     People,
     Cleanup,
+    DeepAnalyze,
     Restructure,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Library,
         Tab::People,
         Tab::Cleanup,
+        Tab::DeepAnalyze,
         Tab::Restructure,
         Tab::Settings,
     ];
@@ -44,6 +46,7 @@ impl Tab {
             Tab::Library => "Library",
             Tab::People => "People",
             Tab::Cleanup => "Cleanup",
+            Tab::DeepAnalyze => "Deep Analyze",
             Tab::Restructure => "Restructure",
             Tab::Settings => "Settings",
         }
@@ -82,7 +85,7 @@ pub struct App {
     pub tab: Tab,
     pub data: Snapshot,
     /// Per-tab cursor position (indexed by `Tab::index`).
-    pub selected: [usize; 5],
+    pub selected: [usize; 6],
     pub search: String,
     pub search_active: bool,
     pub status: String,
@@ -146,7 +149,7 @@ impl App {
         Self {
             tab: Tab::Library,
             data: Snapshot::default(),
-            selected: [0; 5],
+            selected: [0; 6],
             search: String::new(),
             search_active: false,
             status: "Starting…".to_string(),
@@ -193,6 +196,7 @@ impl App {
             Tab::Library => self.visible_files().len(),
             Tab::People => self.data.people.len(),
             Tab::Cleanup => self.data.dupes.len(),
+            Tab::DeepAnalyze => 0,
             Tab::Restructure => self.data.plan.len(),
             Tab::Settings => 0,
         }
@@ -325,7 +329,7 @@ impl App {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.should_quit = true,
             KeyCode::Tab => self.switch_tab(self.tab.next()),
             KeyCode::BackTab => self.switch_tab(self.tab.prev()),
-            KeyCode::Char(d @ '1'..='5') => {
+            KeyCode::Char(d @ '1'..='6') => {
                 let i = (d as u8 - b'1') as usize;
                 self.switch_tab(Tab::from_index(i));
             }
@@ -1662,7 +1666,13 @@ mod tests {
     /// fresh install can trigger it from the welcome screen / any tab's banner.
     #[test]
     fn capital_d_requests_download_from_any_tab() {
-        for tab in [Tab::Library, Tab::People, Tab::Cleanup, Tab::Restructure] {
+        for tab in [
+            Tab::Library,
+            Tab::People,
+            Tab::Cleanup,
+            Tab::DeepAnalyze,
+            Tab::Restructure,
+        ] {
             let mut app = app_with_files(0);
             app.switch_tab(tab);
             app.on_key(KeyCode::Char('D'), KeyModifiers::SHIFT);
@@ -1674,7 +1684,7 @@ mod tests {
         }
     }
 
-    /// The Tab key cycles through ALL five tabs — Settings included — and wraps
+    /// The Tab key cycles through ALL six tabs — Settings included — and wraps
     /// from the last tab back to the first (and BackTab the reverse), so Settings
     /// is always reachable by tabbing.
     #[test]
@@ -1683,6 +1693,7 @@ mod tests {
         let order = [
             Tab::People,
             Tab::Cleanup,
+            Tab::DeepAnalyze,
             Tab::Restructure,
             Tab::Settings,
             Tab::Library,
@@ -1698,10 +1709,10 @@ mod tests {
             Tab::Settings,
             "BackTab from the first tab must wrap to Settings"
         );
-        // The number key jumps straight to Settings (index 5 → '5').
+        // The number key jumps straight to Settings (index 5 → '6').
         app.on_key(KeyCode::Char('1'), KeyModifiers::NONE);
         assert_eq!(app.tab, Tab::Library);
-        app.on_key(KeyCode::Char('5'), KeyModifiers::NONE);
-        assert_eq!(app.tab, Tab::Settings, "5 must jump to Settings");
+        app.on_key(KeyCode::Char('6'), KeyModifiers::NONE);
+        assert_eq!(app.tab, Tab::Settings, "6 must jump to Settings");
     }
 }
