@@ -7,6 +7,12 @@
 
 ---
 
+## 2026-07-11 — The engine pins the COM MTA for process lifetime (CoIncrementMTAUsage) instead of per-call apartments alone
+
+Every shell/WinRT call site (OCR, HEIC, video) brackets its work with `CoInitializeEx`/`CoUninitialize` on tokio blocking-pool threads. That is correct per-call hygiene but leaves a fatal process-level hole: when no WinRT call is in flight, the last `CoUninitialize` drops the MTA to zero, Windows unloads the WinRT stack (WinTypes, Windows.Media.Ocr, windowscodecs, Bcp47Langs), and the `windows` crate's **process-wide activation-factory cache** keeps pointers into the unloaded pages — the next call dies with a native 0xC0000005 that no Rust panic handler, log, or WER entry ever sees. Proven by minidump on the 71k-file family-drive scan (fault READ inside unloaded WinTypes.dll; deterministic 4/4 under the harness's consumer timing).
+
+Decision: one `CoIncrementMTAUsage()` at engine startup, cookie never decremented — the MTA (and the loaded WinRT DLLs + cached factories) live for the process lifetime. Alternatives rejected: (a) a dedicated always-alive OCR thread owning the apartment — more machinery for the same effect and still leaves HEIC/video exposed; (b) purging the windows-crate factory cache per call — not exposed by the crate; (c) removing per-call `CoInitializeEx` — still needed to give each blocking thread *an* apartment (the pin does not initialize calling threads). Cost: a handful of WinRT DLLs stay resident (~10 MB) — irrelevant against a multi-GB ML engine. The per-call `with_com` wrappers stay, now effectively no-op-cheap after the first call per thread.
+
 ## 2026-07-11 — The rename-heal probes every BLAKE3 recipe v0.0.1 actually stamped, at any file size
 
 Upstream's BLAKE3→SHA-256 content-hash switch added a `legacy_content_hash` fallback so pre-switch rows could still rename-heal, but it reproduced a recipe that never shipped in a release: "v1" (head‖tail‖size), while the tagged **v0.0.1** stamped **full-file BLAKE3 for ≤16 MB files** and **"v2" (head‖4×64 KB interior samples‖tail‖size) for over-cap** — and the probe only ran for over-cap sizes at all. Net effect: zero pre-switch rows could heal by content hash; a cross-volume move (NTFS file refs are volume-local, so the file_ref arm can't match either) inserted a fresh row and orphaned the old row's user tags, person assignments, and embeddings — precisely the loss the fallback existed to prevent.
