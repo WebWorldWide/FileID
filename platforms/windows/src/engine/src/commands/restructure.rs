@@ -1359,6 +1359,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Full paged-plan loop: spool a plan over real files, reopen it by
+    /// planID, and stream it through `apply_iter` — the exact path a
+    /// truncated GUI plan takes when the app applies with planID + empty
+    /// moves. Guards the spool/apply seam the piecewise tests can't.
+    #[test]
+    fn stored_plan_applies_end_to_end_by_plan_id() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-spool-apply-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let incoming = root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let total = 10usize;
+        let mut moves = Vec::with_capacity(total);
+        for index in 0..total {
+            let source = incoming.join(format!("{index}.jpg"));
+            std::fs::write(&source, format!("payload-{index}")).unwrap();
+            let source_text = source.to_string_lossy().into_owned();
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0)",
+                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1],
+            )
+            .unwrap();
+            moves.push(IpcMove {
+                file_id: index as i64 + 1,
+                source: source_text,
+                destination: root
+                    .join("Photos")
+                    .join("2024")
+                    .join(format!("{index}.jpg"))
+                    .to_string_lossy()
+                    .into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: "review".into(),
+                reason: None,
+            });
+        }
+
+        let spool_dir = root.join("plans");
+        let root_text = root.to_string_lossy().into_owned();
+        let (plan_id, _preview) =
+            write_stored_plan_in(&spool_dir, &root_text, moves.into_iter().map(Ok), total)
+                .unwrap();
+
+        let (stream, stored_total) =
+            open_stored_plan_in(&spool_dir, &plan_id, &root_text).unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let apply = crate::pipeline::restructure_apply::RestructureApply::new(
+            db,
+            root.clone(),
+            false,
+        );
+        let result = apply.apply_iter(stream, Some(stored_total)).unwrap();
+
+        assert_eq!(result.applied, total as u32, "every spooled move applied");
+        assert_eq!(result.failed, 0);
+        for index in 0..total {
+            let dest = root.join("Photos").join("2024").join(format!("{index}.jpg"));
+            assert_eq!(
+                std::fs::read_to_string(&dest).unwrap(),
+                format!("payload-{index}"),
+                "payload moved intact"
+            );
+            assert!(
+                !incoming.join(format!("{index}.jpg")).exists(),
+                "source removed after move"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     #[ignore = "explicit million-file disk-backed planner regression"]
     fn million_file_large_plan_is_disk_backed_and_preview_bounded() {
