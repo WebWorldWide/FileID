@@ -184,6 +184,18 @@ public partial class App : Application
             HostWindow = window;
             Trace("window.Activate()");
             window.Activate();
+
+            // Heal a stale LastFolderPath: if the saved library folder was
+            // deleted but the engine DB still holds a scan of another root
+            // that exists on disk, fall back to that root instead of booting
+            // into a contradictory sidebar/library state. Skipped under the
+            // auto-scan harness, which sets FolderPath itself.
+            if (string.IsNullOrEmpty(Program.AutoScanFolder))
+            {
+                Trace("LibraryRootRecovery.RunAsync");
+                try { _ = LibraryRootRecovery.RunAsync(window.DispatcherQueue); }
+                catch (System.Exception ex) { Trace($"LibraryRootRecovery failed (non-fatal): {ex.Message}"); }
+            }
             Trace("OnLaunched complete");
 
             // harness auto-scan. When Program.AutoScanFolder is set

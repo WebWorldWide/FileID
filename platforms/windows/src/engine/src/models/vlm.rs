@@ -146,7 +146,30 @@ impl VlmRunner {
 /// Resolve the (gguf, mmproj) pair for a given model_kind. Returns None
 /// if either file is missing — the caller surfaces "model not installed"
 /// without crashing.
+///
+/// Resolution goes through the registry: the wire kind is snake_case
+/// ("mistral_small_3_2") but the installer writes the registry's dotted
+/// dir ("vlm/mistral-small-3.2"), so a naive join(model_kind) never found
+/// installed weights and Deep Analyze reported every model missing.
 pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
+    if let crate::models::registry::LookupResult::Found(model) =
+        crate::models::registry::lookup_full(model_kind)
+    {
+        let dest = |name: &str| {
+            model
+                .files
+                .iter()
+                .map(|f| f.dest.clone())
+                .find(|d| d.file_name().is_some_and(|n| n == name))
+        };
+        if let (Some(gguf), Some(mmproj)) = (dest("model.gguf"), dest("mmproj.gguf")) {
+            if gguf.exists() && mmproj.exists() {
+                return Some((gguf, mmproj));
+            }
+        }
+    }
+    // Unregistered kinds (or callers passing a literal dir name) keep the
+    // direct-layout fallback.
     let root = crate::paths::models_dir().ok()?;
     let dir = root.join("vlm").join(model_kind);
     let gguf = dir.join("model.gguf");
@@ -460,7 +483,7 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_best_vulkan_device;
+    use super::{find_weights, parse_best_vulkan_device};
 
     #[test]
     fn picks_discrete_over_integrated() {
@@ -489,5 +512,32 @@ mod tests {
         // device 0 is the dGPU on hybrid systems).
         let out = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4070 (8188 MiB, free)\n";
         assert_eq!(parse_best_vulkan_device(out), None);
+    }
+
+    /// The wire kind is snake_case but the installer writes the registry's
+    /// dotted dir — a naive join(model_kind) reported every installed VLM as
+    /// missing (Deep Analyze "model isn't installed" on a complete install).
+    #[test]
+    fn find_weights_resolves_wire_kind_through_registry_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-vlm-weights-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("vlm").join("mistral-small-3.2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.gguf"), b"g").unwrap();
+        std::fs::write(dir.join("mmproj.gguf"), b"m").unwrap();
+
+        std::env::set_var("FILEID_MODELS_DIR", &root);
+        let by_kind = find_weights("mistral_small_3_2");
+        let by_dir_name = find_weights("mistral-small-3.2");
+        std::env::remove_var("FILEID_MODELS_DIR");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let (gguf, _) = by_kind.expect("snake_case wire kind must resolve");
+        assert!(gguf.ends_with("vlm/mistral-small-3.2/model.gguf") || gguf.ends_with("vlm\\mistral-small-3.2\\model.gguf"));
+        assert!(by_dir_name.is_some(), "registry dir spelling must also resolve");
     }
 }

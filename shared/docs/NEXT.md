@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## STATUS 2026-07-11 (cont.) — status-lie fixes landed; deferred truthfulness items
+
+Owner-reported "everything says not-installed" fixed (3 root causes, STATE top). Deferred, all needing an IPC-schema addition (modelsStatus / HardwareInfo field) — batch them with the next schema rev:
+
+1. **ep_guard latch invisible to the user**: a crash-latched EP shows as "Install the CUDA pack…" in Settings while Welcome says Installed. Surface "disabled by prior crash — Verify to re-enable" via HardwareInfo. (`resolve_poison_at_startup` runs pre-sink; `RuntimeProbe::detect` folds `is_disabled` into `cuda_pack_present`.)
+2. **App SentinelProbe accepts any `{id}-*` hash**: after a future registry pin bump the app says Installed from a stale token until reinstall. Needs the engine to publish current revision tokens (modelsStatus IPC).
+3. **`pack_present("qnn")` shallow** (nested SDK loads but reports absent) — mirror the recursive provider probe when QNN hardware is testable.
+4. **Settings CUDA/cuDNN buttons flip to "Installed ✓" on IPC send**, before the download finishes/fails — wire to ModelDownloadProgress terminal like the model cards.
+5. **Engine `empty_folder` error for a nonexistent scan root** — add a `scan_root_missing` kind + pre-flight in handle_start_scan (cross-platform message change). Less reachable now that startup root-recovery heals dead lastFolderPath.
+
 ## STATUS 2026-07-11 (later) — WinRT-unload crash fixed + 71k on-hardware GREEN; remaining follow-ups
 
 The critical mid-scan 0xC0000005 is fixed (CoIncrementMTAUsage pin; STATE top entry) and the full Adlon 71k scan passes at 43 f/s. New follow-ups from this session:
