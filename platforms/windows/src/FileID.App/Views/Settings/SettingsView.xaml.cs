@@ -358,12 +358,16 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
+    // Must match BOTH sentinel forms the engine writes — flat
+    // `{id}.installed` and content-hashed `{id}-{hash}.installed`. A
+    // flat-only probe here never saw the hashed CUDA-pack sentinel, so the
+    // install buttons never latched "Installed" and the auto-install toggle
+    // re-dispatched the prewarm on every Settings load.
     private static bool SentinelExists(string modelId)
     {
         try
         {
-            return System.IO.File.Exists(System.IO.Path.Combine(
-                AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
+            return Services.SentinelProbe.Installed(modelId);
         }
         catch
         {
@@ -503,7 +507,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             if (_initializingToggles) return;
             var s = AppViewModel.Instance.Settings;
-            s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
+            var disable = !AutoInstallCudaToggle.IsOn;
+            // ToggleSwitch replays Toggled after HydrateToggles' guarded
+            // programmatic set (deferred until the template applies), so a
+            // no-op echo lands here on every Settings load with the guard
+            // already dropped. Only a real user flip changes the persisted
+            // value; bail on echoes or each Settings visit re-dispatches the
+            // CUDA pack install.
+            if (s.DisableAutoInstallCuda == disable) return;
+            s.DisableAutoInstallCuda = disable;
             s.Save();
             // Project policy forbids a silent GPU-pack fetch, so there is no
             // engine-ready auto-install left to gate — persisting the flag alone

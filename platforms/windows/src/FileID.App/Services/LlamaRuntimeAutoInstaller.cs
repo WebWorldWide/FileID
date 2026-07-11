@@ -85,22 +85,36 @@ internal static class LlamaRuntimeAutoInstaller
             try
             {
                 var llamaDir = Path.Combine(AppPaths.ModelsDir, "llama.cpp");
-                var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{ModelKind}.installed");
+                // Match both sentinel forms the engine writes (flat
+                // `{id}.installed` + hashed `{id}-{hash}.installed`) — the
+                // flat-only probe never saw hashed sentinels, so this fired a
+                // slot-less prewarm on every engine Ready.
+                bool sentinelPresent = SentinelProbe.Installed(ModelKind);
                 // Match the engine's VlmRunner, which accepts the binary at the
                 // dir root OR a bin/ subdir — checking only the flat path would
                 // re-download every launch if a future zip nests binaries.
                 bool mtmdPresent = File.Exists(Path.Combine(llamaDir, "llama-mtmd-cli.exe"))
                                 || File.Exists(Path.Combine(llamaDir, "bin", "llama-mtmd-cli.exe"));
-                if (File.Exists(sentinel) && mtmdPresent)
+                if (sentinelPresent && mtmdPresent)
                 {
                     DebugLog.Info("[VULKAN-AUTO] llama.cpp runtime already installed (mtmd-cli present); skipping.");
                     return;
                 }
-                if (File.Exists(sentinel))
+                if (sentinelPresent)
                 {
                     DebugLog.Info("[VULKAN-AUTO] runtime present but missing llama-mtmd-cli.exe (stale pre-mtmd build) — reinstalling current runtime.");
-                    try { File.Delete(sentinel); } catch { /* best-effort */ }
-                    try { File.Delete(Path.Combine(AppPaths.ModelsDir, "llama.cpp", "llama-runtime.zip")); } catch { /* best-effort */ }
+                    var sentinelsDir = Path.Combine(AppPaths.ModelsDir, ".sentinels");
+                    try
+                    {
+                        // `{ModelKind}*.installed` covers flat + hashed; it cannot
+                        // match llama_runtime_cuda_x64 (different prefix).
+                        foreach (var f in Directory.EnumerateFiles(sentinelsDir, $"{ModelKind}*.installed"))
+                        {
+                            try { File.Delete(f); } catch { /* best-effort */ }
+                        }
+                    }
+                    catch { /* best-effort */ }
+                    try { File.Delete(Path.Combine(llamaDir, "llama-runtime.zip")); } catch { /* best-effort */ }
                 }
             }
             catch { /* if FS check fails, engine's own short-circuit will catch it */ }
