@@ -1113,7 +1113,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
-        var choice = await confirm.ShowAsync();
+        // ShowAsync throws (COMException) when another ContentDialog is
+        // already open; this is an async-void handler, so an escape would
+        // land in App.UnhandledException. Treat a failed confirm as Cancel.
+        ContentDialogResult choice;
+        try { choice = await confirm.ShowAsync(); }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("Trash confirm dialog failed (another dialog open?): " + ex.Message);
+            return;
+        }
         if (choice != ContentDialogResult.Primary) return;
 
         // Listen for the engine's BulkActionResult — it tags the

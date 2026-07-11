@@ -433,7 +433,15 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
-        var choice = await confirm.ShowAsync();
+        // ShowAsync throws when another ContentDialog is already open; treat a
+        // failed confirm as Cancel instead of escaping the async chain.
+        ContentDialogResult choice;
+        try { choice = await confirm.ShowAsync(); }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Trash confirm dialog failed (another dialog open?): " + ex.Message);
+            return;
+        }
         if (choice != ContentDialogResult.Primary) return;
 
         // UndoStack still captures the same reply independently (it listens
@@ -626,7 +634,15 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        // Same open-dialog hazard as TrashNonKeepersAsync — treat as Cancel.
+        ContentDialogResult groupChoice;
+        try { groupChoice = await confirm.ShowAsync(); }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Group-trash confirm dialog failed (another dialog open?): " + ex.Message);
+            return;
+        }
+        if (groupChoice != ContentDialogResult.Primary) return;
         // UndoStack still captures the same reply independently; leave it in place.
         Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
