@@ -24,7 +24,10 @@ pub fn on_activate(app: &adw::Application) {
         .ok()
         .and_then(|s| {
             let mut p = s.split('x');
-            Some((p.next()?.trim().parse().ok()?, p.next()?.trim().parse().ok()?))
+            Some((
+                p.next()?.trim().parse().ok()?,
+                p.next()?.trim().parse().ok()?,
+            ))
         })
         .unwrap_or((1320, 860));
     let window = adw::ApplicationWindow::builder()
@@ -51,9 +54,19 @@ pub fn on_activate(app: &adw::Application) {
     let deep = crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone());
     stack.add_titled_with_icon(&deep, Some("deep"), "Deep Analyze", "starred-symbolic");
     let restructure = crate::tabs::restructure::build_restructure_tab(engine.clone());
-    stack.add_titled_with_icon(&restructure, Some("restructure"), "Restructure", "view-list-symbolic");
+    stack.add_titled_with_icon(
+        &restructure,
+        Some("restructure"),
+        "Restructure",
+        "view-list-symbolic",
+    );
     let settings = crate::tabs::settings::build(engine.clone());
-    stack.add_titled_with_icon(&settings, Some("settings"), "Settings", "emblem-system-symbolic");
+    stack.add_titled_with_icon(
+        &settings,
+        Some("settings"),
+        "Settings",
+        "emblem-system-symbolic",
+    );
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 

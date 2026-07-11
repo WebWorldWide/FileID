@@ -441,7 +441,7 @@ struct FileIDEngineMain {
         // moves through the engine's Restructure butler and emit the
         // corresponding reply event. Run detached so the command loop stays
         // responsive to pause/cancel/shutdown during a long plan computation.
-        case .planRestructure(let libraryRoot):
+        case .planRestructure(let libraryRoot, let supportsPagedPlans):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -454,12 +454,35 @@ struct FileIDEngineMain {
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
                 do {
-                    let planResult = try await Restructure.proposeAll(
-                        database: database, libraryRoot: planRoot)
-                    let plan = Self.restructurePlan(from: planResult, libraryRoot: libraryRoot)
+                    let plan: RestructurePlan
+                    if supportsPagedPlans == true,
+                       let largePlan = try await Restructure.proposeLargeStoredIfNeeded(
+                           database: database, libraryRoot: planRoot) {
+                        plan = largePlan
+                    } else {
+                        let planResult = try await Restructure.proposeAll(
+                            database: database, libraryRoot: planRoot)
+                        var legacyPlan = Self.restructurePlan(
+                            from: planResult, libraryRoot: libraryRoot)
+                        if supportsPagedPlans == true,
+                           legacyPlan.moves.count > Restructure.storedPlanPreviewCap {
+                            let stored = try Restructure.storePlan(
+                                libraryRoot: libraryRoot, moves: legacyPlan.moves)
+                            legacyPlan = RestructurePlan(
+                                libraryRoot: legacyPlan.libraryRoot,
+                                moves: stored.preview,
+                                categoryCounts: legacyPlan.categoryCounts,
+                                folderClassifications: legacyPlan.folderClassifications,
+                                planID: stored.planID,
+                                totalMoves: legacyPlan.moves.count,
+                                truncated: true)
+                        }
+                        plan = legacyPlan
+                    }
                     await sink.emit(.restructurePlan(plan))
                     JSONLog.shared.info(ev: "plan_restructure_done",
-                                        extra: ["moves": AnyCodable(plan.moves.count)])
+                                        extra: ["moves": AnyCodable(
+                                            plan.totalMoves ?? plan.moves.count)])
                 } catch {
                     // Terminal error so the Restructure tab's "Computing plan…"
                     // status recovers instead of awaiting forever (mirrors
@@ -476,7 +499,7 @@ struct FileIDEngineMain {
                 await coordinator.setActiveRestructure(nil)
             }
             await coordinator.setActiveRestructure(planTask)
-        case .applyRestructure(let libraryRoot, let moves, _):
+        case .applyRestructure(let libraryRoot, let moves, _, let planID):
             // macOS performs real filesystem moves; the Windows engine's
             // symlink-preview mode has no macOS equivalent, so `useSymlinks`
             // is accepted for wire parity and ignored.
@@ -495,11 +518,28 @@ struct FileIDEngineMain {
             }
             let applyTask = Task.detached(priority: .userInitiated) {
                 JSONLog.shared.info(ev: "apply_restructure_requested",
-                                    extra: ["moves": AnyCodable(proposals.count)])
-                let result = await Restructure.apply(
-                    proposals: proposals, database: database, libraryRoot: applyRoot)
-                await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                    applied: result.moved, failed: result.failed, privilegeError: nil)))
+                                    extra: ["moves": AnyCodable(proposals.count),
+                                            "storedPlan": AnyCodable(planID != nil)])
+                do {
+                    let result: Restructure.ApplyResult
+                    if let planID {
+                        guard moves.isEmpty else {
+                            throw CocoaError(.fileReadCorruptFile)
+                        }
+                        result = try await Restructure.applyStoredPlan(
+                            planID: planID, expectedRoot: libraryRoot,
+                            database: database, libraryRoot: applyRoot)
+                    } else {
+                        result = await Restructure.apply(
+                            proposals: proposals, database: database, libraryRoot: applyRoot)
+                    }
+                    await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                        applied: result.moved, failed: result.failed, privilegeError: nil)))
+                } catch {
+                    await sink.emit(.error(EngineError(
+                        kind: "apply_restructure",
+                        message: "Apply failed: \(error.localizedDescription)")))
+                }
                 // Clear the handle so a later cancelScan can't cancel a finished
                 // apply, and awaitActiveRestructure() returns promptly.
                 await coordinator.setActiveRestructure(nil)
@@ -846,49 +886,14 @@ struct FileIDEngineMain {
                                     sink: sink, sessionID: session.id)
         }
 
-        // Stage A — Discovery. Walk the tree, sort by path for I/O locality.
-        // cancelCheck reads the cancel mirror (sync, no actor hop) so the
-        // enumerator loop bails out immediately on Cancel — the v1-deferred
-        // "cancel during discovery" gap is now closed.
+        // Stage A — Discovery. Files are streamed directly into the tagging
+        // workers below. The old `walk` path retained and sorted every
+        // DiscoveredFile first, which duplicated all paths and metadata and
+        // exhausted memory on million-file libraries. Directory enumeration is
+        // already depth-first, preserving the useful same-folder I/O locality
+        // without the global O(N) sort.
         let discovery = Discovery()
         let scanStart = Date()
-        // F-C6-001: pass the DB + rescan flag so discovery drops files the DB
-        // already holds unchanged BEFORE the ANE/Vision/CLIP/OCR pass (a non-
-        // forced rescan no longer re-runs ML on every unchanged file). On
-        // `rescan` the skip set is empty (full reprocess), mirroring Windows.
-        let files = await discovery.walk(
-            root: url,
-            database: database,
-            forceReprocess: rescan,
-            excludedPaths: effectiveExcludedPaths,
-            cancelCheck: { ScanCoordinator.isCancelledSync() },
-            progress: { count in
-                Task { await coordinator.bumpDiscovered(to: count) }
-            }
-        )
-        let discoveryDur = Date().timeIntervalSince(scanStart)
-        await coordinator.bumpDiscovered(to: files.count)
-        await coordinator.setTotal(files.count)
-        JSONLog.shared.info(ev: "discovery_complete", sess: session.id,
-                            extra: ["files": AnyCodable(files.count),
-                                    "seconds": AnyCodable(discoveryDur),
-                                    "ratePerSec": AnyCodable(discoveryDur > 0 ? Double(files.count) / discoveryDur : 0)])
-        await sink.emit(.discoveryComplete(totalFiles: files.count))
-        // If the user cancelled during discovery, don't proceed to tagging.
-        if await coordinator.isCancelled {
-            JSONLog.shared.info(ev: "scan_cancelled_during_discovery", sess: session.id)
-            await markSessionFinal(database: database, session: session,
-                                    coordinator: coordinator, sink: sink,
-                                    totalSeconds: discoveryDur)
-            return
-        }
-        if files.isEmpty {
-            await markSessionFinal(database: database, session: session,
-                                    coordinator: coordinator, sink: sink,
-                                    totalSeconds: discoveryDur)
-            return
-        }
-        await sink.emit(.phaseChanged(.tagging))
 
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
@@ -928,16 +933,45 @@ struct FileIDEngineMain {
         // Producer + N workers in one TaskGroup so we know when all workers
         // finish (and can then close taggedChan to signal EOF to writer).
         await withTaskGroup(of: Void.self) { group in
-            // Producer: feed all discovered files into the channel. The cancel
-            // check lets the common case (cancel observed before the producer
-            // next suspends) finish promptly; task cancellation (above) handles
-            // the case where the producer is already suspended in `send`.
+            // Producer: enumerate and feed each file immediately. AsyncChannel
+            // is a rendezvous channel, so the producer cannot outrun the worker
+            // pool and resident discovery state stays O(worker count). The
+            // active scan task is cancelled by requestCancel(), which also
+            // unblocks a producer suspended in send.
             group.addTask {
-                for file in files {
-                    if ScanCoordinator.isCancelledSync() { break }
-                    await discoveryChan.send(file)
+                defer { discoveryChan.finish() }
+                var taggingStarted = false
+                let discovered = await discovery.walkStreaming(
+                    root: url,
+                    database: database,
+                    forceReprocess: rescan,
+                    excludedPaths: effectiveExcludedPaths,
+                    cancelCheck: { ScanCoordinator.isCancelledSync() },
+                    progress: { count in
+                        Task { await coordinator.bumpDiscovered(to: count) }
+                    }
+                ) { file in
+                    if !Task.isCancelled && !ScanCoordinator.isCancelledSync() {
+                        if !taggingStarted {
+                            taggingStarted = true
+                            await coordinator.beginTagging()
+                            await sink.emit(.phaseChanged(.tagging))
+                        }
+                        await discoveryChan.send(file)
+                    }
                 }
-                discoveryChan.finish()
+                let discoveryDur = Date().timeIntervalSince(scanStart)
+                await coordinator.bumpDiscovered(to: discovered)
+                await coordinator.setTotal(discovered)
+                JSONLog.shared.info(
+                    ev: "discovery_complete", sess: session.id,
+                    extra: [
+                        "files": AnyCodable(discovered),
+                        "seconds": AnyCodable(discoveryDur),
+                        "ratePerSec": AnyCodable(
+                            discoveryDur > 0 ? Double(discovered) / discoveryDur : 0)
+                    ])
+                await sink.emit(.discoveryComplete(totalFiles: discovered))
             }
             // Workers — N concurrent. Each pulls files until the channel
             // closes, processes via the Vision pool, pushes to tagged.

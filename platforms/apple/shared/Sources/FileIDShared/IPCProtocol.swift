@@ -62,8 +62,8 @@ public struct IPCCommand: Codable, Sendable {
         // engine implements the subset with equivalent engine-side semantics
         // and returns structured "not_implemented_yet" errors for UI-owned
         // flows that remain app-side on macOS.
-        case planRestructure(libraryRoot: String)
-        case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool)
+        case planRestructure(libraryRoot: String, supportsPagedPlans: Bool?)
+        case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool, planID: String?)
         /// Reverse the most recent applyRestructure: move every file the last run
         /// relocated back to its original location (the engine replays its on-disk
         /// undo journal). Reply lands on `restructureApplyResult`, where `applied`
@@ -674,14 +674,40 @@ public struct RestructurePlan: Codable, Sendable {
     public let categoryCounts: [RestructureCategoryCount]
     /// Engine-authoritative folder classification counts. Nil on older engines.
     public let folderClassifications: FolderClassificationCounts?
+    /// Opaque engine-owned plan handle when `moves` is a bounded preview.
+    public let planID: String?
+    public let totalMoves: Int?
+    public let truncated: Bool
 
     public init(libraryRoot: String, moves: [RestructureMove],
                 categoryCounts: [RestructureCategoryCount],
-                folderClassifications: FolderClassificationCounts? = nil) {
+                folderClassifications: FolderClassificationCounts? = nil,
+                planID: String? = nil, totalMoves: Int? = nil,
+                truncated: Bool = false) {
         self.libraryRoot = libraryRoot
         self.moves = moves
         self.categoryCounts = categoryCounts
         self.folderClassifications = folderClassifications
+        self.planID = planID
+        self.totalMoves = totalMoves
+        self.truncated = truncated
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case libraryRoot, moves, categoryCounts, folderClassifications
+        case planID, totalMoves, truncated
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        libraryRoot = try c.decode(String.self, forKey: .libraryRoot)
+        moves = try c.decode([RestructureMove].self, forKey: .moves)
+        categoryCounts = try c.decode([RestructureCategoryCount].self, forKey: .categoryCounts)
+        folderClassifications = try c.decodeIfPresent(
+            FolderClassificationCounts.self, forKey: .folderClassifications)
+        planID = try c.decodeIfPresent(String.self, forKey: .planID)
+        totalMoves = try c.decodeIfPresent(Int.self, forKey: .totalMoves)
+        truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
     }
 }
 

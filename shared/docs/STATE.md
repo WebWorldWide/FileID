@@ -8,6 +8,39 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-11 — Post-merge multi-agent audit: 12 findings, 11 fixed (2 HIGH data-integrity), macOS CI fixed
+
+Ran an adversarially-verified multi-agent audit over the merged `scale-and-paged-plans` branch (4 dimensions: merge-loss, engine coherence, WinUI runtime, perf-scaling). 12 findings, 8 confirmed by refutation agents (0 refuted), 4 verified by hand (all real). All fixed except two deliberately deferred (NEXT.md).
+
+**macOS CI breaker (fixed):** the codex-written `Restructure.swift` never compiled — five GRDB calls inside an async fn resolved to the async overloads without `await` (lines 95/162/183/210/238) + Swift-6 captured-var warnings. Fixed with `try await`, an immutable keyset-cursor copy, and chunk-base+offset sequencing instead of closure mutation.
+
+**HIGH — v0.0.1-upgrade heal regression (engine, fixed + regression-locked):** upstream's BLAKE3→SHA-256 switch left `legacy_content_hash` reproducing only "recipe v1" (head‖tail‖size) AND gated the legacy probe on `size > FULL_HASH_MAX_BYTES`. But shipped v0.0.1 stamped **full-file BLAKE3 under-cap** and **recipe v2 (head‖4×64 KB interior‖tail‖size) over-cap** — so NO pre-switch row could ever heal by content hash; a cross-volume move (file_ref is volume-local) orphaned tags/persons/embeddings. Now `legacy_content_hashes()` returns both shipped recipes in one read, the probe runs at any size, and `HEAL_LOOKUP_SQL` widened to `IN (?2, ?4, ?6)`. 5 new tests incl. two end-to-end heals seeded with the exact v0.0.1-stamped digests.
+
+**WinUI paged-plan UX (all four real, fixed):** (1) `plan_restructure_store`/`plan_restructure_db` error kinds weren't in RestructureView's filter → spool-persist failure froze the tab on "Computing plan…" (now prefix-matched `plan_restructure*`); (2) a mid-stream spool read error aborted `apply_iter` with `Err`, discarding partial counts → app claimed "your files are unchanged" and never showed Undo despite a fsynced journal (engine now returns a truthful partial result counting the unread remainder as failed; app copy fixed; test added); (3) a fresh plan arriving mid-apply released the static `_applying` guard → second concurrent apply would truncate the first's undo journal (new `_applyInFlight` gate + testable release helper); (4) Cleanup Similar-mode >20k cap exception left stale Exact groups rendered under the Similar header (mode-stamped groups; cross-mode failure clears the list). 11 new C# tests (app tests 174→185).
+
+**Merge-loss restores:** CLI macOS trash guard (`trash_unavailable_on_this_platform()` before the confirm prompt + `{aborted, reason}` JSON contract) and the TUI's sixth DeepAnalyze companion tab (hotkey 6, tests; README already documented it). Upstream's HF-only download-host test had been grafted at merge time.
+
+**Perf-scaling for the dev box (9900X/24T + RTX 5080 + USB "F:\Adlon Drive"):** the decode pool sized [2,12] by CPU topology alone — 12 concurrent blocking reads thrash seek-penalty media. `Tagger.with_scan_root()` now clamps the pool to 4 on Hdd/Removable/Network via the existing `storage_type_for_path` probe (discovery already used it); NVMe unchanged. Also: stale `.planning.sqlite` scratch orphans are now swept before each new large-plan (Windows + Apple mirror), placed pre-creation so the live scratch is never unlinked.
+
+**Verification (combined tree):** engine clippy + 420/422 tests; CLI clippy + 18/8; TUI clippy + 83; app build 0/0 + 185 + IpcSchema 48 + `dotnet format`; WSL Linux-1.90 clippy. macOS Swift compile-verified by CI only.
+
+## 2026-07-10 — Paged / truncated restructure plans finished + verified (cross-platform)
+
+Picked up an **uncommitted, undocumented** in-flight feature ("codex" work in the working tree, not in any STATE/NEXT entry) and completed the loop: audited it across every platform, found it code-complete (no stubs/`todo!()`/placeholders anywhere), and **verified everything buildable on this Windows box is green**.
+
+**The feature — paged/truncated restructure plans (million-file scale).** Previously the restructure planner materialized every `(source→destination)` move in memory and shipped the whole list across IPC just to draw the Sankey preview — O(N) memory + wire on a 500k-file library. Now: `planRestructure` gains `supportsPagedPlans` (client opt-in); when the plan exceeds the preview cap the engine **spools the full move list to disk** (`<planID>.ndjson`, a versioned header + one move per line, written atomically tmp→rename, stale spools cleared first) and returns only a **bounded preview (≤5000 moves) + opaque `planID` + exact `totalMoves` + `truncated=true`**; `applyRestructure` then takes the `planID` and **streams the spooled plan** through `apply_iter` instead of echoing every move back over IPC. Schema (`ipc.schema.json`) is the contract; per-platform DTOs mirror it (there is no codegen — DTOs are hand-maintained + guarded by conformance tests).
+
+**Per-platform status:**
+- **Windows** — COMPLETE + VERIFIED. Engine spool (`commands/restructure.rs`), `restructure_plans_dir()` (`paths.rs`), streaming apply (`restructure_apply.rs::apply_iter`), C# DTOs + app opt-in + apply-by-`planID` (`RestructureView.xaml.cs` hides per-row surfaces + gates apply on `PlanId` when truncated). `cargo check` ✓ · `clippy -D warnings` ✓ · **engine 414 tests** ✓ · **IpcSchema conformance 48** ✓ · **app build 0/0** ✓ · **app 174 tests** ✓ · `dotnet format --verify-no-changes` ✓.
+- **Apple** (reference) — COMPLETE by inspection; `Restructure.swift` has the full disk-spool (`storePlanStream`/`applyStoredPlan`) + `proposeLargeStoredIfNeeded` million-file streaming path + tests. **Unverified-until-Mac** (can't build Swift here).
+- **CLI** — COMPLETE + VERIFIED. In-process (no IPC), so it uses a native RAII `PlanSpool` streaming the full plan to `--json` / apply without buffering. `clippy` ✓ · **8 tests** ✓ (built on Windows).
+- **Linux** — COMPLETE by inspection (opts in, handles `truncated`, applies via `plan_id`); DTOs come from the shared engine crate. **Unverified-until-Linux** (GTK app needs Linux; Rust field-alignment is correct by reading).
+- **TUI** — N/A: read-only 3000-row preview, no restructure-apply surface. Not affected.
+
+Same-batch sibling scalability changes in the tree (all verified by the above compiles/tests): discovery skip-cache keyed by a 128-bit BLAKE3 `SkipFingerprint` instead of full `PathBuf` (`discovery.rs`), and Cleanup dup-group preview truncation.
+
+**Not yet committed.** The whole working tree is dirty (this feature + prior excludedPaths churn) and shows tree-wide CRLF normalization noise (no `.gitattributes`; files written LF vs committed CRLF). Landing on a branch is the next step, pending owner go-ahead.
+
 ## 2026-07-09 — windows-prod-hardening landed (PR #89); FileIDSetup.exe installer working; v0.0.1 assets refreshed
 
 Landed the in-flight `windows-prod-hardening` branch to `main` after full local verification + an adversarial review pass, then produced the first working single-EXE installer and refreshed the v0.0.1 release assets. All real CI green (engine x64/arm64-native/arm64-cross, .NET app x64/arm64, macOS SwiftPM, Linux CLI/TUI/GTK/engine); the lone red is the known Flatpak advisory.

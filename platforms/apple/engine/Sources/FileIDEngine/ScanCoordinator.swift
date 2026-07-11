@@ -133,6 +133,13 @@ public actor ScanCoordinator {
     public func setTotal(_ total: Int) {
         guard var s = current else { return }
         s.totalFiles = total
+        current = s
+    }
+
+    /// Discovery and tagging overlap in the streaming pipeline, so tagging can
+    /// begin before the final discovery total is known.
+    public func beginTagging() {
+        guard var s = current else { return }
         s.phase = .tagging
         current = s
     }

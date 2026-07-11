@@ -33,8 +33,8 @@ use fileid_engine::ipc::{
 };
 use fileid_engine::models::registry::{self, LookupResult};
 
-use crate::engine_client::{EngineClient, EngineEvent};
 use super::util::glass_card;
+use crate::engine_client::{EngineClient, EngineEvent};
 
 const PROPOSED_LIMIT: i64 = 200;
 
@@ -53,9 +53,27 @@ struct VlmKind {
 }
 
 const VLMS: [VlmKind; 3] = [
-    VlmKind { key: "qwen2_5_vl_7b", display: "Qwen2.5-VL 7B", ram_gb: 7.0, secs_per_image: 6.0, license: "Apache-2.0" },
-    VlmKind { key: "gemma_3_4b", display: "Gemma 3 4B", ram_gb: 5.0, secs_per_image: 4.0, license: "Gemma Terms" },
-    VlmKind { key: "mistral_small_3_2", display: "Mistral-Small 3.2", ram_gb: 16.0, secs_per_image: 14.0, license: "Apache-2.0" },
+    VlmKind {
+        key: "qwen2_5_vl_7b",
+        display: "Qwen2.5-VL 7B",
+        ram_gb: 7.0,
+        secs_per_image: 6.0,
+        license: "Apache-2.0",
+    },
+    VlmKind {
+        key: "gemma_3_4b",
+        display: "Gemma 3 4B",
+        ram_gb: 5.0,
+        secs_per_image: 4.0,
+        license: "Gemma Terms",
+    },
+    VlmKind {
+        key: "mistral_small_3_2",
+        display: "Mistral-Small 3.2",
+        ram_gb: 16.0,
+        secs_per_image: 14.0,
+        license: "Apache-2.0",
+    },
 ];
 
 const DEFAULT_KIND: &str = "qwen2_5_vl_7b";
@@ -86,7 +104,12 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let lbl_total = mono_value("0");
     let lbl_pending = mono_value("0");
     let lbl_eta = mono_value("0s");
-    content.append(&build_status_card(&lbl_active, &lbl_total, &lbl_pending, &lbl_eta));
+    content.append(&build_status_card(
+        &lbl_active,
+        &lbl_total,
+        &lbl_pending,
+        &lbl_eta,
+    ));
 
     // Model picker (rows populated after `ui` exists).
     let picker_box = gtk::Box::builder()
@@ -97,7 +120,10 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .xalign(0.0)
         .css_classes(["dim-label"])
         .build();
-    let download_bar = gtk::ProgressBar::builder().show_text(false).css_classes(["gold-accent"]).build();
+    let download_bar = gtk::ProgressBar::builder()
+        .show_text(false)
+        .css_classes(["gold-accent"])
+        .build();
     let download_card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
@@ -109,7 +135,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
 
     // Actions card.
     let naming_banner = build_naming_banner();
-    let skip_check = gtk::CheckButton::with_label("Skip images already analyzed by the active model");
+    let skip_check =
+        gtk::CheckButton::with_label("Skip images already analyzed by the active model");
     skip_check.set_active(true);
     let run_btn = gtk::Button::builder()
         .label("Analyze entire library")
@@ -125,7 +152,13 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .css_classes(["destructive-action"])
         .visible(false)
         .build();
-    content.append(&build_actions_card(&naming_banner, &skip_check, &run_btn, &folder_btn, &cancel_btn));
+    content.append(&build_actions_card(
+        &naming_banner,
+        &skip_check,
+        &run_btn,
+        &folder_btn,
+        &cancel_btn,
+    ));
 
     // Smart-names list.
     let smart_count = gtk::Label::builder()
@@ -152,9 +185,15 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     starting_card.set_visible(false);
     content.append(&starting_card);
 
-    let progress_bar = gtk::ProgressBar::builder().show_text(false).css_classes(["gold-accent"]).build();
+    let progress_bar = gtk::ProgressBar::builder()
+        .show_text(false)
+        .css_classes(["gold-accent"])
+        .build();
     let progress_count = mono_value("0 / 0");
-    let progress_eta = gtk::Label::builder().xalign(1.0).css_classes(["gold-accent"]).build();
+    let progress_eta = gtk::Label::builder()
+        .xalign(1.0)
+        .css_classes(["gold-accent"])
+        .build();
     let progress_file = gtk::Label::builder()
         .xalign(0.0)
         .css_classes(["dim-label"])
@@ -163,19 +202,29 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .build();
     let progress_caption = gtk::Label::builder().xalign(0.0).wrap(true).build();
     let progress_card = build_progress_card(
-        &progress_bar, &progress_count, &progress_eta, &progress_file, &progress_caption,
+        &progress_bar,
+        &progress_count,
+        &progress_eta,
+        &progress_file,
+        &progress_caption,
     );
     progress_card.set_visible(false);
     content.append(&progress_card);
 
     let completion_icon = gtk::Label::new(None);
-    let completion_label = gtk::Label::builder().xalign(0.0).css_classes(["dim-label"]).build();
+    let completion_label = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
     let completion_card = build_completion_card(&completion_icon, &completion_label);
     completion_card.set_visible(false);
     content.append(&completion_card);
 
     let last_desc = gtk::Label::builder().xalign(0.0).wrap(true).build();
-    let last_name = gtk::Label::builder().xalign(0.0).css_classes(["gold-accent"]).build();
+    let last_name = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["gold-accent"])
+        .build();
     let last_card = build_last_card(&last_desc, &last_name);
     last_card.set_visible(false);
     content.append(&last_card);
@@ -337,9 +386,10 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
     }));
 
     // Cancel → deepAnalyzeCancel.
-    ui.cancel_btn.connect_clicked(clone!(@strong ui => move |_| {
-        send_cmd(&ui.engine, CommandPayload::DeepAnalyzeCancel(Empty {}));
-    }));
+    ui.cancel_btn
+        .connect_clicked(clone!(@strong ui => move |_| {
+            send_cmd(&ui.engine, CommandPayload::DeepAnalyzeCancel(Empty {}));
+        }));
 
     // Apply all smart-name renames → renameFiles.
     apply_all.connect_clicked(clone!(@strong ui => move |_| {
@@ -407,9 +457,12 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.run_btn.set_sensitive(false);
             let total = p.total.max(1) as f64;
             ui.progress_bar.set_fraction(p.processed as f64 / total);
-            ui.progress_count.set_text(&format!("{} / {}", p.processed, p.total));
+            ui.progress_count
+                .set_text(&format!("{} / {}", p.processed, p.total));
             match p.eta_seconds {
-                Some(eta) => ui.progress_eta.set_text(&format!("ETA {}", format_duration(eta))),
+                Some(eta) => ui
+                    .progress_eta
+                    .set_text(&format!("ETA {}", format_duration(eta))),
                 None => ui.progress_eta.set_text(""),
             }
             match p.current_path.as_deref() {
@@ -438,9 +491,13 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
         }
         EngineEvent::DeepAnalyzeComplete(c) => {
             end_run(ui);
-            ui.completion_icon.set_text(if c.cancelled { "✗" } else { "✓" });
             ui.completion_icon
-                .set_css_classes(if c.cancelled { &["lavender-accent"] } else { &["gold-accent"] });
+                .set_text(if c.cancelled { "✗" } else { "✓" });
+            ui.completion_icon.set_css_classes(if c.cancelled {
+                &["lavender-accent"]
+            } else {
+                &["gold-accent"]
+            });
             ui.completion_label.set_text(&format!(
                 "{} processed · {} failed · {} wall time",
                 c.processed,
@@ -498,8 +555,11 @@ fn apply_proposed(ui: &Rc<DeepUi>, rows: Vec<ProposedRow>) {
     while let Some(child) = ui.smart_list.first_child() {
         ui.smart_list.remove(&child);
     }
-    ui.smart_count
-        .set_text(&format!("{} file{}", rows.len(), if rows.len() == 1 { "" } else { "s" }));
+    ui.smart_count.set_text(&format!(
+        "{} file{}",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    ));
     for row in &rows {
         ui.smart_list.append(&build_proposed_row(ui, row));
     }
@@ -604,8 +664,16 @@ fn populate_picker(ui: &Rc<DeepUi>) {
         }
 
         let badge = gtk::Label::builder()
-            .label(if installed { "Downloaded".to_string() } else { format!("Will download {gb:.1} GB") })
-            .css_classes(if installed { ["kind-badge"] } else { ["dim-label"] })
+            .label(if installed {
+                "Downloaded".to_string()
+            } else {
+                format!("Will download {gb:.1} GB")
+            })
+            .css_classes(if installed {
+                ["kind-badge"]
+            } else {
+                ["dim-label"]
+            })
             .valign(gtk::Align::Center)
             .build();
 
@@ -675,7 +743,12 @@ fn populate_picker(ui: &Rc<DeepUi>) {
         }));
 
         ui.picker_box.append(&btn);
-        ui.pick_rows.borrow_mut().push(PickRow { key, btn, indicator, title });
+        ui.pick_rows.borrow_mut().push(PickRow {
+            key,
+            btn,
+            indicator,
+            title,
+        });
     }
 }
 
@@ -724,7 +797,9 @@ impl ProposedRow {
 fn query_status(active: String) -> async_channel::Receiver<StatusCounts> {
     spawn_db(move |conn| {
         let total_images: i64 = conn
-            .query_row("SELECT COUNT(*) FROM files WHERE kind = 'image'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM files WHERE kind = 'image'", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         let pending: i64 = conn
             .query_row(
@@ -743,7 +818,11 @@ fn query_status(active: String) -> async_channel::Receiver<StatusCounts> {
                 |r| r.get(0),
             )
             .unwrap_or(0);
-        StatusCounts { total_images, pending, named_people }
+        StatusCounts {
+            total_images,
+            pending,
+            named_people,
+        }
     })
 }
 
@@ -772,7 +851,9 @@ fn query_proposed() -> async_channel::Receiver<Vec<ProposedRow>> {
             })
         });
         match mapped {
-            Ok(iter) => iter.collect::<rusqlite::Result<Vec<_>>>().unwrap_or_default(),
+            Ok(iter) => iter
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap_or_default(),
             Err(_) => Vec::new(),
         }
     })
@@ -875,14 +956,22 @@ fn build_explainer() -> gtk::Box {
     card
 }
 
-fn build_status_card(active: &gtk::Label, total: &gtk::Label, pending: &gtk::Label, eta: &gtk::Label) -> gtk::Box {
+fn build_status_card(
+    active: &gtk::Label,
+    total: &gtk::Label,
+    pending: &gtk::Label,
+    eta: &gtk::Label,
+) -> gtk::Box {
     let card = glass_card();
     card.append(&heading("Library status"));
     card.append(&wrap_caption(
         "Run a scan first (top bar). Then come back here — Deep Analyze adds human-readable \
          captions and suggests smart filenames for every image.",
     ));
-    let grid = gtk::Grid::builder().row_spacing(4).column_spacing(16).build();
+    let grid = gtk::Grid::builder()
+        .row_spacing(4)
+        .column_spacing(16)
+        .build();
     grid.attach(&dim_key("Active model"), 0, 0, 1, 1);
     grid.attach(active, 1, 0, 1, 1);
     grid.attach(&dim_key("Total images"), 0, 1, 1, 1);

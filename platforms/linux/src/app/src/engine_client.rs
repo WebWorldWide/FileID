@@ -166,8 +166,7 @@ impl EngineClient {
             while let Ok(ev) = raw_rx.recv().await {
                 // Snapshot subscribers WITHOUT holding the RefCell borrow across
                 // the await below (a held borrow + await = a latent panic).
-                let subs: Vec<Sender<EngineEvent>> =
-                    this_pump.borrow().subscribers.clone();
+                let subs: Vec<Sender<EngineEvent>> = this_pump.borrow().subscribers.clone();
                 for sub in &subs {
                     let _ = sub.send(ev.clone()).await;
                 }
@@ -208,11 +207,7 @@ impl EngineClient {
             payload,
         };
         let line = serde_json::to_string(&cmd)? + "\n";
-        let stdin = self
-            .stdin
-            .as_ref()
-            .context("engine not spawned")?
-            .clone();
+        let stdin = self.stdin.as_ref().context("engine not spawned")?.clone();
         let mut guard = stdin.lock().expect("engine stdin poisoned");
         guard.write_all(line.as_bytes())?;
         guard.flush()?;
@@ -312,12 +307,9 @@ fn schedule_respawn(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
         e.respawns
     };
     if n > RESPAWN_CAP {
-        let _ = this
-            .borrow()
-            .raw_tx
-            .send_blocking(EngineEvent::Error(
-                "engine crashed repeatedly — giving up. Restart the app.".into(),
-            ));
+        let _ = this.borrow().raw_tx.send_blocking(EngineEvent::Error(
+            "engine crashed repeatedly — giving up. Restart the app.".into(),
+        ));
         return;
     }
     let delay = std::time::Duration::from_millis(400 * n as u64);
@@ -374,23 +366,17 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
         let mapped = match event.payload {
             EventPayload::Ready(_) => Some(EngineEvent::Ready),
             EventPayload::Progress(w) => Some(EngineEvent::Progress(w.inner)),
-            EventPayload::BatchSummary(w) => Some(EngineEvent::BatchLanded(w.inner.processed_total)),
+            EventPayload::BatchSummary(w) => {
+                Some(EngineEvent::BatchLanded(w.inner.processed_total))
+            }
             EventPayload::ScanComplete(w) => {
                 Some(EngineEvent::ScanComplete(w.inner.processed_files))
             }
             EventPayload::Error(w) => Some(EngineEvent::Error(w.inner.message)),
-            EventPayload::DeepAnalyzeStarting(w) => {
-                Some(EngineEvent::DeepAnalyzeStarting(w.inner))
-            }
-            EventPayload::DeepAnalyzeProgress(w) => {
-                Some(EngineEvent::DeepAnalyzeProgress(w.inner))
-            }
-            EventPayload::DeepAnalyzeFileDone(w) => {
-                Some(EngineEvent::DeepAnalyzeFileDone(w.inner))
-            }
-            EventPayload::DeepAnalyzeComplete(w) => {
-                Some(EngineEvent::DeepAnalyzeComplete(w.inner))
-            }
+            EventPayload::DeepAnalyzeStarting(w) => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
+            EventPayload::DeepAnalyzeProgress(w) => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
+            EventPayload::DeepAnalyzeFileDone(w) => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
+            EventPayload::DeepAnalyzeComplete(w) => Some(EngineEvent::DeepAnalyzeComplete(w.inner)),
             EventPayload::ModelDownloadProgress(w) => {
                 Some(EngineEvent::ModelDownloadProgress(w.inner))
             }
@@ -440,12 +426,16 @@ fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
 
     let sql = format!(
         "SELECT {cols} FROM files f \
-         WHERE ( :has_search = 0 \
-                 OR f.path_text LIKE :like ESCAPE '\\' \
+         WHERE f.failed = 0 \
+           AND ( :has_search = 0 \
+                 OR COALESCE(f.path_search, f.path_text) LIKE :like ESCAPE '\\' \
                  OR EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.tag LIKE :like ESCAPE '\\') \
-                 OR ( :has_fts = 1 AND f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH :fts) ) ) \
+                 OR ( :has_fts = 1 AND ( \
+                        f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH :fts) \
+                        OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH :fts) \
+                    ) ) ) \
            AND ( :kind IS NULL OR f.kind = :kind ) \
-         ORDER BY f.scanned_at DESC \
+         ORDER BY f.scanned_at DESC, f.id DESC \
          LIMIT :limit",
         cols = SELECT_COLS
     );

@@ -731,6 +731,7 @@ mod tests {
         assert!(url_is_tarball(
             "https://example.test/foo.TGZ?token=abc#frag"
         ));
+        assert!(!url_is_tarball("https://example.test/libonnxruntime.dylib"));
         assert!(!url_is_tarball(
             "https://huggingface.co/fileid/runtime/resolve/main/libonnxruntime.dylib"
         ));

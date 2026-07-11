@@ -33,9 +33,7 @@ fn main() -> glib::ExitCode {
         .with_target(false)
         .init();
 
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     // Install the FileID design system (palette CSS + glass classes) and force
     // dark mode, matching the macOS + Windows siblings.
