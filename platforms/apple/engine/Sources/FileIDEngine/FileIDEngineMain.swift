@@ -339,12 +339,7 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting, _, _):
-            // `tagsOnly` (fast one-VLM-call/file pass) and `proposeRenames`
-            // (full pass minus the smart-rename VLM call) are accepted for wire
-            // parity; the macOS DeepAnalyzeRunner's wholeLibrary scope doesn't
-            // branch on either yet (tracked in NEXT.md) — full caption + tags +
-            // rename runs regardless. (audit F-C2-001)
+        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames):
             guard let database, let kind = AIModelKind(rawValue: modelKind) else {
                 await sink.emit(.error(EngineError(
                     kind: "deep_invalid",
@@ -369,7 +364,9 @@ struct FileIDEngineMain {
             ) {
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
                                              scope: .wholeLibrary(skipExisting: skipExisting),
-                                             modelKind: kind)
+                                             modelKind: kind,
+                                             tagsOnly: tagsOnly ?? false,
+                                             proposeRenames: proposeRenames ?? true)
             })
         case .deepAnalyzeCancel:
             await DeepAnalyze.shared.requestCancel()
@@ -592,34 +589,228 @@ struct FileIDEngineMain {
                 )))
             }
 
-        // ── Windows-originated commands ──────────────────────────
-        // The schema keeps these symmetric across platforms. Mac
-        // exposes equivalent flows through per-tab UI actions, not
-        // the IPC, so the engine returns a structured pointer rather
-        // than silently dropping.
-        case .applyTags,
-             .renameFiles,
-             .trashFiles,
-             .mergeClusters,
+        // ── Cross-platform bulk actions ──────────────────────────
+        case .applyTags(let fileIDs, let tags, let mode):
+            guard let database else { await emitDbUnavailable(sink, action: "applyTags"); return }
+            await sink.emit(.bulkActionResult(await applyTags(database: database, fileIDs: fileIDs, tags: tags, mode: mode)))
+        case .renameFiles(let renames):
+            guard let database else { await emitDbUnavailable(sink, action: "renameFiles"); return }
+            await sink.emit(.bulkActionResult(await renameFiles(database: database, renames: renames)))
+        case .trashFiles(let fileIDs):
+            guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
+            await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
+        case .mergeClusters(let sourcePersonID, let destinationPersonID):
+            guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
+            await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
+        case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
+            guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
+            await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+        case .markPersonsAsUnknown(let personIDs):
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
+            await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
+        case .wipeLibrary:
+            guard let database else { await sink.emit(.libraryWiped(LibraryWiped(ok: false, message: "Database unavailable."))); return }
+            await sink.emit(.libraryWiped(await wipeLibrary(database: database)))
+        case .findMergeSuggestions,
              .embedTextQuery,
-             .renamePerson,
-             .markPersonsAsUnknown,
-             .findMergeSuggestions,
-             .markPersonsDifferent,
              .embedImageQuery,
              .restoreFromTrash,
              .revertMerge,
-             .wipeLibrary,
+             .markPersonsDifferent,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
-                message: "Bulk tag/rename operations are handled by the FileID app on macOS."
+                message: "This IPC command is not implemented by the macOS engine yet."
             )))
         case .verifyCudaPack:
             await sink.emit(.error(EngineError(
                 kind: "not_applicable_on_platform",
                 message: "CUDA isn't available on Apple Silicon — the AppleProvider EP selects ANE/Metal automatically."
             )))
+        }
+    }
+
+    static func emitDbUnavailable(_ sink: IPCSink, action: String) async {
+        await sink.emit(.bulkActionResult(BulkActionResult(
+            action: action,
+            succeeded: 0,
+            failed: 0,
+            messages: [BulkActionItem(ok: false, message: "Database unavailable.")]
+        )))
+    }
+
+    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil) -> BulkActionItem {
+        BulkActionItem(fileID: id, ok: ok, message: message)
+    }
+
+    static func applyTags(database: Database, fileIDs: [Int64], tags: [String], mode: String) async -> BulkActionResult {
+        let clean = Array(Set(tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted()
+        guard !fileIDs.isEmpty, !clean.isEmpty else {
+            return BulkActionResult(action: "applyTags", succeeded: 0, failed: fileIDs.count, messages: [item(nil, ok: false, "No files or tags supplied.")])
+        }
+        do {
+            let lower = mode.lowercased()
+            let messages = try await database.pool.write { db -> [BulkActionItem] in
+                var messages: [BulkActionItem] = []
+                for id in fileIDs {
+                    do {
+                        if lower == "replace" {
+                            try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'user'", arguments: [id])
+                        }
+                        for tag in clean {
+                            if lower == "remove" {
+                                try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND tag = ? AND source = 'user'", arguments: [id, tag])
+                            } else {
+                                try db.execute(sql: "INSERT OR IGNORE INTO tags(file_id, tag, source, score) VALUES (?, ?, 'user', NULL)", arguments: [id, tag])
+                            }
+                        }
+                        messages.append(item(id, ok: true))
+                    } catch {
+                        messages.append(item(id, ok: false, error.localizedDescription))
+                    }
+                }
+                return messages
+            }
+            return BulkActionResult(action: "applyTags", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        } catch {
+            return BulkActionResult(action: "applyTags", succeeded: 0, failed: fileIDs.count, messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func renameFiles(database: Database, renames: [RenameEntry]) async -> BulkActionResult {
+        var messages: [BulkActionItem] = []
+        for rename in renames {
+            let trimmed = rename.newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("\0") else {
+                messages.append(item(rename.fileID, ok: false, "Invalid filename.")); continue
+            }
+            do {
+                let oldPath: String? = try await database.pool.read { db in
+                    try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [rename.fileID])
+                }
+                guard let oldPath else { messages.append(item(rename.fileID, ok: false, "File row not found.")); continue }
+                let oldURL = URL(fileURLWithPath: oldPath)
+                let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
+                if FileManager.default.fileExists(atPath: newURL.path) {
+                    messages.append(item(rename.fileID, ok: false, "Destination already exists.")); continue
+                }
+                try FileManager.default.moveItem(at: oldURL, to: newURL)
+                let ext = newURL.pathExtension.lowercased()
+                try await database.pool.write { db in
+                    try db.execute(sql: "UPDATE files SET path_text = ?, path_search = ?, extension = ? WHERE id = ?", arguments: [newURL.path, newURL.path.precomposedStringWithCanonicalMapping, ext.isEmpty ? nil : ext, rename.fileID])
+                }
+                messages.append(item(rename.fileID, ok: true))
+            } catch {
+                messages.append(item(rename.fileID, ok: false, error.localizedDescription))
+            }
+        }
+        return BulkActionResult(action: "renameFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    static func trashFiles(database: Database, fileIDs: [Int64]) async -> BulkActionResult {
+        let batch = UUID().uuidString
+        var messages: [BulkActionItem] = []
+        for id in fileIDs {
+            do {
+                let path: String? = try await database.pool.read { db in
+                    try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [id])
+                }
+                guard let path else { messages.append(item(id, ok: false, "File row not found.")); continue }
+                try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)
+                try await database.pool.write { db in
+                    try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
+                }
+                messages.append(item(id, ok: true))
+            } catch {
+                messages.append(item(id, ok: false, error.localizedDescription))
+            }
+        }
+        return BulkActionResult(action: "trashFiles:\(batch)", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    static func mergeClusters(database: Database, source: Int64, destination: Int64) async -> BulkActionResult {
+        if source == destination {
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true, "No-op self merge.")])
+        }
+        do {
+            _ = try await database.mergePersons(target: destination, sources: [source])
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
+        } catch {
+            return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func renamePerson(database: Database, personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?) async -> BulkActionResult {
+        let clean: @Sendable (String?) -> String? = { value in
+            let t = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return t.isEmpty ? nil : t
+        }
+        let parts = [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix)].compactMap { $0 }
+        let display = parts.joined(separator: " ")
+        do {
+            try await database.pool.write { db in
+                try db.execute(sql: """
+                    UPDATE persons
+                    SET title = ?, first_name = ?, middle_name = ?, last_name = ?, suffix = ?, name = ?, is_unknown = 0
+                    WHERE id = ?
+                    """, arguments: [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix), display.isEmpty ? nil : display, personID])
+            }
+            return BulkActionResult(action: "renamePerson", succeeded: 1, failed: 0, messages: [item(personID, ok: true)])
+        } catch {
+            return BulkActionResult(action: "renamePerson", succeeded: 0, failed: 1, messages: [item(personID, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func markPersonsAsUnknown(database: Database, personIDs: [Int64]) async -> BulkActionResult {
+        do {
+            let messages = try await database.pool.write { db -> [BulkActionItem] in
+                var messages: [BulkActionItem] = []
+                for id in personIDs {
+                    do {
+                        try db.execute(sql: """
+                            UPDATE persons
+                            SET name = NULL, title = NULL, first_name = NULL, middle_name = NULL,
+                                last_name = NULL, suffix = NULL, is_unknown = 1
+                            WHERE id = ?
+                            """, arguments: [id])
+                        messages.append(item(id, ok: true))
+                    } catch {
+                        messages.append(item(id, ok: false, error.localizedDescription))
+                    }
+                }
+                return messages
+            }
+            return BulkActionResult(action: "markPersonsAsUnknown", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        } catch {
+            return BulkActionResult(action: "markPersonsAsUnknown", succeeded: 0, failed: personIDs.count, messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func wipeLibrary(database: Database) async -> LibraryWiped {
+        do {
+            try await database.pool.write { db in
+                let virtuals = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'")
+                let tables = try String.fetchAll(db, sql: """
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND sql LIKE 'CREATE TABLE%'
+                      AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'
+                    """).filter { table in
+                        !virtuals.contains { v in table.hasPrefix(v + "_") }
+                    }
+                try db.execute(sql: "PRAGMA foreign_keys = OFF")
+                for table in tables {
+                    try db.execute(sql: "DELETE FROM \"\(table.replacingOccurrences(of: "\"", with: "\"\""))\"")
+                }
+                for table in virtuals {
+                    let q = table.replacingOccurrences(of: "\"", with: "\"\"")
+                    try db.execute(sql: "INSERT INTO \"\(q)\"(\"\(q)\") VALUES('delete-all')")
+                }
+                try? db.execute(sql: "DELETE FROM sqlite_sequence")
+                try db.execute(sql: "PRAGMA foreign_keys = ON")
+            }
+            return LibraryWiped(ok: true)
+        } catch {
+            return LibraryWiped(ok: false, message: error.localizedDescription)
         }
     }
 

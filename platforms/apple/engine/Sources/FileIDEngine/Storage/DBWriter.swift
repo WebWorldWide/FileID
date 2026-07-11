@@ -38,7 +38,7 @@ public struct TaggedFile: Sendable {
     /// tags (no score). DBWriter writes a NULL score for any tag not present here.
     public var tagScores: [String: Double]?
     public var phash: UInt64?                // dHash (0 = none / failed)
-    public var contentHash: Data?            // SHA-256 byte-exact identity (item 1); nil for non-images / read error
+    public var contentHash: Data?            // SHA-256 byte-exact identity; nil on read error
     public var aestheticScore: Double?       // 0..1
     public var hasFaces: Bool
     public var facePrints: [Data]            // archived VNFaceObservation feature prints
@@ -498,9 +498,10 @@ public actor DBWriter {
         // upsert below then takes its DO UPDATE branch and `fileID` resolves to
         // the preserved id. A pure move keeps size+mtime, so `unchanged` is true
         // and the carried-over children are left intact (no re-detect).
-        if existing == nil, let ref = file.fileRef,
+        if existing == nil, (file.fileRef != nil || file.contentHash != nil),
            try Self.healMovedRow(
-               fileRef: ref, newSize: file.sizeBytes, newPath: file.url.path,
+               fileRef: file.fileRef, contentHash: file.contentHash,
+               newSize: file.sizeBytes, newPath: file.url.path,
                newPathHash: pathHash,
                newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
                oldPathExists: oldPathExists, db: db) != nil {
@@ -550,12 +551,10 @@ public actor DBWriter {
         //   DO UPDATE set (matches Windows): a rescan must not clobber the
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
         //   file_ref binds the volume-local inode (st_ino) computed at discovery,
-        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:)) for
-        //   cross-platform byte-parity; content_hash is SHA-256 (item 1) — the
-        //   structure matches Windows (full ≤16 MB; composite above) but the
-        //   primitive is SHA-256 not BLAKE3, so the values are macOS-local while
-        //   the dedup behavior matches. COALESCE preserves a previously-stored
-        //   identity when the incoming value is NULL.
+        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:));
+        //   content_hash is the cross-platform SHA-256 identity shared with the
+        //   Rust engine. COALESCE preserves a previously-stored identity when the
+        //   incoming value is NULL.
         try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
@@ -855,31 +854,24 @@ public actor DBWriter {
 
     /// Lookup + gate + re-bind for a moved file. Returns the healed row id, or
     /// nil if nothing healed. Port of the Windows HEAL_LOOKUP_SQL +
-    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs). file_ref-only on
-    /// macOS — content_hash isn't computed by the scan path, and file_ref alone
-    /// covers same-volume rename/move, the dominant case.
+    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs): prefer same-volume
+    /// file_ref, and fall back to cross-volume content_hash.
     private static func healMovedRow(
-        fileRef: UInt64, newSize: Int64, newPath: String, newPathHash: Int64,
+        fileRef: UInt64?, contentHash: Data?, newSize: Int64, newPath: String, newPathHash: Int64,
         newPathSearch: String, oldPathExists: [String: Bool], db: GRDB.Database
     ) throws -> Int64? {
-        // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
-        // match across a cross-platform DB round-trip.
-        let refInt = Int64(bitPattern: fileRef)
-        // Candidate rows: same volume-local identity AND same size, DIFFERENT
-        // path. NULL file_ref never matches. The size corroboration is the
-        // R-10 caution made real: st_ino carries no generation number, so APFS/
-        // HFS reuse a deleted file's inode freely — without a second signal a
-        // reused inode would re-bind a deleted row onto an unrelated new file and
-        // hand it stale tags/faces/OCR. A genuine move preserves size, so
-        // requiring size_bytes match blocks the reuse case while keeping true
-        // moves healable. (audit F-A2)
+        let refInt = fileRef.map { Int64(bitPattern: $0) }
         let candidates = try Row.fetchAll(
             db.cachedStatement(sql: """
-                SELECT id, path_text FROM files
-                WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
-                  AND size_bytes = ?
+                SELECT id, path_text,
+                       (?2 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4) AS by_ref
+                FROM files
+                WHERE path_text != ?1
+                  AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
+                       OR (content_hash IS NOT NULL AND content_hash = ?3))
+                ORDER BY by_ref DESC
                 """),
-            arguments: [newPath, refInt, newSize])
+            arguments: [newPath, refInt, contentHash, newSize])
         for row in candidates {
             let oldPath: String = row["path_text"]
             // Heal ONLY a genuine move: the candidate's old path must be GONE.
@@ -933,13 +925,14 @@ public actor DBWriter {
         let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
             var paths: Set<String> = []
             for file in batchFiles {
-                guard let ref = file.fileRef else { continue }
-                let refInt = Int64(bitPattern: ref)
+                guard file.fileRef != nil || file.contentHash != nil else { continue }
+                let refInt = file.fileRef.map { Int64(bitPattern: $0) }
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT path_text FROM files
-                    WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
-                      AND size_bytes = ?
-                    """, arguments: [file.url.path, refInt, file.sizeBytes])
+                    WHERE path_text != ?1
+                      AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
+                           OR (content_hash IS NOT NULL AND content_hash = ?3))
+                    """, arguments: [file.url.path, refInt, file.contentHash, file.sizeBytes])
                 for row in rows { paths.insert(row["path_text"]) }
             }
             return paths

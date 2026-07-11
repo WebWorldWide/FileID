@@ -7,27 +7,27 @@
 #   `download-binaries` ships ONLY a STATIC `libonnxruntime.a` (verified: pyke's
 #   `aarch64-apple-darwin` tarball contains no dylib), so a load-dynamic build
 #   has no runtime library unless you install one. This script installs the
-#   official, MIT-licensed ONNX Runtime macOS arm64 dylib where the engine looks.
+#   ONNX Runtime macOS arm64 dylib where the engine looks.
 #
-#   Equivalent to `fileid runtime install`; provided for users not using the CLI.
-#   `brew install onnxruntime` also works (the engine probes /opt/homebrew/lib).
+#   `brew install onnxruntime` is the simplest supported path (the engine probes
+#   /opt/homebrew/lib). This script exists for self-hosted HuggingFace mirrors.
 #
 # VERSION
 #   `ort 2.0.0-rc.10` targets ONNX Runtime 1.22.0 and hard-panics if the loaded
 #   dylib's minor version is < 22, so we install 1.22.0.
 #
 # LICENSE / EGRESS
-#   ONNX Runtime is MIT-licensed (microsoft/onnxruntime). The download is from
-#   github.com (Microsoft's official release) — a user-initiated, one-time fetch.
-#   See shared/docs/RUNTIME.md and shared/docs/DECISIONS.md.
+#   ONNX Runtime is MIT-licensed. To preserve FileID's network policy, this
+#   script refuses to download unless FILEID_ORT_DYLIB_URL points at a
+#   HuggingFace-hosted mirror. See shared/docs/RUNTIME.md.
 #
 # USAGE
 #   shared/scripts/install_onnxruntime_macos.sh [--force]
 #
-# Override the destination with FILEID_RUNTIME_DIR; override the version with
-# ORT_VERSION; pin the archive hash with EXPECTED_SHA256 (recommended — see
-# RUNTIME.md). With EXPECTED_SHA256 unset the script prints the hash it computed
-# so you can pin it.
+# Override the destination with FILEID_RUNTIME_DIR. Set FILEID_ORT_DYLIB_URL to
+# a HuggingFace-hosted .tgz and EXPECTED_SHA256 to the archive hash (recommended —
+# see RUNTIME.md). With EXPECTED_SHA256 unset the script prints the hash it
+# computed so you can pin it.
 set -euo pipefail
 
 ORT_VERSION="${ORT_VERSION:-1.22.0}"
@@ -44,9 +44,20 @@ if [[ "$ARCH" != "arm64" ]]; then
   echo "  Adjust ARCHIVE below for x86_64 (onnxruntime-osx-x86_64-...) if needed." >&2
 fi
 
-# Official, MIT-licensed ONNX Runtime release. Ships lib/libonnxruntime.<ver>.dylib.
-ARCHIVE="onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
-URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ARCHIVE}"
+# HuggingFace-hosted mirror. Ships lib/libonnxruntime.<ver>.dylib.
+URL="${FILEID_ORT_DYLIB_URL:-}"
+if [[ -z "$URL" ]]; then
+  echo "error: FILEID_ORT_DYLIB_URL is required and must point at a HuggingFace-hosted ONNX Runtime .tgz." >&2
+  echo "  Simplest install: brew install onnxruntime" >&2
+  exit 1
+fi
+case "$URL" in
+  https://huggingface.co/*|https://*.huggingface.co/*|https://hf.co/*|https://*.hf.co/*) ;;
+  *)
+    echo "error: runtime downloads must come from huggingface.co or hf.co: $URL" >&2
+    exit 1
+    ;;
+esac
 
 # Pin the archive SHA256 for integrity. TODO(runtime-dylib): paste the value the
 # script prints on first run (or from RUNTIME.md) to enforce verification.

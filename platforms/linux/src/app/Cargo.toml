@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.78"
 description = "FileID — Linux GTK4 + libadwaita app. Talks to the shared Rust engine over stdio."
-license = "TBD"
+license = "Apache-2.0"
 publish = false
 
 [[bin]]
@@ -39,12 +39,9 @@ serde_json = "1"
 # libsqlite3 + FTS5 build the engine links. Justified in shared/docs/DECISIONS.md.
 rusqlite = { version = "0.31", features = ["bundled"] }
 
-# Structured local-only logging. Matches the engine's `tracing` setup so
-# both write to the same `~/.local/share/FileID/logs/app.log` (engine
-# writes engine.jsonl; app writes app.log). NEVER transmits.
+# Structured local-only stderr logging. NEVER transmits.
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender   = "0.2"
 
 anyhow = "1"
 
