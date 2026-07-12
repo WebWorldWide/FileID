@@ -201,7 +201,7 @@ impl ScanSession {
             let total_files: i64 = conn
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
-            let lo = root_prefix.trim_end_matches(['\\', '/']).to_string();
+            let lo = root_descendant_prefix(root);
             // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
             // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
             // non-sargable because LIKE defaults to case-insensitive and forces
@@ -307,6 +307,7 @@ impl ScanSession {
         let discovered_count = handle.count.clone();
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
+        let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_rx = handle.rx;
 
         // Emit a live Progress event every 250 ms while discovery walks
@@ -504,6 +505,32 @@ impl ScanSession {
             }
         }
 
+        let clean_walk = should_reconcile_missing_rows(
+            self.coordinator.is_cancelled(),
+            self.coordinator.is_gpu_dead(),
+            discovered_done_post.load(std::sync::atomic::Ordering::Acquire),
+            discovered_errors.load(std::sync::atomic::Ordering::Relaxed),
+            std::env::var("FILEID_TEST_FILE_CAP")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0),
+        );
+        if clean_walk {
+            let mut seen = discovered_seen_paths.lock();
+            let mut conn = self.db_conn.lock();
+            match soft_hide_missing_rows(&mut conn, root, &mut seen) {
+                Ok(marked) if marked > 0 => {
+                    tracing::info!(marked, "[SCAN] soft-hid catalog rows missing from completed walk");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::error!(error = %err, "[SCAN] missing-file reconciliation failed; preserving catalog rows");
+                }
+            }
+        } else {
+            tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
+        }
+
         let elapsed = started.elapsed().as_secs_f64();
 
         // Stamp the scan_sessions row with completed_at + status. gpu-dead
@@ -670,7 +697,7 @@ fn discovery_notice(
     let (kind, message) = if count == 0 && skip_count > 0 {
         (
             "rescan_no_changes",
-            "Library is already up to date — no new or changed files to scan.".to_string(),
+            "No files required content reprocessing; catalog reconciliation will still complete.".to_string(),
         )
     } else if count == 0 {
         (
@@ -770,11 +797,63 @@ fn bge_installed() -> bool {
         .unwrap_or(false)
 }
 
-/// Exclusive upper bound for a sargable prefix range: `prefix` with its last
-/// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
-/// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
-/// None when no finite bound exists (empty prefix, or an all-`char::MAX` tail)
-/// — callers then match the whole table.
+fn should_reconcile_missing_rows(
+    cancelled: bool,
+    gpu_dead: bool,
+    discovery_done: bool,
+    discovery_errors: u64,
+    test_file_cap: u64,
+) -> bool {
+    !cancelled && !gpu_dead && discovery_done && discovery_errors == 0 && test_file_cap == 0
+}
+
+fn root_descendant_prefix(root: &Path) -> String {
+    let mut prefix = root.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    prefix.push(std::path::MAIN_SEPARATOR);
+    prefix
+}
+
+fn soft_hide_missing_rows(
+    conn: &mut Connection,
+    root: &Path,
+    seen: &mut Vec<i64>,
+) -> rusqlite::Result<usize> {
+    seen.sort_unstable();
+    seen.dedup();
+    let lo = root_descendant_prefix(root);
+    let Some(hi) = prefix_upper_bound(&lo) else { return Ok(0) };
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS fileid_seen_path_hashes (
+             path_hash INTEGER PRIMARY KEY
+         ) WITHOUT ROWID;
+         DELETE FROM fileid_seen_path_hashes;",
+    )?;
+    {
+        let mut insert = tx.prepare_cached(
+            "INSERT OR IGNORE INTO fileid_seen_path_hashes (path_hash) VALUES (?1)",
+        )?;
+        for path_hash in seen.iter() {
+            insert.execute([path_hash])?;
+        }
+    }
+    let marked = tx.execute(
+        "UPDATE files
+         SET failed = 1,
+             error_message = 'File is no longer present under the completed scan root.'
+         WHERE path_text >= ?1 AND path_text < ?2
+           AND failed = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM fileid_seen_path_hashes seen
+               WHERE seen.path_hash = files.path_hash
+           )",
+        rusqlite::params![lo, hi],
+    )?;
+    tx.execute("DELETE FROM fileid_seen_path_hashes", [])?;
+    tx.commit()?;
+    Ok(marked)
+}
+
 /// Delete cataloged rows under each excluded folder. Child rows
 /// (tags / face prints / captions / embeddings) go via ON DELETE CASCADE
 /// (`PRAGMA foreign_keys = ON` on every engine connection); face-crop JPEGs
@@ -816,6 +895,10 @@ pub(crate) fn purge_excluded_rows(
     purged
 }
 
+/// Exclusive upper bound for a sargable prefix range: `prefix` with its last
+/// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
+/// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
+/// None when no finite bound exists.
 pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {
@@ -943,6 +1026,111 @@ mod tests {
         assert_eq!(prefix_upper_bound(""), None);
         // Simple increment.
         assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
+    }
+
+    #[test]
+    fn completed_walk_soft_hides_only_unseen_active_rows_and_preserves_metadata() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        for pragma in crate::db::SETUP_PRAGMAS {
+            let _ = conn.execute_batch(pragma);
+        }
+        crate::db::migrations::apply(&conn).unwrap();
+
+        let root = if cfg!(windows) { r"C:\library" } else { "/library" };
+        let separator = std::path::MAIN_SEPARATOR;
+        let path = |tail: &str| format!("{root}{separator}{tail}");
+        let sibling_root = if cfg!(windows) { r"C:\library-old" } else { "/library-old" };
+        let insert = |conn: &Connection, value: &str, failed: i64, message: Option<&str>| -> i64 {
+            conn.execute(
+                "INSERT INTO files \
+                 (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, error_message) \
+                 VALUES (?1, ?2, 10, 100.0, 'image', 'jpg', ?3, ?4)",
+                rusqlite::params![
+                    value,
+                    crate::util::path_safety::stable_path_hash(value),
+                    failed,
+                    message,
+                ],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let seen_path = path("seen.jpg");
+        let missing_path = path("missing.jpg");
+        let failed_path = path("already-failed.jpg");
+        let seen_id = insert(&conn, &seen_path, 0, None);
+        let missing_id = insert(&conn, &missing_path, 0, None);
+        let failed_id = insert(&conn, &failed_path, 1, Some("decode failed"));
+        let sibling_id = insert(&conn, &format!("{sibling_root}{separator}sibling.jpg"), 0, None);
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source) VALUES (?1, 'family', 'user')",
+            [missing_id],
+        )
+        .unwrap();
+
+        let mut seen = vec![crate::util::path_safety::stable_path_hash(&seen_path)];
+        let marked = soft_hide_missing_rows(&mut conn, Path::new(root), &mut seen).unwrap();
+        assert_eq!(marked, 1);
+        let state = |id: i64| {
+            conn.query_row(
+                "SELECT failed, error_message FROM files WHERE id = ?1",
+                [id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(state(seen_id).0, 0);
+        assert_eq!(state(missing_id).0, 1);
+        assert!(state(missing_id).1.unwrap().contains("no longer present"));
+        assert_eq!(state(failed_id), (1, Some("decode failed".into())));
+        assert_eq!(state(sibling_id).0, 0, "prefix-sharing sibling root must survive");
+        let tag_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE file_id = ?1", [missing_id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tag_count, 1, "soft hide must preserve user tags for recovery");
+    }
+
+    #[test]
+    fn missing_reconciliation_requires_a_complete_uncapped_error_free_walk() {
+        assert!(should_reconcile_missing_rows(false, false, true, 0, 0));
+        assert!(!should_reconcile_missing_rows(true, false, true, 0, 0));
+        assert!(!should_reconcile_missing_rows(false, true, true, 0, 0));
+        assert!(!should_reconcile_missing_rows(false, false, false, 0, 0));
+        assert!(!should_reconcile_missing_rows(false, false, true, 1, 0));
+        assert!(!should_reconcile_missing_rows(false, false, true, 0, 1));
+    }
+
+    #[test]
+    #[ignore = "manual 1M-row performance gate"]
+    fn million_row_reconciliation_uses_set_based_update() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                 id INTEGER PRIMARY KEY,
+                 path_text TEXT NOT NULL UNIQUE,
+                 path_hash INTEGER NOT NULL,
+                 failed INTEGER NOT NULL DEFAULT 0,
+                 error_message TEXT
+             );
+             CREATE INDEX files_path_hash ON files(path_hash);",
+        )
+        .unwrap();
+        let root = if cfg!(windows) { r"C:\million" } else { "/million" };
+        let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
+        conn.execute(
+            "WITH RECURSIVE seq(x) AS (
+                 SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 1000000
+             )
+             INSERT INTO files (id, path_text, path_hash)
+             SELECT x, ?1 || x || '.jpg', x FROM seq",
+            [prefix],
+        )
+        .unwrap();
+        let mut seen: Vec<i64> = (1..=1_000_000).step_by(2).collect();
+        let started = Instant::now();
+        let marked = soft_hide_missing_rows(&mut conn, Path::new(root), &mut seen).unwrap();
+        assert_eq!(marked, 500_000);
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     /// purge_excluded_rows deletes exactly the rows strictly under each

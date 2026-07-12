@@ -9,20 +9,19 @@
 #   3. Cross-compile engine for both x86_64-pc-windows-msvc and aarch64-pc-windows-msvc
 #   4. dotnet publish FileID.App for both win-x64 and win-arm64 (.NET self-contained, R2R)
 #   5. Stage FileIDEngine.exe alongside FileID.exe in each publish dir
-#   6. Sign FileID-owned .exe + .dll files in each publish dir (skipped via -SkipSign)
+#   6. Sign every unsigned .exe + .dll in each publish dir; preserve and verify valid vendor signatures
 #   7. Build per-arch MSIs (FileID-x64.msi + FileID-arm64.msi) via WiX
 #   8. Sign both MSIs
 #   9. Build Burn bundle (runtime prerequisite + architecture-matched MSI)
-#  10. Sign FileIDSetup.exe (Burn re-attaches embedded packages after build,
-#      so the bundle MUST be signed AFTER its inner MSIs are signed,
-#      otherwise the embedded copies are unsigned)
+#  10. Detach + sign the Burn engine, reattach it, then sign FileIDSetup.exe
 #  11. Smoke: bootstrapper exists, sized sanely, signature verifies
 #  12. Privacy gate: grep shipped binaries for telemetry strings
 #  13. Write SHA256SUMS.txt for every produced installer artifact
 #
 # Usage:
 #   pwsh build/publish-bundle.ps1 -SkipSign                 # local test build (no cert)
-#   pwsh build/publish-bundle.ps1 -SignThumbprint <SHA1>    # signed release build
+#   pwsh build/publish-bundle.ps1 -SignThumbprint <SHA1> -SignerSubject "CN=..."
+#   pwsh build/publish-bundle.ps1 -SigningAdapter .\provider-sign.ps1 -SignerSubject "CN=..." -SignerPublicKeySha256 <SHA256>
 #   pwsh build/publish-bundle.ps1 -SkipArm64                # skip ARM64 (x64-only release)
 #
 # Final artifact: platforms/windows/dist/installer/FileIDSetup.exe.
@@ -32,6 +31,9 @@
 param(
     [switch]$SkipSign,
     [string]$SignThumbprint = "",
+    [string]$SigningAdapter = "",
+    [string]$SignerSubject = "",
+    [string]$SignerPublicKeySha256 = "",
     [string]$TimestampServer = "http://timestamp.digicert.com",
     [switch]$SkipArm64,
     [switch]$SkipPrivacyGate
@@ -39,6 +41,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+if (-not $SignThumbprint) { $SignThumbprint = $env:FILEID_SIGN_THUMBPRINT }
+if (-not $SignThumbprint) { $SignThumbprint = $env:FILEID_EV_THUMBPRINT }
+if (-not $SigningAdapter) { $SigningAdapter = $env:FILEID_SIGNING_ADAPTER }
+if (-not $SignerSubject) { $SignerSubject = $env:FILEID_SIGNER_SUBJECT }
+if (-not $SignerPublicKeySha256) { $SignerPublicKeySha256 = $env:FILEID_SIGNER_PUBLIC_KEY_SHA256 }
 
 # A release build must never bypass signing or the privacy gate. release.yml
 # sets CI_RELEASE=true on the actual signing path; if -SkipSign / -SkipPrivacyGate
@@ -108,6 +116,9 @@ $ForbiddenTelemetryStrings = @(
 Write-Host "FileID release publish + bundle" -ForegroundColor Cyan
 Write-Host "  Skip ARM64:    $SkipArm64"
 Write-Host "  Skip sign:     $SkipSign"
+Write-Host "  Sign adapter:  $(if ($SigningAdapter) { $SigningAdapter } else { '<local certificate store>' })"
+Write-Host "  Signer subject: $(if ($SignerSubject) { $SignerSubject } else { '<not set>' })"
+Write-Host "  Signer key:     $(if ($SignerPublicKeySha256) { $SignerPublicKeySha256 } else { '<not set>' })"
 Write-Host "  Skip privacy:  $SkipPrivacyGate"
 Write-Host ""
 
@@ -120,9 +131,23 @@ function Require-Command($name, $hint) {
     }
 }
 
+function Resolve-SignTool {
+    $onPath = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($onPath) { return $onPath.Source }
+    $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    $candidate = Get-ChildItem -Path "$kitsRoot\*\x64\signtool.exe" -File -ErrorAction SilentlyContinue |
+        Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
+    if (-not $candidate) {
+        throw "signtool.exe not found. Install the Windows 10/11 SDK signing tools."
+    }
+    return $candidate
+}
+
 Require-Command "cargo" "Install Rust via https://rustup.rs"
 Require-Command "rustup" "Install Rust via https://rustup.rs"
 Require-Command "dotnet" "winget install Microsoft.DotNet.SDK.8"
+$SignTool = if ($SkipSign) { $null } else { Resolve-SignTool }
 
 $rustVersion = & rustup run 1.90 rustc --version 2>$null
 if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch '^rustc 1\.90\.') {
@@ -203,9 +228,57 @@ if (-not $SkipArm64) {
     Write-Host "  ARM64 SDK:     $windowsSdkArm64Lib" -ForegroundColor Green
 }
 
-if (-not $SkipSign -and [string]::IsNullOrEmpty($SignThumbprint)) {
-    Write-Host "ERROR: -SignThumbprint <SHA1> required (or pass -SkipSign for unsigned local builds)." -ForegroundColor Red
-    exit 1
+function Get-CertificatePublicKeyIdentitySha256($certificate) {
+    $identity = '{0}|{1}|{2}' -f `
+        $certificate.PublicKey.Oid.Value, `
+        [Convert]::ToBase64String($certificate.PublicKey.EncodedParameters.RawData), `
+        [Convert]::ToBase64String($certificate.PublicKey.EncodedKeyValue.RawData)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))) -replace '-', '')
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+if (-not $SkipSign) {
+    if ($SigningAdapter -and $SignThumbprint) {
+        throw "Choose exactly one signing backend: -SigningAdapter or -SignThumbprint."
+    }
+    if ($SigningAdapter) {
+        $SigningAdapter = [System.IO.Path]::GetFullPath($SigningAdapter)
+        if (-not (Test-Path -LiteralPath $SigningAdapter -PathType Leaf)) {
+            throw "Signing adapter not found: $SigningAdapter"
+        }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($SignThumbprint)) {
+            throw "Signed builds require -SigningAdapter or -SignThumbprint (use -SkipSign only for local/dry-run builds)."
+        }
+        $normalizedThumbprint = $SignThumbprint.Replace(" ", "").Replace(":", "")
+        $signingCertificate = @(
+            Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+        ) | Where-Object { $_.Thumbprint -eq $normalizedThumbprint } | Select-Object -First 1
+        if (-not $signingCertificate) {
+            throw "No signing certificate with thumbprint '$normalizedThumbprint' exists in CurrentUser or LocalMachine certificate stores."
+        }
+        $SignThumbprint = $normalizedThumbprint
+        if (-not $SignerSubject) { $SignerSubject = $signingCertificate.Subject }
+        $certificateKeyIdentity = Get-CertificatePublicKeyIdentitySha256 $signingCertificate
+        if ($SignerPublicKeySha256 -and $SignerPublicKeySha256 -ne $certificateKeyIdentity) {
+            throw "Configured signer public-key identity does not match certificate '$normalizedThumbprint'."
+        }
+        $SignerPublicKeySha256 = $certificateKeyIdentity
+    }
+    if ([string]::IsNullOrWhiteSpace($SignerSubject)) {
+        throw "Signed builds require -SignerSubject so FileID can embed and enforce the expected engine publisher."
+    }
+    $SignerPublicKeySha256 = $SignerPublicKeySha256.Replace(" ", "").Replace(":", "").ToUpperInvariant()
+    if ($SignerPublicKeySha256 -notmatch '^[0-9A-F]{64}$') {
+        throw "Signed builds require -SignerPublicKeySha256 (or FILEID_SIGNER_PUBLIC_KEY_SHA256) for the approved signing key."
+    }
+    $env:FileIDRequireSignedEngine = "true"
+    $env:FileIDExpectedSignerSubject = $SignerSubject
+    $env:FileIDExpectedSignerPublicKeySha256 = $SignerPublicKeySha256
 }
 
 # ─── 2. Build engine for each arch ─────────────────────────────────────────
@@ -439,32 +512,109 @@ if (-not $SkipArm64) {
 }
 
 # ─── 5. Sign published binaries ────────────────────────────────────────────
+$script:ExpectedSignerPublicKeySha256 = $SignerPublicKeySha256
+
+function Assert-SignedFile($path) {
+    & $SignTool verify /pa /all /v $path | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "signtool verification failed (exit $LASTEXITCODE) for $path."
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $path
+    if ($signature.Status -ne "Valid") {
+        throw "Authenticode verification failed for $path. Status=$($signature.Status)."
+    }
+    if (-not [string]::Equals($signature.SignerCertificate.Subject, $SignerSubject, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Signer mismatch for $path. Expected '$SignerSubject', got '$($signature.SignerCertificate.Subject)'."
+    }
+    if (-not $signature.TimeStamperCertificate) {
+        throw "Authenticode signature for $path has no trusted timestamp."
+    }
+    $publicKeySha256 = Get-CertificatePublicKeyIdentitySha256 $signature.SignerCertificate
+    if (-not [string]::Equals(
+        $script:ExpectedSignerPublicKeySha256,
+        $publicKeySha256,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Signer public-key mismatch for $path. Every FileID artifact in one release must use the same cryptographic signer."
+    }
+}
+
 function Sign-Binary($path) {
     if ($SkipSign) { return }
-    & signtool sign /fd SHA256 /tr $TimestampServer /td SHA256 /sha1 $SignThumbprint $path | Out-Null
-    # signtool's failures (expired/absent cert, timestamp-server timeout, denied
-    # access) are non-fatal to the pipe unless we check $LASTEXITCODE — without
-    # this the script sails on and ships an UNSIGNED bundle that trips SmartScreen
-    # on every user's machine. Mirrors sign.ps1's per-target check.
+    if ($SigningAdapter) {
+        & $SigningAdapter -Path $path -TimestampServer $TimestampServer -Description "FileID - on-device AI file organizer"
+    } else {
+        & $SignTool sign /fd SHA256 /tr $TimestampServer /td SHA256 /sha1 $SignThumbprint /d "FileID - on-device AI file organizer" $path | Out-Null
+    }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: signtool failed (exit $LASTEXITCODE) for $path — refusing to ship a partially-signed bundle." -ForegroundColor Red
-        exit 1
+        throw "Signing failed (exit $LASTEXITCODE) for $path; refusing to ship a partially signed release."
+    }
+    Assert-SignedFile $path
+}
+
+function Resolve-WixCli {
+    $packageRoot = Join-Path $env:USERPROFILE ".nuget\packages\wixtoolset.sdk"
+    $wix = Get-ChildItem -Path "$packageRoot\*\tools\net6.0\wix.dll" -File -ErrorAction SilentlyContinue |
+        Sort-Object { [version]$_.Directory.Parent.Parent.Name } -Descending |
+        Select-Object -ExpandProperty FullName -First 1
+    if (-not $wix) { throw "WiX CLI not found under $packageRoot after project restore." }
+    return $wix
+}
+
+function Sign-BurnBundle($bundlePath) {
+    if ($SkipSign) { return }
+    $wixCli = Resolve-WixCli
+    $enginePath = Join-Path $DistDir "FileIDSetup.burn-engine.exe"
+    $reattachedPath = Join-Path $DistDir "FileIDSetup.reattached.exe"
+    $verificationEnginePath = Join-Path $DistDir "FileIDSetup.verify-engine.exe"
+    Remove-Item -LiteralPath $enginePath, $reattachedPath, $verificationEnginePath -Force -ErrorAction SilentlyContinue
+    try {
+        & dotnet $wixCli burn detach $bundlePath -engine $enginePath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $enginePath)) {
+            throw "WiX failed to detach the Burn engine from $bundlePath."
+        }
+        Sign-Binary $enginePath
+        & dotnet $wixCli burn reattach $bundlePath -engine $enginePath -o $reattachedPath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $reattachedPath)) {
+            throw "WiX failed to reattach the signed Burn engine."
+        }
+        Move-Item -LiteralPath $reattachedPath -Destination $bundlePath -Force
+        Sign-Binary $bundlePath
+        & dotnet $wixCli burn detach $bundlePath -engine $verificationEnginePath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $verificationEnginePath)) {
+            throw "WiX failed to detach the final Burn engine for verification."
+        }
+        Assert-SignedFile $verificationEnginePath
+    } finally {
+        Remove-Item -LiteralPath $enginePath, $reattachedPath, $verificationEnginePath -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Sign-PublishDir($dir) {
     if ($SkipSign) { return }
-    Write-Host "Signing FileID-owned binaries under $dir..." -ForegroundColor Cyan
-    foreach ($name in @("FileID.exe", "FileID.dll", "FileIDEngine.exe", "FileID.Theme.dll", "FileID.IpcSchema.dll")) {
+    Write-Host "Signing every unsigned executable payload under $dir..." -ForegroundColor Cyan
+    $requiredFileIdTargets = @("FileID.exe", "FileID.dll", "FileIDEngine.exe", "FileID.Theme.dll", "FileID.IpcSchema.dll")
+    foreach ($name in $requiredFileIdTargets) {
         $path = Join-Path $dir $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "FileID-owned signing target is missing: $path"
         }
-        Sign-Binary $path
-        $signature = Get-AuthenticodeSignature -LiteralPath $path
-        if ($signature.Status -ne "Valid") {
-            throw "Authenticode verification failed after signing $path. Status=$($signature.Status)."
+    }
+    foreach ($target in Get-ChildItem -LiteralPath $dir -Recurse -File | Where-Object { $_.Extension -in @(".exe", ".dll") }) {
+        $existing = Get-AuthenticodeSignature -LiteralPath $target.FullName
+        if ($existing.Status -eq "NotSigned") {
+            Sign-Binary $target.FullName
+            continue
         }
+        if ($existing.Status -ne "Valid") {
+            throw "Refusing to package invalid existing signature on $($target.FullName). Status=$($existing.Status)."
+        }
+        & $SignTool verify /pa /all /v $target.FullName | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Existing vendor signature verification failed for $($target.FullName)."
+        }
+    }
+    foreach ($name in $requiredFileIdTargets) {
+        Assert-SignedFile (Join-Path $dir $name)
     }
 }
 
@@ -502,11 +652,9 @@ if (-not (Test-Path $BundleExe)) {
 }
 
 # ─── 9. Sign bundle ────────────────────────────────────────────────────────
-# Burn re-attaches the embedded MSIs after the bundle is built; the bundle
-# itself MUST be re-signed last so the outer Authenticode signature is
-# valid AFTER the embedded MSIs are stamped in. WiX docs call this out
-# explicitly — `insignia` is the tool but signtool on the final .exe works.
-Sign-Binary $BundleExe
+# Burn caches its detached engine for repair/uninstall, so both that engine
+# and the final reattached bundle need valid publisher signatures.
+Sign-BurnBundle $BundleExe
 
 # ─── 10. Smoke ─────────────────────────────────────────────────────────────
 $bundleSize = [math]::Round((Get-Item $BundleExe).Length / 1MB, 1)

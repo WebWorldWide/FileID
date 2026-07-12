@@ -1321,7 +1321,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         var sheet = new FilePreviewSheet();
         sheet.SetSiblings(siblings, tileIndex);
-        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
 
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
@@ -1349,7 +1348,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
             handledEventsToo: true);
 
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        dialog.Opened += (_, _) =>
+            sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
+
+        try { await dialog.ShowAsync(); }
+        catch { /* dialog already open */ }
+        finally { sheet.CloseFromHost(); }
     }
 
     private void OnContextOpen(object sender, RoutedEventArgs e)

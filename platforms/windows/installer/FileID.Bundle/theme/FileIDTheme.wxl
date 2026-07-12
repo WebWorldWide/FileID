@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-us" Language="1033" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="Caption" Value="[WixBundleName] Setup" />
+  <String Id="Title" Value="[WixBundleName]" />
+  <String Id="CheckingForUpdatesLabel" Value="Preparing private, on-device AI" />
+  <String Id="UpdateButton" Value="&amp;Update to version [WixStdBAUpdateAvailable]" />
+  <String Id="InstallHeader" Value="Your files. Your device. Your control." />
+  <String Id="InstallMessage" Value="Organize, tag, deduplicate, and rename files with private on-device AI.&#xA;&#xA;No cloud. No telemetry. No account required." />
+  <String Id="InstallMessageOptions" Value="Organize, tag, deduplicate, and rename files with private on-device AI.&#xA;&#xA;No cloud. No telemetry. No account required." />
+  <String Id="InstallVersion" Value="FileID [WixBundleVersion] - Windows 10/11 64-bit" />
+  <String Id="ConfirmCancelMessage" Value="Cancel FileID setup? No changes will be made." />
+  <String Id="ExecuteUpgradeRelatedBundleMessage" Value="Updating the previous FileID version" />
+  <String Id="HelpHeader" Value="FileID Setup Help" />
+  <String Id="HelpText" Value="/install | /repair | /uninstall | /layout [directory] - installs, repairs, uninstalls, or creates a local copy.&#xA;&#xA;/passive | /quiet - uses minimal UI or no UI.&#xA;/norestart - prevents automatic restart requests.&#xA;/log log.txt - writes setup details to the selected log file." />
+  <String Id="HelpCloseButton" Value="&amp;Close" />
+  <String Id="InstallLicenseLinkText" Value="Review the FileID &lt;a href=&quot;#&quot;&gt;Apache 2.0 license&lt;/a&gt;." />
+  <String Id="InstallAcceptCheckbox" Value="I &amp;agree to the Apache 2.0 license" />
+  <String Id="InstallOptionsButton" Value="&amp;Options" />
+  <String Id="InstallInstallButton" Value="&amp;Install FileID" />
+  <String Id="InstallCancelButton" Value="&amp;Cancel" />
+  <String Id="OptionsHeader" Value="Setup Options" />
+  <String Id="OptionsLocationLabel" Value="Install location:" />
+  <String Id="OptionsBrowseButton" Value="&amp;Browse" />
+  <String Id="OptionsOkButton" Value="&amp;OK" />
+  <String Id="OptionsCancelButton" Value="&amp;Cancel" />
+  <String Id="ProgressHeader" Value="Installing FileID" />
+  <String Id="ProgressLabel" Value="Current step:" />
+  <String Id="OverallProgressPackageText" Value="Preparing setup..." />
+  <String Id="ProgressCancelButton" Value="&amp;Cancel" />
+  <String Id="ModifyHeader" Value="Keep FileID working beautifully" />
+  <String Id="ModifyRepairButton" Value="&amp;Repair" />
+  <String Id="ModifyUninstallButton" Value="&amp;Uninstall" />
+  <String Id="ModifyCancelButton" Value="&amp;Cancel" />
+  <String Id="SuccessHeader" Value="FileID is ready" />
+  <String Id="SuccessCacheHeader" Value="FileID setup files are ready" />
+  <String Id="SuccessInstallHeader" Value="FileID is ready" />
+  <String Id="SuccessLayoutHeader" Value="The FileID offline layout is ready" />
+  <String Id="SuccessModifyHeader" Value="FileID was updated successfully" />
+  <String Id="SuccessRepairHeader" Value="FileID was repaired successfully" />
+  <String Id="SuccessUninstallHeader" Value="FileID was removed" />
+  <String Id="SuccessUnsafeUninstallHeader" Value="FileID was removed" />
+  <String Id="SuccessLaunchButton" Value="&amp;Open FileID" />
+  <String Id="SuccessRestartText" Value="Restart Windows before opening FileID." />
+  <String Id="SuccessUninstallRestartText" Value="Restart Windows to finish removing FileID." />
+  <String Id="SuccessRestartButton" Value="&amp;Restart" />
+  <String Id="SuccessCloseButton" Value="&amp;Close" />
+  <String Id="FailureHeader" Value="FileID setup needs attention" />
+  <String Id="FailureCacheHeader" Value="Setup files could not be prepared" />
+  <String Id="FailureInstallHeader" Value="FileID could not be installed" />
+  <String Id="FailureLayoutHeader" Value="The offline layout could not be created" />
+  <String Id="FailureModifyHeader" Value="FileID could not be updated" />
+  <String Id="FailureRepairHeader" Value="FileID could not be repaired" />
+  <String Id="FailureUninstallHeader" Value="FileID could not be removed" />
+  <String Id="FailureUnsafeUninstallHeader" Value="FileID could not be removed" />
+  <String Id="FailureHyperlinkLogText" Value="Setup kept your existing files safe. Review the &lt;a href=&quot;#&quot;&gt;setup log&lt;/a&gt; for details, then retry." />
+  <String Id="FailureRestartText" Value="Restart Windows to complete rollback before retrying." />
+  <String Id="FailureRestartButton" Value="&amp;Restart" />
+  <String Id="FailureCloseButton" Value="&amp;Close" />
+  <String Id="FilesInUseTitle" Value="Close apps to continue" />
+  <String Id="FilesInUseLabel" Value="These applications are using files FileID needs to update:" />
+  <String Id="FilesInUseNetfxCloseRadioButton" Value="Close the &amp;applications." />
+  <String Id="FilesInUseCloseRadioButton" Value="Close the &amp;applications and try to reopen them." />
+  <String Id="FilesInUseDontCloseRadioButton" Value="&amp;Keep them open and restart Windows later." />
+  <String Id="FilesInUseRetryButton" Value="&amp;Retry" />
+  <String Id="FilesInUseIgnoreButton" Value="&amp;Ignore" />
+  <String Id="FilesInUseExitButton" Value="E&amp;xit" />
+</WixLocalization>

@@ -807,7 +807,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "https://github.com/anolle/FileID/blob/main/shared/docs/PRIVACY.md",
+                FileName = "https://github.com/WebWorldWide/FileID/blob/main/shared/docs/PRIVACY.md",
                 UseShellExecute = true,
             });
         }

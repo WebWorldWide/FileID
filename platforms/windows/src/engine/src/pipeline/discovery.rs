@@ -35,6 +35,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
@@ -174,9 +176,17 @@ pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
     pub count: Arc<AtomicU64>,
     pub done: Arc<AtomicBool>,
+    /// Stable path hashes of every supported, non-empty file observed during
+    /// the walk, including files skipped as already current.
+    pub seen_paths: Arc<Mutex<Vec<i64>>>,
     /// Walk errors swallowed during traversal. Surfaced as a non-fatal
     /// `discovery_partial` event by the scan orchestrator.
     pub error_count: Arc<AtomicU64>,
+}
+
+struct ClassifiedEntry {
+    discovered: Option<DiscoveredFile>,
+    seen_path_hash: Option<i64>,
 }
 
 impl Discovery {
@@ -212,9 +222,11 @@ impl Discovery {
         let count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
+        let seen_paths = Arc::new(Mutex::new(Vec::new()));
         let count_inner = count.clone();
         let done_inner = done.clone();
         let error_count_inner = error_count.clone();
+        let seen_paths_inner = seen_paths.clone();
 
         if !skip_paths.is_empty() {
             tracing::info!(
@@ -265,6 +277,7 @@ impl Discovery {
             let skip_for_dir = skip_paths.clone();
             let excl_for_dir = exclusions.clone();
             let err_for_dir = error_count_inner.clone();
+            let seen_for_dir = seen_paths_inner.clone();
             // Walk a verbatim ("\\?\") root so directories whose full path
             // exceeds MAX_PATH (260) are traversable — std/jwalk silently
             // fail on them otherwise (this engine .exe has no long-path
@@ -350,17 +363,27 @@ impl Discovery {
                     });
                     // Parallel stage: do the per-file stat + file_ref open here
                     // (on the rayon pool) and store the result in client_state.
+                    // Merge observed fingerprints once per directory to avoid a
+                    // global lock on every file in million-file incremental walks.
+                    let mut seen_in_directory = Vec::new();
                     for res in children.iter_mut() {
                         let Ok(entry) = res.as_mut() else { continue };
                         if !entry.file_type().is_file() {
                             continue;
                         }
                         let entry_path = entry.path();
-                        entry.client_state = classify_entry(
+                        let classified = classify_entry(
                             &entry_path,
                             skip_for_dir.as_ref(),
                             err_for_dir.as_ref(),
                         );
+                        if let Some(path_hash) = classified.seen_path_hash {
+                            seen_in_directory.push(path_hash);
+                        }
+                        entry.client_state = classified.discovered;
+                    }
+                    if !seen_in_directory.is_empty() {
+                        seen_for_dir.lock().extend(seen_in_directory);
                     }
                 });
 
@@ -407,17 +430,16 @@ impl Discovery {
             // Channel auto-closes when tx drops here.
         });
 
-        DiscoveryHandle { rx, count, done, error_count }
+        DiscoveryHandle { rx, count, done, seen_paths, error_count }
     }
 }
 
 /// Build the `DiscoveredFile` payload for one file entry, doing the stat +
 /// `file_ref` opens. Runs on the jwalk/rayon pool (one task per directory) so
 /// these syscalls fan out instead of serializing on the consumer thread
-/// (C6-017). Returns `None` for any file the pipeline should skip
-/// (non-Unicode name, already-current, metadata failure, zero-byte,
-/// unsupported kind); skip-with-error cases bump `error_count` here so the
-/// consumer's terminal accounting is unchanged.
+/// (C6-017). Returns both the optional pipeline payload and an optional
+/// stable path hash for reconciliation. Already-current supported files are seen
+/// even though they do not enter the expensive tagging pipeline.
 ///
 /// `entry_path` is the verbatim-prefixed walk path (children inherit the
 /// "\\?\" root); FS opens reconvert via `to_extended_length` internally.
@@ -425,7 +447,7 @@ fn classify_entry(
     entry_path: &std::path::Path,
     skip_paths: &HashMap<SkipFingerprint, (i64, Option<f64>)>,
     error_count: &AtomicU64,
-) -> Option<DiscoveredFile> {
+) -> ClassifiedEntry {
     // Strip the verbatim prefix back to normal form: this is what we store +
     // display + compare against the skip-set (which holds normal-form DB
     // paths). FS access reconverts via `to_extended_length` at the open site.
@@ -442,7 +464,7 @@ fn classify_entry(
              surrogate?) — skipping; rename the file to include it"
         );
         error_count.fetch_add(1, Ordering::Relaxed);
-        return None;
+        return ClassifiedEntry { discovered: None, seen_path_hash: None };
     }
     // follow_links is false on the walk, so symlink_metadata matches jwalk's
     // own DirEntry::metadata for the non-followed case.
@@ -450,13 +472,15 @@ fn classify_entry(
         Ok(m) => m,
         Err(_) => {
             error_count.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return ClassifiedEntry { discovered: None, seen_path_hash: None };
         }
     };
     let size = metadata.len();
     if size == 0 {
-        return None;
+        return ClassifiedEntry { discovered: None, seen_path_hash: None };
     }
+    let fingerprint = path_fingerprint(&path);
+    let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     let modified = metadata
         .modified()
         .ok()
@@ -469,14 +493,14 @@ fn classify_entry(
     // "unchanged" contract. The previous bare path-membership skip stranded any
     // file edited after its last scan, because the stored modified_at is never
     // refreshed for a skipped row (its UPSERT never runs).
-    if let Some(&(db_size, db_modified)) = skip_paths.get(&path_fingerprint(&path)) {
+    if let Some(&(db_size, db_modified)) = skip_paths.get(&fingerprint) {
         let unchanged = db_size == size as i64
             && match db_modified {
                 Some(m) => (m - modified).abs() < 0.000_001,
                 None => false,
             };
         if unchanged {
-            return None;
+            return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
         }
     }
     let created_unix = metadata
@@ -509,7 +533,7 @@ fn classify_entry(
         .map(FileKind::from_extension)
         .unwrap_or(FileKind::Other);
     if kind == FileKind::Other {
-        return None; // don't bother tagging workers with files we can't process
+        return ClassifiedEntry { discovered: None, seen_path_hash: None };
     }
 
     // Volume-local file id: lets the dbwriter heal a renamed/moved file's
@@ -517,15 +541,18 @@ fn classify_entry(
     // via `FILE_FLAG_BACKUP_SEMANTICS`; `None` on permission/race errors (the
     // heal then falls through to content_hash).
     let file_ref = crate::platform::file_ref(entry_path);
-    Some(DiscoveredFile {
-        path,
-        kind,
-        size_bytes: size,
-        modified_unix: modified,
-        created_unix,
-        online_only,
-        file_ref,
-    })
+    ClassifiedEntry {
+        discovered: Some(DiscoveredFile {
+            path,
+            kind,
+            size_bytes: size,
+            modified_unix: modified,
+            created_unix,
+            online_only,
+            file_ref,
+        }),
+        seen_path_hash: Some(seen_path_hash),
+    }
 }
 
 /// True when `to_string_lossy` would mangle this path: the lossy text is the
@@ -851,9 +878,10 @@ mod tests {
             let coord = ScanCoordinator::new();
             let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
             let handle = disc.spawn();
-            let mut rx = handle.rx;
             let count = handle.count.clone();
             let done = handle.done.clone();
+            let seen_paths = handle.seen_paths.clone();
+            let mut rx = handle.rx;
             // Wait for the walk to finish (done flag flips after the last
             // count.fetch_add + tx.send). Then assert count == 100 even if
             // we haven't drained the receiver yet (the 32k channel buffers all
@@ -875,6 +903,7 @@ mod tests {
                 drained += 1;
             }
             assert_eq!(drained, 100);
+            assert_eq!(seen_paths.lock().len(), 100);
         });
     }
 
@@ -895,7 +924,12 @@ mod tests {
         let errors = AtomicU64::new(0);
         // Pass the path exactly as the walk would (no verbatim prefix in the
         // test env; strip_extended_length is a no-op on a plain path).
-        let df = classify_entry(&p, &skip, &errors).expect("supported file → Some payload");
+        let classified = classify_entry(&p, &skip, &errors);
+        let df = classified.discovered.expect("supported file → Some payload");
+        assert_eq!(
+            classified.seen_path_hash,
+            Some(crate::util::path_safety::stable_path_hash(&p.to_string_lossy()))
+        );
         assert_eq!(df.kind, FileKind::Image);
         assert_eq!(df.size_bytes, 9);
         assert!(df.modified_unix > 0.0, "modified timestamp populated by the parallel stage");
@@ -905,30 +939,40 @@ mod tests {
         // so the consumer never has to re-stat to decide.
         let empty = root.join("empty.jpg");
         fs::write(&empty, b"").unwrap();
-        assert!(classify_entry(&empty, &skip, &errors).is_none());
+        let empty_result = classify_entry(&empty, &skip, &errors);
+        assert!(empty_result.discovered.is_none());
+        assert!(empty_result.seen_path_hash.is_none());
         let other = root.join("notes.xyz");
         fs::write(&other, b"data").unwrap();
-        assert!(classify_entry(&other, &skip, &errors).is_none());
+        let other_result = classify_entry(&other, &skip, &errors);
+        assert!(other_result.discovered.is_none());
+        assert!(other_result.seen_path_hash.is_none());
 
         // R4-01: skip honors size+mtime, not bare membership. An entry whose
         // stored size+mtime MATCH the live file is skipped (unchanged)...
         let mut skip2 = HashMap::new();
         skip2.insert(path_fingerprint(&p), (df.size_bytes as i64, Some(df.modified_unix)));
-        assert!(classify_entry(&p, &skip2, &errors).is_none(), "unchanged file is skipped");
+        let unchanged = classify_entry(&p, &skip2, &errors);
+        assert!(unchanged.discovered.is_none(), "unchanged file is skipped");
+        assert_eq!(
+            unchanged.seen_path_hash,
+            Some(crate::util::path_safety::stable_path_hash(&p.to_string_lossy())),
+            "unchanged file is still observed"
+        );
         // ...but a changed mtime defeats the skip so the edit is re-processed.
         let mut skip3 = HashMap::new();
         skip3.insert(
             path_fingerprint(&p),
             (df.size_bytes as i64, Some(df.modified_unix + 100.0)),
         );
-        assert!(classify_entry(&p, &skip3, &errors).is_some(), "mtime change defeats the skip");
+        assert!(classify_entry(&p, &skip3, &errors).discovered.is_some(), "mtime change defeats the skip");
         // A changed size likewise re-processes.
         let mut skip4 = HashMap::new();
         skip4.insert(
             path_fingerprint(&p),
             (df.size_bytes as i64 + 1, Some(df.modified_unix)),
         );
-        assert!(classify_entry(&p, &skip4, &errors).is_some(), "size change defeats the skip");
+        assert!(classify_entry(&p, &skip4, &errors).discovered.is_some(), "size change defeats the skip");
     }
 
     /// C6-017 end-to-end guard: every file the receiver gets must already
