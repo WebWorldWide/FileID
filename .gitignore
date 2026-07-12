@@ -43,6 +43,9 @@ platforms/apple/scripts/deepharness.swift
 # DMG build output (macOS).
 platforms/apple/dist/
 
+# Root packaging output (build-tools.ps1 / package-tools.py tool bundles + smoke).
+/dist/
+
 # ─── Rust / Cargo (Windows engine, future Linux engine) ─────────────────────
 platforms/windows/src/engine/target/
 platforms/linux/**/target/

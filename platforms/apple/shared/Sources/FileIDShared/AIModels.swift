@@ -95,23 +95,46 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
 
     /// Top three picks for a given RAM tier, ranked best-first.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 32       { return [.mistralSmall32, .gemma3_12B, .qwen2VL7B] }
+        if ramGB >= 30       { return [.mistralSmall32, .gemma3_12B, .qwen2VL7B] }
         else if ramGB >= 16  { return [.qwen2VL7B, .qwen3VL4B, .gemma3_4B] }
         else                 { return [.gemma3_4B, .qwen3VL4B, .paligemma3B] }
     }
 
-    /// Reserves ~8 GB for system + scan engine + DB cache. A model that
-    /// would push past `ramGB - 8` is rejected to avoid OOM-killing the
-    /// engine when MLX loads weights.
     public func fits(ramGB: Double) -> Bool {
-        let headroom = max(0, ramGB - 8.0)
+        let reserve = max(2.0, min(8.0, ramGB * 0.35))
+        let headroom = max(0, ramGB - reserve)
         return ramBudgetGB <= headroom
+    }
+
+    public var requiredFreeBytes: Int64 {
+        approxBytes * 2 + 512 * 1_048_576
+    }
+
+    public func fits(freeDiskBytes: Int64?) -> Bool {
+        guard let freeDiskBytes else { return true }
+        return freeDiskBytes >= requiredFreeBytes
     }
 
     /// First recommendation that fits, falling back to the lightest
     /// commercial-clean pick (Gemma 3 4B).
-    public static func safeDefaultFor(ramGB: Double) -> AIModelKind {
-        recommendedFor(ramGB: ramGB).first { $0.fits(ramGB: ramGB) } ?? .gemma3_4B
+    public static func safeDefaultFor(ramGB: Double,
+                                      freeDiskBytes: Int64? = nil) -> AIModelKind {
+        let ranked = recommendedFor(ramGB: ramGB)
+        if let choice = ranked.first(where: {
+            $0.fits(ramGB: ramGB) && $0.fits(freeDiskBytes: freeDiskBytes)
+        }) {
+            return choice
+        }
+        return ranked.first(where: { $0.fits(ramGB: ramGB) }) ?? .gemma3_4B
+    }
+
+    public static func onboardingSelection(persistedRawValue: String?,
+                                           ramGB: Double,
+                                           freeDiskBytes: Int64? = nil) -> AIModelKind {
+        if let persistedRawValue, !persistedRawValue.isEmpty {
+            return migrated(rawValue: persistedRawValue)
+        }
+        return safeDefaultFor(ramGB: ramGB, freeDiskBytes: freeDiskBytes)
     }
 
     /// Migrate a persisted rawValue that may predate the commercial-clean

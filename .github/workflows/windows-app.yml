@@ -11,6 +11,10 @@ on:
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
       - 'platforms/windows/global.json'
+      - 'platforms/windows/VERSION'
+      - 'platforms/windows/installer/**'
+      - 'platforms/windows/build/publish-bundle.ps1'
+      - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   pull_request:
     paths:
@@ -21,6 +25,10 @@ on:
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
       - 'platforms/windows/global.json'
+      - 'platforms/windows/VERSION'
+      - 'platforms/windows/installer/**'
+      - 'platforms/windows/build/publish-bundle.ps1'
+      - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   workflow_dispatch:
 

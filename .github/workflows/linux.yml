@@ -244,11 +244,9 @@ jobs:
   # App — the GTK4 + libadwaita Linux app. ubuntu-latest (24.04) ships gtk4
   # 4.14 + libadwaita 1.5, matching the crates' v4_14 / v1_5 features.
   #
-  # RISK POSTURE: `cargo build` is the REQUIRED gate (proves the scaffold links
-  # against the system GTK stack + the shared engine). `cargo clippy -D warnings`
-  # is ADVISORY (continue-on-error) so a Phase-0 scaffold clippy nit can't
-  # red-gate this keystone workflow. Promote clippy to a hard gate once the app
-  # is known warning-clean.
+  # Both build and Clippy are required gates: this is a shipped six-tab app,
+  # not a scaffold, so warnings are release failures just as they are for the
+  # engine, CLI, and TUI.
   # ---------------------------------------------------------------------------
   app:
     name: GTK4 app (fileid-linux) — Linux x64
@@ -299,11 +297,8 @@ jobs:
       - name: Build (required gate)
         run: cargo build
 
-      - name: Clippy (advisory)
-        # Advisory until the scaffold is confirmed warning-clean — see the
-        # job comment. Surfaces nits in the log without red-gating CI.
-        continue-on-error: true
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (-D warnings)
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Verify binary exists
         run: |

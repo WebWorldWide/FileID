@@ -1,11 +1,10 @@
 name: Packaging (Linux — Flatpak)
 
-# Verifies the Flatpak builds. The whole job is ADVISORY (continue-on-error)
-# for now: the ONNX-Runtime-in-sandbox path (ort `download-binaries` inside a
-# Flatpak build) may need Linux-side iteration, and packaging must not red-gate
-# `main`. It surfaces progress in the log and uploads the bundle when it works.
-# Promote to a hard gate once the build is reliably green — mirrors how
-# linux.yml made the GTK app's clippy advisory until it was known clean.
+# Verifies the Flatpak build as a required signal. This developer manifest
+# grants build-only network for Cargo and the statically linked ONNX Runtime
+# archive. Cargo.lock checksums every crate and ort-sys verifies its pinned
+# archive SHA256, so changing bytes fail closed even though transport is online.
+# Flathub submission still requires expressing those inputs as offline sources.
 
 on:
   push:
@@ -34,13 +33,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # Flatpak — the primary, universal channel. Installs the GNOME 46 runtime +
   # the rust-stable SDK extension (GNOME 46 is based on freedesktop-sdk 23.08),
-  # then runs flatpak-builder against packaging/flatpak/. ADVISORY end to end.
+  # then runs flatpak-builder against packaging/flatpak/.
   # ---------------------------------------------------------------------------
   flatpak:
-    name: Flatpak (GNOME 46) — x64 [advisory]
+    name: Flatpak (GNOME 46) — x64
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -65,10 +63,9 @@ jobs:
             org.freedesktop.Sdk.Extension.rust-stable//23.08
 
       - name: Build the Flatpak
-        # --share=network is granted to the build step inside the manifest
-        # (build-options.build-args) so ort can download onnxruntime; nothing
-        # is uploaded — see the manifest header. The shipped sandbox's network
-        # grant is the finish-arg (user-initiated HuggingFace download only).
+        # --share=network is granted to the build step inside the developer
+        # manifest for Cargo + ort's static archive; nothing is uploaded. The
+        # shipped sandbox's network grant remains user-initiated HF downloads.
         run: |
           set -euo pipefail
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
@@ -80,10 +77,14 @@ jobs:
         run: |
           set -euo pipefail
           flatpak build-bundle repo FileID.flatpak io.github.fileid.FileID
+          sha256sum FileID.flatpak > FileID.flatpak.sha256
+          sha256sum --check FileID.flatpak.sha256
 
       - name: Upload Flatpak bundle
         uses: actions/upload-artifact@v4
         with:
           name: fileid-flatpak
-          path: FileID.flatpak
-          if-no-files-found: warn
+          path: |
+            FileID.flatpak
+            FileID.flatpak.sha256
+          if-no-files-found: error

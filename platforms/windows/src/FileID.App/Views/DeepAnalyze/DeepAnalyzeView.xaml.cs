@@ -70,37 +70,6 @@ public sealed partial class DeepAnalyzeView : UserControl
         Unloaded -= OnUnloadedHandler;
     }
 
-    // Resident-RAM budget per VLM, in GB. Mirrors the macOS AIModelKind
-    // .ramBudgetGB (platforms/apple .../AIModels.swift) so the OOM gate is
-    // identical across platforms. A model whose budget can't fit under the
-    // headroom is disabled — loading it would OOM-kill the engine.
-    private static double RamBudgetGB(string kind) => kind switch
-    {
-        "mistral_small_3_2" => 16.0,
-        "qwen2_5_vl_7b" => 7.0,
-        "gemma_3_4b" => 4.5,
-        _ => 7.0,
-    };
-
-    // Reserves ~8 GB for the OS + scan engine + DB cache, exactly like macOS
-    // AIModelKind.fits(ramGB:). Returns the machine's physical RAM in GB from
-    // EngineClient.Info (PhysicalMemoryGB, with Hardware.ramTotalMB as the
-    // fallback), or null when the engine hasn't reported yet.
-    private static double? PhysicalRamGB()
-    {
-        var info = EngineClient.Instance.Info;
-        if (info is null) return null;
-        if (info.PhysicalMemoryGB > 0) return info.PhysicalMemoryGB;
-        if (info.Hardware is { RamTotalMb: > 0 } hw) return hw.RamTotalMb / 1024.0;
-        return null;
-    }
-
-    private static bool Fits(string kind, double ramGB)
-    {
-        var headroom = Math.Max(0, ramGB - 8.0);
-        return RamBudgetGB(kind) <= headroom;
-    }
-
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
         ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
@@ -263,10 +232,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         // not the shared "any VLM installed" slot, otherwise installing one model
         // makes the other cards mis-report as installed and Deep Analyze fails
         // every file with "VLM weights not installed".
-        var ramGB = PhysicalRamGB();
-        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
-        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
-        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, ramGB);
+        var profile = VlmRecommendation.CurrentProfile();
+        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, profile);
+        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, profile);
+        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, profile);
         HighlightActiveCard();
     }
 
@@ -289,21 +258,53 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch { return false; }
     }
 
-    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
+    private bool ActiveModelReady(out string reason)
     {
-        // RAM gate — mirrors macOS ModelOptionRow. When the engine has reported
-        // physical RAM and this VLM's budget can't fit under the ~8 GB headroom,
-        // disable install/select and show a "Needs N GB (you have M)" affordance
-        // instead of letting the model OOM-kill the engine on load.
-        if (ramGB is double available && !Fits(kind, available))
+        var profile = VlmRecommendation.CurrentProfile();
+        if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(_activeModel, profile))
         {
-            status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
+            reason = $"{VlmRecommendation.DisplayName(_activeModel)} is still your selected model, but current available memory is too low to run it safely. Choose a lighter model.";
+            return false;
+        }
+        if (!VlmWeightsPresent(_activeModel))
+        {
+            reason = $"Install {VlmRecommendation.DisplayName(_activeModel)} before starting Deep Analyze.";
+            return false;
+        }
+        if (!SentinelProbe.Installed("llama_runtime_x64"))
+        {
+            reason = "Finish installing the local llama.cpp runtime before starting Deep Analyze.";
+            return false;
+        }
+        reason = string.Empty;
+        return true;
+    }
+
+    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, VlmHardwareProfile profile)
+    {
+        if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(kind, profile))
+        {
+            status.Text = $"Needs ~{VlmRecommendation.WorkingSetGb(kind):0.#} GB working memory (this PC has {profile.TotalRamGb:0.#} GB RAM)";
             status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
             bar.Visibility = Visibility.Collapsed;
             installButton.IsEnabled = false;
             ToolTipService.SetToolTip(card,
-                $"This model needs {RamBudgetGB(kind):0} GB resident RAM. With your {available:0} GB machine and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.");
+                "System RAM has a hard safety floor even when the GPU has substantial VRAM. Pick a smaller model for this PC.");
             card.Opacity = 0.55;
+            card.IsHitTestVisible = false;
+            return;
+        }
+
+        var installed = VlmWeightsPresent(kind);
+        if (!installed && !VlmRecommendation.HasDiskFor(kind, profile.FreeDiskBytes))
+        {
+            var needGb = VlmRecommendation.RequiredFreeBytes(kind) / (1024.0 * 1024 * 1024);
+            status.Text = $"Needs ~{needGb:0.#} GB free while downloading";
+            status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
+            bar.Visibility = Visibility.Collapsed;
+            installButton.IsEnabled = false;
+            ToolTipService.SetToolTip(card, "Free space on the models drive, then try again. Downloads stage verified parts beside the final model.");
+            card.Opacity = 0.7;
             card.IsHitTestVisible = false;
             return;
         }
@@ -322,7 +323,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             bar.Value = slot.Fraction;
             installButton.IsEnabled = false;
         }
-        else if (VlmWeightsPresent(kind))
+        else if (installed)
         {
             status.Text = "Installed";
             bar.Visibility = Visibility.Collapsed;
@@ -361,10 +362,10 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         ActiveModelText.Text = _activeModel switch
         {
-            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
-            "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
+            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (balanced)",
+            "gemma_3_4b" => "Active model: Gemma 3 4B (lightest)",
             "mistral_small_3_2" => "Active model: Mistral-Small 3.2 (max quality)",
-            _ => "Active model: Qwen 2.5-VL 7B (best quality)",
+            _ => "Active model: Qwen 2.5-VL 7B (balanced)",
         };
     }
 
@@ -736,7 +737,8 @@ public sealed partial class DeepAnalyzeView : UserControl
             // Don't let the user select a model that would OOM-kill the engine —
             // mirrors the macOS `guard fits else { return }`. The card is also
             // IsHitTestVisible=false in that state, but guard here defensively.
-            if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return;
+            var profile = VlmRecommendation.CurrentProfile();
+            if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(id, profile)) return;
             _activeModel = id;
             HighlightActiveCard();
             UpdateActiveModelLabel();
@@ -749,6 +751,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 // pending write. (audit A8)
                 var s = AppViewModel.Instance.Settings;
                 s.SelectedVlmModelKind = id;
+                s.SelectedVlmModelWasUserChosen = true;
                 s.Save();
             }
             catch (Exception ex) { DebugLog.Warn("Persist VLM choice failed: " + ex.Message); }
@@ -773,7 +776,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // (which is where CurrentModelKind would otherwise be set).
             ModelInstallerService.Instance.DeepVlm.CurrentModelKind = modelId;
             SyncCards();
-            await EngineClient.Instance.PrewarmModelAsync(modelId);
+            await ModelInstallerService.Instance.InstallDeepVlmAsync(modelId);
         }
         catch (Exception ex)
         {
@@ -783,6 +786,11 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
+        if (!ActiveModelReady(out var reason))
+        {
+            await ShowAlertAsync("Deep Analyze isn't ready", reason);
+            return;
+        }
         // Set the optimistic/working UI state BEFORE the await: if the send
         // throws, the catch reverts it and surfaces the error. Setting it after
         // the await meant a send failure showed the user nothing — the run
@@ -915,6 +923,11 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
         {
+            if (!ActiveModelReady(out var reason))
+            {
+                await ShowAlertAsync("Deep Analyze isn't ready", reason);
+                return;
+            }
             var sel = SelectionRegistry.Instance.LibrarySelection;
             if (sel.Count == 0) return;
             _selectedRunCancelled = false;
@@ -934,6 +947,11 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeCurrentClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeCurrentClicked), async () =>
         {
+            if (!ActiveModelReady(out var reason))
+            {
+                await ShowAlertAsync("Deep Analyze isn't ready", reason);
+                return;
+            }
             var id = SelectionRegistry.Instance.PreviewedFileId;
             if (id is null) return;
             StreamCard.Visibility = Visibility.Visible;

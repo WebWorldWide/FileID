@@ -16,6 +16,7 @@ const CANONICAL_KINDS: &[&str] = &[
     "qwen2_5_vl_7b",
     "gemma_3_4b",
     "llama_runtime_x64",
+    "whisper",
     "cudnn_runtime_x64",
     "ort_cuda_x64",
     "ort_openvino_x64",
@@ -89,7 +90,7 @@ fn registry_matches_manifest_exactly() {
         "manifest lists windows artifacts the registry doesn't serve: {:?}",
         manifest_entries.keys().collect::<Vec<_>>()
     );
-    assert_eq!(registry_urls.len(), 29, "expected 29 pinned artifacts");
+    assert_eq!(registry_urls.len(), 31, "expected 31 pinned artifacts");
 }
 
 #[test]

@@ -1097,12 +1097,20 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     constraints.push(Constraint::Length(1));
     let rows = Layout::vertical(constraints).split(inner);
 
-    // (0) The headline affordance — a black-on-gold button so "scan THIS folder"
-    // is unmissable, plus the `s` shortcut.
+    let headline = if browser.virtual_drives {
+        " → Open a drive "
+    } else {
+        " → Scan this folder "
+    };
+    let shortcut = if browser.virtual_drives {
+        " Enter "
+    } else {
+        " s "
+    };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " → Scan this folder ",
+                headline,
                 Style::default()
                     .fg(Color::Black)
                     .bg(GOLD)
@@ -1110,7 +1118,7 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
             ),
             Span::styled("  press ", Style::default().fg(DIM)),
             Span::styled(
-                " s ",
+                shortcut,
                 Style::default()
                     .fg(GOLD)
                     .bg(PILL_BG)
@@ -1122,17 +1130,23 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
 
     // (1) Title: the current folder (home-collapsed, tail-truncated) + its own
     // shallow counts, so the user sees what a scan here would pick up.
-    let here = truncate(&short(&browser.cwd.to_string_lossy()), inner.width as usize);
+    let here = if browser.virtual_drives {
+        "This computer".to_string()
+    } else {
+        truncate(&short(&browser.cwd.to_string_lossy()), inner.width as usize)
+    };
+    let summary = if browser.virtual_drives {
+        format!("{} available location(s)", browser.rows.len())
+    } else {
+        count_summary(&browser.here)
+    };
     f.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(Span::styled(
                 here,
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                count_summary(&browser.here),
-                Style::default().fg(DIM),
-            )),
+            Line::from(Span::styled(summary, Style::default().fg(DIM))),
         ])),
         rows[1],
     );
@@ -1161,7 +1175,11 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
                     Style::default().fg(LAVENDER),
                 )],
                 BrowseRow::Dir(p) => {
-                    let counts = browser.count_for(p).map(|c| count_summary(&c));
+                    let counts = if browser.virtual_drives {
+                        None
+                    } else {
+                        browser.count_for(p).map(|c| count_summary(&c))
+                    };
                     dir_row(&format!("{}/", dir_label(p)), counts.as_deref(), cw)
                 }
             };
@@ -1196,8 +1214,11 @@ fn render_browser(f: &mut Frame, browser: &Browser, area: Rect) {
     } else {
         "hidden:off"
     };
-    let hint =
-        format!("↑↓ move · Enter open · ← up · d drives · . {hidden_state} · s scan · Esc cancel");
+    let hint = if browser.virtual_drives {
+        "↑↓ move · Enter open drive · Esc cancel".to_string()
+    } else {
+        format!("↑↓ move · Enter open · ← up · d drives · . {hidden_state} · s scan · Esc cancel")
+    };
     f.render_widget(
         Paragraph::new(Span::styled(
             truncate(&hint, inner.width as usize),

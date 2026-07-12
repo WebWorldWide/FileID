@@ -20,6 +20,9 @@ engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the
 engine binary to `~/.cargo/bin` (make sure that's on your `PATH`). To build
 just this crate:
 
+On Windows, use `.\scripts\build-tools.ps1`; it installs the three executables
+plus the ONNX Runtime/DirectML DLLs required by engine-driven scans.
+
 ```sh
 cd platforms/tui
 cargo build --release

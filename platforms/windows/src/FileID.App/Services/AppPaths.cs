@@ -1,9 +1,7 @@
 ﻿// AppPaths — C# mirror of the Rust engine's `paths.rs`.
 //
-// All app-side filesystem locations live under %LOCALAPPDATA%\FileID\.
-// Engine + app share the same directory layout so a DB written by the
-// engine is reachable by the app's read-only connection without any
-// path-translation logic.
+// Engine + app share the same environment-first directory resolution so
+// isolated runs never split the writer DB/model tree from the app's readers.
 
 using System.IO;
 
@@ -11,13 +9,13 @@ namespace FileID.Services;
 
 internal static class AppPaths
 {
-    /// <summary>%LOCALAPPDATA%\FileID\</summary>
+    /// <summary>%LOCALAPPDATA%\FileID\ unless the process environment overrides it.</summary>
     public static string Root { get; } = ResolveRoot();
 
-    public static string DbPath => Path.Combine(Root, "fileid.sqlite");
+    public static string DbPath { get; } = ResolveDbPath(Root, Environment.GetEnvironmentVariable("FILEID_DB"));
     public static string LogsDir => Path.Combine(Root, "logs");
-    public static string ModelsDir => Path.Combine(Root, "Models");
-    public static string HuggingFaceDir => Path.Combine(Root, "Models", "HuggingFace");
+    public static string ModelsDir { get; } = ResolveModelsDir(Root, Environment.GetEnvironmentVariable("FILEID_MODELS_DIR"));
+    public static string HuggingFaceDir => ResolveHuggingFaceDir(ModelsDir);
     public static string ThumbsDir => Path.Combine(Root, "thumbs.cache");
     public static string FacesDir => Path.Combine(Root, "face_crops");
     public static string SettingsPath => Path.Combine(Root, "app-settings.json");
@@ -81,14 +79,36 @@ internal static class AppPaths
 
     private static string ResolveRoot()
     {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrEmpty(localAppData))
-        {
-            // Fallback: user-profile path (rare on Windows desktop SKUs).
-            localAppData = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "AppData", "Local");
-        }
-        return Path.Combine(localAppData, "FileID");
+        return ResolveRoot(
+            Environment.GetEnvironmentVariable("LOCALAPPDATA"),
+            Environment.GetEnvironmentVariable("USERPROFILE"),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     }
+
+    internal static string ResolveRoot(
+        string? localAppDataOverride,
+        string? userProfileOverride,
+        string? knownLocalAppData,
+        string? knownUserProfile)
+    {
+        if (!string.IsNullOrWhiteSpace(localAppDataOverride))
+            return Path.Combine(localAppDataOverride, "FileID");
+        if (!string.IsNullOrWhiteSpace(userProfileOverride))
+            return Path.Combine(userProfileOverride, "AppData", "Local", "FileID");
+        if (!string.IsNullOrWhiteSpace(knownLocalAppData))
+            return Path.Combine(knownLocalAppData, "FileID");
+        if (!string.IsNullOrWhiteSpace(knownUserProfile))
+            return Path.Combine(knownUserProfile, "AppData", "Local", "FileID");
+        throw new InvalidOperationException("Could not resolve %LOCALAPPDATA% or %USERPROFILE% for FileID state.");
+    }
+
+    internal static string ResolveDbPath(string root, string? overridePath)
+        => string.IsNullOrWhiteSpace(overridePath) ? Path.Combine(root, "fileid.sqlite") : overridePath;
+
+    internal static string ResolveModelsDir(string root, string? overridePath)
+        => string.IsNullOrWhiteSpace(overridePath) ? Path.Combine(root, "Models") : overridePath;
+
+    internal static string ResolveHuggingFaceDir(string modelsDir)
+        => Path.Combine(modelsDir, "HuggingFace");
 }

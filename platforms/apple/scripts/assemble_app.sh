@@ -14,10 +14,17 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BUNDLE="${1:?usage: assemble_app.sh <bundle-path> [version] [build]}"
-VERSION="${2:-1.0}"
+VERSION_FILE="$PROJECT_DIR/../windows/VERSION"
+[ -f "$VERSION_FILE" ] || { echo "❌ canonical version file missing: $VERSION_FILE"; exit 1; }
+VERSION="${2:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 BUILD_NUM="${3:-1}"
 
-BUILD_DIR="$PROJECT_DIR/.build/release"
+BUILD_CONFIGURATION="${FILEID_BUILD_CONFIGURATION:-release}"
+case "$BUILD_CONFIGURATION" in
+    release|debug) ;;
+    *) echo "❌ unsupported FILEID_BUILD_CONFIGURATION: $BUILD_CONFIGURATION"; exit 1 ;;
+esac
+BUILD_DIR="$PROJECT_DIR/.build/$BUILD_CONFIGURATION"
 CONTENTS="$APP_BUNDLE/Contents"
 METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 

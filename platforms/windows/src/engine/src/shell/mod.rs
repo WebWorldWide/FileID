@@ -366,7 +366,8 @@ pub mod tags {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// thumbnail  (stubbed on every non-Windows OS — TODO(linux): gdk-pixbuf)
+// thumbnail  (intentionally unsupported outside Windows; each native app owns
+// its own thumbnail pipeline, so the engine has no non-Windows caller)
 // ────────────────────────────────────────────────────────────────────
 #[cfg(not(windows))]
 pub mod thumbnail {

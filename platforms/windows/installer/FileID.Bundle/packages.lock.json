@@ -14,10 +14,6 @@
         "resolved": "4.0.5",
         "contentHash": "56tA3Dt0DiAVgg0SeFmWXuIs6LxUZ4gPgbc22LysPhjRKo0dtPcXufDcIXTop0iI5ZMy5K5FtqIXosO0MrhIeQ=="
       }
-    },
-    "native,Version=v0.0/win": {},
-    "native,Version=v0.0/win-arm64": {},
-    "native,Version=v0.0/win-x64": {},
-    "native,Version=v0.0/win-x86": {}
+    }
   }
 }
