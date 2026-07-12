@@ -498,7 +498,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             cmd.CommandText = """
                 SELECT id, path_text, vlm_proposed_name
                 FROM files
-                WHERE vlm_proposed_name IS NOT NULL
+                WHERE failed = 0
+                  AND vlm_proposed_name IS NOT NULL
                   AND vlm_proposed_name != ''
                 ORDER BY vlm_analyzed_at DESC
                 LIMIT $limit
@@ -622,7 +623,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return 0;
             using var cmd = _connection.CreateCommand();
             cmd.CommandText =
-                "SELECT COUNT(*) FROM files WHERE vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
+                "SELECT COUNT(*) FROM files WHERE failed = 0 AND vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
             var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
             return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
         }
@@ -642,7 +643,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return new Dictionary<string, int>();
             var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT kind, COUNT(*) FROM files GROUP BY kind";
+            cmd.CommandText = "SELECT kind, COUNT(*) FROM files WHERE failed = 0 GROUP BY kind";
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {

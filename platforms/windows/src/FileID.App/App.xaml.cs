@@ -98,7 +98,7 @@ public partial class App : Application
                 // hard to miss. Covers three classes:
                 //   1. Binary not found (path resolution failed)
                 //   2. Signature verdict was Untrusted (tamper / bad cert chain)
-                //   3. Release build refused an Unsigned binary (FILEID_EV_THUMBPRINT set)
+                //   3. Signed-release policy refused an unsigned/wrong-publisher binary
                 // Recoverable crashes (pure spawn failures, runtime panics
                 // that respawn) keep using the pill alone.
                 try
@@ -134,7 +134,7 @@ public partial class App : Application
                             body = "FileID's engine binary is unsigned, but this release was built " +
                                    "to require a valid signature.\n\n" +
                                    "Reinstall FileID from a trusted source. If you built from source, " +
-                                   "unset the FILEID_EV_THUMBPRINT environment variable for dev builds.\n\n" +
+                                   "unset FILEID_SIGN_THUMBPRINT / FILEID_EV_THUMBPRINT for dev builds.\n\n" +
                                    "See %LOCALAPPDATA%\\FileID\\logs\\app.log for details.";
                         }
                         if (title is not null && body is not null)

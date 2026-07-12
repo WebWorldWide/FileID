@@ -1,5 +1,17 @@
 # NEXT — resume here
 
+## STATUS 2026-07-12 — Windows release-polish tree verified; remaining release gates are external/hardware
+
+The preview, native installer UX, provider-neutral signing contract, privacy link, and reversible missing-file reconciliation are implemented and locally verified (STATE top). Resume with these gates, in order:
+
+1. **Choose/onboard a public-trust signing provider.** Follow `WINDOWS_SIGNING.md`; require a project-specific independently pinnable key identity, protected human-approved environment, OIDC/provider auth, and one signer across every FileID PE/MSI/Burn layer. Add a separate `contents: write` publication job. Acceptance: real signatures + timestamp chain pass the common verifier, app rejects a wrong-key engine fixture, Windows native tool archives are signed before packaging, and a disposable prerelease tag publishes only verified assets. Current tag workflow is unsigned validation-only and cannot auto-publish; manual non-tag publishing remains blocked.
+2. **Clean-VM installer matrix.** On Windows 10 22H2, Windows 11 x64, and Windows 11 ARM64: install prior 0.1.0, major-upgrade to 0.1.1, repair a deleted payload, uninstall, inject one package failure to verify rollback, and confirm ARP/shortcut/cache/user-data behavior. Run keyboard-only, Narrator, high-contrast, and 200% scaling checks. ARM64 build/UI was not produced on this x64 pass.
+3. **Full uncapped current-engine Adlon soak.** The non-destructive 200-file capped run passed (10 f/s, 2.868 GB peak, assertions green), and the prior engine completed all 71k at 43 f/s. Re-run the exact current tree without `FILEID_TEST_FILE_CAP` when a ~30-minute hardware window is available. Acceptance: no discovery errors if possible, reconciliation count/log sane, ≥25 f/s regression floor, ≤8.5 GB, assertions green, source corpus unchanged. Do not wipe the user DB unless explicitly requested.
+4. **Preview resource inspection.** UIA proves image render/close/reopen. Use Process Explorer/handle tooling with image, video, and audio previews to confirm file handles/media playback release after close; repeat on installed signed bits.
+5. **Land the branch and run GitHub CI.** Review the final diff, commit `windows-release-polish`, merge to `main`, and require every engine/app/tools/macOS/Linux workflow green before tagging.
+
+Known non-blocking limitation: the common signing verifier requires a Windows-trusted timestamp but does not independently parse the RFC3161 token digest; local SignTool explicitly requests SHA-256 and managed adapters contractually must do so. Provider-backed validation is the release gate.
+
 ## STATUS 2026-07-11 (cont. 3) — codex tree landed as 0.1.1; macOS-only follow-ups (need a Mac)
 
 The big cross-platform working tree (picker fix, welcome-modal install list + machine-sized VLM recommendation, engine disk-preflight, cross-platform parity, new tools bundle) is verified and landing as **v0.1.1**. Three deferred items are **macOS-only and can't be built/tested off a Mac** — do them on the next Mac pass:

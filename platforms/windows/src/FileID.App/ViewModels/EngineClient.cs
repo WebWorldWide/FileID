@@ -2,9 +2,8 @@
 //
 // Responsibilities:
 //   1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected.
-//   2. Verify the engine binary's Authenticode signature before each spawn
-//      (warns on Unsigned, refuses on Untrusted; will tighten to require
-//      Trusted with a pinned EV thumbprint).
+//   2. Verify the engine binary's Authenticode signature before each spawn;
+//      signed releases require the same signer public key as the app assembly.
 //   3. Read engine stdout line-by-line, decode each as IpcEvent, dispatch
 //      to the UI thread, raise INotifyPropertyChanged for the relevant
 //      observable property.
@@ -466,20 +465,45 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             var enginePath = AppPaths.EngineExePath;
             DebugLog.Info($"EngineClient: spawning {PathRedactor.Redact(enginePath)}");
 
-            // Pin the expected EV thumbprint via msbuild constant or env var
-            // (FILEID_EV_THUMBPRINT, settable at install time). Empty means
-            // dev build — accept Unsigned with a warning. Once a real cert is
-            // in play, ship with the constant defined and the strict path
-            // refuses Unsigned + tamper-mismatched binaries.
-            var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+            var expectedThumb = Environment.GetEnvironmentVariable("FILEID_SIGN_THUMBPRINT")
+                ?? Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+            var expectedSubject = ReleaseSigningPolicy.ExpectedSignerSubject;
+            var requireSignedEngine = ReleaseSigningPolicy.RequireSignedEngine
+                || !string.IsNullOrWhiteSpace(expectedThumb);
+            var expectedSignerPublicKey = ReleaseSigningPolicy.ExpectedSignerPublicKeySha256;
+            if (ReleaseSigningPolicy.RequireSignedEngine)
+            {
+                if (string.IsNullOrWhiteSpace(expectedSignerPublicKey))
+                {
+                    CrashReason = "Engine signature verification failed because the release signer identity is missing.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: signed-release signer public-key policy is missing.");
+                    return;
+                }
+                var appAssemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                var appVerdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
+                    appAssemblyPath,
+                    expectedSignerSubject: expectedSubject,
+                    expectedSignerPublicKeySha256: expectedSignerPublicKey));
+                if (appVerdict != IntegrityVerdict.Trusted)
+                {
+                    CrashReason = "Engine signature verification failed because the FileID app signer could not be verified.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: signed-release app assembly did not match the approved signer identity.");
+                    return;
+                }
+            }
             // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
             // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
             // the startup (UI) thread before the first frame, and again on every
             // crash-respawn. await Task.Run keeps the security gate (the spawn still
             // waits for the verdict) while unblocking first paint; the continuation
             // resumes on the UI thread. (audit Pc / H11)
-            var verdict = await Task.Run(
-                () => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
+            var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
+                enginePath,
+                expectedThumbprintHex: expectedThumb,
+                expectedSignerSubject: expectedSubject,
+                expectedSignerPublicKeySha256: expectedSignerPublicKey));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -495,13 +519,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     return;
 
                 case IntegrityVerdict.Unsigned:
-                    // If a thumbprint was pinned (release mode), refuse to
-                    // spawn. Otherwise warn + continue (dev build).
-                    if (!string.IsNullOrEmpty(expectedThumb))
+                    if (requireSignedEngine)
                     {
                         CrashReason = "Engine binary is unsigned but signature verification is required.";
                         State = LifecycleState.Crashed;
-                        DebugLog.Error("EngineClient: unsigned engine refused (FILEID_EV_THUMBPRINT set).");
+                        DebugLog.Error("EngineClient: unsigned engine refused by the embedded release policy.");
                         return;
                     }
                     DebugLog.Warn("EngineClient: engine is unsigned. OK in dev; ship builds must be signed.");
@@ -516,10 +538,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // returned its verdict, then re-hash + compare immediately
             // before Process.Start. If a privileged adversary swaps the
             // engine binary between Verify and spawn, the post-spawn hash
-            // diverges and we abort. Skipped in dev (no thumbprint pinned)
-            // because Visual Studio rebuilds change the hash legitimately.
+            // diverges and we abort. Skipped in dev because Visual Studio
+            // rebuilds change the hash legitimately.
             byte[]? preSpawnHash = null;
-            if (!string.IsNullOrEmpty(expectedThumb))
+            if (requireSignedEngine)
             {
                 try
                 {

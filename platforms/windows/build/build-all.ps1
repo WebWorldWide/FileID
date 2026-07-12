@@ -68,7 +68,7 @@ param(
     # artifacts + needs cmake. Off by default; enable for ship builds.
     [switch]$VlmNative,
     # Sign every built binary using `build/sign.ps1`. Requires either
-    # -Thumbprint to be set or FILEID_EV_THUMBPRINT env var.
+    # -Thumbprint to be set or FILEID_SIGN_THUMBPRINT env var.
     [switch]$Sign,
     [string]$Thumbprint,
     # Fast iteration mode: cargo uses the `release-fast` profile (thin LTO
@@ -445,7 +445,7 @@ if (-not $SkipApp) {
                 exit 1
             }
         } else {
-            Write-Host "WARN: -Sign requested but $signScript not found." -ForegroundColor Yellow
+            throw "-Sign requested but signing helper is missing: $signScript"
         }
     }
 

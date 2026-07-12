@@ -1128,6 +1128,26 @@ mod tests {
         assert_eq!(n, 1);
     }
 
+    #[test]
+    fn reappearing_file_clears_soft_missing_state() {
+        let conn = in_memory_db();
+        let f = fixture(r"C:\library\returned.jpg");
+        insert_one(&conn, &f).unwrap();
+        conn.execute(
+            "UPDATE files SET failed = 1, error_message = 'File is no longer present under the completed scan root.'",
+            [],
+        )
+        .unwrap();
+
+        insert_one(&conn, &f).unwrap();
+        let state: (i64, Option<String>) = conn
+            .query_row("SELECT failed, error_message FROM files", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(state, (0, None));
+    }
+
     /// `INSERT_FILE_RETURNING_ID_SQL` must yield the row id on BOTH the
     /// freshly-inserted and ON CONFLICT DO UPDATE branches. The hot-path
     /// flush relies on this — if RETURNING only fired on insert, every

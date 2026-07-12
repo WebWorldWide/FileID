@@ -14,10 +14,10 @@ FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) an
 
 ### Enforced today
 
-- **Engine binary integrity before spawn (Windows).** `EngineClient.Start()` refuses to launch the engine unless it passes `WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex)`:
+- **Engine binary integrity before spawn (Windows).** `EngineClient.Start()` refuses to launch the engine unless it passes `WinVerifyTrustChecker.Verify`:
   - `NotFound` / `Untrusted` → refuse and surface a crash reason.
-  - `Unsigned` → refused when an EV thumbprint is pinned (release builds, via `FILEID_EV_THUMBPRINT`); allowed with a warning in dev builds (no thumbprint pinned, so Visual Studio rebuilds aren't blocked).
-  - `Trusted` → proceed. When a thumbprint is pinned, the app SHA256-hashes the binary after the verdict and re-hashes immediately before `Process.Start`; a mismatch aborts the spawn (TOCTOU mitigation against a binary swapped between verify and launch).
+  - `Unsigned` → refused when the signed-release assembly metadata requires Authenticode; allowed with a warning in development builds.
+  - `Trusted` → proceed only after verifying both the signed app assembly and engine against the independently pinned signer subject/public-key SHA-256 identity embedded at release build time. The app SHA256-hashes the engine after verification and re-hashes immediately before `Process.Start`; a mismatch aborts the spawn (TOCTOU mitigation against a binary swapped between verification and launch). A leaf-thumbprint environment override remains available for local testing, but production policy does not depend on a mutable environment variable.
   - On macOS the equivalent guard lives in `EngineClient.start()`: the engine path must resolve inside the app bundle's `Contents/MacOS/`, and the engine's signing Team ID (`kSecCodeInfoTeamIdentifier`) must match the app's (or both unsigned/ad-hoc for dev).
 - **Single-writer database.** The engine holds the only writer connection; all writes serialize through it. Reads fan out via fresh read-only connections. No cross-process write race on the DB.
 - **Parameterized SQL.** Every `rusqlite` call in the engine uses bound parameters (`params![...]`, `query_row(sql, [args], …)`) — values are never string-interpolated into SQL. The migration runner (`db/migrations.rs`) binds the migration identifier as `?1`. Migrations v1–v16 are append-only and byte-faithful with the macOS GRDB schema (same `grdb_migrations` table + identifier strings, chain pinned by tests on both platforms) so a DB written by either platform opens on the other; a DB migrated beyond the local registry is refused with `db_newer_than_engine` instead of silently written. On macOS, GRDB's typed API enforces the same discipline.
@@ -73,7 +73,7 @@ both platforms.
 
 ## Open hardening — gates the v1.0 release (NOT yet shipped)
 
-- **EV signing + thumbprint pin in release builds (Windows).** The engine-integrity guard is only as strong as a real Authenticode/EV signature and a pinned `FILEID_EV_THUMBPRINT`; today's builds run unsigned-with-warning. Ship signed, with the thumbprint pinned, so the strict path (refuse unsigned + tamper-mismatched binaries) is live. Tracked with WiX MSI packaging in `SHIP.md`.
+- **Configure a public-trust signing provider (Windows).** The provider-neutral build path, complete PE/MSI/Burn signing order, common verification, and embedded publisher policy are implemented. GitHub tagged publishing remains blocked until a provider-specific protected authentication step is selected. See `WINDOWS_SIGNING.md`.
 - **macOS Developer ID signing + notarization (user-gated).** The full pipeline exists and dry-runs green (`platforms/apple/scripts/release.sh --skip-notarize` produces a hardened-runtime, ad-hoc-signed DMG). The real signing pass needs the Developer ID certificate + `notarytool store-credentials fileid-notary` on the owner's machine — steps documented in the script header.
 
 ## CI enforcement

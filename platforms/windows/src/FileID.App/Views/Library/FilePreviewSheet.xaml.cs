@@ -9,9 +9,8 @@
 //   other  → kind glyph + "Open in default app" affordance.
 //
 // Lifecycle: SetFile is called once on open and again on every prev/next
-// sibling navigation. CloseInternal is invoked by the toolbar X button,
-// Esc key, or when the host dialog hides — it pauses the media player so
-// audio doesn't keep playing after the sheet closes.
+// sibling navigation. The host calls CloseFromHost after ShowAsync returns
+// so media and file handles are released after every dismissal path.
 
 using System;
 using System.Collections.Generic;
@@ -45,37 +44,28 @@ public sealed partial class FilePreviewSheet : UserControl
         // tag TextBox is focused so typing still moves the cursor.
         PreviewKeyDown += OnPreviewKeyDown;
         Loaded += OnSheetLoaded;
-        Unloaded += (_, _) =>
-        {
-            _unloaded = true;
-            // Stop the deferred loading-ring timer so a queued tick can't touch
-            // the torn-down content tree.
-            try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
-            // Stop playback + fully dispose the MediaPlayer so audio can't keep
-            // playing and the file handle is released after the dialog dismisses.
-            StopAndClearMedia();
-            DisposeMediaPlayer();
-            // Clear the cross-tab "currently previewed" hint so the Deep
-            // Analyze tab's "Analyze current" button disables when the
-            // user closes the sheet.
-            FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
-        };
         IsTabStop = true;
     }
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
     {
-        // Reset the unloaded latch. A ContentDialog can cycle its content through
-        // Unloaded→Loaded during the open handshake; the Unloaded handler latches
-        // _unloaded=true and never clears it, so a spurious Unloaded during open
-        // would short-circuit EVERY later UI write (`if (_unloaded) return`) —
-        // a permanently blank image + nav that changes the filename but never the
-        // preview. If we're Loaded, we're in the tree and live.
         _unloaded = false;
         // The host ContentDialog has no default button, so focus would otherwise
         // sit on the dialog chrome and the tunneling PreviewKeyDown would never
         // fire. Grab focus into the sheet so arrow keys navigate immediately.
         try { Focus(FocusState.Programmatic); } catch { /* best-effort */ }
+    }
+
+    // ContentDialog reparents its content through a transient Unloaded event
+    // while opening. Only ShowAsync completion is a terminal close signal.
+    internal void CloseFromHost()
+    {
+        if (_unloaded) return;
+        _unloaded = true;
+        try { _loadingDelayTimer?.Stop(); } catch { }
+        StopAndClearMedia();
+        DisposeMediaPlayer();
+        FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
     }
 
     internal void SetSiblings(IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
@@ -338,6 +328,7 @@ public sealed partial class FilePreviewSheet : UserControl
     /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
     /// only ever read/written from the dispatcher-marshaled paths below.</summary>
     private const int PreviewCacheCap = 4;
+    private const long MaxDirectPreviewEncodedBytes = 256L * 1024 * 1024;
     private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
 
     private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
@@ -364,43 +355,8 @@ public sealed partial class FilePreviewSheet : UserControl
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
             if (thumb is { Size: > 0 } && dispatcher != null)
             {
-                var captured = thumb;
-                thumb = null;
-                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                var enqueued = dispatcher.TryEnqueue(async () =>
-                {
-                    try
-                    {
-                        // Stale navigation — don't overwrite a newer file's preview. (audit A9)
-                        if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
-                        // Cap the decoded surface at the displayed 1024 px edge
-                        // regardless of what the shell hands back, so the 4-entry
-                        // preview cache stays within its ~16 MB budget instead of
-                        // holding native-resolution (e.g. 48 MP) decodes. (audit P6)
-                        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
-                        await bmp.SetSourceAsync(captured);
-                        PreviewImage.Source = bmp;
-                        PreviewImage.Visibility = Visibility.Visible;
-                        // On the UI thread here — safe to populate the DispatcherObject cache.
-                        StorePreview(cacheKey, bmp);
-                        tcs.TrySetResult(true);
-                    }
-                    catch (Exception ex)
-                    {
-                        Services.DebugLog.Warn($"FilePreviewSheet UI render ({kind}): {ex.Message}");
-                        tcs.TrySetResult(false);
-                    }
-                    finally
-                    {
-                        try { captured.Dispose(); } catch { }
-                    }
-                });
-                if (!enqueued)
-                {
-                    Services.DebugLog.Warn("FilePreviewSheet: dispatcher.TryEnqueue returned false.");
-                    try { captured.Dispose(); } catch { }
-                }
-                else if (await tcs.Task)
+                var bytes = await ReadThumbnailBytesAsync(thumb);
+                if (await TryRenderPreviewBytesAsync(bytes, cacheKey, dispatcher, navGen, kind))
                 {
                     return;
                 }
@@ -414,13 +370,6 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             try { thumb?.Dispose(); } catch { }
         }
-        // Shell thumbnail returned nothing / threw. For images, fall back to a
-        // DIRECT decode from the file stream — this bypasses the shell thumbnail
-        // provider, which can hand back Size==0 for perfectly-decodable JPEG/PNG
-        // on some systems (notably an unpackaged app with no registered per-user
-        // thumbnail cache). FilePreviewSheet was the ONE image callsite missing
-        // the from-bytes decode the grid's ThumbnailService already uses.
-        // Additive: only runs after the shell path produced no image.
         if (kind == "image" && dispatcher != null && !_unloaded && _navGen == navGen
             && await TryDirectImageDecodeAsync(path, cacheKey, dispatcher, navGen))
         {
@@ -443,44 +392,178 @@ public sealed partial class FilePreviewSheet : UserControl
     /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
     /// onto PreviewImage and bump it to most-recently-used. Returns true when a
     /// cached preview was shown (caller skips the shell extract + decode).</summary>
-    // Fallback decode straight from the file's bytes when the shell thumbnail
-    // provider returns nothing. Uses the same DecodePixelWidth=1024 BitmapImage
-    // as the shell path, so cache budget + display size are unchanged. Returns
-    // true only when it actually put an image on PreviewImage.
+    private static async Task<byte[]> ReadThumbnailBytesAsync(
+        Windows.Storage.FileProperties.StorageItemThumbnail thumbnail)
+    {
+        thumbnail.Seek(0);
+        var size = checked((uint)thumbnail.Size);
+        using var reader = new Windows.Storage.Streams.DataReader(thumbnail.GetInputStreamAt(0));
+        var loaded = await reader.LoadAsync(size);
+        if (loaded != size)
+        {
+            throw new EndOfStreamException($"Shell thumbnail ended after {loaded} of {size} bytes.");
+        }
+        var bytes = new byte[size];
+        reader.ReadBytes(bytes);
+        return bytes;
+    }
+
     private async Task<bool> TryDirectImageDecodeAsync(
         string path, string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
     {
+        Windows.Storage.Streams.IRandomAccessStream? stream = null;
         try
         {
-            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-            using var stream = await file.OpenReadAsync();
-            if (stream.Size == 0) return false;
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var enqueued = dispatcher.TryEnqueue(async () =>
+            var length = new FileInfo(path).Length;
+            if (length <= 0 || length > MaxDirectPreviewEncodedBytes)
             {
-                try
-                {
-                    if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
-                    var bmp = new BitmapImage { DecodePixelWidth = 1024 };
-                    await bmp.SetSourceAsync(stream);
-                    PreviewImage.Source = bmp;
-                    PreviewImage.Visibility = Visibility.Visible;
-                    StorePreview(cacheKey, bmp);
-                    tcs.TrySetResult(true);
-                }
-                catch (Exception ex)
-                {
-                    Services.DebugLog.Warn($"FilePreviewSheet direct decode: {ex.Message}");
-                    tcs.TrySetResult(false);
-                }
-            });
-            return enqueued && await tcs.Task;
+                Services.DebugLog.Warn($"FilePreviewSheet direct decode skipped encodedBytes={length}.");
+                return false;
+            }
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            stream = await file.OpenReadAsync();
+            if (stream.Size == 0 || stream.Size > (ulong)MaxDirectPreviewEncodedBytes)
+            {
+                Services.DebugLog.Warn($"FilePreviewSheet direct decode skipped openedBytes={stream.Size}.");
+                return false;
+            }
+            var accepted = await TryRenderPreviewStreamAsync(stream, cacheKey, dispatcher, navGen, "image-direct");
+            if (accepted) stream = null;
+            return accepted;
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn($"FilePreviewSheet direct decode open failed for {Services.PathRedactor.Redact(path)}: {ex.Message}");
             return false;
         }
+        finally
+        {
+            try { stream?.Dispose(); } catch { }
+        }
+    }
+
+    private async Task<bool> TryRenderPreviewStreamAsync(
+        Windows.Storage.Streams.IRandomAccessStream stream,
+        string cacheKey,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        int navGen,
+        string source)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var enqueued = dispatcher.TryEnqueue(() => _ = RenderPreviewStreamOnUiAsync(
+            stream, cacheKey, navGen, source, tcs));
+        if (!enqueued)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet dispatcher rejected {source} render.");
+            return false;
+        }
+        return await tcs.Task;
+    }
+
+    private async Task<bool> TryRenderPreviewBytesAsync(
+        byte[] bytes,
+        string cacheKey,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        int navGen,
+        string source)
+    {
+        if (bytes.Length == 0) return false;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var enqueued = dispatcher.TryEnqueue(() => _ = RenderPreviewBytesOnUiAsync(
+            bytes, cacheKey, navGen, source, tcs));
+        if (!enqueued)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet dispatcher rejected {source} render.");
+            return false;
+        }
+        return await tcs.Task;
+    }
+
+    private async Task RenderPreviewBytesOnUiAsync(
+        byte[] bytes,
+        string cacheKey,
+        int navGen,
+        string source,
+        TaskCompletionSource<bool> completion)
+    {
+        Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
+        try
+        {
+            if (_unloaded || _navGen != navGen)
+            {
+                completion.TrySetResult(false);
+                return;
+            }
+            stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                await writer.FlushAsync();
+                writer.DetachStream();
+            }
+            stream.Seek(0);
+            await RenderPreviewStreamCoreAsync(stream, cacheKey, navGen, source, completion, (ulong)bytes.Length);
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet render failed source={source}: {ex.GetType().Name}: {ex.Message}");
+            completion.TrySetResult(false);
+        }
+        finally
+        {
+            try { stream?.Dispose(); } catch { }
+        }
+    }
+
+    private async Task RenderPreviewStreamOnUiAsync(
+        Windows.Storage.Streams.IRandomAccessStream stream,
+        string cacheKey,
+        int navGen,
+        string source,
+        TaskCompletionSource<bool> completion)
+    {
+        try
+        {
+            stream.Seek(0);
+            await RenderPreviewStreamCoreAsync(stream, cacheKey, navGen, source, completion, stream.Size);
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet render failed source={source}: {ex.GetType().Name}: {ex.Message}");
+            completion.TrySetResult(false);
+        }
+        finally
+        {
+            try { stream.Dispose(); } catch { }
+        }
+    }
+
+    private async Task RenderPreviewStreamCoreAsync(
+        Windows.Storage.Streams.IRandomAccessStream stream,
+        string cacheKey,
+        int navGen,
+        string source,
+        TaskCompletionSource<bool> completion,
+        ulong encodedBytes)
+    {
+        if (_unloaded || _navGen != navGen)
+        {
+            completion.TrySetResult(false);
+            return;
+        }
+        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
+        await bmp.SetSourceAsync(stream);
+        if (_unloaded || _navGen != navGen)
+        {
+            completion.TrySetResult(false);
+            return;
+        }
+        PreviewImage.Source = bmp;
+        PreviewImage.Visibility = Visibility.Visible;
+        StorePreview(cacheKey, bmp);
+        Services.DebugLog.Debug($"FilePreviewSheet render completed source={source} bytes={encodedBytes} pixel={bmp.PixelWidth}x{bmp.PixelHeight}");
+        completion.TrySetResult(true);
     }
 
     private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
@@ -491,13 +574,17 @@ public sealed partial class FilePreviewSheet : UserControl
             var bmp = node.Value.Value;
             _previewCache.Remove(node);
             _previewCache.AddFirst(node);
-            dispatcher.TryEnqueue(() =>
+            var enqueued = dispatcher.TryEnqueue(() =>
             {
                 if (_unloaded || _navGen != navGen) return; // stale navigation (audit A9)
                 PreviewImage.Source = bmp;
                 PreviewImage.Visibility = Visibility.Visible;
             });
-            return true;
+            if (!enqueued)
+            {
+                Services.DebugLog.Warn("FilePreviewSheet dispatcher rejected cached preview render.");
+            }
+            return enqueued;
         }
         return false;
     }
@@ -643,7 +730,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     /// <summary>Fully tear down the MediaPlayerElement's auto-created MediaPlayer
     /// on close — pausing + nulling the source isn't always enough to stop audio
-    /// or release the file handle. Only call on close (Unloaded), not on sibling
+    /// or release the file handle. Only call on host close, not on sibling
     /// navigation (the element reuses its MediaPlayer for the next source).</summary>
     private void DisposeMediaPlayer()
     {
