@@ -284,7 +284,7 @@ async function initReleases() {
   };
 
   try {
-    const res = await fetch('https://api.github.com/repos/AdamNolle/FileID/releases?per_page=5', {
+    const res = await fetch('https://api.github.com/repos/WebWorldWide/FileID/releases?per_page=5', {
       headers: { 'Accept': 'application/vnd.github+json' },
     });
     if (!res.ok) throw new Error('http ' + res.status);
@@ -344,7 +344,7 @@ function showNoReleases(status) {
   status.innerHTML = `
     <strong>No release builds shipping yet.</strong>
     Compile your own using <code>./build.sh</code> below, or
-    <a href="https://github.com/AdamNolle/FileID/releases" target="_blank" rel="noopener">watch the releases page</a>
+    <a href="https://github.com/WebWorldWide/FileID/releases" target="_blank" rel="noopener">watch the releases page</a>
     for the first signed installer.
   `;
 }
