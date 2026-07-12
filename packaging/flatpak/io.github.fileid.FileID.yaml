@@ -111,7 +111,22 @@ modules:
       # 4. Desktop integration — reuse platforms/linux/data/ (single source).
       - install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop      /app/share/applications/io.github.fileid.FileID.desktop
       - install -Dm644 platforms/linux/data/io.github.fileid.FileID.metainfo.xml /app/share/metainfo/io.github.fileid.FileID.metainfo.xml
-      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.svg          /app/share/icons/hicolor/scalable/apps/io.github.fileid.FileID.svg
+      # 5. App icon. The source SVG embeds Figma backdrop-blur as <foreignObject>,
+      #    which appstreamcli compose (flatpak-builder's post-build step) fails
+      #    to rasterize → "file-read-error" drops the whole component
+      #    ("filters-but-no-output") and fails the build. Pre-render raster PNGs
+      #    with the SDK's rsvg-convert (librsvg skips foreignObject, the icon art
+      #    is preserved) and install ONLY those, so appstream uses the raster and
+      #    never touches the SVG.
+      - |
+        set -eu
+        for sz in 64 128 256 512; do
+          d="/app/share/icons/hicolor/${sz}x${sz}/apps"
+          mkdir -p "$d"
+          rsvg-convert -w "$sz" -h "$sz" \
+            platforms/linux/data/io.github.fileid.FileID.svg \
+            -o "$d/io.github.fileid.FileID.png"
+        done
     sources:
       # The whole repo (the app path-depends on ../../windows/src/engine). On a
       # clean CI checkout this is just the source tree (no target/, no .build/).
