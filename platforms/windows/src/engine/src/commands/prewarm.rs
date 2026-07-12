@@ -14,7 +14,9 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
-use crate::downloader::{download_parallel, DownloadProgress, DownloadRequest};
+use crate::downloader::{
+    download_parallel, required_install_free_bytes, DownloadProgress, DownloadRequest,
+};
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, IpcEvent, ModelDownloadProgress, Wrap,
 };
@@ -259,6 +261,27 @@ pub(crate) async fn handle_prewarm_model(
     }
 
     let total_bytes_estimate: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
+    let required_free = required_install_free_bytes(total_bytes_estimate);
+    if let Ok(models_dir) = crate::paths::models_dir() {
+        if let Some(available) = platform::available_disk_bytes(&models_dir) {
+            if available < required_free {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "model_download_disk_full".into(),
+                    message: format!(
+                        "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive. Free space and try again; no download was started.",
+                        model.display_name,
+                        required_free as f64 / 1_073_741_824.0,
+                        available as f64 / 1_073_741_824.0,
+                    ),
+                    path: None,
+                    model_kind: Some(model_kind.clone()),
+                }))))
+                .await;
+                tracing::warn!(model_kind = %model_kind, required_free, available, outcome = "insufficient_disk", "[PREWARM] exiting");
+                return;
+            }
+        }
+    }
     let total_estimate = total_bytes_estimate.max(1);
     let file_count = model.files.len();
 
@@ -590,6 +613,13 @@ pub(crate) async fn handle_prewarm_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_preflight_reserves_parts_final_file_and_staging_headroom() {
+        let gib = 1024_u64 * 1024 * 1024;
+        assert_eq!(required_install_free_bytes(3 * gib), 6 * gib + 512 * 1024 * 1024);
+        assert_eq!(required_install_free_bytes(u64::MAX), u64::MAX);
+    }
 
     // Per-model cancel registry: cancelling one kind must not touch another, and
     // a fresh prewarm of a kind resets only its own flag. Unique kind names keep

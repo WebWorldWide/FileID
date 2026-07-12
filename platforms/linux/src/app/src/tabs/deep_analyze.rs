@@ -76,15 +76,84 @@ const VLMS: [VlmKind; 3] = [
     },
 ];
 
-const DEFAULT_KIND: &str = "qwen2_5_vl_7b";
-
 fn vlm_by_key(key: &str) -> &'static VlmKind {
     VLMS.iter().find(|v| v.key == key).unwrap_or(&VLMS[0])
+}
+
+fn recommended_vlm_kind(
+    total_ram_gb: f64,
+    available_ram_gb: f64,
+    free_disk_bytes: Option<u64>,
+) -> &'static str {
+    let order: &[&str] = if total_ram_gb >= 47.5 {
+        &["mistral_small_3_2", "qwen2_5_vl_7b", "gemma_3_4b"]
+    } else if total_ram_gb >= 15.0 {
+        &["qwen2_5_vl_7b", "gemma_3_4b"]
+    } else {
+        &["gemma_3_4b"]
+    };
+    order
+        .iter()
+        .copied()
+        .find(|kind| vlm_fits(kind, total_ram_gb, available_ram_gb, free_disk_bytes))
+        .or_else(|| {
+            order
+                .iter()
+                .copied()
+                .find(|kind| vlm_fits(kind, total_ram_gb, available_ram_gb, None))
+        })
+        .unwrap_or("gemma_3_4b")
+}
+
+fn vlm_fits(
+    kind: &str,
+    total_ram_gb: f64,
+    available_ram_gb: f64,
+    free_disk_bytes: Option<u64>,
+) -> bool {
+    let (minimum_total, working_set) = match kind {
+        "mistral_small_3_2" => (23.5, 16.0),
+        "qwen2_5_vl_7b" => (11.5, 7.0),
+        "gemma_3_4b" => (7.5, 4.5),
+        _ => return false,
+    };
+    if total_ram_gb < minimum_total {
+        return false;
+    }
+    let reserve = if total_ram_gb <= 10.0 {
+        2.0
+    } else if total_ram_gb <= 20.0 {
+        4.0
+    } else {
+        6.0
+    };
+    let mut usable = (total_ram_gb - reserve).max(0.0);
+    if available_ram_gb > 0.0 {
+        usable = usable.min((available_ram_gb - 1.5).max(0.0));
+    }
+    if usable < working_set {
+        return false;
+    }
+    let Some(free) = free_disk_bytes else {
+        return true;
+    };
+    let bytes = model_install_info(kind).1 * 1_073_741_824.0;
+    free >= fileid_engine::downloader::required_install_free_bytes(bytes as u64)
+}
+
+fn host_recommended_vlm_kind() -> &'static str {
+    let total = fileid_engine::platform::physical_memory_gb();
+    let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
+    let free = fileid_engine::paths::models_dir()
+        .ok()
+        .and_then(|path| fileid_engine::platform::available_disk_bytes(&path));
+    recommended_vlm_kind(total, available, free)
 }
 
 // ─── Tab entrypoint ──────────────────────────────────────────────────────────
 
 pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
+    let default_kind = host_recommended_vlm_kind();
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(18)
@@ -100,7 +169,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     content.append(&explainer);
 
     // Status card.
-    let lbl_active = mono_value(vlm_by_key(DEFAULT_KIND).display);
+    let lbl_active = mono_value(vlm_by_key(default_kind).display);
     let lbl_total = mono_value("0");
     let lbl_pending = mono_value("0");
     let lbl_eta = mono_value("0s");
@@ -241,7 +310,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let ui = Rc::new(DeepUi {
         engine,
         in_flight: Cell::new(false),
-        active_kind: Cell::new(DEFAULT_KIND),
+        active_kind: Cell::new(default_kind),
         lbl_active,
         lbl_total,
         lbl_pending,
@@ -648,7 +717,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
     for vlm in VLMS.iter() {
         let (installed, gb) = model_install_info(vlm.key);
 
-        let is_default = vlm.key == DEFAULT_KIND;
+        let is_default = vlm.key == ui.active_kind.get();
 
         let indicator = gtk::Label::builder()
             .label(if is_default { "●" } else { "○" })
@@ -1201,5 +1270,37 @@ fn format_duration(seconds: f64) -> String {
         format!("{m}m {sec}s")
     } else {
         format!("{sec}s")
+    }
+}
+
+#[cfg(test)]
+mod recommendation_tests {
+    use super::*;
+
+    const PLENTY: u64 = 200 * 1024 * 1024 * 1024;
+
+    #[test]
+    fn low_ram_uses_gemma() {
+        assert_eq!(recommended_vlm_kind(8.0, 6.0, Some(PLENTY)), "gemma_3_4b");
+    }
+
+    #[test]
+    fn balanced_cpu_machine_uses_qwen() {
+        assert_eq!(
+            recommended_vlm_kind(15.5, 12.0, Some(PLENTY)),
+            "qwen2_5_vl_7b"
+        );
+    }
+
+    #[test]
+    fn cpu_only_linux_reserves_mistral_for_very_large_memory_hosts() {
+        assert_eq!(
+            recommended_vlm_kind(30.9, 24.0, Some(PLENTY)),
+            "qwen2_5_vl_7b"
+        );
+        assert_eq!(
+            recommended_vlm_kind(48.0, 40.0, Some(PLENTY)),
+            "mistral_small_3_2"
+        );
     }
 }

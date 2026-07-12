@@ -83,35 +83,21 @@ internal sealed class AppSettings
     /// Once true the banner stays hidden across launches.</summary>
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
-    /// <summary>Opt out of the silent CUDA llama.cpp install that fires
-    /// when the engine reports an NVIDIA GPU. False (the default) means
-    /// auto-install is enabled — Deep Analyze gets the 15-25% faster
-    /// CUDA build without the user finding a hidden Settings button.
-    /// True disables the auto-install entirely.</summary>
+    /// <summary>Legacy preference retained for settings-file compatibility.
+    /// Runtime downloads are now always user-initiated from onboarding or
+    /// Settings; this value no longer starts a background network request.</summary>
     public bool DisableAutoInstallCuda { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready,
-    /// the Vulkan llama.cpp runtime is fetched silently so Deep Analyze
-    /// works without the user finding the Install button. Vulkan ships
-    /// on every GPU vendor — no NVIDIA gate. True disables the
-    /// auto-install entirely (manual install still available via the
-    /// engine's PrewarmModel IPC if a user-facing button is added).</summary>
+    /// <summary>Legacy preference retained for settings-file compatibility.
+    /// The Vulkan runtime now installs only after an explicit VLM install.</summary>
     public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready
-    /// AND NVIDIA hardware, cuDNN is fetched from NVIDIA's public CDN
-    /// (developer.download.nvidia.com) so the ORT CUDA EP can replace
-    /// DirectML for scanning (~10-15% throughput on RTX-class). True
-    /// disables; users can fall back to system-installed CUDA Toolkit
-    /// + cuDNN if they prefer the BYO path.</summary>
+    /// <summary>Legacy preference retained for settings-file compatibility.
+    /// CUDA components now install only from an explicit accelerator action.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready AND Intel
-    /// hardware, the ONNX Runtime OpenVINO pack (Apache-2.0) is fetched so the
-    /// scan pipeline runs on the OpenVINO EP instead of DirectML. True disables.
-    /// (Snapdragon's QNN is NOT auto-installed — the QNN SDK is proprietary and
-    /// can't be redistributed under the project's commercial-clean rule; QNN is
-    /// used only if the device already provides it.)</summary>
+    /// <summary>Legacy preference retained for settings-file compatibility.
+    /// OpenVINO now installs only from an explicit accelerator action.</summary>
     public bool DisableAutoInstallOpenVino { get; set; } = false;
 
     /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
@@ -122,6 +108,11 @@ internal sealed class AppSettings
     /// anything else to the default qwen2_5_vl_7b. The non-commercial
     /// qwen2_5_vl_3b (Qwen Research License) was removed.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
+
+    /// <summary>Distinguishes a deliberate model pick from the historical Qwen
+    /// default. Hardware refreshes may update an automatic recommendation, but
+    /// never replace a model the user explicitly selected.</summary>
+    public bool SelectedVlmModelWasUserChosen { get; set; }
 
     /// <summary>Folders excluded from scanning. Absolute paths; the engine
     /// prunes them from the walk and purges already-cataloged rows under

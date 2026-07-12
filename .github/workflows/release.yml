@@ -1,6 +1,7 @@
-name: Release (Windows)
+name: Release (Windows desktop + native tools)
 
-# Tag-triggered CD: cut a signed FileID release (FileIDSetup.exe + the two MSIs).
+# Tag-triggered CD: cut the signed Windows desktop installers plus native
+# engine/CLI/TUI archives for supported Windows, macOS, and Linux architectures.
 #
 # DORMANT until the Authenticode EV cert is procured and its SHA1 thumbprint is
 # stored as the FILEID_EV_THUMBPRINT repository secret — the single external
@@ -30,8 +31,100 @@ permissions:
   contents: write   # required for `gh release create` + asset upload
 
 jobs:
+  tools-release:
+    name: Native engine + CLI + TUI — ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            artifact: windows-x64
+            runner: windows-latest
+          - label: Windows arm64
+            artifact: windows-arm64
+            runner: windows-11-arm
+          - label: macOS arm64
+            artifact: macos-arm64
+            runner: macos-15
+          - label: macOS x64
+            artifact: macos-x64
+            runner: macos-15-intel
+          - label: Linux x64
+            artifact: linux-x64
+            runner: ubuntu-24.04
+          - label: Linux arm64
+            artifact: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.90
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.90'
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/windows/src/engine/target
+            platforms/cli/target
+            platforms/tui/target
+          key: release-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/cli/Cargo.lock', 'platforms/tui/Cargo.lock') }}
+          restore-keys: |
+            release-tools-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build engine + CLI + TUI
+        run: |
+          cargo build --release --locked --manifest-path platforms/windows/src/engine/Cargo.toml
+          cargo build --release --locked --manifest-path platforms/cli/Cargo.toml
+          cargo build --release --locked --manifest-path platforms/tui/Cargo.toml
+
+      - name: Ad-hoc sign macOS tools
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --sign - platforms/windows/src/engine/target/release/FileIDEngine
+          codesign --force --sign - platforms/cli/target/release/fileid
+          codesign --force --sign - platforms/tui/target/release/fileid-tui
+
+      - name: Package toolset
+        run: python scripts/package-tools.py --label "${{ matrix.artifact }}"
+
+      - name: Privacy scan (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          python3 shared/scripts/check_binary_privacy.py \
+            platforms/windows/src/engine/target/release/FileIDEngine \
+            platforms/cli/target/release/fileid \
+            platforms/tui/target/release/fileid-tui
+
+      - name: Privacy scan (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python shared/scripts/check_binary_privacy.py `
+            platforms/windows/src/engine/target/release/FileIDEngine.exe `
+            platforms/cli/target/release/fileid.exe `
+            platforms/tui/target/release/fileid-tui.exe
+
+      - name: Upload tool bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: tools-${{ matrix.artifact }}
+          path: |
+            dist/tools/*.zip
+            dist/tools/*.tar.gz
+            dist/tools/*.sha256
+          if-no-files-found: error
+
   windows-release:
     name: Build + sign + publish Windows release
+    needs: tools-release
     runs-on: windows-latest
     defaults:
       run:
@@ -39,6 +132,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify tag matches product version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $productVersion = (Get-Content VERSION -Raw).Trim()
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          if ($tagVersion -ne $productVersion) {
+            Write-Host "::error::Release tag v$tagVersion does not match platforms/windows/VERSION ($productVersion)."
+            exit 1
+          }
+          Write-Host "Release version contract OK: $productVersion"
 
       - name: Install Rust (1.90, x64 + arm64 targets)
         uses: dtolnay/rust-toolchain@stable
@@ -93,6 +198,31 @@ jobs:
             if (-not (Test-Path $p)) { Write-Host "::error::missing release artifact $p"; exit 1 }
           }
 
+      - name: Generate Windows artifact checksums
+        shell: pwsh
+        run: |
+          $files = @("FileIDSetup.exe", "FileID-x64.msi", "FileID-arm64.msi")
+          $lines = foreach ($file in $files) {
+            $path = Join-Path "dist/installer" $file
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          $lines | Set-Content "dist/installer/SHA256SUMS.txt" -Encoding ascii
+          Get-Content "dist/installer/SHA256SUMS.txt"
+
+      - name: Upload unsigned dry-run artifacts
+        if: steps.mode.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileID-Windows-unsigned-${{ github.run_number }}
+          path: |
+            platforms/windows/dist/installer/FileIDSetup.exe
+            platforms/windows/dist/installer/FileID-x64.msi
+            platforms/windows/dist/installer/FileID-arm64.msi
+            platforms/windows/dist/installer/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Verify Authenticode (signed release only)
         if: steps.mode.outputs.sign == 'true'
         shell: pwsh
@@ -103,15 +233,52 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
+      - name: Download CLI/TUI bundles
+        if: steps.mode.outputs.publish == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tools-*
+          merge-multiple: true
+          path: release-tools
+
+      - name: Generate checksums for every published asset
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          $payloads = @(
+            Get-Item "dist/installer/FileIDSetup.exe"
+            Get-Item "dist/installer/FileID-x64.msi"
+            Get-Item "dist/installer/FileID-arm64.msi"
+          )
+          $payloads += Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE/release-tools" -File
+          $duplicates = $payloads | Group-Object Name | Where-Object Count -gt 1
+          if ($duplicates) {
+            throw "release asset names must be unique: $($duplicates.Name -join ', ')"
+          }
+          $lines = foreach ($file in ($payloads | Sort-Object Name)) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content "dist/installer/SHA256SUMS.txt" -Encoding ascii
+          if ($lines.Count -ne $payloads.Count) { throw "checksum coverage is incomplete" }
+          Get-Content "dist/installer/SHA256SUMS.txt"
+
       - name: Create GitHub release
         if: steps.mode.outputs.publish == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" `
+          $assets = @(
+            "dist/installer/FileIDSetup.exe",
+            "dist/installer/FileID-x64.msi",
+            "dist/installer/FileID-arm64.msi",
+            "dist/installer/SHA256SUMS.txt"
+          )
+          $assets += Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE/release-tools" -File |
+            Select-Object -ExpandProperty FullName
+          & gh release create "${{ github.ref_name }}" `
             --title "FileID ${{ github.ref_name }}" `
             --generate-notes `
-            "dist/installer/FileIDSetup.exe" `
-            "dist/installer/FileID-x64.msi" `
-            "dist/installer/FileID-arm64.msi"
+            @assets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

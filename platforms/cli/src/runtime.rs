@@ -2,8 +2,8 @@
 //!
 //! The shared engine is built with `load-dynamic`, so the full-ML `scan
 //! --models` path `dlopen`s ONNX Runtime at run time. On Windows the DLLs ship
-//! beside the engine; on Linux the system / `download-binaries` path provides
-//! the `.so`. On macOS arm64, `ort`'s `download-binaries` ships only a STATIC
+//! beside the engine; on Linux `download-binaries` statically links the CPU
+//! runtime into the engine. On macOS arm64, that feature ships only a STATIC
 //! `libonnxruntime.a`, so the dylib must be installed once — this command does
 //! that (`install`) and reports state (`status`). It is entirely separate from
 //! the AI-model download (`fileid models download`): models are the weights, the
@@ -65,13 +65,20 @@ fn configured_source() -> Option<RuntimeSource> {
     if let Some(url) = std::env::var_os("FILEID_ORT_DYLIB_URL") {
         let url = url.to_string_lossy().into_owned();
         if !url.is_empty() {
-            let archive_sha256 = std::env::var("FILEID_ORT_DYLIB_SHA256")
+            let override_sha256 = std::env::var("FILEID_ORT_DYLIB_SHA256")
                 .ok()
                 .filter(|s| !s.is_empty());
+            let mirrored_pinned_archive = override_sha256.is_none() && url_is_tarball(&url);
             return Some(RuntimeSource {
                 url,
-                archive_sha256,
-                extracted_dylib_sha256: None,
+                archive_sha256: override_sha256.or_else(|| {
+                    mirrored_pinned_archive
+                        .then(|| PINNED_DYLIB_SHA256.map(str::to_string))
+                        .flatten()
+                }),
+                extracted_dylib_sha256: mirrored_pinned_archive
+                    .then(|| PINNED_EXTRACTED_DYLIB_SHA256.map(str::to_string))
+                    .flatten(),
             });
         }
     }
@@ -406,6 +413,11 @@ fn download_artifact(url: &str, sha256: Option<&str>, dest: &std::path::Path) ->
     if !is_huggingface_url(url) {
         anyhow::bail!("runtime downloads must come from huggingface.co or hf.co; got {url}");
     }
+    let sha256 = sha256.ok_or_else(|| {
+        anyhow::anyhow!(
+            "runtime download is not hash-pinned; set FILEID_ORT_DYLIB_SHA256 to the expected SHA256"
+        )
+    })?;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -421,7 +433,7 @@ fn download_artifact(url: &str, sha256: Option<&str>, dest: &std::path::Path) ->
             }
         }
     });
-    let r = download_file_blocking(url, dest, sha256, cancel, progress);
+    let r = download_file_blocking(url, dest, Some(sha256), cancel, progress);
     eprintln!();
     r
 }
@@ -568,7 +580,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
     println!(
         "  {}",
         ctx.dim(&format!(
-            "Provided by the platform on {os} (bundled DLLs / system library); nothing to install."
+            "Provided with the engine on {os} (bundled DLLs or a statically linked runtime); nothing to install."
         ))
     );
     Ok(())

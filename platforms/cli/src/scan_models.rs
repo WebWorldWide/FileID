@@ -20,11 +20,12 @@
 //!      there is the app's job, and the CLI/TUI do model-free FTS + browsing.
 //!   2. Engine binary located? If not, we say how to point at it.
 //!
-//! The full pipeline writes the *engine's* library (XDG / `%LOCALAPPDATA%`),
-//! which the engine binary resolves itself — so when the library the CLI's
-//! reads resolve to differs (a pinned `--db`, or on macOS the desktop app's
-//! library, preferred by default when present), that mismatch is surfaced here
-//! rather than silently honored (unlike the read/model-free paths).
+//! The full pipeline writes the engine's canonical library by default. An
+//! explicit `--db`/`$FILEID_DB` is inherited by the child through the engine's
+//! `FILEID_DB` override, so isolated full scans and read commands agree. The
+//! only remaining divergence is the macOS desktop-app library selected
+//! implicitly by read commands; that case is surfaced with an exact `--db`
+//! follow-up hint.
 
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,11 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     crate::ensure_engine_models_dir();
 
     let models_dir = fileid_engine::paths::models_dir().ok();
-    let engine_db = fileid_engine::paths::db_path().ok();
+    let engine_db = if ctx.db_explicit {
+        Some(ctx.db.clone())
+    } else {
+        fileid_engine::paths::db_path().ok()
+    };
 
     // ── Pre-flight 1: models installed? ──────────────────────────────────
     // Runs before the --db caveat: on macOS this reports that full-ML scanning
@@ -79,16 +84,10 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("full-pipeline scan did not run: ONNX Runtime not installed");
     }
 
-    // `scan --models` ALWAYS writes the engine's OWN library (XDG /
-    // %LOCALAPPDATA%), resolved by the engine binary itself. Whenever that
-    // differs from the library the CLI's read/model-free commands open
-    // (`ctx.db`), the AI results land where no `fileid` read command looks. The
-    // divergence is NOT only the pinned-`--db` case: on macOS `ctx.db` defaults
-    // to the desktop app's library when present (context.rs resolve step 4),
-    // which is never where the Rust engine writes — so the note must fire for
-    // ANY mismatch, not just an explicit pin. The old `db_explicit` gate let the
-    // silent macOS default through, so info/search/people/dedupe/restructure all
-    // reported no AI data immediately after a successful scan.
+    // An explicit DB is forwarded to the child. Without one, the engine writes
+    // its canonical XDG/%LOCALAPPDATA% library; on macOS, read commands may
+    // implicitly prefer the Swift app's library instead. Surface that remaining
+    // mismatch so post-scan commands never appear empty without explanation.
     if engine_writes_unseen_library(engine_db.as_deref(), ctx.db.as_path()) {
         let where_ = engine_db.as_ref().map_or_else(
             || "<engine default>".to_string(),
@@ -117,16 +116,13 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         anyhow::bail!("full-pipeline scan did not run: engine binary not found");
     };
 
-    drive_scan(ctx, &engine_bin, &root_abs, rescan)
+    drive_scan(ctx, &engine_bin, &root_abs, rescan, engine_db.as_deref())
 }
 
-/// Will `scan --models` write a library the CLI's read/model-free commands
-/// won't open? The engine ALWAYS writes its OWN library (`engine_db`,
-/// XDG/`%LOCALAPPDATA%`-located); reads use `reader_db` (`ctx.db`). They diverge
-/// for a pinned `--db`/`$FILEID_DB`/`$CFFIXED_USER_HOME` AND — the silent macOS
-/// default — when reads fall back to the desktop app's library (context.rs
-/// resolve step 4) while the engine writes its XDG library. A `None` `engine_db`
-/// (the engine can't resolve its own path) counts as a divergence we can't name.
+/// Will the effective engine target differ from the library read commands open?
+/// Explicit overrides already agree; the expected mismatch is macOS's implicit
+/// Swift-app DB versus the Rust engine's XDG default. An unresolved engine path
+/// counts as a divergence we cannot name.
 fn engine_writes_unseen_library(engine_db: Option<&Path>, reader_db: &Path) -> bool {
     engine_db != Some(reader_db)
 }
@@ -292,16 +288,27 @@ fn report_no_engine(ctx: &Ctx) {
 /// Spawn the engine, send `startScan`, stream progress to stderr, and report
 /// the outcome. Closes the engine's stdin on completion so its parent-EOF
 /// watchdog shuts it down cleanly.
-fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result<()> {
+fn drive_scan(
+    ctx: &Ctx,
+    engine_bin: &Path,
+    root: &Path,
+    rescan: bool,
+    engine_db: Option<&Path>,
+) -> Result<()> {
     ctx.progress(&format!(
         "  {}",
         ctx.dim(&format!("starting engine: {}", engine_bin.display()))
     ));
 
-    let mut child = Command::new(engine_bin)
+    let mut command = Command::new(engine_bin);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if ctx.db_explicit {
+        command.env("FILEID_DB", &ctx.db);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("spawning engine binary {}", engine_bin.display()))?;
 
@@ -363,8 +370,7 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                         String::new()
                     }
                 );
-                let engine_db = fileid_engine::paths::db_path().ok();
-                if let Some((tags, faces, people)) = engine_db.as_deref().and_then(count_results) {
+                if let Some((tags, faces, people)) = engine_db.and_then(count_results) {
                     println!(
                         "  Results:    {tags} tags · {faces} files with faces · {people} people"
                     );
@@ -375,7 +381,7 @@ fn drive_scan(ctx: &Ctx, engine_bin: &Path, root: &Path, rescan: bool) -> Result
                 // hints with that `--db` so the suggested commands open the
                 // library this scan just populated, not an empty one. Byte-
                 // identical (no suffix) when reads already resolve to it.
-                let db_hint = explore_db_arg(engine_db.as_deref(), ctx.db.as_path());
+                let db_hint = explore_db_arg(engine_db, ctx.db.as_path());
                 println!(
                     "  Explore:    {}  ·  {}  ·  {}",
                     ctx.bold(&format!("fileid search \"...\"{db_hint}")),
@@ -637,17 +643,13 @@ mod tests {
         assert_eq!(explore_db_arg(Some(p), p), "");
     }
 
-    // An explicit `--db` elsewhere also diverges from the engine's own library —
-    // preserving the original (pre-fix) behavior for the pinned case.
+    // An explicit `--db` is now inherited by the spawned engine through
+    // FILEID_DB, so the effective engine path and reader path agree.
     #[test]
-    fn divergence_fires_for_explicit_db_elsewhere() {
-        let engine = Path::new("/state/FileID/fileid.sqlite");
+    fn explicit_db_override_eliminates_divergence() {
         let pinned = Path::new("/tmp/lib/fileid.sqlite");
-        assert!(engine_writes_unseen_library(Some(engine), pinned));
-        assert_eq!(
-            explore_db_arg(Some(engine), pinned),
-            format!(" --db {}", engine.display())
-        );
+        assert!(!engine_writes_unseen_library(Some(pinned), pinned));
+        assert_eq!(explore_db_arg(Some(pinned), pinned), "");
     }
 
     // The engine can't resolve its own path (`db_path()` -> Err): we can't name

@@ -154,7 +154,7 @@ EOF
 
     # Linux + macOS run their own dedicated build scripts, so skip the
     # Windows-specific preset wizard (wipe scope, arch, …) for them.
-    if [ "$TARGET" = "linux" ]; then return; fi
+    if [ "$TARGET" != "windows" ]; then return; fi
 
     local preset
     preset=$(ask_choice "What kind of build?" 2 \
@@ -326,12 +326,17 @@ case "$TARGET" in
             echo "ERROR: macOS build script not found at $SCRIPT" >&2
             exit 1
         fi
-        # The macOS run.sh handles its own configuration; just dispatch.
+        mac_args=()
+        [ "$WIPE" = "false" ] && [ "$WIPE_DB_ONLY" = "false" ] && mac_args+=("--no-wipe")
+        [ "$WIPE_DB_ONLY" = "true" ] && mac_args+=("--wipe-db-only")
+        [ "$RELEASE" = "false" ] && mac_args+=("--debug")
+        [ "$RUN" = "false" ] && mac_args+=("--no-run")
+
         # If the user passed --tests, run the test suite first.
         if $RUN_TESTS; then
             ( cd "$REPO_ROOT/platforms/apple" && swift test )
         fi
-        "$SCRIPT"
+        "$SCRIPT" "${mac_args[@]}"
 
         # Mirror FileID.app to ~/Desktop for one-click access — matches
         # the Windows --desktop default. Wipe any prior copy + Finder's
@@ -361,9 +366,14 @@ case "$TARGET" in
             exit 1
         fi
         if [ "$RUN_TESTS" = "true" ]; then
-            ( cd "$REPO_ROOT/platforms/windows/src/engine" && cargo test )
+            ( cd "$REPO_ROOT/platforms/linux" && cargo test --locked -p fileid-engine --lib )
+            ( cd "$REPO_ROOT/platforms/linux" && cargo test --locked -p fileid-linux )
         fi
-        bash "$SCRIPT"
+        if [ "$RELEASE" = "true" ]; then
+            PROFILE=release bash "$SCRIPT"
+        else
+            PROFILE=debug bash "$SCRIPT"
+        fi
         DIST="$REPO_ROOT/platforms/linux/dist/fileid/fileid-linux"
         if [ "$RUN" = "true" ] && [ -x "$DIST" ]; then
             echo "→ launching $DIST"

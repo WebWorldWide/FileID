@@ -24,10 +24,10 @@
 # USAGE
 #   shared/scripts/install_onnxruntime_macos.sh [--force]
 #
-# Override the destination with FILEID_RUNTIME_DIR. Set FILEID_ORT_DYLIB_URL to
-# a HuggingFace-hosted .tgz and EXPECTED_SHA256 to the archive hash (recommended —
-# see RUNTIME.md). With EXPECTED_SHA256 unset the script prints the hash it
-# computed so you can pin it.
+# Override the destination with FILEID_RUNTIME_DIR. FILEID_ORT_DYLIB_URL must
+# point to a HuggingFace-hosted mirror of the official archive. The arm64
+# archive and extracted dylib hashes are pinned below; a different artifact is
+# rejected unless both expected hashes are supplied explicitly.
 set -euo pipefail
 
 ORT_VERSION="${ORT_VERSION:-1.22.0}"
@@ -39,10 +39,38 @@ if [[ "$OS" != "Darwin" ]]; then
   echo "  On Windows/Linux the ONNX Runtime is provided by the platform." >&2
   exit 1
 fi
-if [[ "$ARCH" != "arm64" ]]; then
-  echo "warning: this script targets Apple-silicon (arm64); you are on $ARCH." >&2
-  echo "  Adjust ARCHIVE below for x86_64 (onnxruntime-osx-x86_64-...) if needed." >&2
-fi
+case "$ARCH" in
+  arm64)
+    ARCHIVE="onnxruntime-osx-arm64-${ORT_VERSION}.tgz"
+    DEFAULT_ARCHIVE_SHA256="cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07"
+    DEFAULT_DYLIB_SHA256="2b885992d3d6fa4130d39ec84a80d7504ff52750027c547bb22c86165f19406a"
+    ;;
+  x86_64)
+    ARCHIVE="onnxruntime-osx-x86_64-${ORT_VERSION}.tgz"
+    DEFAULT_ARCHIVE_SHA256=""
+    DEFAULT_DYLIB_SHA256=""
+    ;;
+  *)
+    echo "error: unsupported macOS architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
+
+FORCE=0
+case "$#" in
+  0) ;;
+  1)
+    case "$1" in
+      --force) FORCE=1 ;;
+      --help|-h)
+        echo "Usage: install_onnxruntime_macos.sh [--force]"
+        exit 0
+        ;;
+      *) echo "error: unknown argument: $1" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "error: expected at most one argument (try --help)." >&2; exit 2 ;;
+esac
 
 # HuggingFace-hosted mirror. Ships lib/libonnxruntime.<ver>.dylib.
 URL="${FILEID_ORT_DYLIB_URL:-}"
@@ -59,9 +87,16 @@ case "$URL" in
     ;;
 esac
 
-# Pin the archive SHA256 for integrity. TODO(runtime-dylib): paste the value the
-# script prints on first run (or from RUNTIME.md) to enforce verification.
-EXPECTED_SHA256="${EXPECTED_SHA256:-}"
+EXPECTED_SHA256="${EXPECTED_SHA256:-$DEFAULT_ARCHIVE_SHA256}"
+EXPECTED_DYLIB_SHA256="${EXPECTED_DYLIB_SHA256:-$DEFAULT_DYLIB_SHA256}"
+if [[ ! "$EXPECTED_SHA256" =~ ^[[:xdigit:]]{64}$ ]]; then
+  echo "error: EXPECTED_SHA256 must be a pinned 64-character hex digest for $ARCHIVE." >&2
+  exit 1
+fi
+if [[ ! "$EXPECTED_DYLIB_SHA256" =~ ^[[:xdigit:]]{64}$ ]]; then
+  echo "error: EXPECTED_DYLIB_SHA256 must pin the extracted runtime dylib." >&2
+  exit 1
+fi
 
 # Where the engine looks: <state-root>/runtime, with state-root =
 # $XDG_DATA_HOME/FileID or ~/.local/share/FileID (matches paths::runtime_dir()).
@@ -75,51 +110,64 @@ default_state_root() {
 RUNTIME_DIR="${FILEID_RUNTIME_DIR:-$(default_state_root)/runtime}"
 DEST="${RUNTIME_DIR}/libonnxruntime.dylib"
 
-FORCE=0
-[[ "${1:-}" == "--force" ]] && FORCE=1
-
 if [[ -f "$DEST" && "$FORCE" -ne 1 ]]; then
-  echo "ONNX Runtime already installed: $DEST"
-  echo "  Pass --force to reinstall."
-  exit 0
+  INSTALLED_SHA="$(shasum -a 256 "$DEST" | awk '{print $1}')"
+  if [[ "$(printf '%s' "$INSTALLED_SHA" | tr '[:upper:]' '[:lower:]')" == \
+        "$(printf '%s' "$EXPECTED_DYLIB_SHA256" | tr '[:upper:]' '[:lower:]')" ]]; then
+    echo "ONNX Runtime already installed and SHA256-verified: $DEST"
+    exit 0
+  fi
+  echo "error: existing runtime failed SHA256 verification: $DEST" >&2
+  echo "  expected $EXPECTED_DYLIB_SHA256" >&2
+  echo "  got      $INSTALLED_SHA" >&2
+  echo "  Re-run with --force to replace it." >&2
+  exit 1
 fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Downloading ONNX Runtime ${ORT_VERSION} (macOS arm64, MIT)…"
+echo "Downloading ONNX Runtime ${ORT_VERSION} (macOS ${ARCH}, MIT)…"
 echo "  $URL"
-curl -fL --proto '=https' --tlsv1.2 -o "${TMP}/${ARCHIVE}" "$URL"
+curl --fail --location --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors \
+  -o "${TMP}/${ARCHIVE}" "$URL"
 
 GOT_SHA="$(shasum -a 256 "${TMP}/${ARCHIVE}" | awk '{print $1}')"
-if [[ -n "$EXPECTED_SHA256" ]]; then
-  if [[ "$GOT_SHA" != "$EXPECTED_SHA256" ]]; then
-    echo "error: SHA256 mismatch for ${ARCHIVE}" >&2
-    echo "  expected $EXPECTED_SHA256" >&2
-    echo "  got      $GOT_SHA" >&2
-    exit 1
-  fi
-  echo "SHA256 verified: $GOT_SHA"
-else
-  echo "warning: EXPECTED_SHA256 is unset — proceeding WITHOUT verification." >&2
-  echo "  Pin this value (in the script or via EXPECTED_SHA256) to enforce it:" >&2
-  echo "  $GOT_SHA" >&2
+if [[ "$(printf '%s' "$GOT_SHA" | tr '[:upper:]' '[:lower:]')" != \
+      "$(printf '%s' "$EXPECTED_SHA256" | tr '[:upper:]' '[:lower:]')" ]]; then
+  echo "error: SHA256 mismatch for ${ARCHIVE}" >&2
+  echo "  expected $EXPECTED_SHA256" >&2
+  echo "  got      $GOT_SHA" >&2
+  exit 1
 fi
+echo "Archive SHA256 verified: $GOT_SHA"
 
 echo "Extracting…"
 tar -xzf "${TMP}/${ARCHIVE}" -C "$TMP"
 
 # Find the versioned dylib (e.g. lib/libonnxruntime.1.22.0.dylib) and copy it
 # (dereferencing any symlink) to the engine's expected libonnxruntime.dylib.
-SRC="$(find "$TMP" -type f -name 'libonnxruntime*.dylib' | head -n 1)"
+SRC="$(find "$TMP" -type f -path '*/lib/libonnxruntime*.dylib' -not -path '*.dSYM/*' | sort | sed -n '1p')"
 if [[ -z "$SRC" ]]; then
   echo "error: no libonnxruntime*.dylib found inside ${ARCHIVE}." >&2
   exit 1
 fi
 
+GOT_DYLIB_SHA="$(shasum -a 256 "$SRC" | awk '{print $1}')"
+if [[ "$(printf '%s' "$GOT_DYLIB_SHA" | tr '[:upper:]' '[:lower:]')" != \
+      "$(printf '%s' "$EXPECTED_DYLIB_SHA256" | tr '[:upper:]' '[:lower:]')" ]]; then
+  echo "error: SHA256 mismatch for extracted $(basename "$SRC")" >&2
+  echo "  expected $EXPECTED_DYLIB_SHA256" >&2
+  echo "  got      $GOT_DYLIB_SHA" >&2
+  exit 1
+fi
+echo "Dylib SHA256 verified: $GOT_DYLIB_SHA"
+
 mkdir -p "$RUNTIME_DIR"
-cp -L "$SRC" "$DEST"
-chmod 0644 "$DEST"
+STAGED="$RUNTIME_DIR/.libonnxruntime.dylib.tmp.$$"
+cp -L "$SRC" "$STAGED"
+chmod 0644 "$STAGED"
+mv -f "$STAGED" "$DEST"
 
 echo "✓ Installed: $DEST"
 echo "  (from $(basename "$SRC"))"

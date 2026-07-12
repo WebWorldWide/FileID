@@ -17,13 +17,10 @@
 # is in use can't corrupt it. Uses `cargo build --release` + `cp` rather than
 # `cargo install` precisely to reuse each crate's existing target dir.
 #
-# Why cargo is invoked from the repo root with --manifest-path (not `cd` into
-# each crate): the engine crate pins a Windows-only toolchain
-# (rust-toolchain.toml: channel 1.90 + *-pc-windows-msvc targets) and ships a
-# Windows-target .cargo/config.toml. Cargo discovers rust-toolchain.toml /
-# .cargo/config.toml from the *current directory*, so invoking from the repo
-# root sidesteps both and builds the engine natively with the host's default
-# toolchain on macOS / Linux.
+# Cargo is invoked from the repo root with --manifest-path so all three
+# standalone workspaces use the root Rust 1.90 pin while building for the native
+# host. The engine's Windows-only target list and .cargo config are therefore
+# not imposed on macOS/Linux tool installs.
 
 set -euo pipefail
 
@@ -33,8 +30,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# A system-installed Cargo can appear before rustup on PATH and silently ignore
+# rust-toolchain.toml. Invoke the product MSRV explicitly when rustup exists;
+# otherwise fail unless the ambient compiler is already the required version.
+if command -v rustup >/dev/null 2>&1; then
+    CARGO=(rustup run 1.90 cargo)
+    rustup run 1.90 rustc --version | grep -q '^rustc 1\.90\.' || {
+        echo "ERROR: Rust 1.90 is required; run: rustup toolchain install 1.90" >&2
+        exit 1
+    }
+else
+    CARGO=(cargo)
+    cargo --version | grep -q '^cargo 1\.90\.' || {
+        echo "ERROR: Rust/Cargo 1.90 is required." >&2
+        exit 1
+    }
+fi
+
 # --- destination ------------------------------------------------------------
-BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+BIN_DIR="${FILEID_BIN_DIR:-${CARGO_HOME:-$HOME/.cargo}/bin}"
 mkdir -p "$BIN_DIR"
 
 # --- crate manifests --------------------------------------------------------
@@ -43,18 +57,18 @@ CLI_DIR="platforms/cli"                      # [[bin]] name = fileid
 TUI_DIR="platforms/tui"                      # [[bin]] name = fileid-tui
 
 # --- build ------------------------------------------------------------------
-# The engine binary is built with --no-default-features to drop `pdf-analyze`
-# (pdfium): it matches how the CLI/TUI link the engine, avoids a libpdfium
-# runtime dependency, and is irrelevant to the image scan / tag / face / embed
-# pipeline. Deep-Analyze PDF rasterization is the only thing it turns off.
+# Ship the standalone engine with its default feature set, including
+# `pdf-analyze`. The CLI/TUI libraries remain intentionally slim through their
+# own dependency declarations, but the spawned release engine must expose the
+# complete desktop pipeline.
 echo "==> [1/3] Building FileIDEngine (release)  —  $ENGINE_DIR"
-cargo build --release --no-default-features --manifest-path "$ENGINE_DIR/Cargo.toml"
+"${CARGO[@]}" build --release --locked --manifest-path "$ENGINE_DIR/Cargo.toml"
 
 echo "==> [2/3] Building fileid CLI (release)    —  $CLI_DIR"
-cargo build --release --manifest-path "$CLI_DIR/Cargo.toml"
+"${CARGO[@]}" build --release --locked --manifest-path "$CLI_DIR/Cargo.toml"
 
 echo "==> [3/3] Building fileid-tui (release)    —  $TUI_DIR"
-cargo build --release --manifest-path "$TUI_DIR/Cargo.toml"
+"${CARGO[@]}" build --release --locked --manifest-path "$TUI_DIR/Cargo.toml"
 
 # --- install (atomic) -------------------------------------------------------
 install_bin() {
@@ -100,6 +114,7 @@ cat <<'EOF'
       fileid search <query>                # search the indexed library
       fileid-tui                           # terminal UI (press 's' to scan)
 
-  --models needs the AI weights installed (the macOS desktop app's
-  ~/Library/Application Support/FileID/Models is used automatically when present).
+  --models needs the Rust engine's AI weights installed with:
+      fileid models download --all
+  (The macOS desktop app uses a separate CoreML/MLX model layout.)
 EOF

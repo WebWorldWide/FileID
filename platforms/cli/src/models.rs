@@ -76,11 +76,12 @@ const CATALOG: &[Catalog] = &[
         category: "Document search",
         required: false,
     },
+    #[cfg(windows)]
     Catalog {
-        name: "florence2",
-        kind: "florence2",
+        name: "whisper",
+        kind: "whisper",
         license: "MIT",
-        category: "Grounded regions",
+        category: "Speech transcription",
         required: false,
     },
     Catalog {
@@ -105,6 +106,105 @@ const CATALOG: &[Catalog] = &[
         required: false,
     },
 ];
+
+fn recommended_vlm_kind() -> &'static str {
+    let total = fileid_engine::platform::physical_memory_gb();
+    let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
+    let vram_mb = fileid_engine::platform::dedicated_vram_mb().unwrap_or(0);
+    let has_gpu = matches!(
+        fileid_engine::models::runtime::RuntimeProbe::detect().vendor,
+        fileid_engine::models::runtime::GpuVendor::Nvidia
+            | fileid_engine::models::runtime::GpuVendor::Amd
+            | fileid_engine::models::runtime::GpuVendor::Intel
+            | fileid_engine::models::runtime::GpuVendor::Qualcomm
+    ) && vram_mb > 0;
+    let arm64 = std::env::consts::ARCH == "aarch64";
+    let free = fileid_engine::paths::models_dir()
+        .ok()
+        .and_then(|path| fileid_engine::platform::available_disk_bytes(&path));
+
+    recommended_vlm_kind_for(total, available, vram_mb, has_gpu, arm64, free)
+}
+
+fn recommended_vlm_kind_for(
+    total: f64,
+    available: f64,
+    vram_mb: u64,
+    has_gpu: bool,
+    arm64: bool,
+    free: Option<u64>,
+) -> &'static str {
+    let order: &[&str] = if arm64 {
+        &["gemma_3_4b"]
+    } else if (total >= 29.5 && has_gpu && vram_mb >= 12 * 1024) || total >= 47.5 {
+        &["mistral_small_3_2", "qwen2_5_vl_7b", "gemma_3_4b"]
+    } else if total >= 15.0 || (total >= 11.5 && has_gpu && vram_mb >= 8 * 1024) {
+        &["qwen2_5_vl_7b", "gemma_3_4b"]
+    } else {
+        &["gemma_3_4b"]
+    };
+
+    order
+        .iter()
+        .copied()
+        .find(|kind| cli_vlm_fits(kind, total, available, vram_mb, has_gpu, free))
+        .or_else(|| {
+            order
+                .iter()
+                .copied()
+                .find(|kind| cli_vlm_fits(kind, total, available, vram_mb, has_gpu, None))
+        })
+        .unwrap_or("gemma_3_4b")
+}
+
+fn cli_vlm_fits(
+    kind: &str,
+    total_ram_gb: f64,
+    available_ram_gb: f64,
+    vram_mb: u64,
+    has_gpu: bool,
+    free_disk_bytes: Option<u64>,
+) -> bool {
+    let (minimum_total, working_set) = match kind {
+        "mistral_small_3_2" => (23.5, 16.0),
+        "qwen2_5_vl_7b" => (11.5, 7.0),
+        "gemma_3_4b" => (7.5, 4.5),
+        _ => return false,
+    };
+    if total_ram_gb < minimum_total {
+        return false;
+    }
+    let reserve = if total_ram_gb <= 10.0 {
+        2.0
+    } else if total_ram_gb <= 20.0 {
+        4.0
+    } else {
+        6.0
+    };
+    let mut usable = (total_ram_gb - reserve).max(0.0);
+    if available_ram_gb > 0.0 {
+        usable = usable.min((available_ram_gb - 1.5).max(0.0));
+    }
+    if has_gpu {
+        usable += ((vram_mb as f64 / 1024.0) - 1.5).max(0.0) * 0.8;
+    }
+    if usable < working_set {
+        return false;
+    }
+    let Some(free) = free_disk_bytes else {
+        return true;
+    };
+    let Some(model) = CATALOG
+        .iter()
+        .find(|entry| entry.kind == kind)
+        .and_then(resolve)
+        .map(|resolved| resolved.model)
+    else {
+        return false;
+    };
+    let bytes: u64 = model.files.iter().map(|file| file.approx_bytes).sum();
+    free >= fileid_engine::downloader::required_install_free_bytes(bytes)
+}
 
 /// A catalog entry resolved against the live registry + on-disk install state.
 struct Resolved {
@@ -149,6 +249,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     crate::ensure_engine_models_dir();
     let resolved: Vec<Resolved> = CATALOG.iter().filter_map(resolve).collect();
     let models_dir = fileid_engine::paths::models_dir().ok();
+    let recommended_vlm = recommended_vlm_kind();
 
     if ctx.json {
         let arr: Vec<_> = resolved
@@ -159,6 +260,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
                     "kind": r.model.id,
                     "installed": r.installed,
                     "required": r.cat.required,
+                    "recommended": r.cat.kind == recommended_vlm,
                     "sizeBytes": r.size_bytes,
                     "sizeHuman": human_size(r.size_bytes as i64),
                     "license": r.cat.license,
@@ -188,8 +290,9 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         "{}   {}",
         ctx.bold("FileID engine models"),
         ctx.dim(&format!(
-            "{} = required for `fileid scan --models`",
-            ctx.gold("★")
+            "{} = required for AI scans · {} = recommended VLM for this machine",
+            ctx.gold("★"),
+            ctx.gold("◆")
         )),
     );
     // Name field sized to the longest model id (`mistral_small_3_2`, 17 chars).
@@ -203,7 +306,13 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     for r in &resolved {
         // Pad cells as plain text FIRST, then color — so the escape bytes never
         // skew the column widths.
-        let marker = if r.cat.required { "★" } else { " " };
+        let marker = if r.cat.required {
+            "★"
+        } else if r.cat.kind == recommended_vlm {
+            "◆"
+        } else {
+            " "
+        };
         let name_plain = format!("{marker} {:<17}", r.cat.name);
         let name_cell = if r.cat.required {
             ctx.gold(&name_plain)
@@ -781,6 +890,50 @@ fn human_eta(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vlm_fit_keeps_a_system_ram_floor_even_with_large_vram() {
+        let plenty = Some(200 * 1024 * 1024 * 1024);
+        assert!(cli_vlm_fits(
+            "gemma_3_4b",
+            8.0,
+            6.0,
+            16 * 1024,
+            true,
+            plenty
+        ));
+        assert!(!cli_vlm_fits(
+            "qwen2_5_vl_7b",
+            8.0,
+            6.0,
+            16 * 1024,
+            true,
+            plenty
+        ));
+        assert!(!cli_vlm_fits(
+            "mistral_small_3_2",
+            8.0,
+            6.0,
+            16 * 1024,
+            true,
+            plenty
+        ));
+    }
+
+    #[test]
+    fn live_host_profile_recommends_mistral() {
+        assert_eq!(
+            recommended_vlm_kind_for(
+                30.9,
+                13.5,
+                15_977,
+                true,
+                false,
+                Some(200 * 1024 * 1024 * 1024),
+            ),
+            "mistral_small_3_2"
+        );
+    }
 
     fn prog(
         file_index: usize,

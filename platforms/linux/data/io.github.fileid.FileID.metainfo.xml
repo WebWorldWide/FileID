@@ -78,6 +78,11 @@
   </branding>
 
   <releases>
+    <release version="0.1.1" date="2026-07-11">
+      <description>
+        <p>Cross-platform release with hardened CLI/TUI workflows, packaging, and engine portability.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-06-20">
       <description>
         <p>First Linux preview: GTK4 + libadwaita app across all six tabs.</p>

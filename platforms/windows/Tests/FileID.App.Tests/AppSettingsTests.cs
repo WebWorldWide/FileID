@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using FileID.Services;
 using Xunit;
 
@@ -48,6 +48,7 @@ public class AppSettingsTests
         Assert.False(s.DisableAutoInstallVulkanRuntime);
         Assert.False(s.DisableAutoInstallCudnn);
         Assert.Equal("qwen2_5_vl_7b", s.SelectedVlmModelKind);
+        Assert.False(s.SelectedVlmModelWasUserChosen);
         Assert.Empty(s.ExcludedFolders);
         Assert.True(s.ConfirmCloseOnPendingChanges);
         Assert.Equal(6, s.SchemaVersion);
@@ -71,6 +72,8 @@ public class AppSettingsTests
             DisableAutoInstallCuda = true,
             DisableAutoInstallVulkanRuntime = true,
             DisableAutoInstallCudnn = true,
+            SelectedVlmModelKind = "mistral_small_3_2",
+            SelectedVlmModelWasUserChosen = true,
             SchemaVersion = 1,
         };
 
@@ -91,6 +94,8 @@ public class AppSettingsTests
         Assert.Equal(original.DisableAutoInstallCuda, decoded.DisableAutoInstallCuda);
         Assert.Equal(original.DisableAutoInstallVulkanRuntime, decoded.DisableAutoInstallVulkanRuntime);
         Assert.Equal(original.DisableAutoInstallCudnn, decoded.DisableAutoInstallCudnn);
+        Assert.Equal(original.SelectedVlmModelKind, decoded.SelectedVlmModelKind);
+        Assert.Equal(original.SelectedVlmModelWasUserChosen, decoded.SelectedVlmModelWasUserChosen);
         Assert.Equal(original.SchemaVersion, decoded.SchemaVersion);
     }
 

@@ -47,6 +47,13 @@ engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the
 engine binary to `~/.cargo/bin` (make sure that's on your `PATH`). To build
 just this crate:
 
+On Windows, use the native PowerShell installer; it also stages the ONNX
+Runtime and DirectML DLLs the engine needs for a full AI scan:
+
+```powershell
+.\scripts\build-tools.ps1
+```
+
 ```bash
 cd platforms/cli
 cargo build --release          # compiles the shared engine too (first build is slow)
@@ -115,8 +122,10 @@ document text. The engine's `startScan` hard-requires the AI models and owns its
 own async + ORT runtime, so this path **spawns the `FileIDEngine` binary** and
 speaks newline-delimited JSON over stdio (reusing the engine's own
 `ipc::IpcCommand` / `IpcEvent` types — no schema drift), exactly as the desktop
-apps do. It writes the engine's own library (`$XDG_DATA_HOME` / `%LOCALAPPDATA%`
-location), so a pinned `--db` is reported as not-applicable here.
+apps do. By default it writes the engine's canonical library
+(`$XDG_DATA_HOME` / `%LOCALAPPDATA%`); an explicit `--db` / `$FILEID_DB` is
+forwarded to the engine child so the AI scan and subsequent read commands use
+the same isolated database.
 
 > **macOS:** `--models` works here once you install the engine's **own** models
 > with **`fileid models download --all`**. The Rust engine needs its own model

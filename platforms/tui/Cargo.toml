@@ -16,11 +16,11 @@
 
 [package]
 name = "fileid-tui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID — local AI file organizer. Cross-platform terminal UI (ratatui) over the shared Rust engine."
-license = "TBD"
+license = "Apache-2.0"
 publish = false
 
 [[bin]]
