@@ -71,24 +71,39 @@ modules:
   - name: fileid
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/fileid/cargo
+        RUSTUP_HOME: /run/build/fileid/rustup
         # opt-out of pdfium-render runtime libloading noise; Deep-Analyze PDF
         # rasterization needs a system libpdfium.so (not bundled on Linux) — it
         # degrades to "PDF text only" without it. Bundling libpdfium is a
         # follow-up (add as an offline archive source).
-      # Build-time network ONLY (cargo crate fetch + ort's static runtime archive).
-      # The shipped app's network grant is the finish-arg above, nothing here.
+      # Build-time network ONLY (cargo crate fetch + ort's static runtime archive
+      # + the rustup toolchain fetch below). The shipped app's network grant is
+      # the finish-arg above, nothing here.
       build-args:
         - --share=network
     build-commands:
-      # 1. The GTK app (pulls the engine in as a library, default features).
-      - cd platforms/linux && cargo build --release --locked
-      # 2. The engine BINARY the app spawns over stdio (-p selects the path-dep
-      #    package from the same workspace + lockfile + target dir, so the
-      #    onnxruntime build artifact is shared with step 1).
-      - cd platforms/linux && cargo build --release --locked -p fileid-engine --bin FileIDEngine
+      # The org.freedesktop.Sdk.Extension.rust-stable//23.08 extension ships
+      # Cargo 1.81, which is too old for this workspace: transitive deps (e.g.
+      # moxcms) declare `edition = "2024"`, requiring Cargo >= 1.85. Install the
+      # workspace's pinned toolchain (rust-toolchain.toml → 1.90) via rustup and
+      # use it for every cargo invocation. Build-time network is granted above.
+      # Steps 1+2 share one shell so the PATH export persists across the two
+      # cargo builds (flatpak-builder runs each list entry in a fresh shell).
+      - |
+        set -eu
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
+        sh rustup-init.sh -y --profile minimal --default-toolchain 1.90 --no-modify-path
+        export PATH="$CARGO_HOME/bin:$PATH"
+        rustc --version
+        cd platforms/linux
+        # 1. The GTK app (pulls the engine in as a library, default features).
+        cargo build --release --locked
+        # 2. The engine BINARY the app spawns over stdio (-p selects the path-dep
+        #    package from the same workspace + lockfile + target dir, so the
+        #    onnxruntime build artifact is shared with step 1).
+        cargo build --release --locked -p fileid-engine --bin FileIDEngine
       # 3. Install both binaries into /app/bin. The app's locate_engine_binary()
       #    finds FileIDEngine next to itself (search order #2).
       - install -Dm755 platforms/linux/target/release/fileid-linux  /app/bin/fileid-linux
