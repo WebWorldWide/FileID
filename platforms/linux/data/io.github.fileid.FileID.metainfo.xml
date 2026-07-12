@@ -56,19 +56,16 @@
     <keyword>ai</keyword>
   </keywords>
 
-  <url type="homepage">https://github.com/fileid/FileID</url>
-  <url type="bugtracker">https://github.com/fileid/FileID/issues</url>
-  <url type="vcs-browser">https://github.com/fileid/FileID</url>
+  <url type="homepage">https://github.com/WebWorldWide/FileID</url>
+  <url type="bugtracker">https://github.com/WebWorldWide/FileID/issues</url>
+  <url type="vcs-browser">https://github.com/WebWorldWide/FileID</url>
 
-  <!-- Placeholder screenshot URL: Flathub requires at least one reachable
-       screenshot before submission. Swap in a real raw-content URL (or a
-       hosted asset) once the Linux UI is captured on a real box. -->
-  <screenshots>
-    <screenshot type="default">
-      <caption>The Library tab — search and grid preview</caption>
-      <image>https://raw.githubusercontent.com/fileid/FileID/main/shared/docs/assets/linux-library.png</image>
-    </screenshot>
-  </screenshots>
+  <!-- NOTE: no <screenshots> yet. appstreamcli compose (run by flatpak-builder)
+       downloads every <image> to validate it; a placeholder/unreachable URL
+       fails the whole compose ("file-read-error" → "filters-but-no-output").
+       Flathub submission requires >=1 reachable screenshot — add real hosted
+       captures of the Linux UI here before submitting; keeping the element out
+       entirely is valid AppStream and keeps the build green until then. -->
 
   <content_rating type="oars-1.1"/>
 
