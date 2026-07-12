@@ -63,6 +63,20 @@
     <Description>On-device AI file organization for Windows.</Description>
   </PropertyGroup>
 
+  <ItemGroup Condition="'$(FileIDRequireSignedEngine)' == 'true'">
+    <AssemblyMetadata Include="FileIDRequireSignedEngine" Value="true" />
+    <AssemblyMetadata Include="FileIDExpectedSignerSubject" Value="$(FileIDExpectedSignerSubject)" />
+    <AssemblyMetadata Include="FileIDExpectedSignerPublicKeySha256" Value="$(FileIDExpectedSignerPublicKeySha256)" />
+  </ItemGroup>
+
+  <Target Name="ValidateReleaseSigningPolicy" BeforeTargets="CoreCompile"
+          Condition="'$(FileIDRequireSignedEngine)' == 'true'">
+    <Error Condition="'$(FileIDExpectedSignerSubject)' == ''"
+           Text="Signed release builds must set FileIDExpectedSignerSubject so the app can reject a replaced engine." />
+    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch($(FileIDExpectedSignerPublicKeySha256), '^[0-9A-Fa-f]{64}$'))"
+           Text="Signed release builds must set FileIDExpectedSignerPublicKeySha256 to the approved signer key identity." />
+  </Target>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />

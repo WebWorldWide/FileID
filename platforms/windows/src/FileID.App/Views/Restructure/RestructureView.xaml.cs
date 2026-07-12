@@ -667,7 +667,7 @@ public sealed partial class RestructureView : UserControl
             cmd.CommandText =
                 "SELECT COUNT(*), " +
                 "SUM(CASE WHEN vlm_description IS NOT NULL AND vlm_description <> '' THEN 1 ELSE 0 END) " +
-                "FROM files";
+                "FROM files WHERE failed = 0";
             using var reader = cmd.ExecuteReader();
             if (reader.Read())
             {

@@ -683,7 +683,7 @@ The tabs work. Now sand off the "feels Windows-native" rough edges.
 - [ ] WiX bootstrapper that detects host arch and runs the matching MSI (optional; users can also download the right MSI directly)
 
 ### 11.2 Authenticode code-signing
-- [ ] EV cert procured (user — gating; budget $300–500 + ~3 weeks lead time per ARCHITECTURE.md note)
+- [ ] Public-trust signing provider onboarded with an independently pinnable signer key (`shared/docs/WINDOWS_SIGNING.md`)
 - [ ] `signtool` integrated into `publish.ps1`: signs `FileIDEngine.exe`, `FileID.exe`, every shipped DLL, the MSI itself
 - [ ] Timestamping via `http://timestamp.digicert.com` (or equivalent)
 - [ ] Signature verified post-build via `signtool verify /pa`
@@ -710,7 +710,7 @@ The tabs work. Now sand off the "feels Windows-native" rough edges.
 
 ### 11.7 Acceptance for Phase 11
 - [ ] `FileID-x64.msi` + `FileID-arm64.msi` install + uninstall on clean Windows 10 22H2 + Windows 11 + Windows 11 ARM64 VMs
-- [ ] Authenticode chain verifies on a clean machine (no SmartScreen "unknown publisher" prompt with EV cert)
+- [ ] Authenticode chain + timestamp verify on a clean machine; record SmartScreen result without assuming reputation bypass
 - [ ] All 11 corpus regression assertions pass on a clean install
 - [ ] CI privacy gate is a hard gate on the release tag
 

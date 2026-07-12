@@ -271,7 +271,7 @@ Unified `./build.sh` flags:
 | `--tests` | Run cargo + dotnet tests |
 | `--arm64` | Cross-compile for Snapdragon WoA |
 | `--vlm-native` | Build with native llama.cpp bindings (requires cmake) |
-| `--sign` | Authenticode-sign every binary (needs `FILEID_EV_THUMBPRINT` env var) |
+| `--sign` | Authenticode-sign every binary (needs `FILEID_SIGN_THUMBPRINT` env var) |
 | `--help` | Full flag list |
 
 Underlying `build-all.ps1` flags (use directly when you want finer control):
@@ -318,8 +318,16 @@ Examples with the optional add-ons: `... -Clean -Run` (clean rebuild then launch
 # Local test build (no signing)
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign
 
-# Signed release - paste your EV cert thumbprint, no angle brackets
-.\platforms\windows\build\publish-bundle.ps1 -SignThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4
+# Signed release with a certificate already available to SignTool
+.\platforms\windows\build\publish-bundle.ps1 `
+  -SignThumbprint A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4 `
+  -SignerSubject "CN=Verified publisher"
+
+# Managed/cloud provider adapter
+.\platforms\windows\build\publish-bundle.ps1 `
+  -SigningAdapter .\provider-sign.ps1 `
+  -SignerSubject "CN=Verified publisher" `
+  -SignerPublicKeySha256 "64_HEX_DIGITS_FOR_THE_APPROVED_KEY"
 ```
 
 Produces under `platforms\windows\dist\installer\`:
@@ -334,15 +342,15 @@ The `publish-bundle.ps1` script:
 1. Cross-compiles the Rust engine for x64 + ARM64.
 2. Publishes the WinUI 3 app for both architectures (self-contained .NET, ReadyToRun).
 3. Stages the engine alongside the app in each publish dir.
-4. Signs every binary (skip with `-SkipSign`).
+4. Signs every unsigned executable payload while preserving valid vendor signatures (skip with `-SkipSign`).
 5. Builds both per-arch MSIs via WiX v4.
 6. Signs both MSIs.
 7. Builds the WiX Burn bundle (`FileIDSetup.exe` with both MSIs embedded).
-8. Re-signs the bundle (required because Burn re-attaches embedded MSIs at build time).
-9. Smoke-checks artifact sizes + Authenticode signature validity.
+8. Detaches and signs the Burn engine, reattaches it, then signs the final bundle.
+9. Verifies every new signature, trusted timestamp, publisher subject, and same-release signer public key.
 10. **Privacy gate**: greps every shipped binary for telemetry strings. Zero hits required.
 
-Pass `-SkipArm64` for an x64-only release.
+Pass `-SkipArm64` for an x64-only release. Provider onboarding and the adapter contract are documented in [`WINDOWS_SIGNING.md`](WINDOWS_SIGNING.md).
 
 ## macOS
 

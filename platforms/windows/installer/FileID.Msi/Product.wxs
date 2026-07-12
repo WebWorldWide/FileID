@@ -21,8 +21,7 @@
       - StartMenuShortcut: one shortcut under "FileID".
 
     Properties:
-      - ARPNOMODIFY=1: hides the "Modify" button in Apps & Features
-        (we don't ship optional features that could be added/removed).
+      - Native maintenance mode remains available for repair/uninstall.
       - ARPHELPLINK / ARPURLINFOABOUT: documented in MODELS.md / PRIVACY.md.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -64,7 +63,6 @@
     </StandardDirectory>
 
     <!-- Apps & Features metadata. -->
-    <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPPRODUCTICON" Value="FileIDIcon" />
     <Property Id="ARPHELPLINK" Value="https://github.com/WebWorldWide/FileID/issues" />
     <Property Id="ARPURLINFOABOUT" Value="https://fileid.app" />
@@ -75,6 +73,13 @@
          References the source .ico directly (not extracted from .exe)
          so Add/Remove Programs gets the multi-resolution version. -->
     <Icon Id="FileIDIcon" SourceFile="$(var.AssetsRoot)\FileID.ico" />
+
+    <!-- The EXE bundle is the canonical consumer installer; the MSI remains a
+         polished standalone option for IT admins and direct double-click use. -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.BundleThemeRoot)\license.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.MsiThemeRoot)\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.MsiThemeRoot)\dialog.bmp" />
 
     <!-- Start Menu shortcut. -->
     <DirectoryRef Id="StartMenuDir">
@@ -96,7 +101,7 @@
     </DirectoryRef>
 
     <!-- Feature: bundles every component above into the only feature the
-         installer offers. We don't expose optional features (per ARPNOMODIFY). -->
+         installer offers. -->
     <Feature Id="MainFeature" Title="FileID" Level="1" AllowAdvertise="no" Display="expand">
       <ComponentGroupRef Id="PublishedFiles" />
       <ComponentRef Id="StartMenuShortcut" />

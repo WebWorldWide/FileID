@@ -30,6 +30,7 @@
     <BundleUpgradeCode>3D7091C2-6E64-6C8F-BC34-91BC1BF3D7E6</BundleUpgradeCode>
     <IncludeArm64 Condition="'$(IncludeArm64)' == ''">true</IncludeArm64>
     <PrereqRoot>$(MSBuildThisFileDirectory)..\..\dist\prereqs</PrereqRoot>
+    <AssetsRoot>$(MSBuildThisFileDirectory)..\..\src\FileID.App\Assets</AssetsRoot>
   </PropertyGroup>
 
   <!-- Bundle.wxs is auto-discovered by the WiX SDK; an explicit Compile
@@ -43,7 +44,7 @@
     <!-- $(FileIDVersion) comes from Directory.Build.props (single source:
          platforms/windows/VERSION); Bundle.wxs uses $(var.Version) so the
          bootstrapper version is never a hardcoded literal. -->
-    <DefineConstants>BundleUpgradeCode=$(BundleUpgradeCode);Version=$(FileIDVersion);IncludeArm64=$(IncludeArm64);MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi;MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi;WinAppRuntimeX64Path=$(PrereqRoot)\WindowsAppRuntimeInstall-x64.exe;WinAppRuntimeArm64Path=$(PrereqRoot)\WindowsAppRuntimeInstall-arm64.exe</DefineConstants>
+    <DefineConstants>BundleUpgradeCode=$(BundleUpgradeCode);Version=$(FileIDVersion);IncludeArm64=$(IncludeArm64);AssetsRoot=$(AssetsRoot);MsiX64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-x64.msi;MsiArm64Path=$(MSBuildThisFileDirectory)..\..\dist\installer\FileID-arm64.msi;WinAppRuntimeX64Path=$(PrereqRoot)\WindowsAppRuntimeInstall-x64.exe;WinAppRuntimeArm64Path=$(PrereqRoot)\WindowsAppRuntimeInstall-arm64.exe</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
