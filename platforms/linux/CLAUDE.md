@@ -140,9 +140,9 @@ These are blockers for full feature parity on Linux but not for the scaffold. Se
 | `shell/tags` | xattr `user.xdg.tags` (XDG standard) via libc `{set,get,list,remove}xattr` | **Done** (no crate) |
 | `shell/ocr` | `tesseract` CLI on a temp PPM, best-effort (empty when absent) | **Done** (no crate) |
 | `shell/video` | `ffmpeg` keyframe → P6 PPM we parse, best-effort (`ffprobe` for the 25% seek) | **Done** (no crate) |
-| `shell/thumbnail` | `gdk-pixbuf` thumbnail factory + xdg thumbnail spec at `~/.cache/thumbnails/` | TODO (~3 days) |
+| `shell/thumbnail` | Not used on Linux: the GTK app owns its off-thread GdkPixbuf thumbnail path; the engine API remains an explicit unsupported stub | **Not applicable** |
 | `shell/heic` | best-effort `heif-dec`/`heif-convert` CLI → temp PNG → `image` decode (no GPL libheif linked; graceful skip when the tools are absent) | **Done** (subprocess) |
-| `shell/sleep` | DBus `org.freedesktop.ScreenSaver.Inhibit` | TODO (~1 day) |
+| `platform/SleepGuard` | `systemd-inhibit --what=sleep:idle` held for the scan lifetime; inert when logind is unavailable | **Done** (subprocess) |
 
 The five "Done" backends are gated `#[cfg(target_os = "linux")]` in `platforms/windows/src/engine/src/shell/mod.rs` and built only with **std + libc + subprocess** (no new crates). macOS / other Unix keep the `#[cfg(all(not(windows), not(target_os = "linux")))]` graceful stub; `thumbnail` + `heic` are still stubbed on every non-Windows OS. CI: `linux.yml` runs `cargo clippy --all-targets -D warnings` + `cargo test --lib` on the Linux target (where these arms actually compile).
 

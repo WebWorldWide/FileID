@@ -34,6 +34,7 @@ public sealed partial class WelcomeSheet : UserControl
     internal ModelInstallerService Svc => ModelInstallerService.Instance;
 
     private bool _autoDismissScheduled;
+    private bool _syncingVlmPicker;
 
     /// <summary>Cancels the auto-dismiss task + any in-flight restart
     /// prompt if the sheet unloads before they complete. Without this
@@ -62,6 +63,7 @@ public sealed partial class WelcomeSheet : UserControl
         try
         {
             Svc.SeedFromSentinels();
+            SyncVlmPicker();
         }
         catch (Exception ex)
         {
@@ -72,14 +74,22 @@ public sealed partial class WelcomeSheet : UserControl
         // (e.g. they re-opened it from Settings), the auto-dismiss should
         // still fire so they're not staring at three green checkmarks.
         // Belt-and-braces with the PropertyChanged path above.
-        if (Svc.AllInstalled) ScheduleAutoDismiss();
+        if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired) ScheduleAutoDismiss();
     }
 
     private void OnServicePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ModelInstallerService.AllInstalled) && Svc.AllInstalled)
+        if (e.PropertyName is nameof(ModelInstallerService.AllInstalled)
+            or nameof(ModelInstallerService.IsBusy)
+            or nameof(ModelInstallerService.AcceleratorRestartRequired))
         {
-            ScheduleAutoDismiss();
+            if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired) ScheduleAutoDismiss();
+            SyncVlmPicker();
+        }
+        if (e.PropertyName is nameof(ModelInstallerService.DeepVlmModelKind)
+            or nameof(ModelInstallerService.DeepVlmRecommendation))
+        {
+            SyncVlmPicker();
         }
     }
 
@@ -100,7 +110,14 @@ public sealed partial class WelcomeSheet : UserControl
                 dq?.TryEnqueue(() =>
                 {
                     if (ct.IsCancellationRequested) return;
-                    if (Svc.AllInstalled) RaiseDismissed();
+                    if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired)
+                    {
+                        RaiseDismissed();
+                    }
+                    else
+                    {
+                        _autoDismissScheduled = false;
+                    }
                 });
             }
             catch (OperationCanceledException) { /* sheet dismissed before 800 ms — fine */ }
@@ -251,8 +268,8 @@ public sealed partial class WelcomeSheet : UserControl
         "Failed: " + (lastError ?? "unknown error");
 
     /// <summary>Deep Analyze (Qwen) row title — e.g. "Deep Analyze (Qwen2.5-VL
-    /// 3B)". Reads DisplayLabel via x:Bind so the hardware-tiered recommendation
-    /// (3B ↔ 7B) updates the row text without a page reload.</summary>
+    /// 7B)". Reads DisplayLabel via x:Bind so Gemma / Qwen / Mistral selection
+    /// updates the row text without a page reload.</summary>
     internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
 
     internal string VlmSize(ulong approxBytes)
@@ -312,10 +329,55 @@ public sealed partial class WelcomeSheet : UserControl
         HandleAction(Svc.RamPlus);
     }
 
+    private void OnBgeActionClicked(object sender, RoutedEventArgs e)
+    {
+        DebugLog.Info("[INSTALL] BGE document understanding per-row button clicked.");
+        HandleAction(Svc.Bge);
+    }
+
     private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)
     {
         DebugLog.Info("[INSTALL] Deep Analyze (Qwen) per-row button clicked.");
         HandleAction(Svc.DeepVlm);
+    }
+
+    private void OnVlmSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingVlmPicker || sender is not ComboBox combo
+            || combo.SelectedItem is not ComboBoxItem item
+            || item.Tag is not string kind)
+        {
+            return;
+        }
+        if (!Svc.CanInstallVlm(kind))
+        {
+            SyncVlmPicker();
+            return;
+        }
+        Svc.SelectDeepVlmModel(kind);
+    }
+
+    private void SyncVlmPicker()
+    {
+        if (VlmPicker is null) return;
+        _syncingVlmPicker = true;
+        try
+        {
+            foreach (var value in VlmPicker.Items)
+            {
+                if (value is not ComboBoxItem item || item.Tag is not string kind) continue;
+                item.IsEnabled = Svc.CanInstallVlm(kind);
+                if (string.Equals(kind, Svc.DeepVlmModelKind, StringComparison.Ordinal))
+                {
+                    VlmPicker.SelectedItem = item;
+                }
+            }
+            VlmPicker.IsEnabled = Svc.DeepVlm.Status != ModelInstallStatus.Downloading;
+        }
+        finally
+        {
+            _syncingVlmPicker = false;
+        }
     }
 
     // GPU Acceleration Pack row. On NVIDIA this kicks off the
@@ -346,13 +408,44 @@ public sealed partial class WelcomeSheet : UserControl
         return status != ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    internal Visibility ShowAcceleratorInstalledBadge(ModelInstallStatus status, bool isRealInstall)
+    internal Visibility ShowAcceleratorInstalledBadge(ModelInstallStatus status, bool isRealInstall, bool restartRequired)
     {
         // "Installed" badge is shown only after a real cuDNN install
         // (NVIDIA only). For non-NVIDIA, no badge — the Message text
         // already explains "DirectML is already optimal".
-        return (status == ModelInstallStatus.Installed && isRealInstall)
+        return (status == ModelInstallStatus.Installed && isRealInstall && !restartRequired)
             ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    internal Visibility ShowAcceleratorRestartButton(bool restartRequired, bool isBusy)
+        => restartRequired && !isBusy ? Visibility.Visible : Visibility.Collapsed;
+
+    private async void OnRestartAcceleratorClicked(object sender, RoutedEventArgs e)
+    {
+        var button = sender as Button;
+        try
+        {
+            if (Svc.IsBusy) return;
+            if (button is not null)
+            {
+                button.IsEnabled = false;
+                button.Content = "Restarting…";
+            }
+            await EngineClient.Instance.RestartAsync();
+            Svc.Refresh();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Welcome accelerator restart failed: " + ex.Message);
+        }
+        finally
+        {
+            if (button is not null && Svc.AcceleratorRestartRequired)
+            {
+                button.IsEnabled = true;
+                button.Content = "Restart engine";
+            }
+        }
     }
 
     internal string AcceleratorGlyph(ModelInstallStatus status, bool isRealInstall)

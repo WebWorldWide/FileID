@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    FileIDSetup.exe — single-EXE bootstrapper bundling x64 + ARM64 MSIs.
+    FileIDSetup.exe — single-EXE bootstrapper bundling the Windows App Runtime
+    prerequisite plus the x64 + ARM64 FileID MSIs.
 
     Architecture detection chain:
       - On x64 host (NativeMachine == AMD64 || ProcessorArchitecture == x64) → install FileID-x64.msi
@@ -40,7 +41,9 @@
           LogoFile="theme\logo.png"
           Theme="rtfLicense"
           ShowVersion="yes"
-          SuppressOptionsUI="yes" />
+          SuppressOptionsUI="yes"
+          LaunchTarget="[ProgramFiles64Folder]FileID\FileID.exe"
+          LaunchWorkingFolder="[ProgramFiles64Folder]FileID" />
     </BootstrapperApplication>
 
     <!-- Refuse to install on Win10 < 22H2 (build 19045) or earlier major
@@ -55,26 +58,52 @@
                    Message="FileID requires a 64-bit edition of Windows." />
 
     <Chain>
-      <!-- Rollback boundary: a standalone checkpoint at the head of the
-           chain. On a failed install, Burn only unwinds packages installed
-           AFTER the most recent boundary — packages committed before it stay
-           put. With exactly one MSI chained today this is belt-and-suspenders,
-           but it's the correct place to declare it (RollbackBoundary is a
-           Chain construct, not an MSI/Package one) and future-proofs the chain
-           for prerequisite packages (e.g. the WinAppSDK runtime ExePackage the
-           app csproj notes it depends on). Transaction="no" keeps each MSI's
-           own atomic Windows Installer transaction rather than wrapping the
-           whole chain in one MSI transaction. -->
+      <!-- Rollback boundary: the shared Windows App Runtime is permanent, while
+           each FileID MSI remains its own atomic Windows Installer transaction. -->
       <RollbackBoundary Id="InstallStart" Vital="yes" Transaction="no" />
 
-      <!-- x64 MSI: install on AMD64. NativeMachine 34404 (0x8664) ==
-           IMAGE_FILE_MACHINE_AMD64. -->
+      <!-- Microsoft's runtime installer is idempotent. Always running it heals
+           partially removed MSIX framework packages; Permanent keeps FileID
+           uninstall from removing this shared machine prerequisite. -->
+      <ExePackage
+          Id="WindowsAppRuntimeX64"
+          DisplayName="Windows App Runtime 1.7"
+          SourceFile="$(var.WinAppRuntimeX64Path)"
+          InstallArguments="--quiet"
+          DetectCondition="0"
+          Permanent="yes"
+          Vital="yes"
+          PerMachine="yes"
+          InstallCondition="NativeMachine = 34404" />
+
+      <?if $(var.IncludeArm64) = true ?>
+      <ExePackage
+          Id="WindowsAppRuntimeArm64"
+          DisplayName="Windows App Runtime 1.7"
+          SourceFile="$(var.WinAppRuntimeArm64Path)"
+          InstallArguments="--quiet"
+          DetectCondition="0"
+          Permanent="yes"
+          Vital="yes"
+          PerMachine="yes"
+          InstallCondition="NativeMachine = 43620" />
+      <?endif?>
+
       <MsiPackage
           Id="FileIDx64"
           SourceFile="$(var.MsiX64Path)"
           Compressed="yes"
           Visible="no"
-          InstallCondition="VersionNT64" />
+          InstallCondition="NativeMachine = 34404" />
+
+      <?if $(var.IncludeArm64) = true ?>
+      <MsiPackage
+          Id="FileIDArm64"
+          SourceFile="$(var.MsiArm64Path)"
+          Compressed="yes"
+          Visible="no"
+          InstallCondition="NativeMachine = 43620" />
+      <?endif?>
     </Chain>
   </Bundle>
 </Wix>

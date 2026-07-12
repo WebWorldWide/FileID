@@ -21,9 +21,6 @@ namespace FileID.Services;
 
 internal static class CudaAutoInstaller
 {
-    // ONNX Runtime OpenVINO provider pack — Intel's scan-pipeline accelerator.
-    private const string OpenVinoKind = "ort_openvino_x64";
-
     /// <summary>Set after the first attempt in a process so engine respawns
     /// don't re-fire. Bool is enough — the engine itself dedupes via its
     /// IN_FLIGHT hashset anyway, but cheaper to short-circuit here.</summary>
@@ -77,9 +74,7 @@ internal static class CudaAutoInstaller
             var vendor = (hw.GpuVendor ?? string.Empty).ToLowerInvariant();
             if (vendor == "intel")
             {
-                // Intel: the OpenVINO EP (Apache-2.0) is the accelerated scan
-                // path. No llama CUDA runtime applies on Intel.
-                TryInstallOpenVinoPack();
+                DebugLog.Info("[CUDA-AUTO] Intel detected — OpenVINO is install-on-demand (no auto-install).");
                 return;
             }
             if (vendor != "nvidia")
@@ -106,52 +101,4 @@ internal static class CudaAutoInstaller
         }
     }
 
-    /// <summary>Silently install the ONNX Runtime OpenVINO pack on Intel so the
-    /// scan pipeline runs on the OpenVINO EP instead of DirectML. Apache-2.0,
-    /// so commercial-clean to redistribute. Gated by
-    /// <c>DisableAutoInstallOpenVino</c>; own sentinel. Safe to auto-enable:
-    /// ep_guard reverts to DirectML if the OpenVINO bind crashes, and if the
-    /// download fails (offline, proxy TLS interception) ModelInstallerService
-    /// swallows the error and restores the Accelerator row to its DirectML
-    /// pseudo-Installed state.</summary>
-    private static void TryInstallOpenVinoPack()
-    {
-        try
-        {
-            if (AppViewModel.Instance.Settings.DisableAutoInstallOpenVino) return;
-        }
-        catch { /* fall through and try anyway */ }
-
-        try
-        {
-            // Matches both flat and hashed sentinel forms (see SentinelProbe)
-            // — a flat-only probe re-dispatched the prewarm every engine
-            // Ready once installed.
-            if (SentinelProbe.Installed(OpenVinoKind))
-            {
-                DebugLog.Info("[CUDA-AUTO] ORT OpenVINO pack already installed; skipping.");
-                return;
-            }
-        }
-        catch { /* engine short-circuit catches it */ }
-
-        DebugLog.Info("[CUDA-AUTO] Intel detected + no OpenVINO pack — silently installing OpenVINO EP.");
-        var task = Task.Run(async () =>
-        {
-            try
-            {
-                await EngineClient.Instance.PrewarmModelAsync(OpenVinoKind).ConfigureAwait(false);
-                DebugLog.Info("[CUDA-AUTO] ORT OpenVINO prewarm dispatched.");
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("[CUDA-AUTO] ORT OpenVINO pack install failed: " + ex.Message);
-            }
-        });
-        _ = task.ContinueWith(
-            t => DebugLog.Error("[CUDA-AUTO] OpenVINO worker faulted: " + t.Exception),
-            System.Threading.CancellationToken.None,
-            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted,
-            System.Threading.Tasks.TaskScheduler.Default);
-    }
 }

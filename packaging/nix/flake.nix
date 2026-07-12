@@ -1,5 +1,6 @@
 {
-  # Reproducible NixOS / Nix build of the FileID Linux app.
+  # Reproducible NixOS / Nix build of the FileID Linux app. Input revisions
+  # are pinned below; dependency refreshes are intentional source edits.
   #
   #   nix build  ./packaging/nix#fileid
   #   nix run    ./packaging/nix#fileid
@@ -9,32 +10,24 @@
   # for the GTK/GdkPixbuf/GSettings runtime environment.
   #
   # ============================ ONNX RUNTIME — RISKIEST PART ==================
-  # The engine's `ort` crate is configured `load-dynamic` + `download-binaries`
-  # (platforms/windows/src/engine/Cargo.toml). The Nix build sandbox has NO
-  # network, so the `download-binaries` build script CANNOT fetch onnxruntime.
+  # Portable Linux builds statically link `download-binaries`, but the Nix
+  # sandbox has no network. Point ort-sys at nixpkgs' shared ONNX Runtime and
+  # prefer dynamic linker selection instead.
   # We therefore:
   #   * put nixpkgs `onnxruntime` in buildInputs,
-  #   * set ORT_LIB_LOCATION (build) so ort uses the system lib instead of
-  #     downloading, and ORT_STRATEGY=system as a belt-and-suspenders, and
-  #   * set ORT_DYLIB_PATH (runtime, via the gappsWrapperArgs) so the
-  #     load-dynamic loader dlopen's the nixpkgs lib.
-  # Whether ORT_LIB_LOCATION fully suppresses the download under the
-  # load-dynamic + download-binaries combination for ort 2.0-rc.10 is the part
-  # that NEEDS LINUX-SIDE VERIFICATION. If the build still tries to reach the
-  # network, the fix is either a cargo overlay that drops `download-binaries`
-  # from the engine manifest, or a fixed-output derivation that pins the pyke
-  # onnxruntime tarball by hash. Flagged, not faked.
+  #   * ORT_LIB_LOCATION suppresses the `download-binaries` fetch, and
+  #   * ORT_PREFER_DYNAMIC_LINK selects nixpkgs' libonnxruntime.so.
   # ===========================================================================
 
   description = "FileID — on-device AI file organizer (GTK4 + libadwaita)";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:NixOS/nixpkgs/0bb7ec54c8483066ec9d7720e780a5caa71f8612";
+    flake-utils.url = "github:numtide/flake-utils/11707dc2f618dd54ca8739b309ec4fc024de578b";
   };
 
   outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
         pkgs = import nixpkgs { inherit system; };
         # Repo root is two levels up from packaging/nix/.
@@ -42,7 +35,7 @@
       in {
         packages.fileid = pkgs.rustPlatform.buildRustPackage {
           pname = "fileid-linux";
-          version = "0.1.0";
+          version = "0.1.1";
 
           src = repoRoot;
           # platforms/linux is the workspace; it path-depends on
@@ -76,16 +69,8 @@
           cargoBuildFlags = [ "-p" "fileid-linux" "-p" "fileid-engine" "--bin" "fileid-linux" "--bin" "FileIDEngine" ];
 
           # See the ONNX header above.
-          ORT_STRATEGY = "system";
           ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-
-          # Runtime: make the GApps wrapper also export the dlopen path so the
-          # load-dynamic loader finds nixpkgs' libonnxruntime.so.
-          preFixup = ''
-            gappsWrapperArgs+=(
-              --set ORT_DYLIB_PATH "${pkgs.onnxruntime}/lib/libonnxruntime.so"
-            )
-          '';
+          ORT_PREFER_DYNAMIC_LINK = "1";
 
           # The app's behavioural tests need a display + models; keep the
           # sandboxed build to a compile + the model-free unit tests only.

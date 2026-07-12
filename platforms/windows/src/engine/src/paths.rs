@@ -47,7 +47,16 @@ pub fn root() -> Result<PathBuf> {
     anyhow::bail!("could not resolve $XDG_DATA_HOME or $HOME for FileID state dir")
 }
 
-pub fn db_path()      -> Result<PathBuf> { Ok(root()?.join("fileid.sqlite")) }
+/// Library database path. `FILEID_DB` is an explicit front-end/test override;
+/// empty values are ignored so a misconfigured shell never resolves to the
+/// current working directory. Desktop apps leave it unset and retain the
+/// canonical per-OS path.
+pub fn db_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("FILEID_DB").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(root()?.join("fileid.sqlite"))
+}
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
 // `models_dir` is the single resolution point for every model artifact — the
 // registry download dests, the install sentinels, and the per-model loaders all
@@ -127,7 +136,7 @@ fn default_models_dir() -> Result<PathBuf> {
     }
     Ok(root()?.join("Models"))
 }
-pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
+pub fn hf_cache_dir() -> Result<PathBuf> { Ok(models_dir()?.join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
 pub fn restructure_plans_dir() -> Result<PathBuf> { Ok(root()?.join("restructure_plans")) }
@@ -150,6 +159,10 @@ pub fn ensure_state_dirs() -> Result<PathBuf> {
     ] {
         std::fs::create_dir_all(sub)
             .with_context(|| format!("creating {}", sub.display()))?;
+    }
+    if let Some(parent) = db_path()?.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating database parent {}", parent.display()))?;
     }
     Ok(root)
 }
@@ -227,5 +240,36 @@ mod tests {
         assert_eq!(empty, want);
         assert_eq!(set.unwrap(), PathBuf::from("/data/xdg/FileID"));
         assert_eq!(unset.unwrap(), want);
+    }
+
+    #[test]
+    fn db_override_is_exact_and_empty_value_falls_back() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("FILEID_DB");
+        let default = {
+            std::env::remove_var("FILEID_DB");
+            db_path().unwrap()
+        };
+
+        let explicit = std::env::temp_dir().join("fileid-explicit.sqlite");
+        std::env::set_var("FILEID_DB", &explicit);
+        assert_eq!(db_path().unwrap(), explicit);
+
+        std::env::set_var("FILEID_DB", "");
+        assert_eq!(db_path().unwrap(), default);
+        restore("FILEID_DB", saved);
+    }
+
+    #[test]
+    fn model_override_also_owns_the_huggingface_cache() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("FILEID_MODELS_DIR");
+        let custom = std::env::temp_dir().join("fileid-model-root");
+        std::env::set_var("FILEID_MODELS_DIR", &custom);
+
+        assert_eq!(models_dir().unwrap(), custom);
+        assert_eq!(hf_cache_dir().unwrap(), custom.join("HuggingFace"));
+
+        restore("FILEID_MODELS_DIR", saved);
     }
 }

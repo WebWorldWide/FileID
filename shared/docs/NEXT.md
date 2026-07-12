@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## STATUS 2026-07-11 (cont. 3) — codex tree landed as 0.1.1; macOS-only follow-ups (need a Mac)
+
+The big cross-platform working tree (picker fix, welcome-modal install list + machine-sized VLM recommendation, engine disk-preflight, cross-platform parity, new tools bundle) is verified and landing as **v0.1.1**. Three deferred items are **macOS-only and can't be built/tested off a Mac** — do them on the next Mac pass:
+
+1. **Intel-Mac ORT install hard-fails.** `shared/scripts/install_onnxruntime_macos.sh` now mandates a pinned SHA for both archive + dylib (good hardening), but the `x86_64` branch ships empty `DEFAULT_ARCHIVE_SHA256`/`DEFAULT_DYLIB_SHA256`, so the new `[[ ! ... =~ ^[[:xdigit:]]{64}$ ]]` guard `exit 1`s on Intel Macs — a silent capability removal (was warn-and-proceed). Fix: pin the real x86_64 archive+dylib hashes (arm64 has them), or restore an explicit opt-in unverified path for Intel only. Apple-silicon path is unaffected.
+2. **macOS Welcome sheet has no Whisper/speech row.** Windows lists Whisper (`Svc.Whisper`); macOS `WelcomeSheet.swift` has no `WhisperModelInstaller` and no row. Decide: is macOS speech native/unshipped, or a real parity gap to fill?
+3. **macOS menu-`Picker` per-item `.disabled` is a no-op.** SwiftUI ignores `.disabled` on individual `.menu`-style Picker items, so un-runnable/disk-blocked VLMs still look selectable (the downstream install-button disable + red blocker text still catch it — UX polish, not a crash).
+
+Also (cross-platform, from the packaging review, LOW): `release.yml` publishes both per-bundle `.sha256` sidecars and an aggregate `SHA256SUMS.txt` (redundant, harmless); macOS `fileid runtime install` is now a no-op unless Homebrew/`FILEID_ORT_DYLIB_URL` (deliberate HF-only-egress tightening — RUNTIME.md documents it).
+
 ## STATUS 2026-07-11 (cont.) — status-lie fixes landed; deferred truthfulness items
 
 Owner-reported "everything says not-installed" fixed (3 root causes, STATE top). Deferred, all needing an IPC-schema addition (modelsStatus / HardwareInfo field) — batch them with the next schema rev:

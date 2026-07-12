@@ -13,8 +13,8 @@ pub struct Ctx {
     /// SCRATCH mode (no `--db` / env override): the directory handed to the
     /// spawned engine as `XDG_DATA_HOME` / `%LOCALAPPDATA%` so a scan writes the
     /// SAME library the TUI reads (its `<dir>/FileID/fileid.sqlite`). `None` for
-    /// an explicit `--db` / env library, where the engine uses its own
-    /// canonical root (today's behavior).
+    /// an explicit `--db` / env library; the child receives that path through
+    /// the engine's `FILEID_DB` override.
     pub engine_data_home: Option<PathBuf>,
 }
 
@@ -29,7 +29,7 @@ impl Ctx {
     ///      library at the engine's canonical `…/FileID/fileid.sqlite`.
     ///
     /// 1–3 set `engine_data_home = None` (explicit library; the spawned engine
-    /// uses its own canonical root, as before). Only the default arm is scratch.
+    /// receives `FILEID_DB`). Only the default arm is scratch.
     pub fn resolve(db_flag: Option<PathBuf>) -> Result<Self> {
         let t = resolve_target(
             db_flag,
@@ -77,16 +77,20 @@ fn resolve_target(
         });
     }
     if let Some(s) = fileid_db {
-        return Ok(Target {
-            db: PathBuf::from(s),
-            engine_data_home: None,
-        });
+        if !s.is_empty() {
+            return Ok(Target {
+                db: PathBuf::from(s),
+                engine_data_home: None,
+            });
+        }
     }
     if let Some(home) = cffixed_home {
-        return Ok(Target {
-            db: PathBuf::from(home).join("fileid.sqlite"),
-            engine_data_home: None,
-        });
+        if !home.is_empty() {
+            return Ok(Target {
+                db: PathBuf::from(home).join("fileid.sqlite"),
+                engine_data_home: None,
+            });
+        }
     }
     // No explicit library → SCRATCH. The engine appends `FileID/` to whatever
     // we hand it as its data home, so the scratch library is at
@@ -115,11 +119,12 @@ fn default_scratch_home() -> Result<PathBuf> {
     Ok(std::env::temp_dir().join("FileID-TUI-Scratch"))
 }
 
-/// Replace a leading `$HOME` with `~`.
+/// Replace a leading `$HOME` / `%USERPROFILE%` with `~`.
 pub fn collapse_home(p: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            if let Some(rest) = p.strip_prefix(&home) {
+    for name in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+            let home = home.to_string_lossy();
+            if let Some(rest) = p.strip_prefix(home.as_ref()) {
                 return format!("~{rest}");
             }
         }
@@ -227,6 +232,16 @@ mod tests {
         .unwrap();
         assert_eq!(got.db, PathBuf::from("/sandbox/home/fileid.sqlite"));
         assert_eq!(got.engine_data_home, None);
+    }
+
+    #[test]
+    fn empty_env_overrides_fall_through_to_scratch() {
+        let got = resolve_target(None, Some(String::new()), Some(String::new()), || {
+            Ok(PathBuf::from("/scratch"))
+        })
+        .unwrap();
+        assert_eq!(got.db, PathBuf::from("/scratch/FileID/fileid.sqlite"));
+        assert_eq!(got.engine_data_home, Some(PathBuf::from("/scratch")));
     }
 
     /// FIX 1 — with no `--db`/env, the default is a SCRATCH library (the TUI

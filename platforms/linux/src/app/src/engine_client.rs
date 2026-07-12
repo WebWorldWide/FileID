@@ -180,6 +180,7 @@ impl EngineClient {
                 if let EngineEvent::Exited = ev {
                     let shutting = this_pump.borrow().shutting_down.load(Ordering::Relaxed);
                     if !shutting {
+                        retire_exited_child(&this_pump);
                         schedule_respawn(&this_pump);
                     }
                 }
@@ -266,6 +267,7 @@ fn spawn_process(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
             let _ = raw_tx.send_blocking(EngineEvent::Error(format!(
                 "engine binary not found: {err}"
             )));
+            schedule_respawn(this);
             return;
         }
     };
@@ -295,7 +297,24 @@ fn spawn_process(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
         }
         Err(err) => {
             let _ = raw_tx.send_blocking(EngineEvent::Error(format!("spawn failed: {err}")));
+            schedule_respawn(this);
         }
+    }
+}
+
+/// Close the dead process' stdin and reap it off the GTK thread. Dropping a
+/// `std::process::Child` does not wait on Unix, so overwriting the slot during a
+/// respawn leaked one zombie per crash.
+fn retire_exited_child(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
+    let child = {
+        let mut client = this.borrow_mut();
+        client.stdin.take();
+        client.child.take()
+    };
+    if let Some(mut child) = child {
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
 }
 
@@ -322,9 +341,9 @@ fn schedule_respawn(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
 ///   2. next to the app binary (dev / staged)
 ///   3. system install dirs (.deb / Flatpak)
 fn locate_engine_binary() -> Result<PathBuf> {
-    if let Ok(s) = std::env::var("FILEID_ENGINE") {
+    if let Some(s) = std::env::var_os("FILEID_ENGINE").filter(|value| !value.is_empty()) {
         let p = PathBuf::from(s);
-        if p.exists() {
+        if p.is_file() {
             return Ok(p);
         }
     }
@@ -332,7 +351,7 @@ fn locate_engine_binary() -> Result<PathBuf> {
         if let Some(dir) = exe.parent() {
             for candidate in ["FileIDEngine", "fileid-engine"] {
                 let p = dir.join(candidate);
-                if p.exists() {
+                if p.is_file() {
                     return Ok(p);
                 }
             }
@@ -344,7 +363,7 @@ fn locate_engine_binary() -> Result<PathBuf> {
         "/usr/lib/FileID/fileid-engine",
     ] {
         let p = PathBuf::from(sys);
-        if p.exists() {
+        if p.is_file() {
             return Ok(p);
         }
     }

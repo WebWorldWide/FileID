@@ -8,6 +8,55 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() {
+            return None;
+        }
+    }
+    available_disk_bytes_existing(&probe)
+}
+
+#[cfg(windows)]
+fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut available),
+            None,
+            None,
+        )
+        .ok()?;
+    }
+    Some(available)
+}
+
+#[cfg(unix)]
+fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(raw.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    Some(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn available_disk_bytes_existing(_path: &Path) -> Option<u64> {
+    None
+}
+
 /// Redact a user path for logs: keep last two components; pass
 /// app-structural paths verbatim.
 pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
@@ -944,13 +993,34 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
-    // POSIX fallback: poll getppid every 5 s; if it changes (i.e. our parent
-    // was reaped and we got reparented to init) trigger shutdown.
-    let _ = parent_pid;
-    let _ = shutdown;
+    use tokio::time::{Duration, MissedTickBehavior};
+
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        // TODO(linux): real implementation.
+        tokio::select! {
+            _ = shutdown.notified() => {
+                tracing::info!("watch_parent cancelled by shutdown signal");
+                return;
+            }
+            _ = poll.tick() => {
+                match get_parent_pid() {
+                    Some(current) if current == parent_pid => {}
+                    Some(current) => {
+                        tracing::info!(
+                            "parent process changed (was {parent_pid}, now {current}); signaling shutdown"
+                        );
+                        shutdown.notify_waiters();
+                        return;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "could not read parent pid; falling back to stdin EOF detection"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1437,5 +1507,11 @@ mod adaptive_tests {
         let cwd = std::env::current_dir().unwrap();
         let _ = storage_type_for_path(&cwd);
         let _ = walk_concurrency_for(&cwd);
+    }
+
+    #[test]
+    fn available_disk_space_resolves_a_missing_child_to_its_volume() {
+        let child = std::env::temp_dir().join("fileid-space-probe").join("not-created");
+        assert!(available_disk_bytes(&child).is_some_and(|bytes| bytes > 0));
     }
 }

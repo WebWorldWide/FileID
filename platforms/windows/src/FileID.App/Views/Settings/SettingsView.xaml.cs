@@ -1066,8 +1066,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~200 MB)…";
+            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~621 MB)…";
             await EngineClient.Instance.PrewarmModelAsync("llama_runtime_cuda_x64");
+            await WaitForModelSentinelsAsync(["llama_runtime_cuda_x64"]);
             button.Content = "Installed";
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
         }
@@ -1097,10 +1098,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.IsEnabled = false;
             button.Content = "Installing…";
             CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
-            // Provider last — it's the "installed" gate; finishing it last keeps
-            // the status accurate (see ModelInstallerService.Accelerator).
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
             await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
+            await WaitForModelSentinelsAsync(["cudnn_runtime_x64", "ort_cuda_x64"]);
             button.Content = "Installed";
             CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
         }
@@ -1111,6 +1111,42 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";
         }
+    }
+
+    private static async Task WaitForModelSentinelsAsync(string[] modelKinds)
+    {
+        var started = DateTime.UtcNow;
+        var lastProgressAt = started;
+        var lastProgress = EngineClient.Instance.ModelDownloadProgress;
+        var initialError = EngineClient.Instance.LastError;
+        while (DateTime.UtcNow - started < TimeSpan.FromHours(2))
+        {
+            if (modelKinds.All(SentinelProbe.Installed)) return;
+
+            var progress = EngineClient.Instance.ModelDownloadProgress;
+            if (!ReferenceEquals(progress, lastProgress))
+            {
+                lastProgress = progress;
+                if (progress is not null && modelKinds.Contains(progress.ModelKind, StringComparer.Ordinal))
+                {
+                    lastProgressAt = DateTime.UtcNow;
+                }
+            }
+
+            var error = EngineClient.Instance.LastError;
+            if (!ReferenceEquals(error, initialError)
+                && error?.ModelKind is { } failedKind
+                && modelKinds.Contains(failedKind, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException(error.Message);
+            }
+            if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromMinutes(2))
+            {
+                throw new TimeoutException("The model installer stopped reporting progress. Check the connection and try again.");
+            }
+            await Task.Delay(250).ConfigureAwait(true);
+        }
+        throw new TimeoutException("The model install did not finish within two hours.");
     }
 
     /// <summary>F3c "Get cuDNN" link: opens NVIDIA's official cuDNN download

@@ -1,6 +1,8 @@
 #!/bin/bash
-# FileID launcher — wipes SQLite + transient caches, rebuilds release,
-# bundles into FileID.app/, opens. Preserves downloaded model weights.
+# FileID launcher — rebuilds, bundles into FileID.app/, and optionally opens.
+# A fresh-state wipe remains the default for parity testing; pass --no-wipe for
+# normal iteration or --wipe-db-only for a fresh library without resetting
+# preferences/caches. Downloaded model weights are always preserved.
 #
 # Layout produced:
 #   FileID.app/
@@ -12,12 +14,42 @@
 #         FileID.icns
 #       Info.plist     ← CFBundleIconFile = "FileID"
 
-set -e
+set -euo pipefail
+
+WIPE_MODE="full"
+CONFIGURATION="release"
+RUN_APP=1
+NO_WIPE_REQUESTED=0
+DB_WIPE_REQUESTED=0
+for arg in "$@"; do
+    case "$arg" in
+        --no-wipe) WIPE_MODE="none"; NO_WIPE_REQUESTED=1 ;;
+        --wipe-db-only) WIPE_MODE="db"; DB_WIPE_REQUESTED=1 ;;
+        --debug) CONFIGURATION="debug" ;;
+        --no-run) RUN_APP=0 ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: ./run.sh [--no-wipe | --wipe-db-only] [--debug] [--no-run]
+
+  --no-wipe       Preserve the library, caches, logs, and preferences.
+  --wipe-db-only  Remove only fileid.sqlite{,-wal,-shm}.
+  --debug         Build SwiftPM products in debug configuration.
+  --no-run        Assemble FileID.app without opening it.
+EOF
+            exit 0
+            ;;
+        *) echo "Unknown flag: $arg (try --help)" >&2; exit 1 ;;
+    esac
+done
+if [ "$NO_WIPE_REQUESTED" -eq 1 ] && [ "$DB_WIPE_REQUESTED" -eq 1 ]; then
+    echo "Choose only one wipe mode: --no-wipe or --wipe-db-only." >&2
+    exit 1
+fi
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"        # so `swift build` finds Package.swift no matter where this is invoked from
 APP_NAME="FileID"
-BUILD_DIR="$PROJECT_DIR/.build/release"
+BUILD_DIR="$PROJECT_DIR/.build/$CONFIGURATION"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 
@@ -32,13 +64,13 @@ if [ ! -d "$XCODE_DEV_DIR" ] && [ ! -f "$METALLIB_CACHE_CHECK" ]; then
     exit 1
 fi
 
-echo "🔨 Building FileID + FileIDEngine (release)..."
+echo "🔨 Building FileID + FileIDEngine ($CONFIGURATION)..."
 if [ -d "$XCODE_DEV_DIR" ]; then
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
-    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
+    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileID
+    DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileIDEngine
 else
-    swift build -c release --product FileID
-    swift build -c release --product FileIDEngine
+    swift build -c "$CONFIGURATION" --product FileID
+    swift build -c "$CONFIGURATION" --product FileIDEngine
 fi
 
 # MLX requires a precompiled mlx.metallib for GPU kernels. SwiftPM doesn't
@@ -126,32 +158,37 @@ sleep 0.5
 pkill -9 -f "FileID.app/Contents/MacOS/"           2>/dev/null || true
 pkill -9 -x "FileIDEngine"                          2>/dev/null || true
 
-echo "🧹 Wiping SQLite + caches (preserving model weights)..."
 APP_SUPPORT="$HOME/Library/Application Support"
-rm -f  "$APP_SUPPORT/FileID/fileid.sqlite" \
-       "$APP_SUPPORT/FileID/fileid.sqlite-wal" \
-       "$APP_SUPPORT/FileID/fileid.sqlite-shm"
-rm -rf "$APP_SUPPORT/FileID/checkpoints"
-rm -rf "$APP_SUPPORT/FileID/logs"
-rm -rf "$APP_SUPPORT/FileID/thumbs.cache"
-rm -rf "$APP_SUPPORT/FileID/face_crops"
-
-echo "🧹 Resetting app preferences (UserDefaults)..."
-# Wipes EVERY FileID preference: pickedFolderBookmark, sidebar visibility,
-# active tab, library kind filter, last-rename undo journal, person-tag
-# history, AI toggles, AI Models picker. Models on disk are preserved.
-defaults delete com.fileid.app 2>/dev/null || true
-# `cfprefsd` caches preferences in memory — restart it so the next FileID
-# launch reads the fresh empty defaults instead of the cached old ones.
-killall cfprefsd 2>/dev/null || true
+if [ "$WIPE_MODE" != "none" ]; then
+    echo "🧹 Wiping SQLite state (preserving model weights)..."
+    rm -f "$APP_SUPPORT/FileID/fileid.sqlite" \
+          "$APP_SUPPORT/FileID/fileid.sqlite-wal" \
+          "$APP_SUPPORT/FileID/fileid.sqlite-shm"
+fi
+if [ "$WIPE_MODE" = "full" ]; then
+    echo "🧹 Wiping transient caches + resetting app preferences..."
+    rm -rf "$APP_SUPPORT/FileID/checkpoints"
+    rm -rf "$APP_SUPPORT/FileID/logs"
+    rm -rf "$APP_SUPPORT/FileID/thumbs.cache"
+    rm -rf "$APP_SUPPORT/FileID/face_crops"
+    defaults delete com.fileid.app 2>/dev/null || true
+    killall cfprefsd 2>/dev/null || true
+elif [ "$WIPE_MODE" = "none" ]; then
+    echo "ℹ️  Preserving library, caches, logs, and preferences (--no-wipe)."
+fi
 
 echo "📦 Assembling $APP_NAME.app bundle..."
-bash "$PROJECT_DIR/scripts/assemble_app.sh" "$APP_BUNDLE"
+FILEID_BUILD_CONFIGURATION="$CONFIGURATION" \
+    bash "$PROJECT_DIR/scripts/assemble_app.sh" "$APP_BUNDLE"
 
 # LaunchServices caches icons aggressively. Touching the bundle invalidates
 # the cache so the new icon shows up immediately.
 touch "$APP_BUNDLE"
 
 echo "✅ Built: $APP_BUNDLE"
-echo "🚀 Launching (fresh state)..."
-open "$APP_BUNDLE"
+if [ "$RUN_APP" -eq 1 ]; then
+    echo "🚀 Launching..."
+    open "$APP_BUNDLE"
+else
+    echo "ℹ️  Launch skipped (--no-run)."
+fi

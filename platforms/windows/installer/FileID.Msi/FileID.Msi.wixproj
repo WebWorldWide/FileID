@@ -10,7 +10,8 @@
 
     The MSI installs:
       - FileID.exe + the entire dotnet publish output (self-contained .NET +
-        WinAppSDK runtime + Win2D + every project DLL).
+        Win2D + every project DLL). The Burn bundle installs the framework-
+        dependent Windows App Runtime prerequisite before this MSI.
       - FileIDEngine.exe colocated with FileID.exe so the C# spawn path
         (AppPaths.EngineExePath) finds it without falling back to the dev
         layout.
@@ -119,5 +120,24 @@
   <Target Name="GeneratePublishedFiles" BeforeTargets="CoreCompile">
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot;"
           ConsoleToMSBuild="true" />
+  </Target>
+
+  <Target Name="VerifyPublishedLayout" BeforeTargets="GeneratePublishedFiles">
+    <Error Condition="!Exists('$(PublishRoot)\FileID.exe')"
+           Text="Incomplete publish layout: FileID.exe is missing from $(PublishRoot)." />
+    <Error Condition="!Exists('$(PublishRoot)\FileIDEngine.exe')"
+           Text="Incomplete publish layout: FileIDEngine.exe is missing from $(PublishRoot). Run publish-bundle.ps1 so the matching native engine is staged before MSI creation." />
+    <Error Condition="!Exists('$(PublishRoot)\FileID.pri')"
+           Text="Incomplete publish layout: FileID.pri is missing from $(PublishRoot); the installed WinUI app would fail during XAML activation." />
+    <Error Condition="!Exists('$(PublishRoot)\Microsoft.WindowsAppRuntime.Bootstrap.dll')"
+           Text="Incomplete publish layout: the Windows App Runtime bootstrap DLL is missing from $(PublishRoot)." />
+    <Error Condition="!Exists('$(PublishRoot)\onnxruntime.dll')"
+           Text="Incomplete publish layout: onnxruntime.dll is missing from $(PublishRoot); the installed engine could not initialize inference." />
+    <Error Condition="!Exists('$(PublishRoot)\onnxruntime_providers_shared.dll')"
+           Text="Incomplete publish layout: onnxruntime_providers_shared.dll is missing from $(PublishRoot)." />
+    <Error Condition="!Exists('$(PublishRoot)\DirectML.dll')"
+           Text="Incomplete publish layout: DirectML.dll is missing from $(PublishRoot); the default Windows GPU execution provider would be unavailable." />
+    <Error Condition="!Exists('$(PublishRoot)\pdfium.dll')"
+           Text="Incomplete publish layout: pdfium.dll is missing from $(PublishRoot); PDF analysis would fail at runtime." />
   </Target>
 </Project>

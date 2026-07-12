@@ -1,0 +1,130 @@
+name: Native tools (engine + CLI + TUI)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/cli/**'
+      - 'platforms/tui/**'
+      - 'platforms/windows/src/engine/**'
+      - 'scripts/build-tools.*'
+      - 'scripts/package-tools.py'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/tools.yml'
+  pull_request:
+    paths:
+      - 'platforms/cli/**'
+      - 'platforms/tui/**'
+      - 'platforms/windows/src/engine/**'
+      - 'scripts/build-tools.*'
+      - 'scripts/package-tools.py'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/tools.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Engine + CLI + TUI — ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            artifact: windows-x64
+            runner: windows-latest
+          - label: Windows arm64
+            artifact: windows-arm64
+            runner: windows-11-arm
+          - label: macOS arm64
+            artifact: macos-arm64
+            runner: macos-15
+          - label: macOS x64
+            artifact: macos-x64
+            runner: macos-15-intel
+          - label: Linux x64
+            artifact: linux-x64
+            runner: ubuntu-24.04
+          - label: Linux arm64
+            artifact: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.90
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.90'
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/windows/src/engine/target
+            platforms/cli/target
+            platforms/tui/target
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/cli/Cargo.lock', 'platforms/tui/Cargo.lock') }}
+          restore-keys: |
+            tools-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Format
+        run: |
+          cargo fmt --manifest-path platforms/windows/src/engine/Cargo.toml --all -- --check
+          cargo fmt --manifest-path platforms/cli/Cargo.toml --all -- --check
+          cargo fmt --manifest-path platforms/tui/Cargo.toml --all -- --check
+
+      - name: Clippy — CLI
+        run: cargo clippy --locked --manifest-path platforms/cli/Cargo.toml --all-targets -- -D warnings
+
+      - name: Clippy — TUI
+        run: cargo clippy --locked --manifest-path platforms/tui/Cargo.toml --all-targets -- -D warnings
+
+      - name: Tests — CLI
+        run: cargo test --locked --manifest-path platforms/cli/Cargo.toml
+
+      - name: Tests — TUI
+        run: cargo test --locked --manifest-path platforms/tui/Cargo.toml
+
+      - name: Release builds
+        run: |
+          cargo build --release --locked --manifest-path platforms/windows/src/engine/Cargo.toml
+          cargo build --release --locked --manifest-path platforms/cli/Cargo.toml
+          cargo build --release --locked --manifest-path platforms/tui/Cargo.toml
+
+      - name: Smoke + privacy (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          platforms/cli/target/release/fileid --version
+          platforms/tui/target/release/fileid-tui --version
+          python3 shared/scripts/check_binary_privacy.py \
+            platforms/windows/src/engine/target/release/FileIDEngine \
+            platforms/cli/target/release/fileid \
+            platforms/tui/target/release/fileid-tui
+
+      - name: Smoke + privacy (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & platforms/cli/target/release/fileid.exe --version
+          & platforms/tui/target/release/fileid-tui.exe --version
+          python shared/scripts/check_binary_privacy.py `
+            platforms/windows/src/engine/target/release/FileIDEngine.exe `
+            platforms/cli/target/release/fileid.exe `
+            platforms/tui/target/release/fileid-tui.exe
+
+      - name: Package smoke
+        run: python scripts/package-tools.py --label "${{ matrix.artifact }}-ci" --output dist/tools-smoke

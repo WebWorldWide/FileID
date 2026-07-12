@@ -9,9 +9,9 @@ wraps them. All channels reuse the **single** desktop/metadata/icon source in
 
 | Channel | Covers | Status | Where |
 |---|---|---|---|
-| **Flatpak** (primary) | **Every distro** (Debian, Ubuntu, Arch, Gentoo, Fedora, NixOS, openSUSE, …) via the GNOME 46 runtime | manifest written; **build is advisory in CI** (ONNX-in-sandbox needs Linux-side verification) | [`flatpak/`](flatpak/) |
-| **AppImage** (secondary) | Most x86_64 distros, no install/sandbox | build script written; glibc/GTK baseline needs iteration | [`appimage/`](appimage/) |
-| **Nix flake** | NixOS / any Nix user | `flake.nix` written; ONNX sourcing needs verification | [`nix/`](nix/) |
+| **Flatpak** (primary) | **Every distro** (Debian, Ubuntu, Arch, Gentoo, Fedora, NixOS, openSUSE, …) via the GNOME 46 runtime | developer manifest is a required CI build; offline Flathub sources remain | [`flatpak/`](flatpak/) |
+| **AppImage** (secondary) | Most x86_64 distros, no install/sandbox | tool downloads are version/commit + SHA256 pinned; glibc/GTK baseline needs iteration | [`appimage/`](appimage/) |
+| **Nix flake** | NixOS / any Nix user | input revisions pinned; links nixpkgs ONNX Runtime; real Nix build verification remains | [`nix/`](nix/) |
 | **AUR `PKGBUILD`** | Arch / Manjaro / EndeavourOS | written; native `onnxruntime` dep | [`aur/`](aur/) |
 | `.deb` / `.rpm` | Debian/Ubuntu / Fedora natively | **off the metadata** — the `.desktop` + `metainfo.xml` + icon are packaging-system-agnostic; a future `nfpm`/`fpm` spec reuses `platforms/linux/data/` | — |
 | Gentoo ebuild | Gentoo | **off the metadata** — same data assets; a future `*.ebuild` mirrors the AUR build | — |
@@ -22,31 +22,26 @@ bindings target), so it runs identically on a 2020 Debian stable box and an Arch
 rolling box. The native channels (AUR, Nix, future .deb/ebuild) exist for users
 who prefer their distro's package manager and already have a new-enough GTK.
 
-## The ONNX Runtime question (read this before touching any channel)
+## ONNX Runtime by channel
 
-The engine links ONNX Runtime through the `ort` crate configured with
-`load-dynamic` + `download-binaries`
-([`platforms/windows/src/engine/Cargo.toml`](../platforms/windows/src/engine/Cargo.toml),
-`cfg(not(windows))` deps — **not editable from packaging**):
-
-- `download-binaries` ⇒ `ort-sys`' build script **downloads** `libonnxruntime.so`
-  from pyke's CDN **at build time**. This needs network during build.
-- `load-dynamic` ⇒ onnxruntime is **dlopen'd at runtime**, not linked. The loader
-  finds it via `ORT_DYLIB_PATH` (or the default library search path).
+Portable Linux builds use `ort` with `download-binaries` and no
+`load-dynamic`, statically linking the CPU runtime into `FileIDEngine`. Native
+package managers can instead set `ORT_LIB_LOCATION` and
+`ORT_PREFER_DYNAMIC_LINK=1` to link their managed shared library.
 
 Per-channel handling of that download:
 
 | Channel | Build-time network? | Approach |
 |---|---|---|
-| Flatpak | sandboxed (none by default) | grant `--share=network` to the **build step only**; stage the downloaded `.so` into `/app/lib`; `--env=ORT_DYLIB_PATH=/app/lib/libonnxruntime.so`. *Flathub forbids build network → hardening: vendor onnxruntime offline + `cargo-sources.json` + `ORT_LIB_LOCATION`.* |
-| AppImage | host has network | bundle the downloaded `.so`; `ORT_DYLIB_PATH` via an AppRun hook. |
-| Nix | sandboxed (none) | use nixpkgs `onnxruntime`; `ORT_LIB_LOCATION` (build) + `ORT_DYLIB_PATH` (runtime). |
-| AUR | makepkg has network | depend on system `onnxruntime`; default loader path resolves `/usr/lib/libonnxruntime.so`. |
+| Flatpak | sandboxed (none by default) | developer manifest grants build-only network for Cargo + the static ORT archive; Flathub submission must vendor both as pinned offline sources. |
+| AppImage | host has network | statically linked engine; no runtime ORT file or loader hook. |
+| Nix | sandboxed (none) | link nixpkgs `onnxruntime` with `ORT_LIB_LOCATION` + `ORT_PREFER_DYNAMIC_LINK=1`. |
+| AUR | makepkg has network | link Arch's `onnxruntime` package with the same build variables. |
 
-**This is the riskiest part and the reason the Flatpak CI job is advisory.**
-Whether `ORT_LIB_LOCATION` fully suppresses the `download-binaries` fetch under
-the `load-dynamic` combination for `ort 2.0-rc.10` must be confirmed on a real
-Linux box. Each manifest documents its assumption inline.
+The required CI job proves the developer manifest builds and bundles. Cargo
+verifies locked crate checksums and ort-sys verifies its runtime archive SHA256,
+so network transport cannot silently change build inputs. Store submission
+still requires expressing those same inputs as pinned offline sources.
 
 ## No telemetry
 

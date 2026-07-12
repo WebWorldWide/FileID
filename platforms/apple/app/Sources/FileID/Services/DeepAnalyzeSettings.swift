@@ -2,10 +2,9 @@ import Foundation
 import FileIDShared
 
 /// User-facing Deep Analyze model selection. Persists in UserDefaults
-/// under `deepAnalyzeActiveModel`; the engine reads the same key when
-/// it spawns. Demotes a persisted choice that no longer fits the
-/// host's RAM tier, and prefers a model that's actually downloaded
-/// over one that would require a fresh fetch.
+/// under `deepAnalyzeActiveModel`; the engine reads the same key when it
+/// spawns. A valid persisted choice remains authoritative. The model picker
+/// and engine gate unsafe runs instead of silently replacing the user's pick.
 @Observable
 final class DeepAnalyzeSettings: @unchecked Sendable {
     static let shared = DeepAnalyzeSettings()
@@ -20,16 +19,9 @@ final class DeepAnalyzeSettings: @unchecked Sendable {
     private init() {
         let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
         self.systemRAMGB = ram
-        let persisted: AIModelKind? = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel")
-            .flatMap { AIModelKind(rawValue: $0) }
-        if let p = persisted, p.fits(ramGB: ram) {
-            if ModelInstallStatus.isInstalled(kind: p) {
-                self.activeKind = p
-            } else {
-                let downloaded = AIModelKind.recommendedFor(ramGB: ram)
-                    .first(where: { $0.fits(ramGB: ram) && ModelInstallStatus.isInstalled(kind: $0) })
-                self.activeKind = downloaded ?? p
-            }
+        if let persisted = UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
+           !persisted.isEmpty {
+            self.activeKind = AIModelKind.migrated(rawValue: persisted)
         } else {
             self.activeKind = Self.preferredDefault(ramGB: ram)
         }
