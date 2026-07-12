@@ -49,7 +49,13 @@ fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
         return None;
     }
     let stat = unsafe { stat.assume_init() };
-    Some(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
+    // statvfs field widths differ by platform: f_bavail/f_frsize are u64 on
+    // Linux glibc but f_bavail is u32 on macOS. `u64::from` widens on macOS and
+    // is an identity on Linux — allow the (Linux-only) useless_conversion so the
+    // one expression stays correct on both without a cast clippy flags either way.
+    #[allow(clippy::useless_conversion)]
+    let bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
+    Some(bytes)
 }
 
 #[cfg(not(any(windows, unix)))]
