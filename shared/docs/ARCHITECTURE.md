@@ -150,7 +150,7 @@ Zero telemetry. Every guarantee is in `shared/docs/PRIVACY.md`. CI grep-gates sh
 
 Engine binary integrity verified at app spawn time:
 - macOS: `SecCode` / `SecStaticCode` against the embedded code-signing identity
-- Windows: `WinVerifyTrust` (Authenticode) against the EV cert thumbprint
+- Windows: `WinVerifyTrust` (Authenticode) against an independently pinned signer public-key identity for both app assembly and engine
 
 The app refuses to spawn the engine if the signature doesn't match.
 

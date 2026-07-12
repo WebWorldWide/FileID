@@ -151,7 +151,7 @@ on the Developer ID cert). The major open items:
   FaceAlign) before adopting the values.
 - **Rename-heal exact-duplicate fix** — coexisting byte-identical files currently
   collapse to one row; fix so N pairs yield 2N rows and Cleanup surfaces the group.
-- **Packaging + signing (Windows)** — WiX MSI + Authenticode EV cert.
+- **Packaging + signing (Windows)** — branded WiX MSI/Burn builds are verified; select and authenticate a public-trust provider using `WINDOWS_SIGNING.md`.
 - **Per-vendor on-hardware verification** — see the matrix below.
 
 ## Appendix — Windows per-vendor verification matrix
@@ -193,8 +193,7 @@ on real silicon — is the missing layer the six checks above provide.
 
 ### Build pre-reqs for the verification pass
 
-- Authenticode EV cert installed + `FILEID_EV_THUMBPRINT` set, so signed binaries
-  aren't SmartScreen-blocked on first run.
+- Public-trust Authenticode provider configured through `WINDOWS_SIGNING.md`; verify signatures on a clean Windows VM. Signing improves reputation but cannot guarantee first-run SmartScreen suppression.
 - `llama_runtime_x64` (Vulkan llama.cpp) downloadable from GitHub.
 
 ### Lane gate

@@ -8,7 +8,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 
 - **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp). ONNX Runtime is loaded via `ort`'s `load-dynamic` (Windows bundles `onnxruntime.dll` beside the engine + the accelerator-pack `ORT_DYLIB_PATH` pin). The engine is cross-platform; on **macOS** the dylib is a one-time install (`ort`'s `download-binaries` ships only a static lib for arm64) — `src/ort_runtime.rs` + `fileid runtime install`; see `shared/docs/RUNTIME.md`.
 - **App** — WinUI 3 (Windows App SDK 1.7, .NET 8, C#/XAML), unpackaged desktop. Self-contained .NET publish; the Windows App Runtime remains framework-dependent.
-- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`) that embeds the matching Windows App Runtime prerequisite; Authenticode-signed.
+- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`) that embeds the matching Windows App Runtime prerequisite; provider-neutral Authenticode pipeline documented in `shared/docs/WINDOWS_SIGNING.md`.
 
 ## Layout
 
@@ -54,7 +54,7 @@ Engine and app are both feature-complete across the six tabs. The commercial-cle
 - **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (default) / Gemma 3 / Mistral-Small-3.2.
 - EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU); NVIDIA without the CUDA pack runs DirectML. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
 
-In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.
+In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); public-trust signing-provider onboarding; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.
 
 ## Conventions — Rust engine
 

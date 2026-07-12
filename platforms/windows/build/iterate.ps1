@@ -112,7 +112,12 @@ if ([string]::IsNullOrWhiteSpace($Corpus)) {
     }
 }
 if (-not (Test-Path $Corpus)) { Fail "corpus path does not exist: $Corpus"; exit 2 }
-$corpusFiles = (Get-ChildItem -Recurse -File $Corpus | Measure-Object).Count
+$corpusEnumerationErrors = @()
+$corpusFiles = (Get-ChildItem -LiteralPath $Corpus -Recurse -File -ErrorAction SilentlyContinue `
+    -ErrorVariable +corpusEnumerationErrors | Measure-Object).Count
+if ($corpusEnumerationErrors.Count -gt 0) {
+    Warn "corpus pre-count skipped $($corpusEnumerationErrors.Count) unreadable or transient paths; engine discovery will report its own partial-walk status"
+}
 if ($corpusFiles -lt 10) {
     Warn "corpus has only $corpusFiles files; assertion thresholds may not exercise everything"
 }
@@ -120,6 +125,7 @@ OK "corpus has $corpusFiles files"
 
 # --- 3. Wipe DB -------------------------------------------------------
 $AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
+$faceCrops = Join-Path $AppDataRoot "face_crops"
 if ($SkipWipe) {
     Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
 } else {
@@ -128,7 +134,6 @@ if ($SkipWipe) {
         $p = Join-Path $AppDataRoot $f
         if (Test-Path $p) { Remove-Item -Force $p -ErrorAction SilentlyContinue }
     }
-    $faceCrops = Join-Path $AppDataRoot "face_crops"
     if (Test-Path $faceCrops) { Remove-Item -Recurse -Force $faceCrops -ErrorAction SilentlyContinue }
     OK "DB wiped"
 }
