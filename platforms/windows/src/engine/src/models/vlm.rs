@@ -97,10 +97,9 @@ const BIN_EXT: &str = ".exe";
 const BIN_EXT: &str = "";
 
 impl VlmRunner {
-    /// Locate `llama-mtmd-cli` under the engine's `Models/llama.cpp\
-    /// llama.cpp\` and verify it's a sane PE binary in the expected
-    /// size range. Returns Err with a friendly message if missing —
-    /// callers surface that to the user as "VLM runtime not installed".
+    /// Locate `llama-mtmd-cli` under the engine models directory (or PATH on
+    /// Unix) and verify its native executable header, size, and `--version`.
+    /// Returns a friendly install hint when no runnable binary is available.
     pub fn find() -> Result<Self> {
         let root = crate::paths::models_dir().context("resolving Models dir")?;
         let vulkan_dir = root.join("llama.cpp");
@@ -120,6 +119,12 @@ impl VlmRunner {
                 }
             }
         }
+        #[cfg(not(windows))]
+        if let Some(cand) = find_executable_on_path("llama-mtmd-cli") {
+            if sanity_check_binary(&cand).is_ok() {
+                return Ok(VlmRunner { binary: cand });
+            }
+        }
         // Distinguish "not installed at all" from "installed but too old".
         // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
         // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but
@@ -136,11 +141,25 @@ impl VlmRunner {
                  Settings -> Performance -> 'Install llama.cpp runtime'."
             )
         }
+        #[cfg(windows)]
         bail!(
-            "llama.cpp runtime not found under {}. Install it from Settings -> Performance -> 'Install llama.cpp runtime'.",
+            "llama.cpp runtime not found under {}. Install it with your Deep Analyze model or from Settings -> Performance.",
+            vulkan_dir.display()
+        );
+        #[cfg(not(windows))]
+        bail!(
+            "llama.cpp runtime not found under {} or on PATH. Install a current llama.cpp build that includes llama-mtmd-cli, then try again.",
             vulkan_dir.display()
         )
     }
+}
+
+#[cfg(not(windows))]
+fn find_executable_on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Resolve the (gguf, mmproj) pair for a given model_kind. Returns None
@@ -196,14 +215,34 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
             len
         );
     }
-    let mut buf = [0u8; 2];
     use std::io::Read;
     let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    f.read_exact(&mut buf).context("reading PE header")?;
-    if buf != [b'M', b'Z'] {
-        bail!("{}: not a PE binary (missing MZ header)", p.display());
+    #[cfg(windows)]
+    {
+        let mut buf = [0u8; 2];
+        f.read_exact(&mut buf).context("reading PE header")?;
+        if buf != [b'M', b'Z'] {
+            bail!("{}: not a PE binary (missing MZ header)", p.display());
+        }
     }
-    // PE-header + size pass even if dependent DLLs are missing.
+    #[cfg(target_os = "linux")]
+    {
+        let mut buf = [0u8; 4];
+        f.read_exact(&mut buf).context("reading ELF header")?;
+        if buf != [0x7f, b'E', b'L', b'F'] {
+            bail!("{}: not an ELF binary", p.display());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; 4];
+        f.read_exact(&mut buf).context("reading Mach-O header")?;
+        let magic = u32::from_be_bytes(buf);
+        if !matches!(magic, 0xfeedface | 0xfeedfacf | 0xcefaedfe | 0xcffaedfe | 0xcafebabe | 0xbebafeca | 0xcafebabf | 0xbfbafeca) {
+            bail!("{}: not a Mach-O binary", p.display());
+        }
+    }
+    // Header + size pass even if dependent libraries are missing.
     // Spawning --version trips on dyld errors so we can emit an
     // actionable "reinstall the runtime" message instead of letting
     // caption() fail later with STATUS_DLL_NOT_FOUND.

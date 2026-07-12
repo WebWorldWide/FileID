@@ -5,15 +5,11 @@ name = "fileid-engine"
 # script (no new deps) and exposes its own version via CARGO_PKG_VERSION
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
-# License choice is pending the public-release decision; the engine is
-# `publish = false` so cargo doesn't enforce a SPDX expression. Update
-# this to "MIT" / "Apache-2.0" / proprietary text before any external
-# distribution. Tracked in shared/docs/SHIP.md.
-license = "TBD"
+license = "Apache-2.0"
 publish = false
 
 [lib]

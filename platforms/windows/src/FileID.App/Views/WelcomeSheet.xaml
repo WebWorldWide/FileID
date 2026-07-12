@@ -261,8 +261,8 @@
                     </Grid>
                 </Grid>
 
-                <!-- Qwen 2.5-VL — Deep Analyze (hardware-tiered 3B / 7B, set by
-                     ModelInstallerService.UpdateDeepVlmRecommendation). -->
+                <!-- Deep Analyze VLM — hardware recommendation plus an explicit
+                     Gemma / Qwen / Mistral picker. -->
                 <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="28" />
@@ -293,6 +293,19 @@
                         <TextBlock Text="On-device vision model for Deep Analyze — captions photos, PDFs, and video keyframes and writes smart filenames. Sized to this PC."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ComboBox x:Name="VlmPicker"
+                                  Header="Vision model"
+                                  HorizontalAlignment="Stretch"
+                                  SelectionChanged="OnVlmSelectionChanged"
+                                  AutomationProperties.Name="Deep Analyze vision model">
+                            <ComboBoxItem Content="Gemma 3 4B — lightest" Tag="gemma_3_4b" />
+                            <ComboBoxItem Content="Qwen2.5-VL 7B — balanced" Tag="qwen2_5_vl_7b" />
+                            <ComboBoxItem Content="Mistral-Small 3.2 24B — max quality" Tag="mistral_small_3_2" />
+                        </ComboBox>
+                        <TextBlock Text="{x:Bind Svc.DeepVlmRecommendation, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
                                    TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.DeepVlm.Fraction, Mode=OneWay}"
@@ -328,6 +341,77 @@
                                 MinWidth="86"
                                 AutomationProperties.HelpText="Deep Analyze vision model"
                                 Visibility="{x:Bind ShowActionButton(Svc.DeepVlm.Status), Mode=OneWay}" />
+                    </Grid>
+                </Grid>
+
+                <!-- BGE-small — document-content embeddings for semantic search
+                     and Restructure. Optional for scanning, but a real installable
+                     capability and therefore visible in first-run setup. -->
+                <Grid Padding="0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="28" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <FontIcon Grid.Column="0"
+                              Glyph="{x:Bind GlyphFor(Svc.Bge.Status), Mode=OneWay}"
+                              Foreground="{x:Bind IconBrushFor(Svc.Bge.Status), Mode=OneWay}"
+                              FontSize="22"
+                              VerticalAlignment="Top"
+                              AutomationProperties.AccessibilityView="Raw" />
+                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Document understanding (BGE-small)"
+                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind VlmSize(Svc.Bge.ApproxBytes), Mode=OneWay}"
+                                       Margin="12,0,0,0"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </Grid>
+                        <TextBlock Text="Reads document content so semantic search and Restructure group files by what they say, not only by filename."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ProgressBar Maximum="1"
+                                     Value="{x:Bind Svc.Bge.Fraction, Mode=OneWay}"
+                                     IsIndeterminate="{x:Bind IsStarting(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
+                                     Foreground="{StaticResource GoldBrush}"
+                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind ProgressLabel(Svc.Bge.Message, Svc.Bge.Fraction, Svc.Bge.BytesDone, Svc.Bge.TotalBytes), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="11"
+                                   Text="{x:Bind RateEtaLabel(Svc.Bge.BytesPerSecond, Svc.Bge.EtaSeconds), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Bge.LastError), Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   Visibility="{x:Bind VisibleIfFailed(Svc.Bge.Status), Mode=OneWay}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
+                        <TextBlock Text="Installed"
+                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   VerticalAlignment="Center"
+                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Bge.Status), Mode=OneWay}" />
+                        <Button Click="OnBgeActionClicked"
+                                Content="{x:Bind ButtonLabel(Svc.Bge.Status), Mode=OneWay}"
+                                MinWidth="86"
+                                AutomationProperties.HelpText="Document understanding (BGE-small) model"
+                                Visibility="{x:Bind ShowActionButton(Svc.Bge.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
 
@@ -459,12 +543,17 @@
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
-                                   Visibility="{x:Bind ShowAcceleratorInstalledBadge(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
+                                   Visibility="{x:Bind ShowAcceleratorInstalledBadge(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall, Svc.AcceleratorRestartRequired), Mode=OneWay}" />
                         <Button Click="OnAcceleratorActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Accelerator.Status), Mode=OneWay}"
                                 MinWidth="86"
                                 AutomationProperties.HelpText="GPU Acceleration Pack"
                                 Visibility="{x:Bind ShowAcceleratorButton(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
+                        <Button Click="OnRestartAcceleratorClicked"
+                                Content="Restart engine"
+                                MinWidth="112"
+                                AutomationProperties.HelpText="Restart the engine to activate the installed GPU provider"
+                                Visibility="{x:Bind ShowAcceleratorRestartButton(Svc.AcceleratorRestartRequired, Svc.IsBusy), Mode=OneWay}" />
                     </Grid>
                 </Grid>
             </StackPanel>

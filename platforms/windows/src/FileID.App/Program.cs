@@ -14,6 +14,7 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
+using System.Diagnostics;
 using System.Threading;
 using WinRT;
 
@@ -31,6 +32,7 @@ internal static class Program
     /// reuse it for anything else.
     /// </summary>
     private const string SingleInstanceMutexName = "Local\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
+    private const int ShowWindowRestore = 9;
 
     /// <summary>harness hook. When the app is launched with
     /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a
@@ -67,8 +69,7 @@ internal static class Program
         using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
         if (!createdNew)
         {
-            // Another FileID is already running. Hard exit; later polish
-            // could SetForegroundWindow on the existing instance.
+            TryActivateExistingInstance();
             return 0;
         }
 
@@ -166,6 +167,50 @@ internal static class Program
         _ = NativeMessageBox(System.IntPtr.Zero, message, title, 0x10u);
     }
 
+    private static void TryActivateExistingInstance()
+    {
+        using var current = Process.GetCurrentProcess();
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            foreach (var candidate in Process.GetProcessesByName(current.ProcessName))
+            {
+                using (candidate)
+                {
+                    try
+                    {
+                        if (candidate.Id == current.Id || candidate.SessionId != current.SessionId) continue;
+                        candidate.Refresh();
+                        var hwnd = candidate.MainWindowHandle;
+                        if (hwnd == IntPtr.Zero) continue;
+
+                        if (IsIconic(hwnd)) _ = ShowWindowAsync(hwnd, ShowWindowRestore);
+                        if (!SetForegroundWindow(hwnd)) _ = FlashWindow(hwnd, invert: true);
+                        return;
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }
+            }
+            Thread.Sleep(100);
+        }
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int NativeMessageBox(System.IntPtr hWnd, string text, string caption, uint type);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool FlashWindow(IntPtr hWnd, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] bool invert);
 }

@@ -58,6 +58,13 @@ public final class CLIPModelInstaller {
 
     public static var modelsRoot: URL { AppSupportPath.models }
 
+    public static let approxDownloadBytes: Int64 = {
+        let ids = Set(["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"])
+        return ModelManifest.artifacts
+            .filter { ids.contains($0.id) }
+            .reduce(0) { $0 + $1.approxBytes }
+    }()
+
     private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
         let m = modelsRoot
         let txtDir = m.appendingPathComponent("clip_text")
@@ -171,7 +178,7 @@ public final class CLIPModelInstaller {
         installing = true
         defer { installing = false }
         Self.sweepOrphanedStagingRoots()
-        let approxBytes: Int64 = 250 * 1024 * 1024
+        let approxBytes = Self.approxDownloadBytes
         if let free = freeDiskBytes(), free < approxBytes * 2 {
             status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
             return

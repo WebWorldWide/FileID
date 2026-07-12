@@ -462,8 +462,17 @@ impl App {
             // Scan THIS folder — the headline action. Closing the browser first
             // mirrors the typed-path flow (`confirm_input`).
             KeyCode::Char('s') | KeyCode::Char('S') => {
-                if let Some(b) = self.browser.take() {
-                    self.arm_scan(b.cwd);
+                if self
+                    .browser
+                    .as_ref()
+                    .is_some_and(|browser| browser.virtual_drives)
+                {
+                    if let Some(browser) = self.browser.as_mut() {
+                        browser.notice =
+                            Some("Open a drive before choosing a folder to scan.".to_string());
+                    }
+                } else if let Some(browser) = self.browser.take() {
+                    self.arm_scan(browser.cwd);
                 }
             }
             // Jump straight to where external/removable drives mount (FEATURE 1).
@@ -660,6 +669,10 @@ pub struct Browser {
     /// toggled with `.`. Applies to the subdir list, the file preview, AND every
     /// count so what's shown and what's tallied always agree.
     pub show_hidden: bool,
+    /// A virtual "This computer" list of mount roots. Windows has no common
+    /// parent above `C:\\`, `D:\\`, …, so this state is what makes every local
+    /// and removable drive reachable from the keyboard-only picker.
+    pub virtual_drives: bool,
     /// Lazy per-subdir count cache (FIX 2), filled DURING RENDER for the rows
     /// actually on screen so opening a folder never eagerly walks every child.
     /// `None` caches an unreadable subdir so it isn't retried each frame.
@@ -681,6 +694,7 @@ impl Browser {
             files: Vec::new(),
             files_total: 0,
             show_hidden: false,
+            virtual_drives: false,
             counts: RefCell::new(HashMap::new()),
         };
         b.refresh();
@@ -696,6 +710,7 @@ impl Browser {
     /// followed; unreadable individual entries are simply skipped. Clears the
     /// per-subdir count cache since we've navigated to a new `cwd`.
     fn refresh(&mut self) {
+        self.virtual_drives = false;
         self.counts.borrow_mut().clear();
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut files: Vec<FileEntry> = Vec::new();
@@ -791,6 +806,7 @@ impl Browser {
             Some(BrowseRow::Parent) => self.go_up(),
             Some(BrowseRow::Dir(path)) => {
                 if std::fs::read_dir(&path).is_ok() {
+                    self.virtual_drives = false;
                     self.cwd = path;
                     self.selected = 0;
                     self.refresh();
@@ -809,10 +825,15 @@ impl Browser {
     /// `/` (the root has no parent, so it's a no-op there) — so the user can
     /// always climb out to reach any drive.
     fn go_up(&mut self) {
+        if self.virtual_drives {
+            return;
+        }
         if let Some(parent) = self.cwd.parent().map(Path::to_path_buf) {
             self.cwd = parent;
             self.selected = 0;
             self.refresh();
+        } else {
+            self.go_to_drives();
         }
     }
 
@@ -821,15 +842,24 @@ impl Browser {
     /// else the filesystem root `/`. Re-reads the listing so the user can step
     /// into a drive. Panic-free (an unreadable target just shows a notice).
     fn go_to_drives(&mut self) {
-        self.cwd = drives_root();
+        self.cwd = PathBuf::from("Drives");
+        self.rows = drive_roots().into_iter().map(BrowseRow::Dir).collect();
         self.selected = 0;
-        self.refresh();
+        self.notice = None;
+        self.here = DirCounts::default();
+        self.files.clear();
+        self.files_total = 0;
+        self.virtual_drives = true;
+        self.counts.borrow_mut().clear();
     }
 
     /// Toggle showing dot-prefixed (hidden) entries (the `.` key, FEATURE 2).
     /// Re-reads `cwd` — which also clears the per-subdir count cache — so the
     /// subdir list, file preview, and counts all reflect the new state at once.
     fn toggle_hidden(&mut self) {
+        if self.virtual_drives {
+            return;
+        }
         self.show_hidden = !self.show_hidden;
         self.refresh();
     }
@@ -924,8 +954,8 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
 /// Where external / removable drives mount, for the browser's `d` jump (FEATURE
 /// 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt` (first that
 /// exists); else the filesystem root `/`. Never panics.
-fn drives_root() -> PathBuf {
-    first_existing_or_root(&drives_candidates(), |p| p.is_dir())
+fn drive_roots() -> Vec<PathBuf> {
+    existing_drive_roots(&drives_candidates(), |path| path.is_dir())
 }
 
 /// Ordered candidate mount locations for the current OS (see [`drives_root`]).
@@ -934,12 +964,9 @@ fn drives_candidates() -> Vec<PathBuf> {
     if cfg!(target_os = "macos") {
         vec![PathBuf::from("/Volumes")]
     } else if cfg!(target_os = "windows") {
-        // No single mount root on Windows; use the system drive's root (e.g.
-        // `C:\`) as an absolute starting point to navigate from. `/` is NOT an
-        // absolute path on Windows (it's drive-relative), so — unlike Unix — it
-        // can't serve as the fallback `drives_root` returns.
-        let sysdrive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
-        vec![PathBuf::from(format!("{sysdrive}\\"))]
+        ('A'..='Z')
+            .map(|letter| PathBuf::from(format!("{letter}:\\")))
+            .collect()
     } else {
         let mut v = Vec::with_capacity(3);
         if let Some(user) = std::env::var_os("USER").filter(|u| !u.is_empty()) {
@@ -951,16 +978,27 @@ fn drives_candidates() -> Vec<PathBuf> {
     }
 }
 
-/// First candidate satisfying `exists`, else the filesystem root `/`. The
-/// existence check is injected so the resolution logic is unit-testable on any
-/// OS without depending on what's actually mounted. Never panics.
-fn first_existing_or_root(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) -> PathBuf {
-    for p in candidates {
-        if exists(p) {
-            return p.clone();
-        }
+/// Every candidate satisfying `exists`, with a platform-correct fallback when
+/// none are available. Injecting the probe keeps multi-drive behavior testable
+/// without requiring removable hardware in CI.
+fn existing_drive_roots(candidates: &[PathBuf], exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let roots: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|path| exists(path))
+        .cloned()
+        .collect();
+    if !roots.is_empty() {
+        return roots;
     }
-    PathBuf::from("/")
+    if cfg!(windows) {
+        let system = std::env::var("SystemDrive")
+            .ok()
+            .filter(|drive| !drive.is_empty())
+            .unwrap_or_else(|| "C:".to_string());
+        vec![PathBuf::from(format!("{system}\\"))]
+    } else {
+        vec![PathBuf::from("/")]
+    }
 }
 
 #[cfg(test)]
@@ -1545,29 +1583,27 @@ mod tests {
     }
 
     #[test]
-    fn drives_root_resolves_without_panicking() {
-        let root = drives_root();
-        assert!(root.is_absolute(), "drives root must be an absolute path");
-        // Always either a real mount dir or the `/` fallback — never a panic.
-        assert!(root.is_dir() || root == Path::new("/"));
+    fn drive_roots_resolve_without_panicking() {
+        let roots = drive_roots();
+        assert!(!roots.is_empty(), "the drive picker always has a fallback");
+        assert!(
+            roots.iter().all(|root| root.is_absolute()),
+            "every drive-picker row must be an absolute path: {roots:?}"
+        );
     }
 
     #[test]
-    fn first_existing_or_root_picks_first_then_falls_back() {
+    fn existing_drive_roots_keeps_every_available_mount() {
         let a = PathBuf::from("/aaa-xyz");
         let b = PathBuf::from("/bbb-xyz");
-        // Picks the first candidate the predicate accepts.
         assert_eq!(
-            first_existing_or_root(&[a.clone(), b.clone()], |p| p == b.as_path()),
-            b
+            existing_drive_roots(&[a.clone(), b.clone()], |_| true),
+            vec![a.clone(), b.clone()],
+            "the picker must not collapse multiple drives to the first one"
         );
-        // None accepted → the `/` fallback.
-        assert_eq!(
-            first_existing_or_root(std::slice::from_ref(&a), |_| false),
-            PathBuf::from("/")
-        );
-        // Empty candidate list → the `/` fallback (the Windows path).
-        assert_eq!(first_existing_or_root(&[], |_| false), PathBuf::from("/"));
+        let fallback = existing_drive_roots(std::slice::from_ref(&a), |_| false);
+        assert_eq!(fallback.len(), 1);
+        assert!(fallback[0].is_absolute());
     }
 
     #[test]
@@ -1576,11 +1612,33 @@ mod tests {
         app.browser = Some(Browser::open(std::env::temp_dir()));
         app.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
         let b = app.browser.as_ref().unwrap();
+        assert!(b.virtual_drives, "d opens the virtual drive selector");
         assert_eq!(
-            b.cwd,
-            drives_root(),
-            "d jumps the browser to the drives root"
+            b.rows,
+            drive_roots()
+                .into_iter()
+                .map(BrowseRow::Dir)
+                .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn virtual_drive_selector_cannot_be_scanned_as_a_fake_folder() {
+        let mut app = app_with_files(0);
+        app.browser = Some(Browser::open(std::env::temp_dir()));
+        app.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.browser.is_some(), "the selector stays open");
+        assert!(
+            app.scan_requested.is_none(),
+            "no fake Drives path is scanned"
+        );
+        assert!(!app.scanning);
+        assert!(app
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.notice.as_deref())
+            .is_some_and(|notice| notice.contains("Open a drive")));
     }
 
     #[test]

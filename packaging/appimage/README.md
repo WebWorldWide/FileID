@@ -9,8 +9,8 @@ exists for users who want one download with no runtime, no sandbox, and no store
 `build-appimage.sh` produces `FileID-x86_64.AppImage` containing:
 
 - `fileid-linux` — the GTK4 app, and `FileIDEngine` — the engine it spawns.
-- `libonnxruntime.so` — the ONNX Runtime the engine dlopen's (see *ONNX Runtime*
-  below).
+- ONNX Runtime is statically linked into `FileIDEngine`; there is no runtime
+  `.so` to locate or bundle.
 - The full **GTK4 + libadwaita** runtime, GdkPixbuf loaders, GLib schemas, the
   Adwaita icon theme and GIO modules — pulled in by `linuxdeploy-plugin-gtk`.
 
@@ -20,11 +20,13 @@ exists for users who want one download with no runtime, no sandbox, and no store
 # from the repo root
 ./packaging/appimage/build-appimage.sh
 # -> packaging/appimage/build/FileID-x86_64.AppImage
+# -> packaging/appimage/build/FileID-x86_64.AppImage.sha256
 ```
 
 Requirements on the build host: `cargo` (Rust 1.90), `curl`, `libgtk-4-dev`,
 `libadwaita-1-dev`, `pkg-config`, `build-essential`, and FUSE (for AppImages to
-self-mount at runtime).
+self-mount at runtime). The linuxdeploy binary and GTK plugin are pinned to a
+release/commit and SHA256-verified on every run, including cached copies.
 
 ## glibc baseline (important)
 
@@ -47,14 +49,10 @@ runtime, which is why it is primary.
 
 ## ONNX Runtime
 
-The engine uses `ort` with `load-dynamic` + `download-binaries`. The build
-downloads `libonnxruntime.so` into `target/` (build-time network), and the
-script bundles it into `usr/lib/` and exports `ORT_DYLIB_PATH` from an AppRun
-hook (`apprun-hooks/ort-dylib-path.sh`) so the loader finds it at runtime. CPU
-inference works out of the box; GPU execution providers (CUDA/OpenVINO) are not
-bundled and would need their EP `.so`s added. If the `libonnxruntime.so not
-found` warning prints during the build, ONNX sourcing needs Linux-side
-verification (the same risk flagged in the Flatpak manifest header).
+Linux portable builds enable `ort`'s `download-binaries` without
+`load-dynamic`, which statically links the CPU runtime into `FileIDEngine`.
+CPU inference therefore works out of the box with no AppRun loader hook. GPU
+execution providers remain future work.
 
 ## Privacy
 

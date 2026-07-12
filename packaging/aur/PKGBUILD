@@ -7,14 +7,14 @@
 # Generate .SRCINFO before publishing:  makepkg --printsrcinfo > .SRCINFO
 
 pkgname=fileid
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files locally (GTK4)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/AdamNolle/FileID"
 license=('Apache-2.0')
-# onnxruntime provides /usr/lib/libonnxruntime.so — the engine dlopen's it
-# (ort load-dynamic), so the default loader path resolves it at runtime.
+# Native package builds link the engine against Arch's ONNX Runtime shared
+# library instead of downloading the portable static archive.
 depends=('gtk4' 'libadwaita' 'onnxruntime' 'sqlite' 'glibc' 'glib2')
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=('tesseract: OCR for image/document text extraction'
@@ -36,11 +36,10 @@ build() {
   cd "${srcdir}/FileID/platforms/linux"
   export CARGO_HOME="${srcdir}/cargo-home"
   export RUSTUP_TOOLCHAIN=stable
-  # Point ort at the system ONNX Runtime so `download-binaries` does not fetch
-  # a second copy. ORT_DYLIB_PATH covers the load-dynamic runtime lookup.
-  export ORT_STRATEGY=system
+  # Point ort at Arch's shared ONNX Runtime so `download-binaries` does not
+  # fetch/link the portable static archive.
   export ORT_LIB_LOCATION=/usr/lib
-  export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
+  export ORT_PREFER_DYNAMIC_LINK=1
 
   # The GTK app + the engine binary it spawns. -p selects the engine
   # path-dependency package from the workspace graph.

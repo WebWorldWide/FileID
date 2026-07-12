@@ -108,22 +108,6 @@ fn run_scan(
         );
     };
 
-    // In SCRATCH mode we point the engine at the SAME data home the TUI reads
-    // (below), so the engine's library IS `db` — no mismatch to warn about. With
-    // an explicit `--db`, the engine still writes its OWN canonical location; a
-    // pinned `--db` that differs won't reflect on reload, so surface that (CLI
-    // parity).
-    if engine_data_home.is_none() {
-        if let Ok(engine_db) = fileid_engine::paths::db_path() {
-            if engine_db != db {
-                let _ = tx.send(LoadMsg::Status(format!(
-                    "note: engine writes its library at {}; your --db differs",
-                    short(&engine_db.to_string_lossy())
-                )));
-            }
-        }
-    }
-
     let _ = tx.send(LoadMsg::Status(format!(
         "Starting engine for {}…",
         short(&root_abs.to_string_lossy())
@@ -147,12 +131,9 @@ fn run_scan(
     // is best-effort layout setup (see its doc).
     if let Some(home) = engine_data_home {
         prepare_scratch_dir(home);
-        if cfg!(windows) {
-            command.env("LOCALAPPDATA", home);
-        } else {
-            command.env("XDG_DATA_HOME", home);
-        }
     }
+    let (storage_env, storage_path) = engine_storage_env(db, engine_data_home);
+    command.env(storage_env, storage_path);
 
     let mut child = command
         .spawn()
@@ -583,6 +564,14 @@ fn which_on_path(exe: &str) -> Option<PathBuf> {
         .find(|cand| cand.is_file())
 }
 
+fn engine_storage_env<'a>(db: &'a Path, data_home: Option<&'a Path>) -> (&'static str, &'a Path) {
+    match data_home {
+        Some(home) if cfg!(windows) => ("LOCALAPPDATA", home),
+        Some(home) => ("XDG_DATA_HOME", home),
+        None => ("FILEID_DB", db),
+    }
+}
+
 /// Best-effort scratch-state setup before a scratch-mode scan (FIX 1). Ensures
 /// the engine's scratch root (`<data_home>/FileID`) exists, and on Linux/Windows
 /// — where the engine resolves its model dir from that same root — links the
@@ -746,5 +735,27 @@ mod tests {
 
         *tail.lock().unwrap() = vec![b'x'; 10_000];
         assert!(stderr_tail_summary(&tail).chars().count() <= 300);
+    }
+
+    #[test]
+    fn explicit_db_is_forwarded_to_the_engine_child() {
+        let db = Path::new("/isolated/test.sqlite");
+        assert_eq!(engine_storage_env(db, None), ("FILEID_DB", db));
+    }
+
+    #[test]
+    fn scratch_scan_uses_the_platform_data_home() {
+        let db = Path::new("/scratch/FileID/fileid.sqlite");
+        let home = Path::new("/scratch");
+        let (name, value) = engine_storage_env(db, Some(home));
+        assert_eq!(
+            name,
+            if cfg!(windows) {
+                "LOCALAPPDATA"
+            } else {
+                "XDG_DATA_HOME"
+            }
+        );
+        assert_eq!(value, home);
     }
 }

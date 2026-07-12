@@ -1212,6 +1212,13 @@ pub struct InstallFileProgress {
     pub bytes_per_second: f64,
 }
 
+pub fn required_install_free_bytes(download_bytes: u64) -> u64 {
+    const STAGING_HEADROOM: u64 = 512 * 1024 * 1024;
+    download_bytes
+        .saturating_mul(2)
+        .saturating_add(STAGING_HEADROOM)
+}
+
 /// Download + install one model bundle, blocking until done. Builds its own
 /// current-thread Tokio runtime so a non-async caller (the CLI) needs none.
 ///
@@ -1234,6 +1241,20 @@ pub fn install_model_blocking(
     // Already installed (sentinel present) → nothing to do.
     if crate::models::registry::sentinel_path(model).is_some_and(|p| p.exists()) {
         return Ok(());
+    }
+
+    let download_bytes: u64 = model.files.iter().map(|file| file.approx_bytes).sum();
+    let required_free = required_install_free_bytes(download_bytes);
+    if let Ok(models_dir) = crate::paths::models_dir() {
+        if let Some(available) = crate::platform::available_disk_bytes(&models_dir) {
+            anyhow::ensure!(
+                available >= required_free,
+                "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive",
+                model.display_name,
+                required_free as f64 / 1_073_741_824.0,
+                available as f64 / 1_073_741_824.0,
+            );
+        }
     }
 
     let rt = tokio::runtime::Builder::new_current_thread()

@@ -21,8 +21,8 @@ pub struct Ctx {
     pub db: PathBuf,
     /// The caller pinned the library location (`--db`, `$FILEID_DB`, or
     /// `$CFFIXED_USER_HOME`) rather than falling back to the engine default.
-    /// `scan --models` uses this to warn that the full pipeline writes the
-    /// engine's own library (XDG/`%LOCALAPPDATA%`-located), not an arbitrary db.
+    /// `scan --models` uses this to forward the exact path to the spawned
+    /// engine through `FILEID_DB`.
     pub db_explicit: bool,
 }
 
@@ -46,15 +46,15 @@ impl Ctx {
         quiet: bool,
         no_color: bool,
     ) -> Result<Self> {
-        let db_explicit = db_flag.is_some()
-            || std::env::var_os("FILEID_DB").is_some()
-            || std::env::var_os("CFFIXED_USER_HOME").is_some();
+        let fileid_db = nonempty_env_path("FILEID_DB");
+        let cffixed_home = nonempty_env_path("CFFIXED_USER_HOME");
+        let db_explicit = db_flag.is_some() || fileid_db.is_some() || cffixed_home.is_some();
         let db = if let Some(p) = db_flag {
             p
-        } else if let Ok(s) = std::env::var("FILEID_DB") {
-            PathBuf::from(s)
-        } else if let Ok(home) = std::env::var("CFFIXED_USER_HOME") {
-            PathBuf::from(home).join("fileid.sqlite")
+        } else if let Some(p) = fileid_db {
+            p
+        } else if let Some(home) = cffixed_home {
+            home.join("fileid.sqlite")
         } else if let Some(p) = macos_app_db() {
             p
         } else {
@@ -153,6 +153,12 @@ impl Ctx {
     }
 }
 
+fn nonempty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The macOS Swift app's library location
 /// (`~/Library/Application Support/FileID/fileid.sqlite`), but only when it
 /// already exists. The Swift front-end writes there — NOT to the engine's XDG
@@ -213,10 +219,16 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
             return Some(id);
         }
     }
-    let like = format!("%/{}", escape_like(target.trim_start_matches('/')));
+    let basename = escape_like(target.trim_start_matches(['/', '\\']));
+    let slash_like = format!("%/{basename}");
+    // SQL LIKE uses `\` as its escape character, so a literal Windows path
+    // separator in the pattern is represented by two consecutive backslashes.
+    let backslash_like = format!("%\\\\{basename}");
     conn.query_row(
-        "SELECT id FROM files WHERE path_text LIKE ?1 ESCAPE '\\' ORDER BY path_text LIMIT 1",
-        params![like],
+        "SELECT id FROM files \
+         WHERE path_text LIKE ?1 ESCAPE '\\' OR path_text LIKE ?2 ESCAPE '\\' \
+         ORDER BY path_text LIMIT 1",
+        params![slash_like, backslash_like],
         |r| r.get::<_, i64>(0),
     )
     .optional()
@@ -234,9 +246,10 @@ pub fn print_json(value: &serde_json::Value) {
 
 /// Compact a path for table display: keep it absolute but collapse `$HOME`.
 pub fn display_path(p: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            if let Some(rest) = p.strip_prefix(&home) {
+    for name in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+            let home = home.to_string_lossy();
+            if let Some(rest) = p.strip_prefix(home.as_ref()) {
                 return format!("~{rest}");
             }
         }
@@ -344,5 +357,15 @@ mod tests {
         // deterministically, not an arbitrary `LIMIT 1` row (id 7 by rowid).
         let conn = db_with(&[(7, "/b/report.pdf"), (3, "/a/report.pdf")]);
         assert_eq!(resolve_file_id(&conn, "report.pdf"), Some(3));
+    }
+
+    #[test]
+    fn basename_match_accepts_windows_path_separators() {
+        let conn = db_with(&[(7, r"D:\Photos\report.pdf"), (3, r"C:\Archive\report.pdf")]);
+        assert_eq!(
+            resolve_file_id(&conn, "report.pdf"),
+            Some(3),
+            "basename lookup must work for Windows path_text rows and remain deterministic"
+        );
     }
 }

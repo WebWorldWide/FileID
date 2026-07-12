@@ -13,7 +13,7 @@
 #
 # Usage:
 #   pwsh build/build-all.ps1                    # Debug, x64
-#   pwsh build/build-all.ps1 -Release           # Release self-contained publish
+#   pwsh build/build-all.ps1 -Release           # Release publish (.NET self-contained; WinAppSDK framework-dependent)
 #   pwsh build/build-all.ps1 -Run               # Build + launch FileID.exe
 #   pwsh build/build-all.ps1 -Clean             # Wipe build artifacts first
 #   pwsh build/build-all.ps1 -Wipe              # FULL wipe (artifacts + Desktop\FileID + %LOCALAPPDATA%\FileID)
@@ -457,13 +457,14 @@ if (-not $SkipApp) {
         Write-Host "  WinAppSDK bootstrap DLL OK" -ForegroundColor Green
     } else {
         Write-Host "  WARN: Microsoft.WindowsAppRuntime.Bootstrap.dll not found beside FileID.exe." -ForegroundColor Yellow
-        Write-Host "        Self-contained mode should pull this in; if missing the app will fail to launch." -ForegroundColor Yellow
+        Write-Host "        The unpackaged app needs this bootstrap DLL to activate Windows App Runtime 1.7." -ForegroundColor Yellow
     }
 }
 
 # --- 7. Install to LocalAppData + Desktop shortcut --------------------------
-# WinUI 3 self-contained publish produces ~900 companion files (the .NET
-# runtime, WinAppSDK runtime, Win2D, project DLLs). Dumping that on the
+# The publish produces ~900 companion files (the self-contained .NET runtime,
+# WinAppSDK bootstrapper, Win2D, project DLLs). Windows App Runtime 1.7 remains
+# a machine prerequisite for source-build runs. Dumping the app files on the
 # Desktop is unfriendly. Instead: put the files in %LOCALAPPDATA% (out of
 # sight) and put ONE shortcut named "FileID" on the Desktop. User sees one
 # icon, double-clicks it, app runs -- like every other Windows app.

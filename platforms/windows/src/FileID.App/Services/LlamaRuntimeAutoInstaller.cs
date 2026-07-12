@@ -1,22 +1,13 @@
-﻿// LlamaRuntimeAutoInstaller — silent install of the Vulkan llama.cpp runtime
-// at engine-ready time so Deep Analyze "just works" the first time the user
-// opens the tab.
+﻿// LlamaRuntimeAutoInstaller — runtime-presence detection at engine-ready time.
+// The runtime is installed together with the VLM after an explicit Welcome or
+// Deep Analyze install action; startup never initiates a network request.
 //
-// Previously this was an advisory banner inside Deep Analyze with an Install
-// button. Most users didn't notice it until they tried to caption an image
-// and got nothing. The CudaAutoInstaller pattern proved that silent install
-// is the better default; this is the same idea for the base Vulkan runtime
-// every Windows user needs (NVIDIA, AMD, Intel, Adreno — Vulkan covers all).
-//
-// PRIVACY: no telemetry — failure paths log locally only. The download is a
-// plain HTTPS GET against the official llama.cpp GitHub release (the same
-// source the previous manual button used). No new network surface.
+// PRIVACY: no telemetry and no automatic network request.
 
 using System;
 using System.ComponentModel;
 using System.IO;
 using System.Threading;
-using System.Threading.Tasks;
 using FileID.ViewModels;
 
 namespace FileID.Services;
@@ -119,19 +110,7 @@ internal static class LlamaRuntimeAutoInstaller
             }
             catch { /* if FS check fails, engine's own short-circuit will catch it */ }
 
-            DebugLog.Info("[VULKAN-AUTO] no sentinel — silently installing Vulkan llama.cpp runtime.");
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await EngineClient.Instance.PrewarmModelAsync(ModelKind).ConfigureAwait(false);
-                    DebugLog.Info("[VULKAN-AUTO] PrewarmModel IPC dispatched.");
-                }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn("[VULKAN-AUTO] PrewarmModel failed: " + ex.Message);
-                }
-            });
+            DebugLog.Info("[VULKAN-AUTO] runtime missing — it will install with the user's Deep Analyze model selection.");
         }
         catch (Exception ex)
         {
