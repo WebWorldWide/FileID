@@ -682,6 +682,14 @@ public final class ReadStore: @unchecked Sendable {
     /// library would be ~1.25B comparisons.
     public static let nearDupImageCap = 20_000
 
+    /// Display caps for the perceptual (similar) grouping below. Restored here
+    /// after the exact-duplicate rewrite removed the shared constant block while
+    /// this similar path still references them: at most 200 groups, 5,000 total
+    /// visible members across all groups, 500 members per group. (audit 2026-07-15)
+    private static let cleanupMaxGroups = 200
+    private static let cleanupMaxVisibleMembers = 5_000
+    private static let cleanupMaxVisibleMembersPerGroup = 500
+
     /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
     /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same
     /// keeper ranking as exact dupes (aesthetic ↓, size ↓, createdAt ↑, path len ↑).
