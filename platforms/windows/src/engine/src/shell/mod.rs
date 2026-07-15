@@ -999,7 +999,7 @@ pub mod video {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// heic  (stubbed on every non-Windows OS — TODO(linux): libheif)
+// heic  (Linux libheif CLI bridge; graceful stub on other non-Windows OSes)
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod heic {

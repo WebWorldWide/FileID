@@ -100,8 +100,8 @@ struct SettingsTab: View {
                                 Text("Storage").font(.subheadline.bold())
                                 infoRow("Total files",   "\(store.totalFiles)")
                                 infoRow("Images tagged", "\(store.totalImages)")
-                                infoRow("Duplicate groups", "\(store.totalDuplicateGroups)")
-                                infoRow("Reclaimable",   String(format: "%.1f MB", store.totalReclaimableMB))
+                                infoRow("Stored duplicate hints", "\(store.totalDuplicateGroups)")
+                                infoRow("Hint reclaimable", String(format: "%.1f MB", store.totalReclaimableMB))
                                 infoRow("Database", ReadStore.defaultDBURL.path)
                                 Button("Show database in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])

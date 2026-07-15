@@ -34,13 +34,9 @@ FORBIDDEN = (
 )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("binary", nargs="+", type=Path)
-    args = parser.parse_args()
-
+def scan(paths: list[Path]) -> list[str]:
     failures: list[str] = []
-    for path in args.binary:
+    for path in paths:
         if not path.is_file():
             failures.append(f"missing binary: {path}")
             continue
@@ -48,7 +44,15 @@ def main() -> int:
         for marker in FORBIDDEN:
             if marker in data:
                 failures.append(f"{path}: {marker.decode('ascii')}")
+    return failures
 
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("binary", nargs="+", type=Path)
+    args = parser.parse_args()
+
+    failures = scan(args.binary)
     if failures:
         print("Telemetry markers found in shipped binaries:")
         for failure in failures:

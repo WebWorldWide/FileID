@@ -1,0 +1,80 @@
+name: Repository policy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "**/*.sh"
+      - "platforms/windows/src/engine/src/models/registry.rs"
+      - "platforms/windows/src/engine/src/downloader.rs"
+      - ".github/dependabot.yml"
+      - "shared/scripts/check_workflow_action_pins.py"
+      - "shared/scripts/test_check_workflow_action_pins.py"
+      - "shared/scripts/check_workflow_permissions.py"
+      - "shared/scripts/test_check_workflow_permissions.py"
+      - "shared/scripts/check_bootstrap_supply_chain.py"
+      - "shared/scripts/test_check_bootstrap_supply_chain.py"
+      - "shared/scripts/check_runtime_egress.py"
+      - "shared/scripts/test_check_runtime_egress.py"
+      - "shared/scripts/setup-dev.sh"
+      - "shared/scripts/requirements-ramplus.txt"
+      - "shared/scripts/check_current_docs.py"
+      - "README.md"
+      - "packaging/**/*.md"
+      - "packaging/flatpak/io.github.fileid.FileID.yaml"
+      - "platforms/windows/src/engine/src/db/migrations.rs"
+      - "shared/docs/ARCHITECTURE.md"
+      - "shared/docs/CONTRIBUTING.md"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "**/*.sh"
+      - "platforms/windows/src/engine/src/models/registry.rs"
+      - "platforms/windows/src/engine/src/downloader.rs"
+      - ".github/dependabot.yml"
+      - "shared/scripts/check_workflow_action_pins.py"
+      - "shared/scripts/test_check_workflow_action_pins.py"
+      - "shared/scripts/check_workflow_permissions.py"
+      - "shared/scripts/test_check_workflow_permissions.py"
+      - "shared/scripts/check_bootstrap_supply_chain.py"
+      - "shared/scripts/test_check_bootstrap_supply_chain.py"
+      - "shared/scripts/check_runtime_egress.py"
+      - "shared/scripts/test_check_runtime_egress.py"
+      - "shared/scripts/setup-dev.sh"
+      - "shared/scripts/requirements-ramplus.txt"
+      - "shared/scripts/check_current_docs.py"
+      - "README.md"
+      - "packaging/**/*.md"
+      - "packaging/flatpak/io.github.fileid.FileID.yaml"
+      - "platforms/windows/src/engine/src/db/migrations.rs"
+      - "shared/docs/ARCHITECTURE.md"
+      - "shared/docs/CONTRIBUTING.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  action-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Test action pin policy
+        run: python shared/scripts/test_check_workflow_action_pins.py
+      - name: Enforce immutable action pins
+        run: python shared/scripts/check_workflow_action_pins.py
+      - name: Test workflow permission policy
+        run: python shared/scripts/test_check_workflow_permissions.py
+      - name: Enforce least-privilege workflow permissions
+        run: python shared/scripts/check_workflow_permissions.py
+      - name: Test bootstrap supply-chain policy
+        run: python shared/scripts/test_check_bootstrap_supply_chain.py
+      - name: Enforce bootstrap source pins
+        run: python shared/scripts/check_bootstrap_supply_chain.py
+      - name: Test runtime egress release gate
+        run: python shared/scripts/test_check_runtime_egress.py
+      - name: Reject unreviewed runtime egress additions
+        run: python shared/scripts/check_runtime_egress.py --known-blockers
+      - name: Enforce current documentation contracts
+        run: python shared/scripts/check_current_docs.py

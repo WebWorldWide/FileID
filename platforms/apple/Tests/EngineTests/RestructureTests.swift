@@ -159,7 +159,7 @@ struct RestructureApplyTests {
         try await insertRow(db, id: 2, path: srcB.path)
 
         let dest = root.appendingPathComponent("Sorted").appendingPathComponent("IMG_0001.jpg")
-        let result = await Restructure.apply(
+        let result = try await Restructure.apply(
             proposals: [
                 RestructureProposal(fileID: 1, oldPath: srcA.path, newPath: dest.path, bucket: "photo"),
                 RestructureProposal(fileID: 2, oldPath: srcB.path, newPath: dest.path, bucket: "photo"),
@@ -207,7 +207,7 @@ struct RestructureApplyTests {
 
         let staleSrc = root.appendingPathComponent("vanished.jpg")
         let dest = root.appendingPathComponent("Sorted/x.jpg")
-        let result = await Restructure.apply(
+        let result = try await Restructure.apply(
             proposals: [RestructureProposal(
                 fileID: 1, oldPath: staleSrc.path, newPath: dest.path, bucket: "photo")],
             database: db, libraryRoot: root)
@@ -245,7 +245,7 @@ struct RestructureApplyTests {
         }
 
         let dest = root.appendingPathComponent("Sorted/doc.pdf")
-        let result = await Restructure.apply(
+        let result = try await Restructure.apply(
             proposals: [RestructureProposal(
                 fileID: 1, oldPath: doc.path, newPath: dest.path, bucket: "document")],
             database: db, libraryRoot: root)
@@ -294,7 +294,7 @@ struct RestructureApplyTests {
         }
 
         let dest = root.appendingPathComponent("Sorted/moved.jpg")
-        let result = await Restructure.apply(
+        let result = try await Restructure.apply(
             proposals: [RestructureProposal(
                 fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "photo")],
             database: db, libraryRoot: root)
@@ -334,6 +334,95 @@ struct RestructureApplyTests {
         #expect(d3 == tmp.appendingPathComponent("audio (2).mp3"))
     }
 
+    @Test("An unavailable undo journal prevents every move")
+    func unavailableUndoJournalFailsClosed() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoUnavailable-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("source.jpg")
+        let dest = root.appendingPathComponent("Sorted/source.jpg")
+        try Data("source".utf8).write(to: src)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src.path)
+        let blocker = tmp.appendingPathComponent("not-a-directory")
+        try Data("x".utf8).write(to: blocker)
+        let journal = blocker.appendingPathComponent("undo.ndjson")
+
+        do {
+            _ = try await Restructure.apply(
+                proposals: [RestructureProposal(
+                    fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "photo")],
+                database: db, libraryRoot: root, undoJournal: journal)
+            Issue.record("apply unexpectedly succeeded without an undo journal")
+        } catch Restructure.UndoJournalError.unavailable(_) {
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+        #expect(FileManager.default.fileExists(atPath: src.path))
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    @Test("An undo journal write failure stops before the next move")
+    func undoJournalWriteFailureStopsApply() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoWriteFailure-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let incoming = root.appendingPathComponent("incoming")
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+        let src1 = incoming.appendingPathComponent("one.jpg")
+        let src2 = incoming.appendingPathComponent("two.jpg")
+        let dest1 = root.appendingPathComponent("Photos/one.jpg")
+        let dest2 = root.appendingPathComponent("Photos/two.jpg")
+        try Data("one".utf8).write(to: src1)
+        try Data("two".utf8).write(to: src2)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src1.path)
+        try await insertRow(db, id: 2, path: src2.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        var appendCount = 0
+
+        do {
+            _ = try await Restructure.applyForTesting(
+                proposals: [
+                    RestructureProposal(fileID: 1, oldPath: src1.path,
+                                        newPath: dest1.path, bucket: "photo"),
+                    RestructureProposal(fileID: 2, oldPath: src2.path,
+                                        newPath: dest2.path, bucket: "photo")
+                ],
+                database: db, libraryRoot: root, undoJournal: journal,
+                journalAppender: { entry, handle in
+                    appendCount += 1
+                    if appendCount == 2 {
+                        try handle.write(contentsOf: Data("{".utf8))
+                        throw CocoaError(.fileWriteOutOfSpace)
+                    }
+                    try Restructure.appendUndoEntry(entry, to: handle)
+                })
+            Issue.record("apply unexpectedly continued after a journal write failure")
+        } catch Restructure.UndoJournalError.writeFailed(let result) {
+            #expect(result.moved == 1)
+            #expect(result.failed == 1)
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        #expect(FileManager.default.fileExists(atPath: dest1.path))
+        #expect(!FileManager.default.fileExists(atPath: src1.path))
+        #expect(FileManager.default.fileExists(atPath: src2.path))
+        #expect(!FileManager.default.fileExists(atPath: dest2.path))
+        #expect(Restructure.hasUndoableRun(undoJournal: journal))
+
+        let undone = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 1)
+        #expect(undone.failed == 0)
+        #expect(FileManager.default.fileExists(atPath: src1.path))
+        #expect(!Restructure.hasUndoableRun(undoJournal: journal))
+    }
+
     /// R2 reversibility: apply relocates a file, undoLast moves it back to its
     /// original path + updates the DB + clears the journal (so it can't be undone
     /// twice). Uses a temp journal so the real one is never touched.
@@ -354,7 +443,7 @@ struct RestructureApplyTests {
         let journal = tmp.appendingPathComponent("undo.ndjson")
         let dest = root.appendingPathComponent("Documents").appendingPathComponent("invoice.pdf")
 
-        let applied = await Restructure.apply(
+        let applied = try await Restructure.apply(
             proposals: [RestructureProposal(
                 fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "document")],
             database: db, libraryRoot: root, undoJournal: journal)
@@ -382,6 +471,76 @@ struct RestructureApplyTests {
         #expect(again.moved == 0)
     }
 
+    @Test("Undo recovers a crash after move but before DB update")
+    func undoRecoversPostMoveCrash() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoCrash-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("source.jpg")
+        let dest = root.appendingPathComponent("Photos/source.jpg")
+        try Data("source".utf8).write(to: src)
+        let inode = try #require(Discovery.inode(of: src))
+        let db = try makeDB(tmp)
+        try await db.pool.write { d in
+            try d.execute(
+                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, file_ref) VALUES (?,?,?,?,0,'image','jpg',?)",
+                arguments: [1, src.path, StablePathHash.hash(src.path), 6,
+                            Int64(bitPattern: inode)])
+        }
+        try FileManager.default.createDirectory(
+            at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: src, to: dest)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let handle = try Restructure.openUndoJournalTruncating(at: journal)
+        try Restructure.appendUndoEntry(
+            Restructure.UndoEntry(fileID: 1, from: dest.path, to: src.path), to: handle)
+        try handle.close()
+
+        let undone = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 1)
+        #expect(undone.failed == 0)
+        #expect(FileManager.default.fileExists(atPath: src.path))
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    @Test("Undo replays dependent moves in reverse order")
+    func undoReversesDependentMoves() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoOrder-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let a = root.appendingPathComponent("A.txt")
+        let b = root.appendingPathComponent("B.txt")
+        let x = root.appendingPathComponent("X.txt")
+        try Data("first".utf8).write(to: a)
+        try Data("second".utf8).write(to: b)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: a.path)
+        try await insertRow(db, id: 2, path: b.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+
+        let applied = try await Restructure.apply(
+            proposals: [
+                RestructureProposal(fileID: 1, oldPath: a.path,
+                                    newPath: x.path, bucket: "document"),
+                RestructureProposal(fileID: 2, oldPath: b.path,
+                                    newPath: a.path, bucket: "document")
+            ], database: db, libraryRoot: root, undoJournal: journal)
+        #expect(applied.moved == 2)
+
+        let undone = await Restructure.undoLast(
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 2)
+        #expect(undone.failed == 0)
+        #expect(String(data: try Data(contentsOf: a), encoding: .utf8) == "first")
+        #expect(String(data: try Data(contentsOf: b), encoding: .utf8) == "second")
+        #expect(!FileManager.default.fileExists(atPath: x.path))
+    }
+
     /// Audit R2 fix: a CANCELLED undo must NOT clear the journal, so the user can
     /// re-run it and finish — otherwise a mistimed Stop orphans the un-restored
     /// files with no recovery path. Worst case: cancel before any move.
@@ -401,7 +560,7 @@ struct RestructureApplyTests {
         let journal = tmp.appendingPathComponent("undo.ndjson")
         let dest = root.appendingPathComponent("Documents").appendingPathComponent("invoice.pdf")
 
-        _ = await Restructure.apply(
+        _ = try await Restructure.apply(
             proposals: [RestructureProposal(
                 fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "document")],
             database: db, libraryRoot: root, undoJournal: journal)
@@ -441,7 +600,7 @@ struct RestructureApplyTests {
         let dest1 = root.appendingPathComponent("Photos/one.jpg")
         let dest2 = root.appendingPathComponent("Photos/two.jpg")
 
-        let applied = await Restructure.apply(
+        let applied = try await Restructure.apply(
             proposals: [
                 RestructureProposal(fileID: 1, oldPath: src1.path,
                                     newPath: dest1.path, bucket: "photo"),

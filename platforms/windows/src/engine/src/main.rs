@@ -375,6 +375,12 @@ async fn async_main() -> Result<()> {
     let restructure_apply_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_restructure_apply_cancel = restructure_apply_cancel.clone();
+    // Single-flight for apply/undo: two overlapping runs would share one cancel
+    // flag and race on-disk moves plus the undo journal. Same compare-exchange +
+    // RAII-guard shape as Deep Analyze. (audit 2026-07-14)
+    let restructure_active: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_restructure_active = restructure_active.clone();
 
     // Sidebar job tracker (macOS JobQueue parity): scan / cluster /
     // deep-analyze jobs push on accept and finish via RAII guards;
@@ -459,6 +465,7 @@ async fn async_main() -> Result<()> {
                                     &dispatch_deep_active,
                                     &dispatch_face_cluster_active,
                                     &dispatch_restructure_apply_cancel,
+                                    &dispatch_restructure_active,
                                     &dispatch_jobs,
                                     &dispatch_http_client,
                                     &text,
@@ -731,6 +738,16 @@ async fn emit_face_clustering_busy(sink: &Sink) {
     .await;
 }
 
+async fn emit_restructure_busy(sink: &Sink) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "restructure_already_running".into(),
+        message: "A restructure apply or undo is already running — wait for it to finish or cancel it first.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+}
+
 async fn emit_deep_analyze_busy(sink: &Sink) {
     sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
         kind: "deep_analyze_already_running".into(),
@@ -752,6 +769,7 @@ async fn handle_line(
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
     restructure_apply_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    restructure_active: &Arc<std::sync::atomic::AtomicBool>,
     jobs: &job_queue::JobQueue,
     http_client: &Arc<reqwest::Client>,
     line: &str,
@@ -830,6 +848,22 @@ async fn handle_line(
                 emit_db_unavailable(sink, "applyRestructure").await;
                 return;
             };
+            // Single-flight: a second apply (or an undo) while one is running
+            // would share the cancel flag and race on-disk moves + the undo
+            // journal. Reject it loudly instead. (audit 2026-07-14)
+            if restructure_active
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+            {
+                emit_restructure_busy(sink).await;
+                return;
+            }
+            let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             // Fresh apply: clear any stale cancel from a prior operation so this
@@ -838,6 +872,7 @@ async fn handle_line(
             restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let cancel_c = restructure_apply_cancel.clone();
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::restructure::handle_apply_restructure(sink_c, db_c, payload, cancel_c)
                     .await;
             });
@@ -847,6 +882,19 @@ async fn handle_line(
                 emit_db_unavailable(sink, "undoRestructure").await;
                 return;
             };
+            if restructure_active
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_err()
+            {
+                emit_restructure_busy(sink).await;
+                return;
+            }
+            let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
             // Same cancellable, fresh-flag treatment as apply — undo does real
@@ -854,6 +902,7 @@ async fn handle_line(
             restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let cancel_c = restructure_apply_cancel.clone();
             tokio::spawn(async move {
+                let _guard = guard;
                 commands::restructure::handle_undo_restructure(sink_c, db_c, payload, cancel_c)
                     .await;
             });
@@ -1138,8 +1187,13 @@ async fn handle_line(
             let db_c = db.clone();
             let state_c = scan_state.clone();
             let fca_c = face_cluster_active.clone();
+            let da_cancel_c = deep_analyze_cancel.clone();
+            let da_active_c = deep_analyze_active.clone();
             tokio::spawn(async move {
-                commands::wipe::handle_wipe_library(sink_c, db_c, state_c, fca_c).await;
+                commands::wipe::handle_wipe_library(
+                    sink_c, db_c, state_c, fca_c, da_cancel_c, da_active_c,
+                )
+                .await;
             });
         }
         CommandPayload::GenerateVideoThumbnail(payload) => {

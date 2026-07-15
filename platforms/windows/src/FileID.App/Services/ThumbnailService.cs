@@ -52,6 +52,8 @@ internal sealed class ThumbnailService : IDisposable
     /// the coldest thumbnails and a miss just re-decodes (no correctness hit).</summary>
     private const long DecodedBytesPerEntry = (long)ThumbnailRequestPx * ThumbnailRequestPx * 4;
     private const long L1CacheByteBudget = 128L * 1024 * 1024;
+    internal const int QueueCapacity = 256;
+    internal const long MaxFallbackEncodedBytes = 64L * 1024 * 1024;
     private readonly MemoryCache _cache = new(new MemoryCacheOptions
     {
         SizeLimit = L1CacheByteBudget,
@@ -106,26 +108,29 @@ internal sealed class ThumbnailService : IDisposable
     private const int VideoThumbTimeoutMs = 20_000;
     private volatile bool _disposed;
 
+    // Bounded keeps the queue's memory ceiling; DropOldest keeps the NEWEST
+    // request when full — in a fast scroll burst the evicted oldest is almost
+    // always a scrolled-away tile, whereas rejecting the newcomer left a
+    // still-VISIBLE tile shimmering forever with no retry path. The dropped
+    // request's awaiter is completed with the placeholder result exactly like
+    // the disposal drain, so no TaskCompletionSource is ever orphaned (the
+    // hang the original unbounded design's comment warned about).
+    internal static Channel<ThumbnailRequest> CreateRequestChannel() =>
+        Channel.CreateBounded<ThumbnailRequest>(
+            new BoundedChannelOptions(QueueCapacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.DropOldest,
+            },
+            dropped => dropped.Completion.TrySetResult(null));
+
     public ThumbnailService()
     {
         // capture the UI dispatcher at ctor time. Service is
         // expected to be constructed on the UI thread.
         _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
-        // Unbounded on purpose. A bounded DropOldest channel silently drops the
-        // OLDEST queued request when full WITHOUT completing its
-        // TaskCompletionSource — so on a big refresh (a full screen re-prepared at
-        // once), a still-visible tile's request could be evicted and its awaiter
-        // (LoadThumbAsync) would hang forever in the shimmer state ("things don't
-        // stay loaded"). Unbounded never drops, so no awaiter is ever orphaned;
-        // backpressure is instead shed for free by the PER-REQUEST cancellation
-        // token — a scrolled-away tile's request is skipped in O(1) at the top of
-        // DrainAsync, so the queue drains near-instantly and never accumulates
-        // real work regardless of scroll velocity.
-        _queue = Channel.CreateUnbounded<ThumbnailRequest>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            SingleWriter = false,
-        });
+        _queue = CreateRequestChannel();
         // attach a fault sink so a DrainAsync exception leaves a
         // forensic trail instead of becoming an UnobservedTaskException
         // at GC time.
@@ -613,7 +618,7 @@ internal sealed class ThumbnailService : IDisposable
         {
             try
             {
-                var fileBytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+                var fileBytes = await ReadFallbackFileBytesAsync(path, ct).ConfigureAwait(false);
                 var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
@@ -643,6 +648,43 @@ internal sealed class ThumbnailService : IDisposable
         DebugLog.Trace($"[THUMB] RENDER_FAILED file={PathRedactor.Redact(path)}");
         Interlocked.Increment(ref _renderedFailed);
         return null;
+    }
+
+    internal static async Task<byte[]> ReadFallbackFileBytesAsync(
+        string path,
+        CancellationToken ct)
+    {
+        var length = new FileInfo(path).Length;
+        if (length < 0 || length > MaxFallbackEncodedBytes)
+        {
+            throw new InvalidDataException(
+                $"Encoded image is {length} bytes; thumbnail fallback cap is {MaxFallbackEncodedBytes} bytes.");
+        }
+
+        var bytes = new byte[(int)length];
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 64 * 1024,
+            options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var offset = 0;
+        while (offset < bytes.Length)
+        {
+            var read = await stream.ReadAsync(bytes.AsMemory(offset), ct).ConfigureAwait(false);
+            if (read == 0) break;
+            offset += read;
+        }
+        if (offset == bytes.Length && stream.ReadByte() != -1)
+        {
+            throw new InvalidDataException("Encoded image grew while the bounded thumbnail fallback was reading it.");
+        }
+        if (offset != bytes.Length)
+        {
+            Array.Resize(ref bytes, offset);
+        }
+        return bytes;
     }
 
     /// <summary>Drain a StorageItemThumbnail's IRandomAccessStream into a
@@ -760,11 +802,17 @@ internal sealed class ThumbnailService : IDisposable
         // because thumbnail decoding has no persistence side-effects.
         try { _cts.Cancel(); } catch { /* swallow */ }
         try { _queue.Writer.TryComplete(); } catch { /* swallow */ }
+        while (_queue.Reader.TryRead(out var queued))
+        {
+            queued.Completion.TrySetResult(null);
+        }
         try { _cache.Dispose(); } catch { /* swallow */ }
         try { _cts.Dispose(); } catch { /* swallow */ }
     }
 
-    private sealed record ThumbnailRequest(
+    // Internal (not private) so the resource-bounds tests can construct
+    // requests against the exact production channel configuration.
+    internal sealed record ThumbnailRequest(
         string Path,
         double? ModifiedAt,
         TaskCompletionSource<BitmapImage?> Completion,

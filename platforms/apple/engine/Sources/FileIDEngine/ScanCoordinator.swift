@@ -74,6 +74,8 @@ public actor ScanCoordinator {
     private var paused = false
     private var activeScanTask: Task<Void, Never>?
     private var activeRestructureTask: Task<Void, Never>?
+    private var activeRestructureToken: UUID?
+    private var restructureCancelPending = false
     // R4-11: a cancelScan arriving in the window between `.startScan` enqueue and
     // `startSession` was lost — startSession unconditionally reset cancelled=false.
     // Attribute each cancel to the latest-enqueued scan epoch so startSession can
@@ -214,6 +216,9 @@ public actor ScanCoordinator {
         // cancelling the registered handle breaks its loop at the next boundary.
         // No stale-cancel risk: a fresh apply registers a new (un-cancelled)
         // handle, and only a subsequent requestCancel cancels it.
+        if activeRestructureToken != nil && activeRestructureTask == nil {
+            restructureCancelPending = true
+        }
         activeRestructureTask?.cancel()
     }
 
@@ -232,18 +237,36 @@ public actor ScanCoordinator {
         activeScanTask = task
     }
 
-    /// Track the in-flight restructure-apply task so `requestCancel` can stop it
-    /// and the engine can await its terminal `restructureApplyResult` on
-    /// shutdown rather than `_exit`-ing over it. Pass nil to clear on completion.
-    public func setActiveRestructure(_ task: Task<Void, Never>?) {
-        activeRestructureTask = task
+    public func reserveRestructure() -> UUID? {
+        guard activeRestructureToken == nil else { return nil }
+        let token = UUID()
+        activeRestructureToken = token
+        restructureCancelPending = false
+        return token
     }
 
-    /// Block until the active restructure apply (if any) completes — so a
-    /// shutdown mid-apply still flushes the terminal result event.
-    public func awaitActiveRestructure() async {
-        await activeRestructureTask?.value
+    public func attachRestructure(_ task: Task<Void, Never>, token: UUID) {
+        guard activeRestructureToken == token else { return }
+        activeRestructureTask = task
+        if restructureCancelPending { task.cancel() }
+    }
+
+    public func finishRestructure(token: UUID) {
+        guard activeRestructureToken == token else { return }
         activeRestructureTask = nil
+        activeRestructureToken = nil
+        restructureCancelPending = false
+    }
+
+    /// Block until a reserved or active restructure apply completes.
+    public func awaitActiveRestructure() async {
+        while activeRestructureToken != nil {
+            if let task = activeRestructureTask {
+                await task.value
+            } else {
+                await Task.yield()
+            }
+        }
     }
 
     /// True iff a scan task is currently registered AND not yet finished.

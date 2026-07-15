@@ -67,7 +67,9 @@ public final class ArcFaceModelInstaller {
     public func install(_ kind: FaceEmbedderKind) {
         guard tasks[kind] == nil else { return }
         tasks[kind] = Task { [weak self] in
-            await self?.runInstall(kind)
+            await AppSleepActivity.run(reason: "Install face model") {
+                await self?.runInstall(kind)
+            }
             self?.tasks[kind] = nil
         }
     }

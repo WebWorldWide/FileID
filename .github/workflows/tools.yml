@@ -9,7 +9,9 @@ on:
       - 'platforms/windows/src/engine/**'
       - 'scripts/build-tools.*'
       - 'scripts/package-tools.py'
+      - 'scripts/test_package_tools.py'
       - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
       - '.github/workflows/tools.yml'
   pull_request:
@@ -19,7 +21,9 @@ on:
       - 'platforms/windows/src/engine/**'
       - 'scripts/build-tools.*'
       - 'scripts/package-tools.py'
+      - 'scripts/test_package_tools.py'
       - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - 'rust-toolchain.toml'
       - '.github/workflows/tools.yml'
   workflow_dispatch:
@@ -60,16 +64,16 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust 1.90
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: '1.90'
           components: rustfmt, clippy
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -80,6 +84,11 @@ jobs:
           key: tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/cli/Cargo.lock', 'platforms/tui/Cargo.lock') }}
           restore-keys: |
             tools-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Packaging policy tests
+        run: |
+          python shared/scripts/test_check_binary_privacy.py
+          python scripts/test_package_tools.py
 
       - name: Format
         run: |
@@ -126,5 +135,5 @@ jobs:
             platforms/cli/target/release/fileid.exe `
             platforms/tui/target/release/fileid-tui.exe
 
-      - name: Package smoke
+      - name: Package smoke + staged payload privacy scan
         run: python scripts/package-tools.py --label "${{ matrix.artifact }}-ci" --output dist/tools-smoke

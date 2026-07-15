@@ -392,6 +392,8 @@ struct FileIDEngineMain {
             JSONLog.shared.info(ev: "prewarm_model_started",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             let work = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Model prewarm")
+                defer { SleepGuard.shared.end() }
                 do {
                     try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
                         Task {
@@ -449,8 +451,16 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure operation is already running.")))
+                return
+            }
             let planRoot = URL(fileURLWithPath: libraryRoot)
             let planTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure planning")
+                defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
                 do {
@@ -493,12 +503,9 @@ struct FileIDEngineMain {
                         message: "Restructure planning did not complete: \(error)"
                     )))
                 }
-                // Registered so awaitActiveRestructure() in main() drains this
-                // task before _exit — prevents losing the restructurePlan event
-                // on a shutdown that arrives while planning is in progress.
-                await coordinator.setActiveRestructure(nil)
+                await coordinator.finishRestructure(token: restructureToken)
             }
-            await coordinator.setActiveRestructure(planTask)
+            await coordinator.attachRestructure(planTask, token: restructureToken)
         case .applyRestructure(let libraryRoot, let moves, _, let planID):
             // macOS performs real filesystem moves; the Windows engine's
             // symlink-preview mode has no macOS equivalent, so `useSymlinks`
@@ -516,7 +523,15 @@ struct FileIDEngineMain {
                     fileID: m.fileID, oldPath: m.source, newPath: m.destination,
                     bucket: m.category, confidence: m.confidence, reason: m.reason)
             }
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure apply or undo is already running.")))
+                return
+            }
             let applyTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure apply")
+                defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "apply_restructure_requested",
                                     extra: ["moves": AnyCodable(proposals.count),
                                             "storedPlan": AnyCodable(planID != nil)])
@@ -530,23 +545,28 @@ struct FileIDEngineMain {
                             planID: planID, expectedRoot: libraryRoot,
                             database: database, libraryRoot: applyRoot)
                     } else {
-                        result = await Restructure.apply(
+                        result = try await Restructure.apply(
                             proposals: proposals, database: database, libraryRoot: applyRoot)
                     }
                     await sink.emit(.restructureApplyResult(RestructureApplyResult(
                         applied: result.moved, failed: result.failed, privilegeError: nil)))
                 } catch {
-                    await sink.emit(.error(EngineError(
-                        kind: "apply_restructure",
-                        message: "Apply failed: \(error.localizedDescription)")))
+                    if let journalError = error as? Restructure.UndoJournalError {
+                        let result = journalError.result
+                        await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                            applied: result.moved, failed: result.failed, privilegeError: nil)))
+                        await sink.emit(.error(EngineError(
+                            kind: "restructure_undo_journal",
+                            message: journalError.localizedDescription)))
+                    } else {
+                        await sink.emit(.error(EngineError(
+                            kind: "apply_restructure",
+                            message: "Apply failed: \(error.localizedDescription)")))
+                    }
                 }
-                // Clear the handle so a later cancelScan can't cancel a finished
-                // apply, and awaitActiveRestructure() returns promptly.
-                await coordinator.setActiveRestructure(nil)
+                await coordinator.finishRestructure(token: restructureToken)
             }
-            // Register so cancelScan can stop a long apply (F-C6-013 wiring) and
-            // shutdown awaits the terminal result instead of _exit-ing over it.
-            await coordinator.setActiveRestructure(applyTask)
+            await coordinator.attachRestructure(applyTask, token: restructureToken)
 
         case .undoRestructure(let libraryRoot):
             // Reverse the last apply by replaying the engine's on-disk undo
@@ -559,15 +579,23 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure apply or undo is already running.")))
+                return
+            }
             let undoRoot = URL(fileURLWithPath: libraryRoot)
             let undoTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure undo")
+                defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "undo_restructure_requested")
                 let result = await Restructure.undoLast(database: database, libraryRoot: undoRoot)
                 await sink.emit(.restructureApplyResult(RestructureApplyResult(
                     applied: result.moved, failed: result.failed, privilegeError: nil)))
-                await coordinator.setActiveRestructure(nil)
+                await coordinator.finishRestructure(token: restructureToken)
             }
-            await coordinator.setActiveRestructure(undoTask)
+            await coordinator.attachRestructure(undoTask, token: restructureToken)
 
         case .purgeExcluded(let excludedPaths):
             guard let database else {
@@ -677,28 +705,85 @@ struct FileIDEngineMain {
         }
     }
 
+    static let bulkMutationChunkSize = 500
+
+    struct BulkFileState: Sendable {
+        let path: String
+        let fileRef: Int64?
+    }
+
+    static func fetchBulkStates(
+        database: Database, fileIDs: [Int64]
+    ) async throws -> [Int64: BulkFileState] {
+        let ids = Array(Set(fileIDs))
+        guard !ids.isEmpty else { return [:] }
+        return try await database.pool.read { db in
+            var result: [Int64: BulkFileState] = [:]
+            for start in stride(from: 0, to: ids.count, by: bulkMutationChunkSize) {
+                let chunk = ids[start..<min(start + bulkMutationChunkSize, ids.count)]
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, path_text, file_ref FROM files WHERE id IN (\(placeholders))",
+                    arguments: StatementArguments(chunk))
+                for row in rows {
+                    let id: Int64 = row["id"]
+                    result[id] = BulkFileState(path: row["path_text"], fileRef: row["file_ref"])
+                }
+            }
+            return result
+        }
+    }
+
     static func renameFiles(database: Database, renames: [RenameEntry]) async -> BulkActionResult {
+        SleepGuard.shared.begin(reason: "Bulk rename")
+        defer { SleepGuard.shared.end() }
         var messages: [BulkActionItem] = []
+        var states: [Int64: BulkFileState]
+        do {
+            states = try await fetchBulkStates(database: database,
+                                               fileIDs: renames.map(\.fileID))
+        } catch {
+            return BulkActionResult(
+                action: "renameFiles", succeeded: 0, failed: renames.count,
+                messages: renames.map { item($0.fileID, ok: false, error.localizedDescription) })
+        }
         for rename in renames {
             let trimmed = rename.newName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("\0") else {
-                messages.append(item(rename.fileID, ok: false, "Invalid filename.")); continue
+                messages.append(item(rename.fileID, ok: false, "Invalid filename."))
+                continue
+            }
+            guard let state = states[rename.fileID] else {
+                messages.append(item(rename.fileID, ok: false, "File row not found."))
+                continue
+            }
+            let oldURL = URL(fileURLWithPath: state.path)
+            guard !Restructure.fileRefSwapped(
+                dbRef: state.fileRef, currentRef: Discovery.inode(of: oldURL)) else {
+                messages.append(item(rename.fileID, ok: false, "File changed since it was indexed."))
+                continue
+            }
+            let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
+            guard !FileManager.default.fileExists(atPath: newURL.path) else {
+                messages.append(item(rename.fileID, ok: false, "Destination already exists."))
+                continue
             }
             do {
-                let oldPath: String? = try await database.pool.read { db in
-                    try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [rename.fileID])
-                }
-                guard let oldPath else { messages.append(item(rename.fileID, ok: false, "File row not found.")); continue }
-                let oldURL = URL(fileURLWithPath: oldPath)
-                let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
-                if FileManager.default.fileExists(atPath: newURL.path) {
-                    messages.append(item(rename.fileID, ok: false, "Destination already exists.")); continue
-                }
                 try FileManager.default.moveItem(at: oldURL, to: newURL)
                 let ext = newURL.pathExtension.lowercased()
                 try await database.pool.write { db in
-                    try db.execute(sql: "UPDATE files SET path_text = ?, path_search = ?, extension = ? WHERE id = ?", arguments: [newURL.path, newURL.path.precomposedStringWithCanonicalMapping, ext.isEmpty ? nil : ext, rename.fileID])
+                    try db.execute(
+                        sql: "UPDATE OR ABORT files SET path_text = ?, path_hash = ?, path_search = ?, extension = ? WHERE id = ? AND path_text = ?",
+                        arguments: [newURL.path, StablePathHash.hash(newURL.path),
+                                    newURL.path.precomposedStringWithCanonicalMapping,
+                                    ext.isEmpty ? nil : ext, rename.fileID, state.path])
+                    guard db.changesCount == 1 else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
                 }
+                states[rename.fileID] = BulkFileState(
+                    path: newURL.path, fileRef: state.fileRef)
                 messages.append(item(rename.fileID, ok: true))
             } catch {
                 messages.append(item(rename.fileID, ok: false, error.localizedDescription))
@@ -707,25 +792,49 @@ struct FileIDEngineMain {
         return BulkActionResult(action: "renameFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }
 
+    static func orderedUniqueFileIDs(_ fileIDs: [Int64]) -> [Int64] {
+        var seen = Set<Int64>()
+        return fileIDs.filter { seen.insert($0).inserted }
+    }
+
     static func trashFiles(database: Database, fileIDs: [Int64]) async -> BulkActionResult {
-        let batch = UUID().uuidString
+        SleepGuard.shared.begin(reason: "Bulk trash")
+        defer { SleepGuard.shared.end() }
+        let uniqueIDs = orderedUniqueFileIDs(fileIDs)
         var messages: [BulkActionItem] = []
-        for id in fileIDs {
+        let states: [Int64: BulkFileState]
+        do {
+            states = try await fetchBulkStates(database: database, fileIDs: uniqueIDs)
+        } catch {
+            return BulkActionResult(
+                action: "trashFiles", succeeded: 0, failed: uniqueIDs.count,
+                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription) })
+        }
+        for id in uniqueIDs {
+            guard let state = states[id] else {
+                messages.append(item(id, ok: false, "File row not found."))
+                continue
+            }
+            let url = URL(fileURLWithPath: state.path)
+            guard !Restructure.fileRefSwapped(
+                dbRef: state.fileRef, currentRef: Discovery.inode(of: url)) else {
+                messages.append(item(id, ok: false, "File changed since it was indexed."))
+                continue
+            }
             do {
-                let path: String? = try await database.pool.read { db in
-                    try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [id])
-                }
-                guard let path else { messages.append(item(id, ok: false, "File row not found.")); continue }
-                try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
+                    guard db.changesCount == 1 else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
                 }
                 messages.append(item(id, ok: true))
             } catch {
                 messages.append(item(id, ok: false, error.localizedDescription))
             }
         }
-        return BulkActionResult(action: "trashFiles:\(batch)", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        return BulkActionResult(action: "trashFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }
 
     static func mergeClusters(database: Database, source: Int64, destination: Int64) async -> BulkActionResult {

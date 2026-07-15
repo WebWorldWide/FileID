@@ -1,63 +1,32 @@
-# FileID — Flatpak manifest (PRIMARY distribution channel; runs on every distro).
+# FileID Flatpak developer/store-preparation manifest.
 #
-# Build (from repo root):
-#   flatpak install -y flathub org.gnome.Platform//46 org.gnome.Sdk//46 \
-#       org.freedesktop.Sdk.Extension.rust-stable//23.08   # GNOME 46 base = fd 23.08
-#   flatpak-builder --user --install --force-clean \
-#       build-dir packaging/flatpak/io.github.fileid.FileID.yaml
-#   flatpak run io.github.fileid.FileID
+# From the repository root:
+#   flatpak install -y --user flathub \
+#     org.gnome.Platform//49 org.gnome.Sdk//49 \
+#     org.freedesktop.Sdk.Extension.rust-stable//25.08
+#   flatpak-builder --user --force-clean --repo=repo \
+#     build-dir packaging/flatpak/io.github.fileid.FileID.yaml
 #
-# Runtime choice: GNOME 46 ships GTK 4.14 + libadwaita 1.5 — an exact match for
-# the app's `gtk4 0.8` (v4_14) / `libadwaita 0.6` (v1_5) bindings. The
-# rust-stable SDK extension supplies the Rust toolchain.
-#
-# ============================ ONNX RUNTIME ===================================
-# Linux enables `download-binaries` without `load-dynamic`, so ort-sys fetches
-# the pinned CPU archive at build time and statically links it into
-# FileIDEngine. There is no runtime `.so` or ORT_DYLIB_PATH to stage.
-#
-# Build-time network is NOT a telemetry concern (it fetches crates + the ONNX
-# runtime, nothing is sent). The SHIPPED sandbox's only network grant is the
-# user-initiated HuggingFace model download — identical to macOS/Windows.
-#
-# Flathub still forbids build network. Before store submission, cargo sources
-# and the ONNX archive must be expressed as pinned offline manifest sources.
-# Cargo.lock verifies every registry crate and ort-sys verifies the selected
-# runtime archive SHA256, so the online developer build still fails closed on
-# byte drift. CI hard-gates it; it is not claimed Flathub-ready until equivalent
-# offline sources land.
-# =============================================================================
+# Cargo crates and ONNX Runtime are immutable manifest sources. The build
+# sandbox has no network access and Cargo is forced offline. Before Flathub
+# submission, replace the local `dir` sources with the immutable archive
+# of the audited release commit and regenerate cargo-sources.json from that
+# archive's platforms/linux/Cargo.lock.
 
 app-id: io.github.fileid.FileID
-# HEIC/HEIF NOTE: the engine decodes HEIC via the `heif-dec`/`heif-convert` CLI
-# tools (shell/heic.rs), which are NOT in org.gnome.Platform. To enable HEIC in
-# the sandbox, add a libheif build module (built with the libde265 HEVC decoder,
-# + libdav1d for AV1-in-HEIF) that installs heif-dec into /app/bin. Verified only
-# on a Linux Flatpak build — tracked in NEXT.md. Without it, HEIC files skip
-# gracefully (no crash). AUR ships this as an optdepend; native Ubuntu needs
-# libheif-examples + libheif-plugin-libde265.
 runtime: org.gnome.Platform
-runtime-version: '46'
+runtime-version: '49'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: fileid-linux
 
 finish-args:
-  # GTK display + GPU. --share=ipc is needed for X11 SHM under fallback-x11.
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
-  # The user's files are the whole point of the app. --filesystem=home covers
-  # the common case. For NAS-mounted libraries outside $HOME the user grants the
-  # specific mount via `flatpak override --filesystem=/mnt/nas` or Flatseal; the
-  # GTK file chooser also reaches non-home paths through the xdg-desktop-portal
-  # without any extra permission. We deliberately do NOT grant --filesystem=host.
   - --filesystem=home
-  # SOLE network egress: user-initiated AI model downloads from huggingface.co
-  # (engine downloader.rs). No analytics/telemetry — same single use as the
-  # macOS/Windows builds. CI scans the shipped binaries for telemetry strings.
   - --share=network
 
 cleanup:
@@ -71,53 +40,24 @@ modules:
   - name: fileid
     buildsystem: simple
     build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/fileid/cargo
-        RUSTUP_HOME: /run/build/fileid/rustup
-        # opt-out of pdfium-render runtime libloading noise; Deep-Analyze PDF
-        # rasterization needs a system libpdfium.so (not bundled on Linux) — it
-        # degrades to "PDF text only" without it. Bundling libpdfium is a
-        # follow-up (add as an offline archive source).
-      # Build-time network ONLY (cargo crate fetch + ort's static runtime archive
-      # + the rustup toolchain fetch below). The shipped app's network grant is
-      # the finish-arg above, nothing here.
-      build-args:
-        - --share=network
+        ORT_LIB_LOCATION: /run/build/fileid/onnxruntime
+        ORT_SKIP_DOWNLOAD: '1'
     build-commands:
-      # The org.freedesktop.Sdk.Extension.rust-stable//23.08 extension ships
-      # Cargo 1.81, which is too old for this workspace: transitive deps (e.g.
-      # moxcms) declare `edition = "2024"`, requiring Cargo >= 1.85. Install the
-      # workspace's pinned toolchain (rust-toolchain.toml → 1.90) via rustup and
-      # use it for every cargo invocation. Build-time network is granted above.
-      # Steps 1+2 share one shell so the PATH export persists across the two
-      # cargo builds (flatpak-builder runs each list entry in a fresh shell).
       - |
         set -eu
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
-        sh rustup-init.sh -y --profile minimal --default-toolchain 1.90 --no-modify-path
-        export PATH="$CARGO_HOME/bin:$PATH"
         rustc --version
+        cargo --version
+        test -f "$ORT_LIB_LOCATION/lib/libonnxruntime.a"
         cd platforms/linux
-        # 1. The GTK app (pulls the engine in as a library, default features).
-        cargo build --release --locked
-        # 2. The engine BINARY the app spawns over stdio (-p selects the path-dep
-        #    package from the same workspace + lockfile + target dir, so the
-        #    onnxruntime build artifact is shared with step 1).
-        cargo build --release --locked -p fileid-engine --bin FileIDEngine
-      # 3. Install both binaries into /app/bin. The app's locate_engine_binary()
-      #    finds FileIDEngine next to itself (search order #2).
-      - install -Dm755 platforms/linux/target/release/fileid-linux  /app/bin/fileid-linux
-      - install -Dm755 platforms/linux/target/release/FileIDEngine   /app/bin/FileIDEngine
-      # 4. Desktop integration — reuse platforms/linux/data/ (single source).
-      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop      /app/share/applications/io.github.fileid.FileID.desktop
+        cargo build --release --locked --offline
+        cargo build --release --locked --offline -p fileid-engine --bin FileIDEngine
+      - install -Dm755 platforms/linux/target/release/fileid-linux /app/bin/fileid-linux
+      - install -Dm755 platforms/linux/target/release/FileIDEngine /app/bin/FileIDEngine
+      - install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop /app/share/applications/io.github.fileid.FileID.desktop
       - install -Dm644 platforms/linux/data/io.github.fileid.FileID.metainfo.xml /app/share/metainfo/io.github.fileid.FileID.metainfo.xml
-      # 5. App icon. The source SVG embeds Figma backdrop-blur as <foreignObject>,
-      #    which appstreamcli compose (flatpak-builder's post-build step) fails
-      #    to rasterize → "file-read-error" drops the whole component
-      #    ("filters-but-no-output") and fails the build. Pre-render raster PNGs
-      #    with the SDK's rsvg-convert (librsvg skips foreignObject, the icon art
-      #    is preserved) and install ONLY those, so appstream uses the raster and
-      #    never touches the SVG.
       - |
         set -eu
         for sz in 64 128 256 512; do
@@ -128,7 +68,25 @@ modules:
             -o "$d/io.github.fileid.FileID.png"
         done
     sources:
-      # The whole repo (the app path-depends on ../../windows/src/engine). On a
-      # clean CI checkout this is just the source tree (no target/, no .build/).
+      - cargo-sources.json
+      - type: archive
+        only-arches: [x86_64]
+        url: https://cdn.pyke.io/0/pyke:ort-rs/ms@1.22.0/x86_64-unknown-linux-gnu.tgz
+        sha256: ed1716de95974bf47ab0223ca33734a0b5a5d09a181225d0e8ed62d070aea893
+        dest: onnxruntime
+      - type: archive
+        only-arches: [aarch64]
+        url: https://cdn.pyke.io/0/pyke:ort-rs/ms@1.22.0/aarch64-unknown-linux-gnu.tgz
+        sha256: 24e4760207136fc50b854bb5012ab81de6189039cf6d4fd3f5b8d3db7e929f1e
+        dest: onnxruntime
       - type: dir
-        path: ../..
+        path: ../../platforms/linux
+        dest: platforms/linux
+        skip: [target]
+      - type: dir
+        path: ../../platforms/windows/src/engine
+        dest: platforms/windows/src/engine
+        skip: [target]
+      - type: dir
+        path: ../../shared
+        dest: shared

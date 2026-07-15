@@ -129,12 +129,22 @@ pub fn on_activate(app: &adw::Application) {
         if i == 0 {
             row.add_css_class("active");
         }
-        row.connect_clicked(clone!(@weak stack, @strong nav_buttons => move |_| {
-            stack.set_visible_child_name(name);
-            for (j, b) in nav_buttons.borrow().iter().enumerate() {
-                if j == i { b.add_css_class("active"); } else { b.remove_css_class("active"); }
+        row.connect_clicked(clone!(
+            #[weak]
+            stack,
+            #[strong]
+            nav_buttons,
+            move |_| {
+                stack.set_visible_child_name(name);
+                for (j, b) in nav_buttons.borrow().iter().enumerate() {
+                    if j == i {
+                        b.add_css_class("active");
+                    } else {
+                        b.remove_css_class("active");
+                    }
+                }
             }
-        }));
+        ));
         nav_buttons.borrow_mut().push(row.clone());
         sidebar.append(&row);
     }
@@ -192,9 +202,13 @@ pub fn on_activate(app: &adw::Application) {
         .css_classes(["flat"])
         .tooltip_text("Toggle sidebar")
         .build();
-    sidebar_toggle.connect_clicked(clone!(@weak split => move |_| {
-        split.set_show_sidebar(!split.shows_sidebar());
-    }));
+    sidebar_toggle.connect_clicked(clone!(
+        #[weak]
+        split,
+        move |_| {
+            split.set_show_sidebar(!split.shows_sidebar());
+        }
+    ));
     header.pack_start(&sidebar_toggle);
 
     let toolbar = adw::ToolbarView::new();
@@ -210,7 +224,7 @@ pub fn on_activate(app: &adw::Application) {
         720.0,
         adw::LengthUnit::Px,
     ));
-    breakpoint.add_setter(&split, "collapsed", &true.to_value());
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
     window.add_breakpoint(breakpoint);
 
     // ── Layering: LavaLamp → scrim → UI ──────────────────────────────────────
@@ -230,32 +244,60 @@ pub fn on_activate(app: &adw::Application) {
     // ── Folder pick → enable scan ────────────────────────────────────────────
     let selected_folder: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     pick_btn.connect_clicked(clone!(
-        @weak window, @weak folder_label, @weak start_btn, @strong selected_folder => move |_| {
+        #[weak]
+        window,
+        #[weak]
+        folder_label,
+        #[weak]
+        start_btn,
+        #[strong]
+        selected_folder,
+        move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Pick a folder to organize")
                 .modal(true)
                 .build();
-            dialog.select_folder(Some(&window), gtk::gio::Cancellable::NONE, clone!(
-                @weak folder_label, @weak start_btn, @strong selected_folder => move |result| {
-                    if let Ok(file) = result {
-                        if let Some(path) = file.path() {
-                            let display = path.file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                            folder_label.set_label(&display);
-                            *selected_folder.borrow_mut() = Some(path.to_string_lossy().into_owned());
-                            start_btn.set_sensitive(true);
+            dialog.select_folder(
+                Some(&window),
+                gtk::gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    folder_label,
+                    #[weak]
+                    start_btn,
+                    #[strong]
+                    selected_folder,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let display = path
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                                folder_label.set_label(&display);
+                                *selected_folder.borrow_mut() =
+                                    Some(path.to_string_lossy().into_owned());
+                                start_btn.set_sensitive(true);
+                            }
                         }
                     }
-                }
-            ));
+                ),
+            );
         }
     ));
 
     // ── Start scan → engine ──────────────────────────────────────────────────
     start_btn.connect_clicked(clone!(
-        @strong engine, @strong selected_folder, @weak status_label => move |_| {
-            let Some(folder) = selected_folder.borrow().clone() else { return };
+        #[strong]
+        engine,
+        #[strong]
+        selected_folder,
+        #[weak]
+        status_label,
+        move |_| {
+            let Some(folder) = selected_folder.borrow().clone() else {
+                return;
+            };
             match engine.borrow_mut().start_scan(&folder, false) {
                 Ok(()) => status_label.set_label("Engine: scanning…"),
                 Err(err) => status_label.set_label(&format!("scan failed: {err}")),
@@ -265,21 +307,34 @@ pub fn on_activate(app: &adw::Application) {
 
     // ── Engine status → sidebar status line ──────────────────────────────────
     let status_rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@weak status_label => async move {
-        while let Ok(ev) = status_rx.recv().await {
-            let text = match ev {
-                EngineEvent::Spawning => "Engine: starting…".to_string(),
-                EngineEvent::Ready => "Engine: ready".to_string(),
-                EngineEvent::Progress(p) => format!("Scanning… {} / {}", p.processed, p.total),
-                EngineEvent::BatchLanded(n) => format!("Scanning… {n} files"),
-                EngineEvent::ScanComplete(n) => format!("Scan complete — {n} files"),
-                EngineEvent::Error(m) => format!("Engine: {m}"),
-                EngineEvent::Exited => "Engine: restarting…".to_string(),
-                _ => continue,
-            };
-            status_label.set_label(&text);
+    glib::MainContext::default().spawn_local(clone!(
+        #[weak]
+        status_label,
+        async move {
+            while let Ok(ev) = status_rx.recv().await {
+                let text = match ev {
+                    EngineEvent::Spawning => "Engine: starting…".to_string(),
+                    EngineEvent::Ready => "Engine: ready".to_string(),
+                    EngineEvent::Progress(p) => format!("Scanning… {} / {}", p.processed, p.total),
+                    EngineEvent::BatchLanded(n) => format!("Scanning… {n} files"),
+                    EngineEvent::ScanComplete(n) => format!("Scan complete — {n} files"),
+                    EngineEvent::Error(m) => format!("Engine: {m}"),
+                    // Model-download failures were split out of Error; without
+                    // this arm a failed download vanishes from the sidebar
+                    // (only the Settings/Deep Analyze cards would notice).
+                    EngineEvent::ModelDownloadFailed {
+                        model_kind,
+                        message,
+                    } => {
+                        format!("Model {model_kind}: {message}")
+                    }
+                    EngineEvent::Exited => "Engine: restarting…".to_string(),
+                    _ => continue,
+                };
+                status_label.set_label(&text);
+            }
         }
-    }));
+    ));
 
     // Boot the engine + thumbnail worker + event fan-out pump.
     EngineClient::start(&engine);

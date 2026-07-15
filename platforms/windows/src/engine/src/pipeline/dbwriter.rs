@@ -610,6 +610,17 @@ impl DbWriter {
         }
         tx.commit().context("commit batch")?;
 
+        // The batch is durable and every crop was already copied into
+        // crops_to_write — release the buffered originals now, so the JPEG
+        // encode/write loop below doesn't hold TWO copies of the whole
+        // batch's crop bytes (500 files × faces × 37 KB). Rollback-safe by
+        // construction: this runs only after a successful commit.
+        for f in buffer.iter_mut() {
+            for face in &mut f.faces {
+                face.crop_rgb_112 = None;
+            }
+        }
+
         // Batch is durable; now prune crop JPEGs for the face ids it replaced.
         // (After commit so a rolled-back batch never deletes a live crop.)
         for old_id in crop_ids_to_prune {

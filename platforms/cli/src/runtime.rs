@@ -18,6 +18,28 @@ use anyhow::Result;
 
 use crate::context::{print_json, Ctx};
 
+#[cfg(any(target_os = "macos", test))]
+fn install_aborted_payload() -> serde_json::Value {
+    serde_json::json!({
+        "command": "runtime", "action": "install",
+        "installed": false, "aborted": true,
+        "message": "nothing downloaded",
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn no_source_payload() -> serde_json::Value {
+    serde_json::json!({
+        "command": "runtime", "action": "install",
+        "installed": false, "error": "no_source_configured",
+        "message": "no HuggingFace runtime source configured; install via Homebrew or set FILEID_ORT_DYLIB_URL",
+        "options": [
+            "brew install onnxruntime",
+            "set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a HuggingFace-hosted 1.22.x .tgz or bare dylib",
+        ],
+    })
+}
+
 // ── Pinned ONNX Runtime source (macOS arm64) ────────────────────────────────
 //
 // `ort 2.0.0-rc.10` targets ONNX Runtime 1.22.0 (ort-sys `ONNXRUNTIME_VERSION`)
@@ -212,7 +234,11 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
             ),
             yes,
         ) {
-            println!("Aborted. (nothing downloaded)");
+            if ctx.json {
+                print_json(&install_aborted_payload());
+            } else {
+                println!("Aborted. (nothing downloaded)");
+            }
             return Ok(());
         }
         if let Some(parent) = target.parent() {
@@ -229,7 +255,7 @@ pub fn install(ctx: &Ctx, yes: bool, force: bool) -> Result<()> {
 
     // ── Nothing pinned for this arch and no override: print next steps. ──
     no_source_guidance(ctx);
-    Ok(())
+    anyhow::bail!("no HuggingFace ONNX Runtime source is configured")
 }
 
 /// First existing dylib among the system/Homebrew sources (NOT the install
@@ -534,15 +560,7 @@ fn report_installed(ctx: &Ctx, target: &std::path::Path, how: &str) -> Result<()
 #[cfg(target_os = "macos")]
 fn no_source_guidance(ctx: &Ctx) {
     if ctx.json {
-        print_json(&serde_json::json!({
-            "command": "runtime", "action": "install",
-            "installed": false, "error": "no_source_configured",
-            "message": "no HuggingFace runtime source configured; install via Homebrew or set FILEID_ORT_DYLIB_URL",
-            "options": [
-                "brew install onnxruntime",
-                "set FILEID_ORT_DYLIB_URL (+ FILEID_ORT_DYLIB_SHA256) to a HuggingFace-hosted 1.22.x .tgz or bare dylib",
-            ],
-        }));
+        print_json(&no_source_payload());
         return;
     }
     println!("{}", ctx.bold("ONNX Runtime install — choose one:"));
@@ -603,6 +621,28 @@ pub fn install(ctx: &Ctx, _yes: bool, _force: bool) -> Result<()> {
         ))
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn install_abort_payload_is_machine_readable_and_explicit() {
+        let payload = install_aborted_payload();
+        assert_eq!(payload["command"], "runtime");
+        assert_eq!(payload["action"], "install");
+        assert_eq!(payload["installed"], false);
+        assert_eq!(payload["aborted"], true);
+    }
+
+    #[test]
+    fn no_source_payload_is_an_explicit_failure() {
+        let payload = no_source_payload();
+        assert_eq!(payload["installed"], false);
+        assert_eq!(payload["error"], "no_source_configured");
+        assert!(payload["options"].as_array().is_some_and(|v| !v.is_empty()));
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

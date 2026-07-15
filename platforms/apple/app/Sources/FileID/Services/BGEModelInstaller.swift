@@ -61,7 +61,9 @@ public final class BGEModelInstaller {
     public func install() {
         guard task == nil else { return }
         task = Task { [weak self] in
-            await self?.runInstall()
+            await AppSleepActivity.run(reason: "Install BGE model") {
+                await self?.runInstall()
+            }
             self?.task = nil
         }
     }

@@ -48,7 +48,7 @@ residual risk and rationale are in `DECISIONS.md`).
 
 CA-allowlist pinning (root SPKI set + backups, NOT leaf pins) for the model-download hosts.
 Pins live in `shared/security/tls-pins.json` + `pinned-roots/*.pem` (11 roots covering
-huggingface.co, its CDNs, and GitHub releases); `shared/scripts/check_tls_pins.sh` asserts the
+Hugging Face/CDNs plus the release-blocked legacy GitHub runtime baseline); `shared/scripts/check_tls_pins.sh` asserts the
 two representations match in CI. macOS: `TLSPinning.swift` challenge handler (system trust
 first, then chain∩pin-set). Windows: `reqwest` built with `.tls_built_in_root_certs(false)` +
 only the embedded roots; the fail-closed fallback client has no roots at all. Escape hatch
@@ -73,6 +73,7 @@ both platforms.
 
 ## Open hardening — gates the v1.0 release (NOT yet shipped)
 
+- **Mirror six Windows runtime archives to Hugging Face.** Current development sources retain hash-pinned GitHub/NVIDIA llama.cpp, Whisper, cuDNN, CUDA, and ONNX Runtime archives. CI permits only that exact reviewed baseline; strict signed publication fails before staging until byte-identical mirrors replace every URL and the downloader redirect allowlist is reduced to Hugging Face-owned hosts.
 - **Configure a public-trust signing provider (Windows).** The provider-neutral build path, complete PE/MSI/Burn signing order, common verification, and embedded publisher policy are implemented. GitHub tagged publishing remains blocked until a provider-specific protected authentication step is selected. See `WINDOWS_SIGNING.md`.
 - **macOS Developer ID signing + notarization (user-gated).** The full pipeline exists and dry-runs green (`platforms/apple/scripts/release.sh --skip-notarize` produces a hardened-runtime, ad-hoc-signed DMG). The real signing pass needs the Developer ID certificate + `notarytool store-credentials fileid-notary` on the owner's machine — steps documented in the script header.
 

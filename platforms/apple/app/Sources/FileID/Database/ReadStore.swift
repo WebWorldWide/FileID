@@ -224,8 +224,9 @@ public final class ReadStore: @unchecked Sendable {
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
 
-                // Duplicate groups by content_hash (byte-exact; groups of size > 1). Mirror the
-                // Cleanup list exactly: filter failed = 0, and compute
+                // Fast stored-hash candidate metrics for Settings only. Cleanup itself
+                // performs bounded live full-file verification before display and Trash.
+                // Filter failed = 0 and compute
                 // reclaimable bytes against the ACTUAL keeper (the same
                 // aesthetic↓, size↓, createdAt↑, path-length↑ rank the list
                 // uses), not MAX(size). The old MAX(size) keeper diverged from
@@ -543,105 +544,125 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Cleanup queries
 
-    /// Duplicate groups. Files within each group are sorted keeper-first.
-    /// Stable Int64 id for a duplicate group keyed by content_hash — the first
-    /// 8 bytes of the 32-byte SHA-256, little-endian. Used only as the SwiftUI
-    /// Identifiable id; collisions across distinct 256-bit hashes are infeasible.
-    private static func dupGroupID(_ hash: Data) -> Int64 {
-        var v: UInt64 = 0
-        for (i, byte) in hash.prefix(8).enumerated() {
-            v |= UInt64(byte) << (8 * i)
+    private struct ExactCandidateLoad: Sendable {
+        let files: [FileRow]
+        let candidateCount: Int
+        let partial: Bool
+    }
+
+    private func exactDuplicateCandidates() -> ExactCandidateLoad {
+        guard let q = queue else {
+            return ExactCandidateLoad(files: [], candidateCount: 0, partial: true)
         }
-        return Int64(bitPattern: v)
-    }
-
-    private struct ExactDuplicateKey: Hashable {
-        let hash: Data
-        let size: Int64
-    }
-
-    private static let cleanupMaxGroups = 200
-    private static let cleanupMaxVisibleMembers = 5_000
-    private static let cleanupMaxVisibleMembersPerGroup = 500
-
-    public func duplicateGroups() -> [DuplicateGroup] {
-        guard let q = queue else { return [] }
         do {
             return try q.read { db in
-                // Indexed grouping + windowed member preview. The old query
-                // materialized every duplicate file in the library even though
-                // Cleanup is an interactive review surface. This returns at most
-                // 5,000 ranked rows while preserving exact group totals.
+                // Candidate SELECTION stays recipe-agnostic: membership is the
+                // whole same-size class (stored hashes are NEVER byte-proof —
+                // legacy BLAKE3/current SHA-256 rows and stale hashes must still
+                // meet in one class so verify()'s live read can pair them). The
+                // stored content_hash is used purely as a RANKING hint: classes
+                // whose members share a stored (hash, size) — near-certain real
+                // duplicates — load first, and each class is capped at
+                // memberCap files (same-hash twins ranked adjacently so the cap
+                // can't split a pair). Together those stop one dominant class of
+                // NON-duplicates (zero-byte files, fixed-size sidecars) from
+                // starving genuine groups out of the candidateCap file budget.
+                // `candidateCount` is the uncapped total membership so the
+                // partial-preview disclosure fires whenever any backstop drops
+                // real candidates.
+                let candidateCount = try Int.fetchOne(db, sql: """
+                    WITH candidate_sizes AS (
+                        SELECT COUNT(*) AS n FROM files
+                        WHERE failed = 0 AND size_bytes >= 0
+                        GROUP BY size_bytes HAVING n > 1
+                    )
+                    SELECT COALESCE(SUM(n), 0) FROM candidate_sizes
+                    """) ?? 0
                 let rows = try Row.fetchAll(db, sql: """
-                    WITH top_groups AS (
-                        SELECT content_hash, size_bytes, COUNT(*) AS n
+                    WITH per_file AS (
+                        -- twins: how many OTHER rows share this row's stored
+                        -- (content_hash, size). NULL hashes never count as twins
+                        -- (SQLite windows partition NULLs together).
+                        SELECT id AS pf_id, size_bytes AS pf_size,
+                               CASE WHEN content_hash IS NULL THEN 0
+                                    ELSE COUNT(*) OVER (
+                                        PARTITION BY content_hash, size_bytes
+                                    ) - 1 END AS twins
                         FROM files
-                        WHERE content_hash IS NOT NULL AND failed = 0
-                        GROUP BY content_hash, size_bytes
-                        HAVING n > 1
-                        ORDER BY n DESC, hex(content_hash), size_bytes
+                        WHERE failed = 0 AND size_bytes >= 0
+                    ),
+                    candidate_sizes AS (
+                        SELECT pf_size AS gsize, COUNT(*) AS n,
+                               MAX(twins) AS hash_twins
+                        FROM per_file
+                        GROUP BY pf_size HAVING n > 1
+                    ),
+                    top_groups AS (
+                        SELECT gsize, n, hash_twins FROM candidate_sizes
+                        ORDER BY (hash_twins > 0) DESC, hash_twins DESC,
+                                 n DESC, gsize ASC
                         LIMIT ?
-                    ), ranked AS (
+                    ),
+                    ranked AS (
                         SELECT f.*, tg.n AS group_count,
+                               tg.hash_twins AS group_hash_twins,
                                ROW_NUMBER() OVER (
-                                   PARTITION BY f.content_hash, f.size_bytes
-                                   ORDER BY COALESCE(f.aesthetic, 0) DESC,
-                                            f.size_bytes DESC,
+                                   PARTITION BY tg.gsize
+                                   ORDER BY (pf.twins > 0) DESC,
+                                            f.content_hash ASC,
                                             COALESCE(f.created_at, 1e18) ASC,
                                             LENGTH(f.path_text) ASC,
                                             f.path_text ASC
                                ) AS member_rank
                         FROM files f
-                        JOIN top_groups tg
-                          ON tg.content_hash = f.content_hash
-                         AND tg.size_bytes = f.size_bytes
+                        JOIN per_file pf ON pf.pf_id = f.id
+                        JOIN top_groups tg ON tg.gsize = f.size_bytes
                         WHERE f.failed = 0
                     )
                     SELECT * FROM ranked
                     WHERE member_rank <= ?
-                    ORDER BY group_count DESC, hex(content_hash), size_bytes, member_rank
+                    ORDER BY (group_hash_twins > 0) DESC, group_hash_twins DESC,
+                             group_count DESC, size_bytes ASC, member_rank ASC
                     LIMIT ?
                     """, arguments: [
-                        Self.cleanupMaxGroups,
-                        Self.cleanupMaxVisibleMembersPerGroup,
-                        Self.cleanupMaxVisibleMembers
+                        ExactDuplicateVerifier.groupCap,
+                        ExactDuplicateVerifier.memberCap,
+                        ExactDuplicateVerifier.candidateCap + 1
                     ])
-                var order: [ExactDuplicateKey] = []
-                var filesByKey: [ExactDuplicateKey: [FileRow]] = [:]
-                var counts: [ExactDuplicateKey: Int] = [:]
-                for row in rows {
-                    guard let hash: Data = row["content_hash"] else { continue }
-                    let key = ExactDuplicateKey(hash: hash, size: row["size_bytes"] ?? 0)
-                    if filesByKey[key] == nil { order.append(key) }
-                    filesByKey[key, default: []].append(Self.toFileRow(row))
-                    counts[key] = row["group_count"] ?? 0
+                var files: [FileRow] = []
+                files.reserveCapacity(min(rows.count, ExactDuplicateVerifier.candidateCap))
+                var selectedBytes: Int64 = 0
+                var partial = candidateCount > ExactDuplicateVerifier.candidateCap
+                for row in rows.prefix(ExactDuplicateVerifier.candidateCap) {
+                    let file = Self.toFileRow(row)
+                    let size = max(0, file.sizeBytes)
+                    if size > ExactDuplicateVerifier.readBudgetBytes - selectedBytes {
+                        partial = true
+                        break
+                    }
+                    selectedBytes += size
+                    files.append(file)
                 }
-                return order.compactMap { key in
-                    guard let files = filesByKey[key], files.count > 1 else { return nil }
-                    let count = counts[key] ?? files.count
-                    return DuplicateGroup(
-                        id: Self.dupGroupID(key.hash), files: files,
-                        totalFileCount: count,
-                        totalBytes: Int64(count) * key.size)
+                if files.count < min(candidateCount, ExactDuplicateVerifier.candidateCap) {
+                    partial = true
                 }
+                return ExactCandidateLoad(
+                    files: files, candidateCount: candidateCount, partial: partial)
             }
         } catch {
-            reportError("Duplicate query failed: \(error)")
-            return []
+            reportError("Exact duplicate candidate query failed: \(error)")
+            return ExactCandidateLoad(files: [], candidateCount: 0, partial: true)
         }
     }
 
-    /// Off-main twin of `duplicateGroups()`. The materialization does a GROUP BY
-    /// over `files`, a chunked SELECT * of every duplicate-group file, FileRow
-    /// mapping, and a per-group sort — work proportional to the duplicated-file
-    /// count. Run inline on the MainActor, the Cleanup tab re-fired it on every
-    /// throttled scan batch (notifyChanged ~once/s), janking the UI. Callers await
-    /// this so the heavy read runs on a background task and only the assignment
-    /// lands on main. (R3-05)
-    public func duplicateGroupsAsync() async -> [DuplicateGroup] {
-        await Task.detached(priority: .userInitiated) { [self] in
-            duplicateGroups()
+    func exactDuplicateSnapshotAsync() async -> ExactDuplicateSnapshot {
+        let load = await Task.detached(priority: .userInitiated) { [self] in
+            exactDuplicateCandidates()
         }.value
+        return await ExactDuplicateVerifier.verify(
+            candidates: load.files,
+            candidateCount: load.candidateCount,
+            inputPartial: load.partial)
     }
 
     // MARK: - Perceptual near-duplicate queries
@@ -660,6 +681,14 @@ public final class ReadStore: @unchecked Sendable {
     /// than hang the UI. The user's libraries are ~1.6K images (instant); a 50K
     /// library would be ~1.25B comparisons.
     public static let nearDupImageCap = 20_000
+
+    /// Display caps for the perceptual (similar) grouping below. Restored here
+    /// after the exact-duplicate rewrite removed the shared constant block while
+    /// this similar path still references them: at most 200 groups, 5,000 total
+    /// visible members across all groups, 500 members per group. (audit 2026-07-15)
+    private static let cleanupMaxGroups = 200
+    private static let cleanupMaxVisibleMembers = 5_000
+    private static let cleanupMaxVisibleMembersPerGroup = 500
 
     /// Perceptual near-duplicate groups: images whose 64-bit dHashes are within
     /// `maxHamming` (Hamming distance) of one another, transitively unioned. Same

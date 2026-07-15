@@ -737,8 +737,8 @@ public struct BulkActionItem: Codable, Sendable {
 }
 
 public struct BulkActionResult: Codable, Sendable {
-    /// Originating command's discriminator; the trashFiles reply additionally
-    /// carries the undo batch id as a ":<uuid>" suffix.
+    /// Originating command's discriminator. Platforms with restore-from-trash
+    /// support may append an undo batch id as a ":<uuid>" suffix.
     public let action: String
     public let succeeded: Int
     public let failed: Int

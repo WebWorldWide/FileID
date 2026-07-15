@@ -293,7 +293,7 @@ fn sanitize_path_component(s: &str) -> String {
     crate::util::path_safety::safe_filename_component(s)
 }
 
-fn month_name(m: u32) -> String {
+pub(crate) fn month_name(m: u32) -> String {
     match m {
         1 => "January", 2 => "February", 3 => "March", 4 => "April",
         5 => "May", 6 => "June", 7 => "July", 8 => "August",
@@ -331,7 +331,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
 /// Convert a Unix-seconds timestamp to (year, month). Drives the
 /// Photos/{Year}/{Month}/ tree. Uses chrono so daylight-savings doesn't
 /// shift a January-1 photo into the prior December folder.
-fn year_month(unix: f64) -> (i32, u32) {
+pub(crate) fn year_month(unix: f64) -> (i32, u32) {
     use chrono::{DateTime, Datelike, Utc};
     let secs = unix as i64;
     let nanos = ((unix - secs as f64) * 1_000_000_000.0) as u32;

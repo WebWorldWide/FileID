@@ -453,77 +453,135 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     update_apply_hint(&ui, false);
 
     // ── Sankey rendering + interaction ────────────────────────────────────────
-    sankey.set_draw_func(clone!(@strong state => move |_area, cr, w, h| {
-        draw_sankey(&state, cr, w, h);
-    }));
+    sankey.set_draw_func(clone!(
+        #[strong]
+        state,
+        move |_area, cr, w, h| {
+            draw_sankey(&state, cr, w, h);
+        }
+    ));
 
     let motion = gtk::EventControllerMotion::new();
-    motion.connect_motion(clone!(@strong state, @weak sankey => move |_, x, y| {
-        let next = hit_test_ribbon(&state, &sankey, x, y);
-        let changed = state.borrow().hovered_flow != next;
-        if changed {
-            state.borrow_mut().hovered_flow = next;
-            sankey.queue_draw();
+    motion.connect_motion(clone!(
+        #[strong]
+        state,
+        #[weak]
+        sankey,
+        move |_, x, y| {
+            let next = hit_test_ribbon(&state, &sankey, x, y);
+            let changed = state.borrow().hovered_flow != next;
+            if changed {
+                state.borrow_mut().hovered_flow = next;
+                sankey.queue_draw();
+            }
         }
-    }));
-    motion.connect_leave(clone!(@strong state, @weak sankey => move |_| {
-        if state.borrow().hovered_flow.is_some() {
-            state.borrow_mut().hovered_flow = None;
-            sankey.queue_draw();
+    ));
+    motion.connect_leave(clone!(
+        #[strong]
+        state,
+        #[weak]
+        sankey,
+        move |_| {
+            if state.borrow().hovered_flow.is_some() {
+                state.borrow_mut().hovered_flow = None;
+                sankey.queue_draw();
+            }
         }
-    }));
+    ));
     sankey.add_controller(motion);
 
     let click = gtk::GestureClick::new();
-    click.connect_released(
-        clone!(@strong state, @strong ui, @weak sankey => move |_, _, x, y| {
+    click.connect_released(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        #[weak]
+        sankey,
+        move |_, _, x, y| {
             if let Some(scope) = hit_test_node(&state, &sankey, x, y) {
                 open_drilldown(&state, &ui, scope);
             }
-        }),
-    );
+        }
+    ));
     sankey.add_controller(click);
 
     // ── Header pick button ────────────────────────────────────────────────────
-    pick_btn.connect_clicked(clone!(@strong engine, @strong state, @strong ui => move |_| {
-        let dialog = gtk::FileDialog::builder()
-            .title("Pick a destination root")
-            .modal(true)
-            .build();
-        let win = ui.root.root().and_downcast::<gtk::Window>();
-        dialog.select_folder(win.as_ref(), gio::Cancellable::NONE, clone!(
-            @strong engine, @strong state, @strong ui => move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        set_root_and_plan(&engine, &state, &ui, path.to_string_lossy().into_owned());
+    pick_btn.connect_clicked(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
+            let dialog = gtk::FileDialog::builder()
+                .title("Pick a destination root")
+                .modal(true)
+                .build();
+            let win = ui.root.root().and_downcast::<gtk::Window>();
+            dialog.select_folder(
+                win.as_ref(),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[strong]
+                    engine,
+                    #[strong]
+                    state,
+                    #[strong]
+                    ui,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                set_root_and_plan(
+                                    &engine,
+                                    &state,
+                                    &ui,
+                                    path.to_string_lossy().into_owned(),
+                                );
+                            }
+                        }
                     }
-                }
-            }
-        ));
-    }));
+                ),
+            );
+        }
+    ));
 
     // ── Apply / symlink / undo wiring ─────────────────────────────────────────
-    symlink_switch.connect_active_notify(clone!(@strong ui => move |sw| {
-        update_apply_hint(&ui, sw.is_active());
-    }));
+    symlink_switch.connect_active_notify(clone!(
+        #[strong]
+        ui,
+        move |sw| {
+            update_apply_hint(&ui, sw.is_active());
+        }
+    ));
 
-    apply_btn.connect_clicked(
-        clone!(@strong engine, @strong state, @strong ui => move |_| {
+    apply_btn.connect_clicked(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
             if state.borrow().applying {
                 return;
             }
             let request = {
                 let s = state.borrow();
-                let (Some(plan), Some(root)) = (s.plan.as_ref(), s.root.clone()) else { return };
+                let (Some(plan), Some(root)) = (s.plan.as_ref(), s.root.clone()) else {
+                    return;
+                };
                 if plan.truncated {
-                    let Some(plan_id) = plan.plan_id.clone() else { return };
+                    let Some(plan_id) = plan.plan_id.clone() else {
+                        return;
+                    };
                     ApplyRequest {
                         root,
                         moves: Vec::new(),
                         plan_id: Some(plan_id),
-                        total: usize::try_from(
-                            plan.total_moves.unwrap_or(plan.moves.len() as u64)
-                        ).unwrap_or(usize::MAX),
+                        total: usize::try_from(plan.total_moves.unwrap_or(plan.moves.len() as u64))
+                            .unwrap_or(usize::MAX),
                     }
                 } else {
                     let moves: Vec<RestructureMove> = plan
@@ -533,45 +591,69 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         .cloned()
                         .collect();
                     let total = moves.len();
-                    ApplyRequest { root, moves, plan_id: None, total }
+                    ApplyRequest {
+                        root,
+                        moves,
+                        plan_id: None,
+                        total,
+                    }
                 }
             };
             if request.total == 0 {
                 return;
             }
             confirm_apply(&engine, &state, &ui, request, ui.symlink_switch.is_active());
-        }),
-    );
+        }
+    ));
 
-    undo_btn.connect_clicked(clone!(@strong engine, @strong state, @strong ui => move |_| {
-        if state.borrow().applying {
-            return;
-        }
-        let Some(root) = state.borrow().root.clone() else { return };
-        {
-            let mut s = state.borrow_mut();
-            s.applying = true;
-            s.undo_in_flight = true;
-        }
-        set_status(&ui, "Undoing the last restructure…", false);
-        let sent = engine
-            .borrow_mut()
-            .send(CommandPayload::UndoRestructure(UndoRestructurePayload { library_root: root }));
-        if sent.is_err() {
+    undo_btn.connect_clicked(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
+            if state.borrow().applying {
+                return;
+            }
+            let Some(root) = state.borrow().root.clone() else {
+                return;
+            };
             {
                 let mut s = state.borrow_mut();
-                s.applying = false;
-                s.undo_in_flight = false;
+                s.applying = true;
+                s.undo_in_flight = true;
             }
-            set_status(&ui, "Engine is unavailable — try again in a moment.", true);
+            set_status(&ui, "Undoing the last restructure…", false);
+            let sent =
+                engine
+                    .borrow_mut()
+                    .send(CommandPayload::UndoRestructure(UndoRestructurePayload {
+                        library_root: root,
+                    }));
+            if sent.is_err() {
+                {
+                    let mut s = state.borrow_mut();
+                    s.applying = false;
+                    s.undo_in_flight = false;
+                }
+                set_status(&ui, "Engine is unavailable — try again in a moment.", true);
+            }
+            update_apply_controls(&state, &ui);
         }
-        update_apply_controls(&state, &ui);
-    }));
+    ));
 
     // ── Engine events ─────────────────────────────────────────────────────────
     let ev_rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(
-        clone!(@strong engine, @strong state, @strong ui => async move {
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        async move {
             while let Ok(ev) = ev_rx.recv().await {
                 match ev {
                     EngineEvent::RestructurePlan(plan) => on_plan(&state, &ui, plan),
@@ -583,20 +665,26 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     _ => {}
                 }
             }
-        }),
-    );
+        }
+    ));
 
     // ── Auto-default the destination root to the most recent scan ─────────────
     let rx = recent_root_async();
-    glib::MainContext::default().spawn_local(
-        clone!(@strong engine, @strong state, @strong ui => async move {
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        async move {
             if let Ok(Some(found)) = rx.recv().await {
                 if state.borrow().root.is_none() {
                     set_root_and_plan(&engine, &state, &ui, found);
                 }
             }
-        }),
-    );
+        }
+    ));
 
     root.upcast()
 }
@@ -888,14 +976,22 @@ fn confirm_apply(
     alert.set_close_response("cancel");
     alert.connect_response(
         None,
-        clone!(@strong engine, @strong state, @strong ui => move |_, resp| {
-            if resp != "apply" {
-                return;
+        clone!(
+            #[strong]
+            engine,
+            #[strong]
+            state,
+            #[strong]
+            ui,
+            move |_, resp| {
+                if resp != "apply" {
+                    return;
+                }
+                do_apply(&engine, &state, &ui, request.clone(), use_symlinks);
             }
-            do_apply(&engine, &state, &ui, request.clone(), use_symlinks);
-        }),
+        ),
     );
-    alert.present(&ui.root);
+    alert.present(Some(&ui.root));
 }
 
 fn do_apply(
@@ -1084,20 +1180,26 @@ fn build_bucket_card(
         .css_classes(["flat", "caption"])
         .build();
     let ids: Vec<i64> = props.iter().map(|p| p.file_id).collect();
-    sel_btn.connect_clicked(clone!(@strong state, @strong ui => move |_| {
-        {
-            let mut s = state.borrow_mut();
-            let all = ids.iter().all(|id| s.selected.contains(id));
-            for id in &ids {
-                if all {
-                    s.selected.remove(id);
-                } else {
-                    s.selected.insert(*id);
+    sel_btn.connect_clicked(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
+            {
+                let mut s = state.borrow_mut();
+                let all = ids.iter().all(|id| s.selected.contains(id));
+                for id in &ids {
+                    if all {
+                        s.selected.remove(id);
+                    } else {
+                        s.selected.insert(*id);
+                    }
                 }
             }
+            schedule_render(&state, &ui);
         }
-        schedule_render(&state, &ui);
-    }));
+    ));
 
     header.append(&icon);
     header.append(&title_vb);
@@ -1110,9 +1212,15 @@ fn build_bucket_card(
             .css_classes(["flat"])
             .build();
         let bkt = bucket.to_string();
-        open_btn.connect_clicked(clone!(@strong state, @strong ui => move |_| {
-            open_drilldown(&state, &ui, DrillScope::Bucket(bkt.clone()));
-        }));
+        open_btn.connect_clicked(clone!(
+            #[strong]
+            state,
+            #[strong]
+            ui,
+            move |_| {
+                open_drilldown(&state, &ui, DrillScope::Bucket(bkt.clone()));
+            }
+        ));
         header.append(&open_btn);
     }
     inner.append(&header);
@@ -1127,9 +1235,15 @@ fn build_bucket_card(
             .css_classes(["flat", "caption"])
             .halign(gtk::Align::Start)
             .build();
-        more_btn.connect_clicked(clone!(@strong state, @strong ui => move |_| {
-            open_drilldown(&state, &ui, DrillScope::Bucket(bkt.clone()));
-        }));
+        more_btn.connect_clicked(clone!(
+            #[strong]
+            state,
+            #[strong]
+            ui,
+            move |_| {
+                open_drilldown(&state, &ui, DrillScope::Bucket(bkt.clone()));
+            }
+        ));
         inner.append(&more_btn);
     }
 
@@ -1146,17 +1260,23 @@ fn build_proposal_row(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, p: &Proposal) -> 
     check.set_active(state.borrow().selected.contains(&p.file_id));
     check.set_valign(gtk::Align::Center);
     let fid = p.file_id;
-    check.connect_toggled(clone!(@strong state, @strong ui => move |c| {
-        {
-            let mut s = state.borrow_mut();
-            if c.is_active() {
-                s.selected.insert(fid);
-            } else {
-                s.selected.remove(&fid);
+    check.connect_toggled(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |c| {
+            {
+                let mut s = state.borrow_mut();
+                if c.is_active() {
+                    s.selected.insert(fid);
+                } else {
+                    s.selected.remove(&fid);
+                }
             }
+            update_apply_controls(&state, &ui);
         }
-        update_apply_controls(&state, &ui);
-    }));
+    ));
     row.append(&check);
 
     let icon = gtk::Image::from_icon_name(file_icon(&p.filename));
@@ -1296,10 +1416,16 @@ fn open_drilldown(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, scope: DrillScope) {
 
     // Toggling a checkbox inside the sheet writes the shared selection; rebuild
     // the main recommendation cards once the sheet closes so they stay in sync.
-    dialog.connect_closed(clone!(@strong state, @strong ui => move |_| {
-        schedule_render(&state, &ui);
-    }));
-    dialog.present(&ui.root);
+    dialog.connect_closed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
+            schedule_render(&state, &ui);
+        }
+    ));
+    dialog.present(Some(&ui.root));
 
     // Springy reveal on the shared brand spring (matches Library's preview).
     let content_weak = content.downgrade();
@@ -1351,7 +1477,7 @@ fn set_status(ui: &Rc<Ui>, msg: &str, is_error: bool) {
         return;
     }
     ui.status_label.set_text(msg);
-    ui.status_icon.set_from_icon_name(Some(if is_error {
+    ui.status_icon.set_icon_name(Some(if is_error {
         "dialog-warning-symbolic"
     } else {
         "emblem-ok-symbolic"
@@ -1370,9 +1496,15 @@ fn show_empty(ui: &Rc<Ui>, title: &str, desc: &str) {
 }
 
 fn schedule_render(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
-    glib::idle_add_local_once(clone!(@strong state, @strong ui => move || {
-        render_recommendations(&state, &ui);
-    }));
+    glib::idle_add_local_once(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move || {
+            render_recommendations(&state, &ui);
+        }
+    ));
 }
 
 // ─── Sankey: pixel layout, drawing, hit-testing ──────────────────────────────

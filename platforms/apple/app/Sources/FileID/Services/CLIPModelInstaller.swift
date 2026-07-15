@@ -136,7 +136,9 @@ public final class CLIPModelInstaller {
     public func install() {
         guard task == nil else { return }
         task = Task { [weak self] in
-            await self?.runHubFetch()
+            await AppSleepActivity.run(reason: "Install CLIP models") {
+                await self?.runHubFetch()
+            }
             self?.task = nil
         }
     }
@@ -146,7 +148,9 @@ public final class CLIPModelInstaller {
     public func installFromLocalZip(_ zipURL: URL) {
         guard task == nil else { return }
         task = Task { [weak self] in
-            await self?.runExtract(zipAt: zipURL, deleteZipAfter: false)
+            await AppSleepActivity.run(reason: "Install local CLIP models") {
+                await self?.runExtract(zipAt: zipURL, deleteZipAfter: false)
+            }
             self?.task = nil
         }
     }

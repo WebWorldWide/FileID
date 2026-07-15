@@ -23,10 +23,7 @@ use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
-use crate::engine_client::{
-    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent, FileRow,
-    QuerySpec,
-};
+use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent, FileRow, QuerySpec};
 
 const QUERY_LIMIT: i64 = 1000;
 const TILE_THUMB_PX: i32 = 256;
@@ -51,11 +48,15 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             li.set_child(Some(&build_tile()));
         }
     });
-    factory.connect_bind(clone!(@strong engine => move |_, list_item| {
-        if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
-            bind_tile(&engine, li);
+    factory.connect_bind(clone!(
+        #[strong]
+        engine,
+        move |_, list_item| {
+            if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+                bind_tile(&engine, li);
+            }
         }
-    }));
+    ));
     factory.connect_unbind(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
             if let Some(tile) = li.child() {
@@ -70,11 +71,15 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     grid.set_enable_rubberband(false);
     grid.add_css_class("fileid-tab");
 
-    grid.connect_activate(clone!(@strong engine => move |gv, pos| {
-        if let Some(model) = gv.model() {
-            open_preview(&engine, gv, model, pos);
+    grid.connect_activate(clone!(
+        #[strong]
+        engine,
+        move |gv, pos| {
+            if let Some(model) = gv.model() {
+                open_preview(&engine, gv, model, pos);
+            }
         }
-    }));
+    ));
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -145,7 +150,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Debounced search → reload.
     search.connect_search_changed(clone!(
-        @strong search_text, @strong reload, @strong debounce_gen => move |entry| {
+        #[strong]
+        search_text,
+        #[strong]
+        reload,
+        #[strong]
+        debounce_gen,
+        move |entry| {
             *search_text.borrow_mut() = entry.text().to_string();
             let g = debounce_gen.get().wrapping_add(1);
             debounce_gen.set(g);
@@ -161,21 +172,25 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Live-scan reloads: throttle on batches, final reload on completion.
     let ev_rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@strong reload => async move {
-        let mut last = Instant::now() - Duration::from_secs(10);
-        while let Ok(ev) = ev_rx.recv().await {
-            match ev {
-                EngineEvent::BatchLanded(_) => {
-                    if last.elapsed() >= Duration::from_millis(900) {
-                        last = Instant::now();
-                        reload();
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        reload,
+        async move {
+            let mut last = Instant::now() - Duration::from_secs(10);
+            while let Ok(ev) = ev_rx.recv().await {
+                match ev {
+                    EngineEvent::BatchLanded(_) => {
+                        if last.elapsed() >= Duration::from_millis(900) {
+                            last = Instant::now();
+                            reload();
+                        }
                     }
+                    EngineEvent::ScanComplete(_) => reload(),
+                    _ => {}
                 }
-                EngineEvent::ScanComplete(_) => reload(),
-                _ => {}
             }
         }
-    }));
+    ));
 
     // Initial fill.
     reload();
@@ -256,7 +271,13 @@ fn build_pills(kind_filter: Rc<RefCell<Option<String>>>, reload: Rc<dyn Fn()>) -
         }
         let value = value.map(|s| s.to_string());
         btn.connect_clicked(clone!(
-            @strong kind_filter, @strong buttons, @strong reload => move |b| {
+            #[strong]
+            kind_filter,
+            #[strong]
+            buttons,
+            #[strong]
+            reload,
+            move |b| {
                 for other in buttons.borrow().iter() {
                     other.remove_css_class("pill-active");
                 }
@@ -383,23 +404,13 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         }
         pic.set_paintable(None::<&gtk::gdk::Texture>);
         let want = path.clone();
-        let rx = engine.borrow().request_thumbnail(path);
+        let rx = engine
+            .borrow()
+            .request_scaled_thumbnail(path, TILE_THUMB_PX);
         let pic_weak = pic.downgrade();
         let li_weak = list_item.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(bytes)) = rx.recv().await else {
-                return;
-            };
-            // Skip the decode entirely if this tile was recycled onto another file.
-            if !tile_still_wants(&li_weak, &want) {
-                return;
-            }
-            // Decode + scale OFF the main loop; only Send pixel data crosses back.
-            let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
-            std::thread::spawn(move || {
-                let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
-            });
-            let Ok(Some(decoded)) = drx.recv().await else {
+            let Ok(Some(decoded)) = rx.recv().await else {
                 return;
             };
             let tex: gtk::gdk::Texture = texture_from_decoded(&decoded).upcast();
@@ -511,36 +522,66 @@ fn open_preview(
         })
     };
 
-    prev_btn.connect_clicked(clone!(@strong idx, @strong load => move |_| {
-        if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
-    }));
-    next_btn.connect_clicked(
-        clone!(@strong idx, @strong model, @strong load => move |_| {
-            if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
-        }),
-    );
+    prev_btn.connect_clicked(clone!(
+        #[strong]
+        idx,
+        #[strong]
+        load,
+        move |_| {
+            if idx.get() > 0 {
+                idx.set(idx.get() - 1);
+                load();
+            }
+        }
+    ));
+    next_btn.connect_clicked(clone!(
+        #[strong]
+        idx,
+        #[strong]
+        model,
+        #[strong]
+        load,
+        move |_| {
+            if idx.get() + 1 < model.n_items() {
+                idx.set(idx.get() + 1);
+                load();
+            }
+        }
+    ));
 
     // ←/→ arrow keys page through the library.
     let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(
-        clone!(@strong idx, @strong model, @strong load => move |_, key, _, _| {
+    keys.connect_key_pressed(clone!(
+        #[strong]
+        idx,
+        #[strong]
+        model,
+        #[strong]
+        load,
+        move |_, key, _, _| {
             match key {
                 gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
-                    if idx.get() > 0 { idx.set(idx.get() - 1); load(); }
+                    if idx.get() > 0 {
+                        idx.set(idx.get() - 1);
+                        load();
+                    }
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
-                    if idx.get() + 1 < model.n_items() { idx.set(idx.get() + 1); load(); }
+                    if idx.get() + 1 < model.n_items() {
+                        idx.set(idx.get() + 1);
+                        load();
+                    }
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
             }
-        }),
-    );
+        }
+    ));
     dialog.add_controller(keys);
 
     load();
-    dialog.present(parent);
+    dialog.present(Some(parent));
 
     // Springy fade-in of the body, on the shared brand spring.
     let body_weak = body.downgrade();
@@ -596,17 +637,12 @@ fn build_meta(row: &FileRow) -> gtk::Box {
 /// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.
 fn load_preview_image(engine: &Rc<RefCell<EngineClient>>, pic: &gtk::Picture, row: &FileRow) {
     if row.kind == "image" {
-        let rx = engine.borrow().request_thumbnail(row.path.clone());
+        let rx = engine
+            .borrow()
+            .request_scaled_thumbnail(row.path.clone(), PREVIEW_PX);
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(bytes)) = rx.recv().await else {
-                return;
-            };
-            let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
-            std::thread::spawn(move || {
-                let _ = dtx.send_blocking(decode_scaled(bytes, PREVIEW_PX));
-            });
-            let Ok(Some(decoded)) = drx.recv().await else {
+            let Ok(Some(decoded)) = rx.recv().await else {
                 return;
             };
             if let Some(pic) = pic_weak.upgrade() {

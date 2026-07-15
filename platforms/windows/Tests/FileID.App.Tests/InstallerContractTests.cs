@@ -100,7 +100,7 @@ public sealed class InstallerContractTests
         Assert.Equal(version, cargoVersion);
         Assert.Contains("Verify tag matches product version", releaseWorkflow, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", releaseWorkflow, StringComparison.Ordinal);
-        Assert.Contains("actions/upload-artifact@v4", releaseWorkflow, StringComparison.Ordinal);
+        Assert.Matches("actions/upload-artifact@[0-9a-f]{40} # v4", releaseWorkflow);
         Assert.Contains("verify-version.ps1", releaseWorkflow, StringComparison.Ordinal);
         Assert.Contains("verify-version.ps1", msiProject, StringComparison.Ordinal);
         Assert.DoesNotContain("_CargoVersionParsed", msiProject, StringComparison.Ordinal);

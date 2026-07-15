@@ -12,13 +12,13 @@ name = "fileid-linux"
 path = "src/main.rs"
 
 [dependencies]
-# GTK4 + libadwaita Rust bindings, one release train: gtk4 0.8 / libadwaita 0.6 /
+# GTK4 + libadwaita Rust bindings, one release train: gtk4 0.9 / libadwaita 0.7 /
 # libadwaita 1.5+, which ship on Ubuntu 24.04, Fedora 40, and Arch
 # rolling. Older distros use the Flatpak.
-gtk = { package = "gtk4", version = "0.8", features = ["v4_14"] }
-adw = { package = "libadwaita", version = "0.6", features = ["v1_5"] }
-glib = "0.19"
-gio  = "0.19"
+gtk = { package = "gtk4", version = "0.9", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+glib = "0.20"
+gio  = "0.20"
 
 # Async + IPC plumbing — the GTK app spawns the engine as a child
 # process and reads NDJSON from its stdout. async_channel bridges the
