@@ -288,18 +288,25 @@ struct ExactCosineJoinTests {
 
     @Test("person, embedding-row, and embedding-byte preflight caps are independent")
     func inputCaps() {
-        #expect(FaceClustering.autoMergeInputWithinLimits(
+        // Precompute each Bool into a typed Int64 call so the #expect macro sees
+        // a plain Bool — the multi-arg integer arithmetic inside the macro
+        // autoclosure otherwise blows the Swift type-checker's time budget.
+        let allWithin = FaceClustering.autoMergeInputWithinLimits(
             personCount: 20_000, embeddingCount: 250_000,
-            embeddingBytes: 768 * 1024 * 1024, maxEmbeddingBytes: 16 * 1024))
-        #expect(!FaceClustering.autoMergeInputWithinLimits(
+            embeddingBytes: Int64(768) * 1024 * 1024, maxEmbeddingBytes: 16 * 1024)
+        #expect(allWithin)
+        let rowsOver = FaceClustering.autoMergeInputWithinLimits(
             personCount: 1, embeddingCount: 250_001,
-            embeddingBytes: 250_001 * 2_048, maxEmbeddingBytes: 2_048))
-        #expect(!FaceClustering.autoMergeInputWithinLimits(
+            embeddingBytes: Int64(250_001) * 2_048, maxEmbeddingBytes: 2_048)
+        #expect(!rowsOver)
+        let bytesOver = FaceClustering.autoMergeInputWithinLimits(
             personCount: 1, embeddingCount: 2,
-            embeddingBytes: 768 * 1024 * 1024 + 1, maxEmbeddingBytes: 2_048))
-        #expect(!FaceClustering.autoMergeInputWithinLimits(
+            embeddingBytes: Int64(768) * 1024 * 1024 + 1, maxEmbeddingBytes: 2_048)
+        #expect(!bytesOver)
+        let perRowOver = FaceClustering.autoMergeInputWithinLimits(
             personCount: 1, embeddingCount: 1,
-            embeddingBytes: 16 * 1024 + 1, maxEmbeddingBytes: 16 * 1024 + 1))
+            embeddingBytes: Int64(16) * 1024 + 1, maxEmbeddingBytes: 16 * 1024 + 1)
+        #expect(!perRowOver)
     }
 
     @Test("VP-tree edges equal the deterministic direct sweep")
