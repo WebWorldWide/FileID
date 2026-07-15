@@ -46,9 +46,10 @@ struct BulkMutationTests {
         let renamed = root.appendingPathComponent("renamed.md")
         #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(FileManager.default.fileExists(atPath: second.path))
-        let row: Row = try await db.pool.read { sql in
-            try #require(Row.fetchOne(sql, sql: "SELECT path_text, path_hash, extension FROM files WHERE id = 1"))
+        let fetched: Row? = try await db.pool.read { sql in
+            try Row.fetchOne(sql, sql: "SELECT path_text, path_hash, extension FROM files WHERE id = 1")
         }
+        let row = try #require(fetched)
         let path: String = row["path_text"]
         let pathHash: Int64 = row["path_hash"]
         let ext: String = row["extension"]
