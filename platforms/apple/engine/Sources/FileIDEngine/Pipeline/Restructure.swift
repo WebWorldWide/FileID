@@ -857,6 +857,26 @@ public enum Restructure {
         public let conflicts: [String]
     }
 
+    public enum UndoJournalError: LocalizedError, Sendable {
+        case unavailable(ApplyResult)
+        case writeFailed(ApplyResult)
+
+        public var result: ApplyResult {
+            switch self {
+            case .unavailable(let result), .writeFailed(let result): return result
+            }
+        }
+
+        public var errorDescription: String? {
+            switch self {
+            case .unavailable:
+                return "The restructure undo journal could not be created. No files were moved."
+            case .writeFailed:
+                return "The restructure undo journal could not be written. No further files were moved."
+            }
+        }
+    }
+
     struct DestinationClaim: Hashable {
         let high: UInt64
         let low: UInt64
@@ -907,6 +927,52 @@ public enum Restructure {
                 if chunk.isEmpty { eof = true }
                 else { buffer.append(chunk) }
                 guard buffer.count <= Self.maxLineSize else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+            }
+        }
+    }
+
+    private final class ReverseNDJSONLineReader {
+        private let handle: FileHandle
+        private var position: UInt64
+        private var buffer = Data()
+        private var trimmedTrailingNewline = false
+        private static let chunkSize = 64 * 1024
+        private static let maxLineSize = 1024 * 1024
+
+        init(url: URL) throws {
+            let file = try FileHandle(forReadingFrom: url)
+            handle = file
+            position = try file.seekToEnd()
+        }
+
+        deinit { try? handle.close() }
+
+        func nextLine() throws -> Data? {
+            while true {
+                if !trimmedTrailingNewline, buffer.last == 0x0A {
+                    buffer.removeLast()
+                    trimmedTrailingNewline = true
+                }
+                if let newline = buffer.lastIndex(of: 0x0A) {
+                    let line = Data(buffer[buffer.index(after: newline)...])
+                    buffer.removeSubrange(newline...)
+                    return line
+                }
+                if position == 0 {
+                    guard !buffer.isEmpty else { return nil }
+                    let line = buffer
+                    buffer.removeAll(keepingCapacity: false)
+                    return line
+                }
+                let count = min(Int(position), Self.chunkSize)
+                position -= UInt64(count)
+                try handle.seek(toOffset: position)
+                let chunk = try handle.read(upToCount: count) ?? Data()
+                buffer.insert(contentsOf: chunk, at: 0)
+                if buffer.lastIndex(of: 0x0A) == nil,
+                   buffer.count > Self.maxLineSize {
                     throw CocoaError(.fileReadCorruptFile)
                 }
             }
@@ -1013,7 +1079,7 @@ public enum Restructure {
               pathsEqual(header.libraryRoot, expectedRoot) else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return await applyStream(
+        return try await applyStream(
             total: header.totalMoves,
             nextProposal: {
                 guard let line = try reader.nextLine() else { return nil }
@@ -1037,16 +1103,32 @@ public enum Restructure {
         isCancelled: @Sendable () -> Bool = { Task.isCancelled },
         undoJournal: URL? = nil,
         recordUndo: Bool = true
-    ) async -> ApplyResult {
+    ) async throws -> ApplyResult {
+        try await applyForTesting(
+            proposals: proposals, database: database, libraryRoot: libraryRoot,
+            isCancelled: isCancelled, undoJournal: undoJournal, recordUndo: recordUndo,
+            journalAppender: Self.appendUndoEntry)
+    }
+
+    static func applyForTesting(
+        proposals: [RestructureProposal],
+        database: Database,
+        libraryRoot: URL,
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        undoJournal: URL? = nil,
+        recordUndo: Bool = true,
+        journalAppender: (UndoEntry, FileHandle) throws -> Void
+    ) async throws -> ApplyResult {
         var iterator = proposals.makeIterator()
-        return await applyStream(
+        return try await applyStream(
             total: proposals.count,
             nextProposal: { iterator.next() },
             database: database,
             libraryRoot: libraryRoot,
             isCancelled: isCancelled,
             undoJournal: undoJournal,
-            recordUndo: recordUndo)
+            recordUndo: recordUndo,
+            journalAppender: journalAppender)
     }
 
     private static func applyStream(
@@ -1056,20 +1138,29 @@ public enum Restructure {
         libraryRoot: URL,
         isCancelled: @Sendable () -> Bool,
         undoJournal: URL?,
-        recordUndo: Bool
-    ) async -> ApplyResult {
+        recordUndo: Bool,
+        journalAppender: (UndoEntry, FileHandle) throws -> Void = Restructure.appendUndoEntry
+    ) async throws -> ApplyResult {
         let fm = FileManager.default
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
-        // Inverse of every successful move (current → original), appended to the
-        // undo journal AS IT HAPPENS so "Undo last run" can reverse this batch — and
-        // so a crash mid-apply still leaves every COMPLETED move undoable (the prior
-        // design buffered in memory and wrote once after the loop, losing the whole
-        // batch's undo on a crash). nil disables undo, best-effort as before.
-        // (R2 → crash-safe)
-        let undoHandle: FileHandle? = recordUndo
-            ? Self.openUndoJournalTruncating(at: journalURL) : nil
+        let undoHandle: FileHandle?
+        if recordUndo {
+            guard let journalURL else {
+                throw UndoJournalError.unavailable(ApplyResult(
+                    moved: 0, skipped: 0, failed: total, conflicts: []))
+            }
+            do {
+                undoHandle = try Self.openUndoJournalTruncating(at: journalURL)
+            } catch {
+                JSONLog.shared.error(ev: "restructure_undo_journal_open_failed",
+                                     error: "\((error as NSError).domain) \((error as NSError).code)")
+                throw UndoJournalError.unavailable(ApplyResult(
+                    moved: 0, skipped: 0, failed: total, conflicts: []))
+            }
+        } else {
+            undoHandle = nil
+        }
         defer { try? undoHandle?.close() }
-        var undoCount = 0
         // (source, final destination) of every successful move, fed to the
         // learn-from-corrections memory in ONE write after the loop so a future plan
         // can boost a move toward a folder the user has filed here before. Populated
@@ -1140,26 +1231,34 @@ public enum Restructure {
                         arguments: [p.fileID]) else { return nil }
                     return (row["path_text"], row["file_ref"])
                 }
-            guard let live, Self.pathsEqual(live.path, p.oldPath) else {
-                // Undo journals are deliberately retained after cancellation or
-                // a partial failure. A retry sees already-restored entries first;
-                // treat a live DB row + file at the original destination as an
-                // idempotent skip so the remaining entries can finish and the
-                // journal can finally be cleared.
-                if !recordUndo,
-                   let live,
-                   Self.pathsEqual(live.path, p.newPath),
-                   FileManager.default.fileExists(atPath: p.newPath),
-                   !Self.fileRefSwapped(
-                       dbRef: live.fileRef,
-                       currentRef: Discovery.inode(of: URL(fileURLWithPath: p.newPath))) {
-                    skipped += 1
-                    continue
-                }
+            guard let live else {
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_stale_plan",
                                     path: redactPathForLog(p.oldPath))
                 continue
+            }
+            if !Self.pathsEqual(live.path, p.oldPath) {
+                let liveNamesOriginal = !recordUndo && Self.pathsEqual(live.path, p.newPath)
+                let bytesAtOriginal = FileManager.default.fileExists(atPath: p.newPath)
+                let bytesAtMovedPath = FileManager.default.fileExists(atPath: p.oldPath)
+                if liveNamesOriginal && bytesAtOriginal
+                    && !Self.fileRefSwapped(
+                        dbRef: live.fileRef,
+                        currentRef: Discovery.inode(of: plannedURL)) {
+                    skipped += 1
+                    continue
+                }
+                let recoverablePostMoveCrash = liveNamesOriginal && !bytesAtOriginal
+                    && bytesAtMovedPath
+                    && Self.fileRefMatches(
+                        dbRef: live.fileRef,
+                        currentRef: Discovery.inode(of: oldURL))
+                guard recoverablePostMoveCrash else {
+                    failed += 1
+                    JSONLog.shared.warn(ev: "restructure_stale_plan",
+                                        path: redactPathForLog(p.oldPath))
+                    continue
+                }
             }
             // R-#14 same-path SWAP guard: the path check above only proves the DB row
             // still NAMES this source — not that the file currently AT that path is the
@@ -1230,11 +1329,33 @@ public enum Restructure {
             // volumes — byte-faithful with the Windows restructure_apply fix.
             claimed.insert(DestinationClaim(finalURL.path))
 
+            if let h = undoHandle {
+                do {
+                    try Self.appendUndoEntryRecovering(
+                        UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path),
+                        to: h, writer: journalAppender)
+                } catch {
+                    let ns = error as NSError
+                    JSONLog.shared.error(ev: "restructure_undo_journal_write_failed",
+                                         error: "\(ns.domain) \(ns.code)")
+                    failed += max(total - processed + 1, 1)
+                    if recordUndo && !appliedPairs.isEmpty {
+                        await RestructureFeedback.record(
+                            database: database, moves: appliedPairs,
+                            now: Date().timeIntervalSince1970)
+                    }
+                    throw UndoJournalError.writeFailed(ApplyResult(
+                        moved: moved, skipped: skipped, failed: failed,
+                        conflicts: conflicts))
+                }
+            }
+
             do {
                 try fm.moveItem(at: oldURL, to: finalURL)
             } catch {
                 failed += 1
-                // NSError text embeds both full paths — log domain+code only.
+                // The durable inverse entry is harmless: undo treats a live row and
+                // bytes still at the original path as an idempotent skip.
                 let ns = error as NSError
                 JSONLog.shared.warn(ev: "restructure_move_failed",
                                     path: redactPathForLog(oldURL.path),
@@ -1245,17 +1366,6 @@ public enum Restructure {
             // NOT also count it failed (no double-count); it's recorded for
             // recovery (and self-heals on the next scan). (F-C3-012)
             moved += 1
-            // Record the inverse (final → original) for undo, durably. Captured after
-            // the on-disk move succeeded but BEFORE (and regardless of) the DB update
-            // below, so undo can always move the bytes back — appended + periodically
-            // fsync'd so a crash on a later move can't lose this one's undoability.
-            // (R2 → crash-safe)
-            if let h = undoHandle {
-                Self.appendUndoEntry(
-                    UndoEntry(fileID: p.fileID, from: finalURL.path, to: oldURL.path), to: h)
-                undoCount += 1
-                if undoCount % Self.applyProgressInterval == 0 { try? h.synchronize() }
-            }
             if recordUndo {
                 // Credit every successful move to the feedback memory regardless
                 // of whether the undo journal opened (disk-full / sandbox failure).
@@ -1329,34 +1439,57 @@ public enum Restructure {
     }
 
     /// `~/Library/Application Support/FileID/restructure_undo.ndjson` — the last
-    /// apply run's inverse moves. nil only if Application Support is unresolvable
-    /// (then undo is silently unavailable).
+    /// apply run's inverse moves. A forward apply fails before its first move if
+    /// Application Support or the journal is unavailable.
     static var defaultUndoJournalURL: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("FileID/restructure_undo.ndjson")
     }
 
-    /// Open the undo journal truncating (fresh batch) for incremental append, so the
-    /// journal is durable as each move completes rather than written once after the
-    /// loop. nil disables undo (best-effort). "Last run only" semantics are now
-    /// established at the START of the batch (truncate) instead of the end.
-    /// (R2 → crash-safe)
-    static func openUndoJournalTruncating(at url: URL?) -> FileHandle? {
-        guard let url else { return nil }
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // createFile truncates any prior run's journal to empty; the handle then
-        // opens at offset 0 (= end of the empty file), so writes append in order.
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        return try? FileHandle(forWritingTo: url)
+    /// Open the undo journal truncating (fresh batch) for incremental append.
+    /// "Last run only" semantics are established at the start of the batch.
+    static func openUndoJournalTruncating(at url: URL) throws -> FileHandle {
+        let fm = FileManager.default
+        try fm.createDirectory(at: url.deletingLastPathComponent(),
+                               withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: url.path),
+           !fm.createFile(atPath: url.path, contents: nil) {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        do {
+            try handle.truncate(atOffset: 0)
+            try handle.seek(toOffset: 0)
+            return handle
+        } catch {
+            try? handle.close()
+            throw error
+        }
     }
 
-    /// Append one inverse-move entry (NDJSON) to the open journal.
-    static func appendUndoEntry(_ e: UndoEntry, to handle: FileHandle) {
+    static func appendUndoEntryRecovering(
+        _ entry: UndoEntry,
+        to handle: FileHandle,
+        writer: (UndoEntry, FileHandle) throws -> Void
+    ) throws {
+        let offset = try handle.offset()
+        do {
+            try writer(entry, handle)
+        } catch {
+            try? handle.truncate(atOffset: offset)
+            try? handle.seek(toOffset: offset)
+            try? handle.synchronize()
+            throw error
+        }
+    }
+
+    /// Append and durably synchronize one inverse move before its filesystem move.
+    static func appendUndoEntry(_ e: UndoEntry, to handle: FileHandle) throws {
         let obj: [String: Any] = ["file_id": e.fileID, "from": e.from, "to": e.to]
-        guard var line = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        var line = try JSONSerialization.data(withJSONObject: obj)
         line.append(0x0A)
-        try? handle.write(contentsOf: line)
+        try handle.write(contentsOf: line)
+        try handle.synchronize()
     }
 
     private static func undoEntryCount(from url: URL) throws -> Int {
@@ -1438,9 +1571,9 @@ public enum Restructure {
         guard total > 0 else {
             return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
         }
-        let reader: NDJSONLineReader
+        let reader: ReverseNDJSONLineReader
         do {
-            reader = try NDJSONLineReader(url: journalURL)
+            reader = try ReverseNDJSONLineReader(url: journalURL)
         } catch {
             return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
         }
@@ -1450,18 +1583,25 @@ public enum Restructure {
         // and put the REMAINING files back (the already-restored ones stale-skip on
         // the retry). Only a fully-completed (non-cancelled) undo clears it, so the
         // button can't toggle apply→undo→apply by accident.
-        let result = await applyStream(
-            total: total,
-            nextProposal: {
-                guard let line = try reader.nextLine() else { return nil }
-                let entry = try decoder.decode(UndoEntry.self, from: line)
-                return RestructureProposal(
-                    fileID: entry.fileID, oldPath: entry.from,
-                    newPath: entry.to, bucket: "")
-            },
-            database: database, libraryRoot: libraryRoot,
-            isCancelled: isCancelled, undoJournal: journalURL,
-            recordUndo: false)
+        let result: ApplyResult
+        do {
+            result = try await applyStream(
+                total: total,
+                nextProposal: {
+                    guard let line = try reader.nextLine() else { return nil }
+                    let entry = try decoder.decode(UndoEntry.self, from: line)
+                    return RestructureProposal(
+                        fileID: entry.fileID, oldPath: entry.from,
+                        newPath: entry.to, bucket: "")
+                },
+                database: database, libraryRoot: libraryRoot,
+                isCancelled: isCancelled, undoJournal: journalURL,
+                recordUndo: false)
+        } catch {
+            JSONLog.shared.error(ev: "restructure_undo_apply_failed",
+                                 error: "\((error as NSError).domain) \((error as NSError).code)")
+            return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+        }
         if !isCancelled(), result.failed == 0 {
             // Reversibility completeness: remove the orphan empty group folders the
             // apply created, now that undo emptied them. Stream the journal again
@@ -1530,6 +1670,11 @@ public enum Restructure {
     static func fileRefSwapped(dbRef: Int64?, currentRef: UInt64?) -> Bool {
         guard let dbRef, let currentRef else { return false }
         return UInt64(bitPattern: dbRef) != currentRef
+    }
+
+    static func fileRefMatches(dbRef: Int64?, currentRef: UInt64?) -> Bool {
+        guard let dbRef, let currentRef else { return false }
+        return UInt64(bitPattern: dbRef) == currentRef
     }
 
     /// B5: best-effort durable record of a successful on-disk move whose DB

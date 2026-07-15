@@ -26,11 +26,11 @@ struct Detail: View {
         // ⌘Space search results fresh.
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed {
-                Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+                Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
             }
         }
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
-            Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+            Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 28 pt strip at the top for traffic-light buttons + the sidebar

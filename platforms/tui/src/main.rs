@@ -228,7 +228,19 @@ impl Drop for TerminalGuard {
 fn setup_terminal() -> Result<TerminalGuard> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        return Err(error.into());
+    }
+    let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            return Err(error.into());
+        }
+    };
     // Restore the terminal on panic BEFORE the default hook prints, so a panic
     // mid-event-loop lands on the cooked main screen instead of being wiped by
     // the alt-screen teardown in TerminalGuard::drop. The guard's Drop still
@@ -239,6 +251,5 @@ fn setup_terminal() -> Result<TerminalGuard> {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         prev_hook(info);
     }));
-    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     Ok(TerminalGuard { terminal })
 }

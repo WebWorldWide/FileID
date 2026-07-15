@@ -25,7 +25,7 @@ The `generators/` subdirectory will hold scripted codegen once the schema settle
 1. Update `ipc.schema.json` first.
 2. Update the per-platform DTO files to match.
 3. Add a round-trip test on each platform that exercises the new variant.
-4. Run all platforms' tests; all must encode the same byte string for the same logical message.
+4. Run all platforms' tests; all must decode to the same schema-valid logical message. JSON key order is not part of the contract.
 
 ## Versioning
 

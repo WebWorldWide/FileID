@@ -399,6 +399,18 @@ const VRAM_RESERVED_MB: u64 = 1500;
 /// hash/EXIF/decode of a normally-sized file is byte-for-byte unchanged.
 const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
 
+/// Per-image ceiling on persisted faces (top-K by quality). 32 comfortably
+/// covers real family group shots; the cap exists for crowd/stadium photos
+/// whose hundreds of 37 KB crops would otherwise amplify through the tagging
+/// channel and DBWriter batch. Env-tunable for corpus-specific sweeps.
+fn face_max_per_image() -> usize {
+    std::env::var("FILEID_FACE_MAX_PER_IMAGE")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|v| v.clamp(1, 512))
+        .unwrap_or(32)
+}
+
 fn resolve_pool_size(worker_count: usize) -> usize {
     let env_override = std::env::var("FILEID_MODEL_POOL_SIZE")
         .ok()
@@ -1200,6 +1212,24 @@ fn run_decoder_thread(
             }
         }
 
+        // Pre-decode budget reservation for images: the header probe is ~free
+        // and yields the exact decoded RGB size (w×h×3), so the reservation
+        // lands BEFORE the up-to-150 MB frame exists. Without it, every
+        // decoder thread held one full decoded frame while BLOCKED in
+        // budget.acquire — decoder_count × frame_size OUTSIDE the budget,
+        // scaling with core count (12 threads on a 9900X ≈ +1.8 GB worst
+        // case). Video/obj frames and unprobeable images (HEIC shell path)
+        // still reserve post-decode below. (audit 2026-07-14)
+        let mut budget_guard = None;
+        if !file.online_only && file.kind == FileKind::Image {
+            if let Some(expected) = probe_decoded_rgb_bytes(&file.path, file_bytes.as_deref()) {
+                match budget.acquire(expected, &coord) {
+                    Some(g) => budget_guard = Some(g),
+                    None => return,
+                }
+            }
+        }
+
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
@@ -1267,14 +1297,20 @@ fn run_decoder_thread(
             Some(Ok((rgb, _, _))) => rgb.len(),
             _ => 0,
         };
-        let budget_guard = if frame_bytes > 0 {
-            match budget.acquire(frame_bytes, &coord) {
-                Some(g) => Some(g),
-                None => return,
+        if frame_bytes > 0 {
+            // Post-decode fallback for frames that couldn't reserve ahead
+            // (video keyframes, obj renders, unprobeable image headers).
+            if budget_guard.is_none() {
+                match budget.acquire(frame_bytes, &coord) {
+                    Some(g) => budget_guard = Some(g),
+                    None => return,
+                }
             }
         } else {
-            None
-        };
+            // Decode failed or produced no frame — release any pre-decode
+            // reservation immediately instead of riding the channel.
+            budget_guard = None;
+        }
         let item = PreDecoded {
             file,
             decoded,
@@ -1392,6 +1428,28 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
         }
     }
     primary
+}
+
+/// Header-only dimension probe → exact decoded RGB8 byte count (w×h×3),
+/// bounded by the same MAX_DECODED_PIXELS bar the decoder enforces. Used to
+/// reserve the predecode budget BEFORE the frame exists; None (unreadable
+/// header, HEIC shell path, over-cap) falls back to the post-decode
+/// reservation.
+fn probe_decoded_rgb_bytes(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<usize> {
+    use std::io::Cursor;
+    let (w, h) = match bytes {
+        Some(b) => image::ImageReader::new(Cursor::new(b))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?,
+        None => image::image_dimensions(path).ok()?,
+    };
+    let pixels = w as u64 * h as u64;
+    if pixels == 0 || pixels > MAX_DECODED_PIXELS {
+        return None;
+    }
+    usize::try_from(pixels.checked_mul(3)?).ok()
 }
 
 fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
@@ -1761,6 +1819,18 @@ async fn process_file_predecoded(
                     tagged.vision_ms = vision_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
+                }
+                // A crowd shot can emit hundreds of DetectedFaces, each holding a
+                // 37 KB aligned crop — and they ride the 256-slot tagging→DBWriter
+                // channel plus the 500-file batch buffer with no other ceiling, so
+                // one dense stretch of group photos is a real RSS amplifier. Keep
+                // the top-K by quality; K is generous for family group shots.
+                let face_cap = face_max_per_image();
+                if tagged.faces.len() > face_cap {
+                    tagged
+                        .faces
+                        .sort_unstable_by(|a, b| b.quality.total_cmp(&a.quality));
+                    tagged.faces.truncate(face_cap);
                 }
                 // The face stage truly ran this session iff the GPU was alive at
                 // entry, the face models were loaded, AND the GPU did not die

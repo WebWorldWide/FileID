@@ -33,6 +33,7 @@ pub const PARALLEL_PARTS: usize = 12;
 const PROGRESS_REPORT_INTERVAL_BYTES: u64 = 1024 * 1024; // 1 MB
 const MIN_BYTES_FOR_PARALLEL: u64 = 5 * 1024 * 1024;     // 5 MB
 const PROGRESS_THROTTLE_MS: u64 = 50;                    // 20 Hz — smoother bar + finer EMA
+const MAX_UNSIZED_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Total concurrent in-flight HTTP requests across ALL prewarm tasks.
 /// HuggingFace's CDN starts returning 429s when one IP issues too many
@@ -280,6 +281,13 @@ fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result
     Ok(())
 }
 
+fn stream_hard_limit(advertised: Option<u64>, expected: Option<u64>) -> u64 {
+    advertised
+        .filter(|n| *n > 0)
+        .or_else(|| expected.filter(|n| *n > 0).map(|n| n.saturating_mul(4)))
+        .unwrap_or(MAX_UNSIZED_DOWNLOAD_BYTES)
+}
+
 const RETRY_BACKOFFS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(4),
@@ -496,6 +504,7 @@ where
             .filter(|_| !resumed)
             .map(|_| Sha256::new());
 
+        let hard_limit = stream_hard_limit(total, request.expected_bytes);
         let mut stream = resp.bytes_stream();
         let mut last_report = bytes_done.load(Ordering::Relaxed);
         let mut chunk_err: Option<anyhow::Error> = None;
@@ -511,6 +520,20 @@ where
                     break;
                 }
             };
+            let current = bytes_done.load(Ordering::Relaxed);
+            let next = current
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("download byte count overflow for {}", request.url))?;
+            if next > hard_limit {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                anyhow::bail!(
+                    "download exceeded hard byte limit for {}: next chunk would reach {} bytes (limit {})",
+                    request.url,
+                    next,
+                    hard_limit
+                );
+            }
             if let Some(h) = hasher.as_mut() {
                 h.update(&chunk);
             }
@@ -1369,8 +1392,8 @@ mod tests {
     use super::{
         apply_part_progress, chain_has_disk_full, chain_has_pin_failure, check_size_plausible,
         classify_range_status, download_url_allowed, message_indicates_pin_failure,
-        resume_seed_bytes, source_chain_indicates_pin_failure, PartProgress, RangeResumeAction,
-        RetryBudget, PINNED_ROOT_CERTS,
+        resume_seed_bytes, source_chain_indicates_pin_failure, stream_hard_limit, PartProgress,
+        RangeResumeAction, RetryBudget, MAX_UNSIZED_DOWNLOAD_BYTES, PINNED_ROOT_CERTS,
     };
     use std::time::Duration;
 
@@ -1572,6 +1595,15 @@ mod tests {
         assert!(check_size_plausible(100_000, Some(1_000_000), "u").is_err());
         // Zero-byte result against a 38 MB expectation.
         assert!(check_size_plausible(0, Some(38_696_353), "u").is_err());
+    }
+
+    #[test]
+    fn stream_limit_prefers_advertised_then_bounds_estimates_and_unknowns() {
+        assert_eq!(stream_hard_limit(Some(123), Some(456)), 123);
+        assert_eq!(stream_hard_limit(None, Some(456)), 1_824);
+        assert_eq!(stream_hard_limit(Some(0), Some(456)), 1_824);
+        assert_eq!(stream_hard_limit(None, None), MAX_UNSIZED_DOWNLOAD_BYTES);
+        assert_eq!(stream_hard_limit(None, Some(u64::MAX)), u64::MAX);
     }
 
     // C1: ranged resume must seed progress from bytes already on disk, so the

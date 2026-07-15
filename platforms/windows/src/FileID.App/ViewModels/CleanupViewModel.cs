@@ -355,7 +355,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         var maxHamming = NearDupHammingThreshold;
         var groups = new List<DuplicateGroup>();
         var remaining = MaxVisibleMembers;
-        foreach (var ids in PerceptualGrouping.GroupByHamming(items, maxHamming))
+        foreach (var ids in PerceptualGrouping.GroupByHamming(items, maxHamming, ct))
         {
             ct.ThrowIfCancellationRequested();
             if (remaining < 2) break;

@@ -43,7 +43,7 @@ One command, every platform — from the repo root in any bash shell (Git Bash o
 ```bash
 ./build.sh -windows                    # Windows: fresh-install build + run
 ./build.sh -mac                        # macOS:   build + launch
-bash platforms/linux/build/build.sh    # Linux:   build the GTK4 app + run
+./build.sh -linux                      # Linux:   build + launch the GTK4 app
 ```
 
 Defaults build Release, stage a runnable copy at `~/Desktop/FileID/`, and launch. `./build.sh -windows` wipes your local install (including multi-GB model weights) — pass `--no-wipe` to iterate. Full build steps, flag tables, release packaging, and troubleshooting live in [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
@@ -69,7 +69,7 @@ On first launch a **Welcome sheet** offers to install the on-device models (RAM+
 
 ## Front-ends
 
-One engine, five clients — three native desktop GUIs and two headless front-ends. None use web tech: each GUI is native to its OS, and the CLI/TUI link the engine crate in-process so they can never drift from the apps.
+One engine, five clients — three native desktop GUIs and two terminal front-ends. None use web tech: each GUI is native to its OS. CLI/TUI query and model-free paths link the engine crate in-process; their full-ML scan path spawns the same engine binary and IPC used by the desktop clients.
 
 | Front-end | Stack | Best for |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ macOS is the canonical visual + behavioral reference and ships every tab end-to-
 
 ## Using the CLI and TUI
 
-`fileid` (CLI) and `fileid-tui` link the engine in-process and read/write the **same library** as the desktop apps — handy for scripting, headless servers, or a quick scan straight from a terminal.
+`fileid` (CLI) and `fileid-tui` share the engine crate and the **same library** as the desktop apps. Read/query and model-free paths run in-process; full-ML scans spawn `FileIDEngine` over the canonical IPC.
 
 **Build &amp; install.** One command from the repo root builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin` (make sure that's on your `PATH`):
 
@@ -132,7 +132,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 ## Install
 
-> Pre-built release binaries aren't published from the repo yet — build your own with the one-command [Quickstart](#quickstart), or assemble a distributable with the recipes in [`packaging/`](packaging/) ([`packaging/README.md`](packaging/README.md)).
+> Clearly labeled unsigned prerelease artifacts are available on [GitHub Releases](https://github.com/WebWorldWide/FileID/releases). They are not public-trust signed. Build from source with the [Quickstart](#quickstart), or use the recipes in [`packaging/`](packaging/) ([`packaging/README.md`](packaging/README.md)).
 
 - **Linux** — Flatpak (primary; bundles a pinned GNOME runtime, so one build runs on Debian / Ubuntu / Arch / NixOS / Fedora), plus AppImage, a Nix flake, and an AUR `PKGBUILD`.
 - **Windows** — `FileIDSetup.exe` embeds per-arch **.msi** installers (x64 + ARM64) and auto-picks the right one at install; build it with `publish-bundle.ps1`.
@@ -142,7 +142,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 ## Architecture
 
-Each desktop app ships **two processes** that talk newline-delimited JSON over stdio: a native **UI** (SwiftUI / WinUI 3 / GTK4) and a **Rust engine** (Swift on macOS) that owns the SQLite WAL database, scan pipeline, and ML inference. The split buys crash isolation — a panic in the ML pipeline restarts the engine, not the UI. The `fileid` CLI and TUI link the engine crate in-process, so they can't drift either. The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), mirrored by hand-maintained Swift, Rust, and C# DTOs that per-language schema-conformance suites hold to the canonical schema — so casing or shape drift is a test break.
+Each desktop app ships **two processes** that talk newline-delimited JSON over stdio: a native **UI** (SwiftUI / WinUI 3 / GTK4) and an engine (Swift on macOS, Rust on Windows/Linux) that owns the SQLite WAL database, scan pipeline, and ML inference. The split buys crash isolation — a panic in the ML pipeline restarts the engine, not the UI. CLI/TUI share the Rust engine library for local operations and spawn the engine for full-ML scans. The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), mirrored by hand-maintained Swift, Rust, and C# DTOs that per-language schema-conformance suites hold to the canonical schema.
 
 FileID picks the best GPU/NPU path per machine: DirectML across every Windows vendor, CUDA / OpenVINO / QNN Performance Packs opt-in, CoreML + ANE on Apple Silicon, and an AVX2/NEON CPU floor. Full design, the GPU matrix, and the ML-model stack: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md). Build, CI, and troubleshooting detail: [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
 

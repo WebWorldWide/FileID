@@ -70,11 +70,11 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public var isVideo: Bool { kind == "video" }
 }
 
-/// Duplicate group — files sharing the same byte-exact content_hash (item 1), or
-/// a perceptual near-duplicate cluster when `isSimilar` is true (Cleanup's
+/// Duplicate group — files verified by a live full-file digest, or a
+/// perceptual near-duplicate cluster when `isSimilar` is true (Cleanup's
 /// "Similar" mode: dHash Hamming grouping — NOT byte-identical).
 public struct DuplicateGroup: Sendable, Identifiable, Hashable {
-    public let id: Int64           // exact: first 8 bytes of content_hash; similar: min member file id
+    public let id: Int64           // exact: first 8 bytes of full digest; similar: min member file id
     public let files: [FileRow]    // sorted by keeperRank descending (best first)
     /// Exact cardinality/bytes for the whole group. `files` is a bounded
     /// interactive preview when a pathological group contains thousands of
@@ -103,17 +103,4 @@ public struct DuplicateGroup: Sendable, Identifiable, Hashable {
     public var reclaimableBytes: Int64 { totalBytes - (files.first?.sizeBytes ?? 0) }
     public var keeper: FileRow? { files.first }
     public var trashable: ArraySlice<FileRow> { files.dropFirst() }
-
-    /// Files at or below this size get a full byte-for-byte SHA-256; larger files
-    /// are matched by a head+samples+tail+size composite, so a group whose largest
-    /// member is above it is only a *likely* match, not byte-verified. Mirrors the
-    /// engine's internal `ContentHash.fullHashMaxBytes` (16 MiB, == Windows FULL_HASH_MAX_BYTES).
-    public static let fullHashMaxBytes: Int64 = 16 * 1024 * 1024
-
-    /// True when the largest member exceeds the full-hash threshold, so the group
-    /// rests on the composite fingerprint rather than a byte-exact hash. Cleanup
-    /// surfaces this as a "likely match" disclaimer before the user trashes copies.
-    public var isApproximate: Bool {
-        (files.map(\.sizeBytes).max() ?? 0) > Self.fullHashMaxBytes
-    }
 }

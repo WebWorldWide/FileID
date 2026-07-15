@@ -17,6 +17,8 @@ pub(crate) async fn handle_wipe_library(
     db: Arc<Mutex<Connection>>,
     scan_state: Arc<Mutex<Option<crate::coordinator::ScanCoordinator>>>,
     face_cluster_active: Arc<std::sync::atomic::AtomicBool>,
+    deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool>,
+    deep_analyze_active: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Cancel any in-flight scan and wait (bounded) for it to release the single
     // writer before truncating. Otherwise the running DbWriter keeps committing
@@ -48,6 +50,20 @@ pub(crate) async fn handle_wipe_library(
     while face_cluster_active.load(std::sync::atomic::Ordering::Acquire) && cluster_waited < 100 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         cluster_waited += 1;
+    }
+
+    // Same interlock for Deep Analyze: its VLM batch loop writes captions and
+    // renamed rows through the shared writer between items, so a wipe landing
+    // mid-batch would be immediately re-contaminated by the surviving writer
+    // (ghost rows after a wipe that reported success). Cancel it and wait
+    // (bounded) for the single-flight DeepActiveGuard to clear. (audit 2026-07-14)
+    if deep_analyze_active.load(std::sync::atomic::Ordering::Acquire) {
+        deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    let mut deep_waited = 0u32;
+    while deep_analyze_active.load(std::sync::atomic::Ordering::Acquire) && deep_waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        deep_waited += 1;
     }
 
     let wiped = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

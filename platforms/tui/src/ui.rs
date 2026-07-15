@@ -25,7 +25,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, 
 use ratatui::Frame;
 
 use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, DownloadState, Tab};
-use crate::data::{human_size, short};
+use crate::data::{human_size, short, PLAN_CAP};
 
 // ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
 /// Main panel background (`#141417`). Painted under the whole UI so light
@@ -633,12 +633,14 @@ fn render_people(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
-    if app.data.dupes.is_empty() {
+    if app.data.dupes_pending {
+        // The snapshot painted but the deferred live verification is still
+        // reading files — say so instead of a misleading "none found".
         render_context(
             f,
             rows[0],
             vec![Span::styled(
-                "Cleanup — files saved more than once.",
+                "Cleanup — verifying duplicates against file contents…",
                 Style::default().fg(DIM),
             )],
             None,
@@ -647,25 +649,59 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
             f,
             rows[1],
             "Duplicate sets",
-            "No duplicates found.",
+            "Verifying duplicates…",
+            "Cleanup reads each candidate file to confirm true byte-for-byte copies. The other tabs are ready now; this list fills in when verification finishes.",
+            None,
+        );
+        return;
+    }
+    if app.data.dupes.is_empty() {
+        let context = if app.data.dupes_truncated {
+            format!(
+                "Cleanup — partial preview of {} same-size candidates.",
+                app.data.dupe_candidate_count
+            )
+        } else {
+            "Cleanup — files saved more than once.".to_string()
+        };
+        render_context(
+            f,
+            rows[0],
+            vec![Span::styled(context, Style::default().fg(DIM))],
+            None,
+        );
+        render_empty(
+            f,
+            rows[1],
+            "Duplicate sets",
+            if app.data.dupes_truncated {
+                "No duplicates in this partial preview."
+            } else {
+                "No duplicates found."
+            },
             "Cleanup spots files saved more than once by hashing their contents during a scan. It's a read-only preview — FileID never deletes anything here.",
             Some(cta("s", "scan a folder to check for duplicates")),
         );
         return;
     }
-    render_context(
-        f,
-        rows[0],
-        vec![
-            Span::styled("Same file saved more than once. ", Style::default().fg(DIM)),
-            Span::styled("This is a read-only preview", Style::default().fg(GREEN)),
+    let mut context = vec![
+        Span::styled("Same file saved more than once. ", Style::default().fg(DIM)),
+        Span::styled("This is a read-only preview", Style::default().fg(GREEN)),
+        Span::styled(
+            " — the first copy is the one worth keeping.",
+            Style::default().fg(DIM),
+        ),
+    ];
+    if app.data.dupes_truncated {
+        context.insert(
+            0,
             Span::styled(
-                " — the first copy is the one worth keeping.",
-                Style::default().fg(DIM),
+                "PARTIAL DUPLICATE PREVIEW · ",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-        ],
-        None,
-    );
+        );
+    }
+    render_context(f, rows[0], context, None);
 
     let cols =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(rows[1]);
@@ -745,40 +781,55 @@ fn render_deep_analyze(f: &mut Frame, _app: &App, area: Rect) {
 fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
     if app.data.plan.is_empty() {
-        render_context(
-            f,
-            rows[0],
+        let context = if app.data.plan_truncated {
+            vec![Span::styled(
+                format!(
+                    "Partial preview — newest {PLAN_CAP} of {} indexed files.",
+                    app.data.plan_candidate_count
+                ),
+                Style::default().fg(GOLD),
+            )]
+        } else {
             vec![Span::styled(
                 "Restructure — a suggested tidy-up.",
                 Style::default().fg(DIM),
-            )],
-            None,
-        );
+            )]
+        };
+        render_context(f, rows[0], context, None);
         render_empty(
             f,
             rows[1],
             "Suggested moves",
-            "No moves to suggest yet.",
+            if app.data.plan_truncated {
+                "No moves in this partial preview."
+            } else {
+                "No moves to suggest yet."
+            },
             "Restructure previews a tidy, dated folder layout from your indexed files — a read-only plan you review before anything moves.",
             Some(cta("s", "scan a folder, then this plan fills in")),
         );
         return;
     }
-    render_context(
-        f,
-        rows[0],
-        vec![
-            Span::styled(
-                "Suggested tidy-up — read-only preview, nothing moves.   ",
-                Style::default().fg(DIM),
+    let mut context = vec![Span::styled(
+        "Suggested tidy-up — read-only preview, nothing moves.   ",
+        Style::default().fg(DIM),
+    )];
+    if app.data.plan_truncated {
+        context.push(Span::styled(
+            format!(
+                "PARTIAL newest {PLAN_CAP}/{}   ",
+                app.data.plan_candidate_count
             ),
-            Span::styled("● ", Style::default().fg(GREEN)),
-            Span::styled("auto  ", Style::default().fg(DIM)),
-            Span::styled("◐ ", Style::default().fg(GOLD)),
-            Span::styled("check", Style::default().fg(DIM)),
-        ],
-        None,
-    );
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+    }
+    context.extend([
+        Span::styled("● ", Style::default().fg(GREEN)),
+        Span::styled("auto  ", Style::default().fg(DIM)),
+        Span::styled("◐ ", Style::default().fg(GOLD)),
+        Span::styled("check", Style::default().fg(DIM)),
+    ]);
+    render_context(f, rows[0], context, None);
     let cw = content_width(rows[1]);
     render_calm_list(
         f,
@@ -1832,6 +1883,71 @@ mod tests {
         assert!(text.contains("FileID"), "brand/header missing");
         assert!(text.contains("Library"), "Library tab label missing");
         assert!(text.contains("report.txt"), "live file row not rendered");
+    }
+
+    #[test]
+    fn restructure_partial_preview_is_visibly_labeled() {
+        use crate::app::{App, Tab};
+        use crate::data::{LoadMsg, PlanRow, Snapshot};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::Restructure;
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            plan: vec![PlanRow {
+                source: "/library/a.txt".into(),
+                destination: "/library/Documents/a.txt".into(),
+                category: "Documents".into(),
+                confidence: "auto",
+            }],
+            plan_truncated: true,
+            plan_candidate_count: 3_005,
+            ..Snapshot::default()
+        })));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("PARTIAL newest 3000/3005"));
+    }
+
+    #[test]
+    fn cleanup_partial_preview_is_visibly_labeled() {
+        use crate::app::{App, Tab};
+        use crate::data::{DupGroup, LoadMsg, Snapshot};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::Cleanup;
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            dupes: vec![DupGroup {
+                size: 4,
+                copies: 2,
+                paths: vec!["/library/a.bin".into(), "/library/b.bin".into()],
+            }],
+            dupes_truncated: true,
+            dupe_candidate_count: 6_000,
+            ..Snapshot::default()
+        })));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area().height {
+            for x in 0..buffer.area().width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("PARTIAL DUPLICATE PREVIEW"));
     }
 
     #[test]

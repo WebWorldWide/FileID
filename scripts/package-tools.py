@@ -10,7 +10,9 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 
@@ -77,6 +79,43 @@ def windows_runtime_sources(root: Path) -> dict[str, Path]:
     return {name: resolved[name] for name in sorted(required)}
 
 
+def scan_staged_payloads(root: Path, payloads: list[Path]) -> None:
+    scanner = root / "shared/scripts/check_binary_privacy.py"
+    result = subprocess.run(
+        [sys.executable, str(scanner), *(str(path) for path in payloads)],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "staged tool privacy scan failed:\n"
+            + result.stdout
+            + ("\n" if result.stdout and result.stderr else "")
+            + result.stderr
+        )
+    print(result.stdout.strip())
+
+
+def verify_archive_payload(archive: Path, stage: Path) -> None:
+    expected = {f"{stage.name}/{path.name}" for path in stage.iterdir() if path.is_file()}
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive) as bundle:
+            actual = {name.rstrip("/") for name in bundle.namelist() if not name.endswith("/")}
+    else:
+        with tarfile.open(archive, "r:gz") as bundle:
+            actual = {member.name.rstrip("/") for member in bundle.getmembers() if member.isfile()}
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise SystemExit(
+            "archive payload mismatch"
+            f"\n  missing: {missing or 'none'}"
+            f"\n  unexpected: {unexpected or 'none'}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", required=True, help="artifact suffix, e.g. windows-X64")
@@ -131,6 +170,7 @@ def main() -> int:
     stage.mkdir()
     for name, source in sources.items():
         shutil.copy2(source, stage / name)
+    scan_staged_payloads(root, [stage / name for name in sources])
     shutil.copy2(root / "LICENSE", stage / "LICENSE")
 
     runtime = (
@@ -153,6 +193,7 @@ def main() -> int:
 
     archive_format = "zip" if windows else "gztar"
     archive = Path(shutil.make_archive(str(output / stem), archive_format, output, stem))
+    verify_archive_payload(archive, stage)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_name(f"{archive.name}.sha256").write_text(
         f"{digest}  {archive.name}\n", encoding="ascii"

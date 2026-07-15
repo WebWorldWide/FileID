@@ -21,7 +21,8 @@
 // completion.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ use fileid_engine::ipc::{
 const CARD_THUMB_PX: i32 = 256;
 const PHOTO_THUMB_PX: i32 = 240;
 const PERSON_FILE_LIMIT: i64 = 500;
+const PERSON_THUMB_CACHE_CAP: usize = 256;
 
 // Cosine-similarity band the clusterer treats as "borderline" (might be the
 // same person; might not) — identical to macOS `ClusterSuggestions`.
@@ -136,6 +138,53 @@ struct Snapshot {
     total_faces: i64,
 }
 
+struct BoundedLru<K, V> {
+    values: HashMap<K, V>,
+    order: VecDeque<K>,
+    capacity: usize,
+}
+
+impl<K, V> BoundedLru<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    fn new(capacity: usize) -> Self {
+        Self {
+            values: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &K) -> Option<V> {
+        let value = self.values.get(key)?.clone();
+        self.order.retain(|existing| existing != key);
+        self.order.push_back(key.clone());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.values.insert(key.clone(), value).is_some() {
+            self.order.retain(|existing| existing != &key);
+        }
+        self.order.push_back(key);
+        while self.values.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.values.remove(&evicted);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+}
+
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
 
@@ -153,7 +202,7 @@ struct Ui {
     // Keyed by (representative photo path, face bbox): two people can share a
     // representative photo but crop different faces from it, so the path alone
     // would make the second card reuse the first card's face crop.
-    thumb_cache: RefCell<HashMap<(String, Option<String>), gtk::gdk::MemoryTexture>>,
+    thumb_cache: RefCell<BoundedLru<(String, Option<String>), gtk::gdk::MemoryTexture>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
@@ -331,7 +380,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         unknown_checked: RefCell::new(HashSet::new()),
         reload_gen: Cell::new(0),
         clustering: Cell::new(false),
-        thumb_cache: RefCell::new(HashMap::new()),
+        thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_CAP)),
         count_label: count_label.clone(),
         status_label: status_label.clone(),
         actions_box: actions_box.clone(),
@@ -681,7 +730,7 @@ fn toggle(set: &RefCell<HashSet<i64>>, pid: i64) -> bool {
 }
 
 fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
-    check.set_from_icon_name(Some(if on {
+    check.set_icon_name(Some(if on {
         "emblem-ok-symbolic"
     } else {
         "checkbox-symbolic"
@@ -698,23 +747,20 @@ fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
 fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Option<String>) {
     // (path, bbox) — the crop region is part of the identity (see thumb_cache).
     let key = (rep_path.clone(), bbox.clone());
-    if let Some(tex) = ui.thumb_cache.borrow().get(&key).cloned() {
+    if let Some(tex) = ui.thumb_cache.borrow_mut().get(&key) {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = ui.engine.borrow().request_thumbnail(rep_path);
+    let rx = ui
+        .engine
+        .borrow()
+        .request_thumbnail_with(rep_path, move |bytes| {
+            cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX)
+        });
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(bytes)) = rx.recv().await else {
-            return;
-        };
-        // Decode + crop + scale OFF the main loop; only Send pixel data crosses back.
-        let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
-        std::thread::spawn(move || {
-            let _ = dtx.send_blocking(cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX));
-        });
-        let Ok(Some(decoded)) = drx.recv().await else {
+        let Ok(Some(decoded)) = rx.recv().await else {
             return;
         };
         let tex = texture_from_decoded(&decoded);
@@ -961,7 +1007,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         });
     }
 
-    dialog.present(&ui.anchor);
+    dialog.present(Some(&ui.anchor));
 
     // Photos load off the main loop, then tiles stream in.
     let rx = read_person_files_async(pid);
@@ -1002,18 +1048,13 @@ fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
     vbox.append(&pic);
     vbox.append(&name);
 
-    let rx = ui.engine.borrow().request_thumbnail(path.to_string());
+    let rx = ui
+        .engine
+        .borrow()
+        .request_scaled_thumbnail(path.to_string(), PHOTO_THUMB_PX);
     let pic_weak = pic.downgrade();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(bytes)) = rx.recv().await else {
-            return;
-        };
-        // Decode + scale OFF the main loop; only Send pixel data crosses back.
-        let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
-        std::thread::spawn(move || {
-            let _ = dtx.send_blocking(cropped_texture(bytes, None, PHOTO_THUMB_PX));
-        });
-        let Ok(Some(decoded)) = drx.recv().await else {
+        let Ok(Some(decoded)) = rx.recv().await else {
             return;
         };
         if let Some(pic) = pic_weak.upgrade() {
@@ -1109,7 +1150,7 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
     body.append(&scroll);
     toolbar.set_content(Some(&body));
     dialog.set_child(Some(&toolbar));
-    dialog.present(&ui.anchor);
+    dialog.present(Some(&ui.anchor));
 }
 
 // ── Suggested merges ──────────────────────────────────────────────────────────
@@ -1263,7 +1304,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
 
     toolbar.set_content(Some(&body));
     dialog.set_child(Some(&toolbar));
-    dialog.present(&ui.anchor);
+    dialog.present(Some(&ui.anchor));
 }
 
 fn build_suggestion_row(pa: &PersonRow, pb: &PersonRow, sim: f32) -> (gtk::Box, gtk::Button) {
@@ -1721,4 +1762,33 @@ fn sim_markup(s: f32) -> String {
         ("#E0944A", "Possibly same")
     };
     format!("<span foreground='{color}' weight='bold'>{text}</span>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedLru;
+
+    #[test]
+    fn people_thumbnail_cache_never_exceeds_capacity() {
+        let mut cache = BoundedLru::new(3);
+        for value in 0..100 {
+            cache.insert(value, value);
+            assert!(cache.len() <= 3);
+        }
+        assert_eq!(cache.len(), 3);
+        assert!(cache.get(&0).is_none());
+        assert_eq!(cache.get(&99), Some(99));
+    }
+
+    #[test]
+    fn people_thumbnail_cache_refreshes_recently_used_entry() {
+        let mut cache = BoundedLru::new(2);
+        cache.insert("a", 1);
+        cache.insert("b", 2);
+        assert_eq!(cache.get(&"a"), Some(1));
+        cache.insert("c", 3);
+        assert_eq!(cache.get(&"a"), Some(1));
+        assert!(cache.get(&"b").is_none());
+        assert_eq!(cache.get(&"c"), Some(3));
+    }
 }

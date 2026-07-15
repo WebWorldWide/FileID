@@ -6,9 +6,9 @@
 //     disk via the engine crate's own `models::registry` (the canonical
 //     source of every model's files + sizes, so the contract can't drift).
 //     "Download" sends `prewarmModel` (the engine fetches + warms the model,
-//     mirroring Windows); "Cancel" sends `cancelPrewarm`; "Remove" deletes the
-//     on-disk artifacts. Progress is polled off disk (see the NOTE on the
-//     missing `modelDownloadProgress` event surface).
+//     mirroring Windows); "Cancel" sends `cancelPrewarm`; confirmed removal runs
+//     off the GTK thread. Engine progress/errors drive state, with bounded disk
+//     polling as a completion/timeout backstop.
 //   * Engine — connection status (live, from the event stream) + Restart.
 //   * Storage — total files, images, DB path/size, Models dir (DB read).
 //   * Recent scans — the `scan_sessions` table (DB read).
@@ -72,6 +72,94 @@ const MODEL_SLOTS: &[(&str, &str)] = &[
 ];
 
 const LOG_TAIL_LINES: usize = 200;
+const DOWNLOAD_POLL_INTERVAL: Duration = Duration::from_millis(1200);
+const DOWNLOAD_TIMEOUT_TICKS: u32 = 1500;
+
+#[derive(Default)]
+struct ModelTransferState {
+    active: bool,
+    fraction: f64,
+    message: Option<String>,
+    poll_ticks: u32,
+}
+
+impl ModelTransferState {
+    fn start(&mut self) {
+        self.active = true;
+        self.fraction = 0.0;
+        self.message = Some("Queued — starting download…".into());
+        self.poll_ticks = 0;
+    }
+
+    fn progress(&mut self, fraction: f64, message: String) {
+        self.fraction = fraction.clamp(0.0, 1.0);
+        self.message = Some(message);
+        self.active = self.fraction < 1.0;
+        self.poll_ticks = 0;
+    }
+
+    fn fail(&mut self, message: impl Into<String>) {
+        self.active = false;
+        self.message = Some(message.into());
+    }
+
+    fn notice(&mut self, message: impl Into<String>) {
+        self.active = false;
+        self.message = Some(message.into());
+    }
+
+    fn poll(&mut self, installed: bool) {
+        if installed {
+            self.active = false;
+            self.fraction = 1.0;
+            return;
+        }
+        self.poll_ticks = self.poll_ticks.saturating_add(1);
+        if self.poll_ticks >= DOWNLOAD_TIMEOUT_TICKS {
+            self.fail("Download timed out — retry when the network and disk are ready.");
+        }
+    }
+}
+
+#[derive(Default)]
+struct RemovalOutcome {
+    removed: usize,
+    missing: usize,
+    failures: Vec<String>,
+}
+
+impl RemovalOutcome {
+    fn message(&self) -> String {
+        if self.failures.is_empty() {
+            format!(
+                "Removed {} model file(s); {} already absent.",
+                self.removed, self.missing
+            )
+        } else {
+            format!(
+                "Removal incomplete: removed {}, already absent {}, failed {}: {}",
+                self.removed,
+                self.missing,
+                self.failures.len(),
+                self.failures.join("; ")
+            )
+        }
+    }
+}
+
+fn remove_model_files(files: &[(PathBuf, u64)]) -> RemovalOutcome {
+    let mut outcome = RemovalOutcome::default();
+    for (path, _) in files {
+        match std::fs::remove_file(path) {
+            Ok(()) => outcome.removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => outcome.missing += 1,
+            Err(error) => outcome
+                .failures
+                .push(format!("{}: {error}", path.display())),
+        }
+    }
+    outcome
+}
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let root = gtk::Box::builder()
@@ -202,7 +290,10 @@ fn build_model_card(
         .build();
     card.append(&footer);
 
-    let downloading = Rc::new(Cell::new(false));
+    let transfer = Rc::new(RefCell::new(ModelTransferState::default()));
+    let engine_busy = Rc::new(Cell::new(engine.borrow().models_busy()));
+    let removing = Rc::new(Cell::new(false));
+    let timer = Rc::new(RefCell::new(None::<glib::SourceId>));
 
     // Self-referential render closure: button handlers re-trigger it through
     // the shared cell so the footer rebuilds on each state change. Same pattern
@@ -213,7 +304,11 @@ fn build_model_card(
         let engine = engine.clone();
         let footer = footer.clone();
         let files = files.clone();
-        let downloading = downloading.clone();
+        let transfer = transfer.clone();
+        let timer = timer.clone();
+        let engine_busy = engine_busy.clone();
+        let removing = removing.clone();
+        let card = card.clone();
         Rc::new(move || {
             // Clear the previous footer.
             while let Some(child) = footer.first_child() {
@@ -238,7 +333,12 @@ fn build_model_card(
             let installed = files.iter().all(|(p, _)| p.exists());
 
             if installed {
-                downloading.set(false);
+                {
+                    let mut state = transfer.borrow_mut();
+                    state.active = false;
+                    state.fraction = 1.0;
+                }
+                stop_timer(&timer);
                 let row = gtk::Box::builder()
                     .orientation(gtk::Orientation::Horizontal)
                     .spacing(8)
@@ -260,32 +360,114 @@ fn build_model_card(
                 }
                 row.append(&open_btn);
                 let remove_btn = gtk::Button::builder()
-                    .label("Remove")
+                    .label(if removing.get() {
+                        "Removing…"
+                    } else {
+                        "Remove"
+                    })
                     .css_classes(["destructive-action"])
+                    .sensitive(!engine_busy.get() && !removing.get())
                     .build();
+                if engine_busy.get() {
+                    remove_btn.set_tooltip_text(Some(
+                        "Finish the active scan or Deep Analyze run before removing models.",
+                    ));
+                }
                 {
                     let again = self_cell.clone();
                     let files = files.clone();
+                    let card = card.clone();
+                    let transfer = transfer.clone();
+                    let engine = engine.clone();
+                    let engine_busy = engine_busy.clone();
+                    let removing = removing.clone();
                     remove_btn.connect_clicked(move |_| {
-                        for (p, _) in files.iter() {
-                            let _ = std::fs::remove_file(p);
+                        // Enforcement, not the cached hint: re-read the engine's
+                        // authoritative model-use activity at the click moment so
+                        // a scan/Deep Analyze already loading models (before its
+                        // first event has refreshed `engine_busy`) still blocks
+                        // the dialog from opening.
+                        if engine.borrow().models_busy() || removing.get() {
+                            return;
                         }
-                        rerender(&again);
+                        let dialog = adw::AlertDialog::new(
+                            Some("Remove this model?"),
+                            Some("Delete this model from this device? Your library data is unchanged, and you can download the model again later."),
+                        );
+                        dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+                        dialog.set_response_appearance(
+                            "remove",
+                            adw::ResponseAppearance::Destructive,
+                        );
+                        dialog.set_default_response(Some("cancel"));
+                        dialog.set_close_response("cancel");
+                        let again = again.clone();
+                        let files = files.clone();
+                        let transfer = transfer.clone();
+                        let engine = engine.clone();
+                        let engine_busy = engine_busy.clone();
+                        let removing = removing.clone();
+                        dialog.connect_response(None, move |_, response| {
+                            if response != "remove" {
+                                return;
+                            }
+                            // The dialog can sit open for seconds — re-check the
+                            // AUTHORITATIVE engine activity at confirm time, not
+                            // just the cached hint, so work that started while
+                            // the user was reading can't lose its model files.
+                            if engine.borrow().models_busy() || engine_busy.get() {
+                                transfer.borrow_mut().fail(
+                                    "Removal cancelled because the engine became busy.",
+                                );
+                                rerender(&again);
+                                return;
+                            }
+                            removing.set(true);
+                            rerender(&again);
+                            let rx = spawn_blocking({
+                                let files = files.clone();
+                                move || remove_model_files(&files)
+                            });
+                            let again = again.clone();
+                            let transfer = transfer.clone();
+                            let removing = removing.clone();
+                            glib::MainContext::default().spawn_local(async move {
+                                let message = match rx.recv().await {
+                                    Ok(outcome) => outcome.message(),
+                                    Err(_) => "Model removal worker stopped unexpectedly.".into(),
+                                };
+                                removing.set(false);
+                                transfer.borrow_mut().notice(message);
+                                rerender(&again);
+                            });
+                        });
+                        dialog.present(Some(&card));
                     });
                 }
                 row.append(&remove_btn);
                 footer.append(&row);
-            } else if downloading.get() {
-                let frac = if total_bytes > 0 {
-                    (on_disk as f64 / total_bytes as f64).clamp(0.0, 0.999)
+            } else if transfer.borrow().active {
+                let disk_fraction = if total_bytes > 0 {
+                    on_disk as f64 / total_bytes as f64
                 } else {
                     0.0
                 };
+                let (fraction, message) = {
+                    let state = transfer.borrow();
+                    (
+                        state.fraction.max(disk_fraction).clamp(0.0, 0.999),
+                        state
+                            .message
+                            .clone()
+                            .unwrap_or_else(|| "Downloading…".into()),
+                    )
+                };
                 let bar = gtk::ProgressBar::new();
-                bar.set_fraction(frac);
+                bar.set_fraction(fraction);
                 bar.set_show_text(true);
                 bar.set_text(Some(&format!(
-                    "Downloading… {} / {}",
+                    "{} · {} / {}",
+                    message,
                     fmt_bytes(on_disk),
                     fmt_bytes(total_bytes)
                 )));
@@ -308,20 +490,32 @@ fn build_model_card(
                 {
                     let again = self_cell.clone();
                     let engine = engine.clone();
-                    let downloading = downloading.clone();
+                    let transfer = transfer.clone();
+                    let timer = timer.clone();
                     cancel_btn.connect_clicked(move |_| {
                         let _ = engine.borrow_mut().send(CommandPayload::CancelPrewarm(
                             CancelPrewarmPayload {
                                 model_kind: Some(kind.to_string()),
                             },
                         ));
-                        downloading.set(false);
+                        transfer.borrow_mut().notice("Download cancelled.");
+                        stop_timer(&timer);
                         rerender(&again);
                     });
                 }
                 row.append(&cancel_btn);
                 footer.append(&row);
             } else {
+                if let Some(message) = transfer.borrow().message.clone() {
+                    footer.append(
+                        &gtk::Label::builder()
+                            .label(message)
+                            .xalign(0.0)
+                            .wrap(true)
+                            .css_classes(["dim-label"])
+                            .build(),
+                    );
+                }
                 let row = gtk::Box::builder()
                     .orientation(gtk::Orientation::Horizontal)
                     .spacing(8)
@@ -338,33 +532,47 @@ fn build_model_card(
                 {
                     let again = self_cell.clone();
                     let engine = engine.clone();
-                    let downloading = downloading.clone();
+                    let transfer = transfer.clone();
+                    let timer = timer.clone();
                     let files = files.clone();
+                    let card_weak = card.downgrade();
                     dl_btn.connect_clicked(move |_| {
-                        let _ = engine.borrow_mut().send(CommandPayload::PrewarmModel(
+                        stop_timer(&timer);
+                        transfer.borrow_mut().start();
+                        let sent = engine.borrow_mut().send(CommandPayload::PrewarmModel(
                             PrewarmModelPayload {
                                 model_kind: kind.to_string(),
                             },
                         ));
-                        downloading.set(true);
-                        rerender(&again);
-                        // Poll disk for progress + completion until done/cancelled.
-                        // NOTE: would be event-driven if EngineClient surfaced
-                        // `modelDownloadProgress` (see return summary).
-                        let again = again.clone();
-                        let downloading = downloading.clone();
-                        let files = files.clone();
-                        glib::timeout_add_local(Duration::from_millis(1200), move || {
-                            if files.iter().all(|(p, _)| p.exists()) {
-                                downloading.set(false);
-                            }
+                        if let Err(error) = sent {
+                            transfer
+                                .borrow_mut()
+                                .fail(format!("Could not start download: {error}"));
                             rerender(&again);
-                            if downloading.get() {
+                            return;
+                        }
+                        rerender(&again);
+                        let again = again.clone();
+                        let transfer = transfer.clone();
+                        let timer_slot = timer.clone();
+                        let files = files.clone();
+                        let card_weak = card_weak.clone();
+                        let source = glib::timeout_add_local(DOWNLOAD_POLL_INTERVAL, move || {
+                            if card_weak.upgrade().is_none() {
+                                timer_slot.borrow_mut().take();
+                                return glib::ControlFlow::Break;
+                            }
+                            let installed = files.iter().all(|(path, _)| path.exists());
+                            transfer.borrow_mut().poll(installed);
+                            rerender(&again);
+                            if transfer.borrow().active {
                                 glib::ControlFlow::Continue
                             } else {
+                                timer_slot.borrow_mut().take();
                                 glib::ControlFlow::Break
                             }
                         });
+                        *timer.borrow_mut() = Some(source);
                     });
                 }
                 row.append(&dl_btn);
@@ -375,6 +583,79 @@ fn build_model_card(
     *render_cell.borrow_mut() = Some(render.clone());
     render();
 
+    let events = engine.borrow_mut().subscribe();
+    let render_weak = Rc::downgrade(&render_cell);
+    let card_weak = card.downgrade();
+    let transfer_events = transfer.clone();
+    let busy_events = engine_busy.clone();
+    let timer_events = timer.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(event) = events.recv().await {
+            if card_weak.upgrade().is_none() {
+                break;
+            }
+            let rerender_needed = match event {
+                EngineEvent::ModelDownloadProgress(progress) if progress.model_kind == kind => {
+                    let complete = progress.fraction >= 1.0;
+                    transfer_events
+                        .borrow_mut()
+                        .progress(progress.fraction, progress.message);
+                    if complete {
+                        stop_timer(&timer_events);
+                    }
+                    true
+                }
+                EngineEvent::ModelDownloadFailed {
+                    model_kind,
+                    message,
+                } if model_kind == kind => {
+                    transfer_events
+                        .borrow_mut()
+                        .fail(format!("Download failed: {message}"));
+                    stop_timer(&timer_events);
+                    true
+                }
+                EngineEvent::Progress(_)
+                | EngineEvent::BatchLanded(_)
+                | EngineEvent::DeepAnalyzeStarting(_) => {
+                    busy_events.set(true);
+                    true
+                }
+                EngineEvent::ScanComplete(_) | EngineEvent::DeepAnalyzeComplete(_) => {
+                    busy_events.set(false);
+                    true
+                }
+                EngineEvent::Exited => {
+                    busy_events.set(false);
+                    if transfer_events.borrow().active {
+                        transfer_events
+                            .borrow_mut()
+                            .fail("Download stopped because the engine exited.");
+                        stop_timer(&timer_events);
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if rerender_needed {
+                if let Some(cell) = render_weak.upgrade() {
+                    rerender(&cell);
+                }
+            }
+        }
+    });
+
+    let render_for_unroot = render_cell.clone();
+    let transfer_for_unroot = transfer.clone();
+    let timer_for_unroot = timer.clone();
+    card.connect_parent_notify(move |card| {
+        if card.parent().is_none() {
+            stop_timer(&timer_for_unroot);
+            transfer_for_unroot.borrow_mut().active = false;
+            render_for_unroot.borrow_mut().take();
+        }
+    });
+
     card.upcast()
 }
 
@@ -383,6 +664,12 @@ fn rerender(cell: &Rc<RefCell<Option<Rc<dyn Fn()>>>>) {
     let f = cell.borrow().clone();
     if let Some(f) = f {
         f();
+    }
+}
+
+fn stop_timer(timer: &Rc<RefCell<Option<glib::SourceId>>>) {
+    if let Some(source) = timer.borrow_mut().take() {
+        source.remove();
     }
 }
 
@@ -425,23 +712,29 @@ fn build_engine_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Live status from the engine event stream (mirrors window.rs).
     let rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@weak status => async move {
-        while let Ok(ev) = rx.recv().await {
-            let text = match ev {
-                EngineEvent::Spawning => "Status: starting…".to_string(),
-                EngineEvent::Ready => "Status: ready".to_string(),
-                EngineEvent::Progress(p) => format!("Status: scanning… {} / {}", p.processed, p.total),
-                EngineEvent::BatchLanded(n) => format!("Status: scanning… {n} files"),
-                EngineEvent::ScanComplete(n) => format!("Status: ready — last scan {n} files"),
-                EngineEvent::Error(m) => format!("Status: {m}"),
-                EngineEvent::Exited => "Status: restarting…".to_string(),
-                // Deep Analyze / Restructure / model-download events are driven
-                // by their own subscribers — don't clobber the engine status.
-                _ => continue,
-            };
-            status.set_label(&text);
+    glib::MainContext::default().spawn_local(clone!(
+        #[weak]
+        status,
+        async move {
+            while let Ok(ev) = rx.recv().await {
+                let text = match ev {
+                    EngineEvent::Spawning => "Status: starting…".to_string(),
+                    EngineEvent::Ready => "Status: ready".to_string(),
+                    EngineEvent::Progress(p) => {
+                        format!("Status: scanning… {} / {}", p.processed, p.total)
+                    }
+                    EngineEvent::BatchLanded(n) => format!("Status: scanning… {n} files"),
+                    EngineEvent::ScanComplete(n) => format!("Status: ready — last scan {n} files"),
+                    EngineEvent::Error(m) => format!("Status: {m}"),
+                    EngineEvent::Exited => "Status: restarting…".to_string(),
+                    // Deep Analyze / Restructure / model-download events are driven
+                    // by their own subscribers — don't clobber the engine status.
+                    _ => continue,
+                };
+                status.set_label(&text);
+            }
         }
-    }));
+    ));
 
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -449,18 +742,30 @@ fn build_engine_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
 
     let restart = gtk::Button::with_label("Restart engine");
-    restart.connect_clicked(clone!(@strong engine, @weak status => move |_| {
-        // Shutdown → clean exit → EngineClient's fan-out pump auto-respawns.
-        let _ = engine.borrow_mut().send(CommandPayload::Shutdown(Empty {}));
-        status.set_label("Status: restarting…");
-    }));
+    restart.connect_clicked(clone!(
+        #[strong]
+        engine,
+        #[weak]
+        status,
+        move |_| {
+            // Shutdown → clean exit → EngineClient's fan-out pump auto-respawns.
+            let _ = engine.borrow_mut().send(CommandPayload::Shutdown(Empty {}));
+            status.set_label("Status: restarting…");
+        }
+    ));
     row.append(&restart);
 
     let refresh = gtk::Button::with_label("Refresh status");
-    refresh.connect_clicked(clone!(@strong engine => move |_| {
-        // RequestStatus re-emits `ready`, refreshing the label above.
-        let _ = engine.borrow_mut().send(CommandPayload::RequestStatus(Empty {}));
-    }));
+    refresh.connect_clicked(clone!(
+        #[strong]
+        engine,
+        move |_| {
+            // RequestStatus re-emits `ready`, refreshing the label above.
+            let _ = engine
+                .borrow_mut()
+                .send(CommandPayload::RequestStatus(Empty {}));
+        }
+    ));
     row.append(&refresh);
 
     card.append(&row);
@@ -532,7 +837,11 @@ fn build_storage_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
     populate();
 
     let refresh = gtk::Button::with_label("Refresh");
-    refresh.connect_clicked(clone!(@strong populate => move |_| populate()));
+    refresh.connect_clicked(clone!(
+        #[strong]
+        populate,
+        move |_| populate()
+    ));
     buttons.append(&refresh);
 
     let open_db = gtk::Button::with_label("Show database");
@@ -555,13 +864,17 @@ fn build_storage_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Refresh storage after a scan finishes (counts changed).
     let rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@strong populate => async move {
-        while let Ok(ev) = rx.recv().await {
-            if matches!(ev, EngineEvent::ScanComplete(_)) {
-                populate();
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        populate,
+        async move {
+            while let Ok(ev) = rx.recv().await {
+                if matches!(ev, EngineEvent::ScanComplete(_)) {
+                    populate();
+                }
             }
         }
-    }));
+    ));
 
     card.append(&buttons);
     card.upcast()
@@ -589,37 +902,45 @@ fn build_recent_scans_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let list = list.clone();
         Rc::new(move || {
             let rx = spawn_blocking(|| read_recent_scans(12));
-            glib::MainContext::default().spawn_local(clone!(@weak list => async move {
-                let rows = rx.recv().await.unwrap_or_default();
-                while let Some(child) = list.first_child() {
-                    list.remove(&child);
+            glib::MainContext::default().spawn_local(clone!(
+                #[weak]
+                list,
+                async move {
+                    let rows = rx.recv().await.unwrap_or_default();
+                    while let Some(child) = list.first_child() {
+                        list.remove(&child);
+                    }
+                    if rows.is_empty() {
+                        list.append(
+                            &gtk::Label::builder()
+                                .label("No scans recorded yet.")
+                                .xalign(0.0)
+                                .css_classes(["dim-label"])
+                                .build(),
+                        );
+                        return;
+                    }
+                    for s in rows {
+                        list.append(&scan_row(&s));
+                    }
                 }
-                if rows.is_empty() {
-                    list.append(
-                        &gtk::Label::builder()
-                            .label("No scans recorded yet.")
-                            .xalign(0.0)
-                            .css_classes(["dim-label"])
-                            .build(),
-                    );
-                    return;
-                }
-                for s in rows {
-                    list.append(&scan_row(&s));
-                }
-            }));
+            ));
         })
     };
     populate();
 
     let rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(clone!(@strong populate => async move {
-        while let Ok(ev) = rx.recv().await {
-            if matches!(ev, EngineEvent::ScanComplete(_)) {
-                populate();
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        populate,
+        async move {
+            while let Ok(ev) = rx.recv().await {
+                if matches!(ev, EngineEvent::ScanComplete(_)) {
+                    populate();
+                }
             }
         }
-    }));
+    ));
 
     card.upcast()
 }
@@ -720,11 +1041,15 @@ fn build_logs_card() -> gtk::Widget {
         let buffer = buffer.clone();
         Rc::new(move || {
             let rx = spawn_blocking(|| read_log_tail(LOG_TAIL_LINES));
-            glib::MainContext::default().spawn_local(clone!(@weak buffer => async move {
-                if let Ok(text) = rx.recv().await {
-                    buffer.set_text(&text);
+            glib::MainContext::default().spawn_local(clone!(
+                #[weak]
+                buffer,
+                async move {
+                    if let Ok(text) = rx.recv().await {
+                        buffer.set_text(&text);
+                    }
                 }
-            }));
+            ));
         })
     };
     populate();
@@ -734,7 +1059,11 @@ fn build_logs_card() -> gtk::Widget {
         .spacing(8)
         .build();
     let refresh = gtk::Button::with_label("Refresh");
-    refresh.connect_clicked(clone!(@strong populate => move |_| populate()));
+    refresh.connect_clicked(clone!(
+        #[strong]
+        populate,
+        move |_| populate()
+    ));
     buttons.append(&refresh);
     let open = gtk::Button::with_label("Open logs folder");
     open.connect_clicked(|_| {
@@ -994,4 +1323,58 @@ fn fmt_unix(secs: f64) -> String {
         .and_then(|dt| dt.format("%Y-%m-%d %H:%M").ok())
         .map(|g| g.to_string())
         .unwrap_or_else(|| "—".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_transfer_terminal_events_and_timeout_stop_activity() {
+        let mut state = ModelTransferState::default();
+        state.start();
+        assert!(state.active);
+        state.progress(0.5, "halfway".into());
+        assert!(state.active);
+        assert_eq!(state.fraction, 0.5);
+        state.fail("disk full");
+        assert!(!state.active);
+        assert_eq!(state.message.as_deref(), Some("disk full"));
+
+        state.start();
+        for _ in 0..DOWNLOAD_TIMEOUT_TICKS {
+            state.poll(false);
+        }
+        assert!(!state.active);
+        assert!(state.message.as_deref().unwrap().contains("timed out"));
+
+        state.start();
+        state.poll(true);
+        assert!(!state.active);
+        assert_eq!(state.fraction, 1.0);
+    }
+
+    #[test]
+    fn partial_model_removal_reports_failures_without_claiming_success() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-linux-remove-model-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let removable = root.join("first.bin");
+        let forced_failure = root.join("directory-not-file");
+        std::fs::write(&removable, b"model").unwrap();
+        std::fs::create_dir(&forced_failure).unwrap();
+        let outcome = remove_model_files(&[(removable.clone(), 5), (forced_failure.clone(), 0)]);
+        assert_eq!(outcome.removed, 1);
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(!removable.exists());
+        assert!(forced_failure.is_dir());
+        assert!(outcome.message().contains("Removal incomplete"));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

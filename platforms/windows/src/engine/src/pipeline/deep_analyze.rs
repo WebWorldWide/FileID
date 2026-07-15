@@ -583,6 +583,8 @@ pub(crate) fn name_from_transcript(transcript: &str) -> Option<(String, String)>
     Some((name, format!("Audio transcript: {snippet}")))
 }
 
+const MAX_VLM_DECODED_PIXELS: u64 = 50_000_000;
+
 /// Resolve a file's on-disk path and rasterize it to an image the VLM can read:
 /// images pass through; video → 25%-duration keyframe; PDF → page-1 render.
 /// Returns the image path + an optional temp path the caller must clean up.
@@ -620,6 +622,8 @@ pub(crate) async fn rasterize_for_vlm(
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+                let checked = source_path.clone();
+                tokio::task::spawn_blocking(move || validate_vlm_image_dimensions(&checked)).await??;
                 Ok((source_path, None))
             } else {
                 let transcoded = transcode_image_to_jpeg(&source_path).await?;
@@ -656,23 +660,7 @@ async fn transcode_image_to_jpeg(
 ) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-        // Peek dimensions before decode so a tiny adversarial file that expands
-        // to a multi-GB raw buffer can't OOM this blocking thread — mirrors the
-        // MAX_DECODED_PIXELS guard in tagging::decode_image_sync_imagecrate.
-        const MAX_DECODED_PIXELS: u64 = 50_000_000;
-        let (pw, ph) = image::ImageReader::open(&p)
-            .map_err(|e| anyhow::anyhow!("open {}: {e}", p.display()))?
-            .with_guessed_format()
-            .map_err(|e| anyhow::anyhow!("guess format {}: {e}", p.display()))?
-            .into_dimensions()
-            .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", p.display()))?;
-        let pixels = pw as u64 * ph as u64;
-        if pixels > MAX_DECODED_PIXELS {
-            anyhow::bail!(
-                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
-                pw, ph, pixels, MAX_DECODED_PIXELS
-            );
-        }
+        validate_vlm_image_dimensions(&p)?;
         let img = image::open(&p)
             .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
         let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
@@ -683,6 +671,30 @@ async fn transcode_image_to_jpeg(
         Ok(dest)
     })
     .await?
+}
+
+fn validate_vlm_image_dimensions(path: &std::path::Path) -> anyhow::Result<()> {
+    let (width, height) = image::ImageReader::open(path)
+        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("guess format {}: {e}", path.display()))?
+        .into_dimensions()
+        .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", path.display()))?;
+    validate_vlm_pixel_count(width, height)
+}
+
+fn validate_vlm_pixel_count(width: u32, height: u32) -> anyhow::Result<()> {
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_VLM_DECODED_PIXELS {
+        anyhow::bail!(
+            "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
+            width,
+            height,
+            pixels,
+            MAX_VLM_DECODED_PIXELS
+        );
+    }
+    Ok(())
 }
 
 /// Persist VLM enrichment for one file: caption + proposed name into the v3
@@ -1104,6 +1116,12 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
 mod tests {
     use super::sanitize_proposed_name;
     use super::*;
+
+    #[test]
+    fn vlm_pixel_cap_accepts_boundary_and_rejects_oversize() {
+        assert!(validate_vlm_pixel_count(10_000, 5_000).is_ok());
+        assert!(validate_vlm_pixel_count(10_001, 5_000).is_err());
+    }
 
     #[test]
     fn sanitize_strips_quotes_and_normalizes() {

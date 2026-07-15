@@ -290,9 +290,17 @@ Assert "[A1] scan completed without crash" $scanComplete
 # A2: corpus had >= 10 files (or warned).
 Assert "[A2] corpus contains >= 10 files (or warning was emitted)" ($corpusFiles -ge 10) "(found $corpusFiles)"
 
-# A3: throughput meets target.
+# A3: throughput meets target. On an incremental rescan (-SkipWipe) nearly
+# every file skip-matches, so processed/elapsed measures a handful of
+# re-processed files against the whole walk's wall clock and false-fails —
+# gate on WALK throughput (corpus files covered per second) in that case.
 $throughput = if ($scanElapsed.TotalSeconds -gt 0) { $totalProcessed / $scanElapsed.TotalSeconds } else { 0 }
-Assert "[A3] throughput >= $ThroughputTarget files/sec" ($throughput -ge $ThroughputTarget) "(was $([int]$throughput))"
+if ($SkipWipe -and $totalProcessed -lt ($corpusFiles / 10)) {
+    $walkRate = if ($scanElapsed.TotalSeconds -gt 0) { $corpusFiles / $scanElapsed.TotalSeconds } else { 0 }
+    Assert "[A3] incremental walk >= $ThroughputTarget files/sec" ($walkRate -ge $ThroughputTarget) "(walked $([int]$walkRate)/s, reprocessed $totalProcessed)"
+} else {
+    Assert "[A3] throughput >= $ThroughputTarget files/sec" ($throughput -ge $ThroughputTarget) "(was $([int]$throughput))"
+}
 
 # A4: peak resident memory under cap.
 Assert "[A4] peak resident memory <= $MemoryCapMB MB" ($peakResidentMB -le $MemoryCapMB) "(peak $peakResidentMB MB)"

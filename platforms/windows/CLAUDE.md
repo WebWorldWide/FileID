@@ -43,7 +43,7 @@ platforms/windows/
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign   # release MSIs + FileIDSetup.exe
 ```
 
-Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. On-hardware: `build\iterate.ps1 -Corpus <path>` drives a full scan + cluster + assertions against the RTX 2060 / `G:\TrueNAS`.
+Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build FileID.sln` / `dotnet format FileID.sln --verify-no-changes`, then `dotnet test Tests/FileID.App.Tests` + `dotnet test Tests/FileID.IpcSchema.Tests` (the Tests projects are deliberately outside `FileID.sln` — `dotnet test FileID.sln` runs zero tests). On-hardware: `build\iterate.ps1 -Corpus <path>` drives a full scan + cluster + assertions against the RTX 2060 / `G:\TrueNAS`.
 
 ## Current status
 

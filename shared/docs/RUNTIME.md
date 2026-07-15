@@ -61,7 +61,10 @@ Without `--force` it first reuses any runtime already on the machine (Homebrew,
 beside the engine — **zero network**). FileID does not hardcode a third-party
 runtime URL under its HuggingFace-only egress policy. To use the download path,
 set `FILEID_ORT_DYLIB_URL` to a HuggingFace-hosted mirror of the official 1.22.0
-archive; the archive hash is then verified before install.
+archive; the archive hash is then verified before install. With `--json`, declining
+a configured download emits one JSON object with `aborted: true` and exits zero;
+requesting an install with no local or configured source emits
+`error: "no_source_configured"` and exits nonzero.
 
 ### 2. Homebrew
 

@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
+use futures_util::StreamExt;
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 pub struct VlmServer {
@@ -33,6 +35,8 @@ pub struct VlmServer {
 const BIN_EXT: &str = ".exe";
 #[cfg(not(windows))]
 const BIN_EXT: &str = "";
+const MAX_VLM_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_VLM_RESPONSE_BYTES: usize = 1024 * 1024;
 
 impl VlmServer {
     /// Candidate `llama-server` paths in preference order: the CUDA runtime
@@ -164,9 +168,7 @@ impl VlmServer {
     /// read from disk and inlined as a base64 data URI (the format
     /// `/v1/chat/completions` accepts for `image_url`).
     pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
-        let bytes = tokio::fs::read(image_path)
-            .await
-            .with_context(|| format!("read image {}", image_path.display()))?;
+        let bytes = read_image_bounded(image_path).await?;
         let data_uri = format!(
             "data:{};base64,{}",
             image_mime(&bytes),
@@ -204,10 +206,10 @@ impl VlmServer {
             .context("VLM chat/completions request")?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = read_response_bounded(resp).await.unwrap_or_default();
             bail!("llama-server returned {status}: {text}");
         }
-        let text = resp.text().await.context("read VLM response body")?;
+        let text = read_response_bounded(resp).await?;
         let json: serde_json::Value =
             serde_json::from_str(&text).context("parse VLM response JSON")?;
         let content = json["choices"][0]["message"]["content"]
@@ -215,6 +217,49 @@ impl VlmServer {
             .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
         Ok(content.trim().to_string())
     }
+}
+
+async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
+    let len = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("stat image {}", path.display()))?
+        .len();
+    if len > MAX_VLM_ENCODED_BYTES {
+        bail!(
+            "image {} is {} bytes, exceeding the VLM encoded-input cap of {} bytes",
+            path.display(),
+            len,
+            MAX_VLM_ENCODED_BYTES
+        );
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("open image {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(len as usize);
+    tokio::io::AsyncReadExt::take(&mut file, MAX_VLM_ENCODED_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .with_context(|| format!("read image {}", path.display()))?;
+    if bytes.len() as u64 > MAX_VLM_ENCODED_BYTES {
+        bail!(
+            "image {} grew beyond the VLM encoded-input cap while reading",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
+async fn read_response_bounded(resp: reqwest::Response) -> Result<String> {
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("read VLM response chunk")?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_VLM_RESPONSE_BYTES {
+            bail!("VLM response exceeded {MAX_VLM_RESPONSE_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).context("VLM response wasn't UTF-8")
 }
 
 /// Bind an ephemeral port, read it, release it, and hand it to the server.
@@ -245,5 +290,38 @@ fn image_mime(bytes: &[u8]) -> &'static str {
         "image/bmp"
     } else {
         "image/jpeg"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_image_reader_rejects_oversized_sparse_file() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-vlm-bound-{}-{}.jpg",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_VLM_ENCODED_BYTES + 1).unwrap();
+        drop(file);
+        let result = read_image_bounded(&path).await;
+        let _ = std::fs::remove_file(path);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_image_reader_accepts_small_file() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-vlm-small-{}-{}.jpg",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, [0xFF, 0xD8, 0xFF]).unwrap();
+        let bytes = read_image_bounded(&path).await.unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(bytes, [0xFF, 0xD8, 0xFF]);
     }
 }

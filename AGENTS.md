@@ -9,7 +9,7 @@ FileID/
 ├── platforms/
 │   ├── apple/      ← macOS — Swift / SwiftUI / MLX / GRDB
 │   ├── windows/    ← Windows — Rust engine ('fileid-engine') + WinUI 3 / .NET 8
-│   └── linux/      ← deferred; engine is cross-platform-clean, UI port unstarted
+│   └── linux/      ← Rust engine + native GTK4 / libadwaita app
 ├── shared/
 │   ├── ipc-schema/ ← canonical IPC contract (JSON Schema → Swift/Rust/C# DTOs)
 │   ├── docs/       ← cross-platform docs (see Persistence files)
@@ -18,13 +18,14 @@ FileID/
 └── README.md
 ```
 
-Both apps are feature-complete across six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings). macOS remains the **visual + behavioral reference**; Windows currently leads on the commercial-clean model stack (merged, CI-green) with the macOS mirror in progress.
+All three desktop apps are feature-complete across six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings). macOS remains the **visual + behavioral reference**; the commercial-clean model stack is wired on every platform, with remaining on-hardware parity gates documented in `shared/docs/NEXT.md`.
 
 ## Per-platform dev guides
 
 Read the one for the work in front of you:
-- `platforms/windows/AGENTS.md` — Rust engine, WinUI 3, ONNX Runtime (DirectML/CUDA/…), llama.cpp.
-- `platforms/apple/AGENTS.md` — Swift engine + SwiftUI app, MLX, GRDB.
+- `platforms/windows/CLAUDE.md` — Rust engine, WinUI 3, ONNX Runtime (DirectML/CUDA/…), llama.cpp.
+- `platforms/apple/CLAUDE.md` — Swift engine + SwiftUI app, MLX, GRDB.
+- `platforms/linux/CLAUDE.md` — Rust engine client, GTK4/libadwaita, and Linux packaging.
 
 ## Cross-platform principles (apply everywhere)
 
