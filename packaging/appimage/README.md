@@ -44,7 +44,7 @@ The GTK 4.14 / libadwaita 1.5 requirement (from the app's `gtk4 0.8` / `adw 0.6`
 bindings) collides with the "old glibc" goal — old distros don't ship a new
 enough GTK. **This is the AppImage's main open item and needs Linux-side
 iteration**: either build GTK 4.14 into the old-baseline image, or accept the
-22.04/24.04 floor. The Flatpak sidesteps this entirely by shipping the GNOME 46
+22.04/24.04 floor. The Flatpak sidesteps this entirely by shipping the GNOME 49
 runtime, which is why it is primary.
 
 ## ONNX Runtime

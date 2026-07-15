@@ -81,6 +81,7 @@ pub fn spawn_download(db: PathBuf, query: String, tx: Sender<LoadMsg>) -> Downlo
                         "AI models ready. Press s to scan a folder with full AI.".to_string(),
                     ));
                     let _ = tx.send(LoadMsg::Done(Box::new(snap)));
+                    data::run_deferred_dupes(&db, &tx);
                 }
                 Err(e) => {
                     let _ = tx.send(LoadMsg::Error(format!(

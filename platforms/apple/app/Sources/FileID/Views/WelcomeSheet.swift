@@ -106,17 +106,32 @@ struct WelcomeSheet: View {
                 action: { bge.install() },
                 cancel: { bge.cancel() }
             )
-            Picker("Deep Analyze model", selection: $selectedVLM) {
+            Menu {
                 ForEach(AIModelKind.allCases, id: \.rawValue) { kind in
-                    Text("\(kind.displayName) · \(kind.licenseName)")
-                        .tag(kind)
-                        .disabled(!kind.fits(ramGB: systemRAMGB)
-                                  || (!ModelInstallStatus.isInstalled(kind: kind)
-                                      && !kind.fits(freeDiskBytes: availableDiskBytes)))
+                    Button {
+                        selectedVLM = kind
+                    } label: {
+                        HStack {
+                            Text("\(kind.displayName) · \(kind.licenseName)")
+                            if kind == selectedVLM {
+                                Image(systemName: "checkmark").accessibilityHidden(true)
+                            }
+                        }
+                    }
+                    .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
+                    .disabled(!vlmChoiceAvailable(kind))
+                }
+            } label: {
+                HStack {
+                    Text("Deep Analyze model")
+                    Spacer()
+                    Text(selectedVLM.displayName)
+                    Image(systemName: "chevron.up.chevron.down")
                 }
             }
-            .pickerStyle(.menu)
             .disabled(vlmInProgress)
+            .accessibilityLabel("Deep Analyze model")
+            .accessibilityValue(selectedVLM.displayName)
             Text(selectedVLM == hardwareRecommendedVLM
                  ? "Recommended for this Mac's \(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB unified memory."
                  : "Custom model choice. FileID will keep this selection for Deep Analyze.")
@@ -473,9 +488,13 @@ struct WelcomeSheet: View {
     private var vlmInstalled: Bool {
         ModelInstallStatus.isInstalled(kind: selectedVLM)
     }
+    private func vlmChoiceAvailable(_ kind: AIModelKind) -> Bool {
+        kind.fits(ramGB: systemRAMGB)
+            && (ModelInstallStatus.isInstalled(kind: kind)
+                || kind.fits(freeDiskBytes: availableDiskBytes))
+    }
     private var selectedVLMCanInstall: Bool {
-        selectedVLM.fits(ramGB: systemRAMGB)
-            && (vlmInstalled || selectedVLM.fits(freeDiskBytes: availableDiskBytes))
+        vlmChoiceAvailable(selectedVLM)
     }
     private var selectedVLMInstallBlocker: String? {
         guard !vlmInstalled else { return nil }

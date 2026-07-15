@@ -115,12 +115,21 @@ source-URL scans are hard release blockers — no exceptions.
   vulnerable-package scan, telemetry-string scan, app startup smoke.
 - **`macos.yml`**: `swift build` (app + engine), `swift test`, source-URL
   allowlist, telemetry-string scan, engine startup smoke.
+- **`linux.yml`**: native engine/CLI/TUI/GTK format, clippy, tests, builds,
+  schema checks, and binary privacy scanning.
+- **`packaging.yml`**: required GNOME 49 Flatpak build from generated pinned
+  Cargo sources plus SHA-pinned ONNX Runtime, with Cargo forced offline.
+- **`tools.yml` / `release.yml`**: staged native-tool privacy, exact archive
+  membership/checksums, and release validation. Publication remains separately
+  gated on signing credentials and job-scoped write permission.
+- **`policy.yml`**: rejects mutable external GitHub Action references.
+- **`pages.yml`**: builds and deploys the static website when Pages is enabled.
 
 Dev verifies headlessly in the agent environment (`cargo clippy`/`test`,
-`dotnet build`/`test`/`format`); on-hardware verification runs on an RTX 2060
-against the `G:\TrueNAS` corpus via `platforms/windows/build/iterate.ps1` +
-`build/scan_assertions.py` (asserts file count, low failure rate, RAM++/CLIP tags
-present, 128-d/512-byte SFace prints, person clusters formed).
+`dotnet build`/`test`/`format`); Windows on-hardware verification uses
+`platforms/windows/build/iterate.ps1` + `build/scan_assertions.py` against the
+configured real corpus (asserting count, failure rate, RAM++/CLIP tags,
+128-d/512-byte SFace prints, and person clusters).
 
 ## Remaining to v1.0
 

@@ -31,7 +31,7 @@
 // library — even if the planner is buggy or someone forges a payload.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Lines, Write};
+use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -68,6 +68,168 @@ impl Iterator for UndoJournalIter {
     }
 }
 
+/// Write-ahead undo journal: every inverse entry is appended, flushed, and
+/// fsync'd BEFORE the move it describes executes, and rolled back to the prior
+/// offset if that move then fails. The journal therefore never claims a move
+/// that didn't happen and never misses one that did — closing the two crash
+/// windows the previous write-behind (fsync-every-500) design left open.
+/// Mirrors the macOS engine's journal discipline. (audit 2026-07-14)
+struct UndoJournal {
+    file: File,
+    len: u64,
+}
+
+impl UndoJournal {
+    /// Open fresh, truncating the previous run's journal. Called lazily right
+    /// before the FIRST journaled move, so an apply that never journals
+    /// (symlink mode, all no-ops) preserves the prior journal, and an open
+    /// failure aborts before anything moves. Fail-closed: undo protection is a
+    /// precondition of a recorded apply, not best-effort.
+    fn open_truncating(path: Option<PathBuf>) -> Result<UndoJournal> {
+        let path = path.context("no undo journal location available")?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating undo journal dir {}", dir.display()))?;
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("opening undo journal {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing truncated undo journal {}", path.display()))?;
+        Ok(UndoJournal { file, len: 0 })
+    }
+
+    /// Durably append one inverse entry; returns the pre-append offset so a
+    /// failed move can roll the entry back.
+    fn append_ahead(&mut self, file_id: i64, from: &str, to: &str) -> Result<u64> {
+        let prev = self.len;
+        let mut line =
+            serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
+        line.push('\n');
+        self.file
+            .write_all(line.as_bytes())
+            .context("appending undo journal entry")?;
+        self.file.sync_data().context("syncing undo journal entry")?;
+        self.len = prev + line.len() as u64;
+        Ok(prev)
+    }
+
+    /// The move this entry described never happened — truncate it away so undo
+    /// can't replay a phantom. Prior entries stay durable. Best-effort: a
+    /// failed rollback leaves a phantom entry whose replay stale-skips on the
+    /// identity checks.
+    fn rollback_to(&mut self, prev: u64) {
+        use std::io::Seek as _;
+        let _ = self.file.set_len(prev);
+        let _ = self.file.seek(std::io::SeekFrom::Start(prev));
+        let _ = self.file.sync_data();
+        self.len = prev;
+    }
+}
+
+/// One forward pass over the journal collecting each entry's byte span and
+/// validating that it parses. Returns None if the journal does not exist.
+/// Tolerates exactly a torn TRAILING entry: under write-ahead ordering an
+/// entry is fsync'd before its move starts, so a torn tail means that move
+/// never executed and skipping it is safe. Corruption anywhere earlier fails
+/// closed — an explicit error beats a partial undo that reorders dependents.
+fn scan_undo_journal_spans(path: &Path) -> Result<Option<Vec<(u64, u32)>>> {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("opening undo journal {}", path.display()))
+        }
+    };
+    let mut reader = BufReader::new(file);
+    let mut spans: Vec<(u64, u32)> = Vec::new();
+    let mut offset = 0u64;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let n = std::io::BufRead::read_until(&mut reader, b'\n', &mut buf)
+            .context("reading undo journal")?;
+        if n == 0 {
+            break;
+        }
+        let had_newline = buf.last() == Some(&b'\n');
+        let body_len = if had_newline { n - 1 } else { n };
+        let parses = serde_json::from_slice::<UndoEntry>(&buf[..body_len]).is_ok();
+        if parses {
+            spans.push((offset, u32::try_from(body_len).context("journal entry too large")?));
+            offset += n as u64;
+            if !had_newline {
+                break; // final entry, newline lost to a crash — content intact
+            }
+        } else {
+            // Only a torn FINAL entry is acceptable.
+            let mut probe = [0u8; 1];
+            let at_eof = std::io::Read::read(&mut reader, &mut probe)
+                .context("probing undo journal tail")?
+                == 0;
+            if at_eof && !had_newline {
+                tracing::warn!(
+                    offset,
+                    "[RESTRUCTURE] dropping torn trailing undo entry (its move never executed)"
+                );
+                break;
+            }
+            anyhow::bail!(
+                "undo journal corrupt at byte {offset}: refusing a partial undo of {} valid entries",
+                spans.len()
+            );
+        }
+    }
+    Ok(Some(spans))
+}
+
+/// Streams journal entries NEWEST-FIRST via pre-scanned byte spans. Dependent
+/// moves (A→X then B→A) must be restored newest-first or the older inverse
+/// (X→A) finds A occupied by B and uniquifies into "A (2)" — silent
+/// corruption. Holds only the span table, never the journal contents.
+struct ReverseUndoIter {
+    file: File,
+    spans: Vec<(u64, u32)>,
+    next: usize,
+}
+
+impl Iterator for ReverseUndoIter {
+    type Item = Result<RestructureMove>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::{Read as _, Seek as _};
+        if self.next == 0 {
+            return None;
+        }
+        self.next -= 1;
+        let (start, len) = self.spans[self.next];
+        let mut buf = vec![0u8; len as usize];
+        let entry = (|| -> Result<RestructureMove> {
+            self.file
+                .seek(std::io::SeekFrom::Start(start))
+                .context("seeking undo journal entry")?;
+            self.file
+                .read_exact(&mut buf)
+                .context("reading undo journal entry")?;
+            let e: UndoEntry = serde_json::from_slice(&buf)
+                .context("parsing restructure undo journal entry")?;
+            Ok(RestructureMove {
+                file_id: e.file_id,
+                source: e.from,
+                destination: e.to,
+                category: String::new(),
+                tier: None,
+                confidence: String::new(),
+                reason: None,
+            })
+        })();
+        Some(entry)
+    }
+}
+
 fn claimed_destination_key(path: &Path) -> ClaimedDestination {
     let folded = path.to_string_lossy().to_lowercase();
     let digest = blake3::hash(folded.as_bytes());
@@ -93,6 +255,9 @@ pub struct RestructureApply {
     // a user "stop" aborts a 100k-move apply between moves (each completed move
     // is already durable, so stopping mid-batch preserves per-move atomicity).
     cancel: Arc<AtomicBool>,
+    // Test seam: journal location override so concurrent tests never share (or
+    // clobber) the real user journal. None → the app-data location.
+    undo_journal_override: Option<PathBuf>,
 }
 
 impl RestructureApply {
@@ -102,7 +267,14 @@ impl RestructureApply {
             library_root,
             use_symlinks,
             cancel: Arc::new(AtomicBool::new(false)),
+            undo_journal_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_undo_journal_path(mut self, path: PathBuf) -> Self {
+        self.undo_journal_override = Some(path);
+        self
     }
 
     /// Inject a shared cancellation flag. `handle_apply_restructure` passes the
@@ -157,18 +329,15 @@ impl RestructureApply {
 
         let mut applied = 0u32;
         let mut failed = 0u32;
-        // Inverse of every successful real move (current → original), appended to
-        // the undo journal AS IT HAPPENS so "Undo last run" can reverse this batch —
-        // and so a crash mid-apply still leaves every COMPLETED move undoable. (The
-        // prior design buffered in memory and wrote once after the loop, losing the
-        // whole batch's undo on a crash.) Best-effort: a journal that won't open
-        // just disables undo, exactly as before. (R2 → crash-safe)
-        let mut journal = if record_undo {
-            Self::open_undo_journal_truncating()
-        } else {
-            None
-        };
-        let mut undo_count = 0usize;
+        // WRITE-AHEAD undo journal (macOS parity, audit 2026-07-14): each
+        // inverse entry is appended + fsync'd BEFORE its move executes and
+        // rolled back if the move then fails, so the journal never claims a
+        // move that didn't happen and never misses one that did. Opened
+        // LAZILY at the first journaled move: a batch that never journals
+        // (symlink mode, all no-ops) can't truncate the prior run's journal,
+        // and an unopenable journal aborts before ANY file moves — undo
+        // protection is a precondition now, not best-effort.
+        let mut journal: Option<UndoJournal> = None;
         // (source, final destination) of every successful real move, fed to the
         // learn-from-corrections memory in ONE lock acquisition after the loop so a
         // future plan can boost a move toward a folder the user has filed here
@@ -340,6 +509,36 @@ impl RestructureApply {
                 d
             };
 
+            // WRITE-AHEAD: the inverse entry (final → original) is durable
+            // BEFORE the move executes. If the journal cannot open, abort now —
+            // no file has moved yet (lazy open fires on the first real move).
+            // If a later append fails, stop BEFORE the unrecorded move: every
+            // completed move stays undoable, the remainder is reported failed.
+            let mut journal_entry_offset: Option<u64> = None;
+            if record_undo && !self.use_symlinks {
+                if journal.is_none() {
+                    journal = Some(
+                        UndoJournal::open_truncating(self.undo_journal_path())
+                            .context("undo journal unavailable; aborting before any file moves")?,
+                    );
+                }
+                let j = journal.as_mut().expect("journal just opened");
+                match j.append_ahead(m.file_id, &final_dest.to_string_lossy(), &m.source) {
+                    Ok(prev) => journal_entry_offset = Some(prev),
+                    Err(err) => {
+                        tracing::error!(
+                            ?err,
+                            applied,
+                            failed,
+                            "[RESTRUCTURE] undo journal append failed; stopping before the unrecorded move"
+                        );
+                        let remainder = total.saturating_sub(idx).max(1);
+                        failed = failed.saturating_add(u32::try_from(remainder).unwrap_or(u32::MAX));
+                        break;
+                    }
+                }
+            }
+
             let result = if self.use_symlinks {
                 make_symlink(&m.source, &final_dest)
             } else {
@@ -371,23 +570,8 @@ impl RestructureApply {
                             std::path::Path::new(&m.source),
                             &final_dest,
                         );
-                        // Record the inverse (final → original) for undo, durably.
-                        // Real moves only — symlink mode doesn't relocate the file.
-                        // Appended + periodically fsync'd so a crash on a later move
-                        // can't lose this one's undoability. (R2 → crash-safe)
-                        if let Some(j) = journal.as_mut() {
-                            Self::append_undo_entry(
-                                j,
-                                m.file_id,
-                                &final_dest.to_string_lossy(),
-                                &m.source,
-                            );
-                            undo_count += 1;
-                            if undo_count % APPLY_PROGRESS_INTERVAL == 0 {
-                                let _ = j.flush();
-                                let _ = j.get_ref().sync_all();
-                            }
-                        }
+                        // The inverse entry was already written AND synced
+                        // before this move executed (write-ahead above).
                         // Same forward-only gate as the journal: this move was
                         // approved by the user, so credit it to the feedback
                         // memory. Recorded for every real forward move
@@ -404,6 +588,11 @@ impl RestructureApply {
                     applied += 1;
                 }
                 Err(ApplyError::Privilege(msg)) => {
+                    // The journaled entry describes a move that never happened —
+                    // roll it back so undo can't replay a phantom.
+                    if let (Some(j), Some(prev)) = (journal.as_mut(), journal_entry_offset) {
+                        j.rollback_to(prev);
+                    }
                     return Ok(RestructureApplyResult {
                         applied,
                         failed,
@@ -417,18 +606,20 @@ impl RestructureApply {
                         dst=%crate::platform::redact_path_for_log(&final_dest),
                         "move failed"
                     );
+                    if let (Some(j), Some(prev)) = (journal.as_mut(), journal_entry_offset) {
+                        j.rollback_to(prev);
+                    }
                     failed += 1;
                 }
             }
         }
 
-        // Final durability barrier — flush + fsync the remaining buffered entries
-        // so the journal is complete on a clean finish. (None during an undo run,
-        // record_undo=false, so a CANCELLED undo leaves the ORIGINAL journal intact
-        // and the user can re-run undo to finish the remainder.) (R2 → crash-safe)
-        if let Some(mut j) = journal {
-            let _ = j.flush();
-            let _ = j.get_ref().sync_all();
+        // Every entry is already individually durable (write-ahead); one final
+        // sync_all covers file metadata on a clean finish. (None during an undo
+        // run, record_undo=false, so a CANCELLED undo leaves the ORIGINAL
+        // journal intact and the user can re-run undo for the remainder.)
+        if let Some(j) = journal {
+            let _ = j.file.sync_all();
         }
 
         // Learn-from-corrections: each applied move is an approved example, so credit
@@ -443,37 +634,16 @@ impl RestructureApply {
 
     // ── Undo (R2 — reversible "Undo last run") ──────────────────────────────
 
-    fn undo_journal_path() -> Option<PathBuf> {
-        crate::paths::trash_log_path()
-            .ok()
-            .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
+    fn undo_journal_path(&self) -> Option<PathBuf> {
+        self.undo_journal_override.clone().or_else(|| {
+            crate::paths::trash_log_path()
+                .ok()
+                .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
+        })
     }
 
-    /// Open the undo journal truncating (fresh batch). Returns a buffered writer
-    /// each completed move's inverse is appended to, so the journal is durable
-    /// incrementally rather than written once after the loop. (R2 → crash-safe)
-    fn open_undo_journal_truncating() -> Option<BufWriter<File>> {
-        let path = Self::undo_journal_path()?;
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .ok()?;
-        Some(BufWriter::new(f))
-    }
-
-    /// Append one inverse-move entry (NDJSON) to the open journal.
-    fn append_undo_entry(j: &mut BufWriter<File>, file_id: i64, from: &str, to: &str) {
-        let line = serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
-        let _ = writeln!(j, "{line}");
-    }
-
-    fn open_undo_journal() -> Result<Option<UndoJournalIter>> {
-        let Some(path) = Self::undo_journal_path() else {
+    fn open_undo_journal(&self) -> Result<Option<UndoJournalIter>> {
+        let Some(path) = self.undo_journal_path() else {
             return Ok(None);
         };
         match File::open(&path) {
@@ -488,32 +658,31 @@ impl RestructureApply {
     /// Undo the most recent `apply`: replay the inverse moves through `apply`
     /// itself (so the identical stale-check / containment / no-clobber / DB-update
     /// safety applies), then clear the journal so a run can't be undone twice.
-    /// (RESTRUCTURE.md §6 reversibility)
+    ///
+    /// Replay is NEWEST-FIRST (reverse journal order): with dependent moves
+    /// (A→X then B→A) the forward order restores A into the slot B currently
+    /// occupies and uniquifies it into "A (2)" — silent corruption. Reverse
+    /// order first gives B its home back, then A. A torn TRAILING entry (crash
+    /// mid-append, before its fsync — so its move never executed under the
+    /// write-ahead ordering) is skipped; torn data anywhere else fails closed.
+    /// (RESTRUCTURE.md §6 reversibility; macOS parity, audit 2026-07-14)
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
-        let Some(entries) = Self::open_undo_journal()? else {
+        let Some(path) = self.undo_journal_path() else {
             return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
         };
-        // Count in one streaming pass for progress, then reopen for replay. No
-        // journal-sized String/Vec is retained even for a million-move apply.
-        let total = entries
-            .map(|entry| entry.map(|_| 1usize))
-            .try_fold(0usize, |sum, one| one.map(|one| sum + one))?;
+        // One forward pass collects byte spans + validates entries; replay then
+        // seeks backward through the spans. No journal-sized String/Vec is
+        // retained even for a million-move apply (16 B/entry of offsets).
+        let Some(spans) = scan_undo_journal_spans(&path)? else {
+            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+        };
+        let total = spans.len();
         if total == 0 {
             return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
         }
-        let entries = Self::open_undo_journal()?
-            .context("undo journal disappeared before replay")?;
-        let inverse = entries.map(|entry| {
-            entry.map(|entry| RestructureMove {
-                file_id: entry.file_id,
-                source: entry.from,
-                destination: entry.to,
-                category: String::new(),
-                tier: None,
-                confidence: String::new(),
-                reason: None,
-            })
-        });
+        let file = File::open(&path)
+            .with_context(|| format!("reopening undo journal {}", path.display()))?;
+        let inverse = ReverseUndoIter { file, spans, next: total };
         // record_undo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it and
         // put the REMAINING files back (already-restored ones stale-skip on the
@@ -534,10 +703,8 @@ impl RestructureApply {
             // Re-read the journal for bounded-memory empty-directory cleanup
             // before deleting it. Repeated parents are harmless: remove_dir is
             // empty-only, and later entries simply observe an absent directory.
-            Self::cleanup_empty_dirs_from_journal(&self.library_root);
-            if let Some(path) = Self::undo_journal_path() {
-                let _ = std::fs::remove_file(path);
-            }
+            self.cleanup_empty_dirs_from_journal();
+            let _ = std::fs::remove_file(&path);
         }
         Ok(result)
     }
@@ -547,8 +714,9 @@ impl RestructureApply {
     /// never at risk; we additionally stay strictly inside the library root and never
     /// touch the root itself. Deepest-first so nested empties fully collapse.
     /// Best-effort. (R2 → reversibility completeness)
-    fn cleanup_empty_dirs_from_journal(root: &Path) {
-        let Ok(Some(entries)) = Self::open_undo_journal() else {
+    fn cleanup_empty_dirs_from_journal(&self) {
+        let root = self.library_root.as_path();
+        let Ok(Some(entries)) = self.open_undo_journal() else {
             return;
         };
         for entry in entries.flatten() {
@@ -1268,6 +1436,210 @@ mod tests {
         assert_eq!(result.applied, 0);
         assert_eq!(result.failed, 0, "retry must not become permanently stale");
         assert!(original.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn undo_fixture_root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "fileid-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    /// Dependent moves (A→Albums/X, then B→A's vacated slot) must undo
+    /// NEWEST-FIRST: forward replay restores A into the slot B still occupies
+    /// and uniquifies it into "A (2).txt" — silent corruption. (audit 2026-07-14)
+    #[test]
+    fn undo_restores_dependent_moves_in_reverse_order() {
+        let root = undo_fixture_root("undo-reverse");
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("A.txt");
+        let b = root.join("B.txt");
+        std::fs::write(&a, b"AAAA").unwrap();
+        std::fs::write(&b, b"BBBB").unwrap();
+        let a_new = root.join("Albums").join("X.txt");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &a.to_string_lossy());
+        insert_file_row(&conn, 2, &b.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let moves = vec![
+            move_fixture(1, &a.to_string_lossy(), &a_new.to_string_lossy()),
+            move_fixture(2, &b.to_string_lossy(), &a.to_string_lossy()),
+        ];
+        let res = apply.apply(&moves).unwrap();
+        assert_eq!((res.applied, res.failed), (2, 0));
+        assert_eq!(std::fs::read(&a).unwrap(), b"BBBB", "B took A's vacated slot");
+        assert_eq!(std::fs::read(&a_new).unwrap(), b"AAAA");
+
+        let undo = apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (2, 0), "undo must fully restore");
+        assert_eq!(std::fs::read(&a).unwrap(), b"AAAA", "A restored to its own slot");
+        assert_eq!(std::fs::read(&b).unwrap(), b"BBBB", "B restored home");
+        assert!(!a_new.exists());
+        assert!(
+            !root.join("A (2).txt").exists(),
+            "forward-order replay corruption: A was uniquified instead of restored"
+        );
+        assert!(!journal.exists(), "completed undo clears the journal");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A torn trailing journal entry (crash mid-append, before its fsync — so
+    /// its move never executed) must not abort the undo of every valid,
+    /// durable entry before it. (audit 2026-07-14)
+    #[test]
+    fn undo_tolerates_a_torn_trailing_journal_entry() {
+        let root = undo_fixture_root("undo-torn");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        std::fs::write(&src, b"PIC").unwrap();
+        let dst = root.join("Sorted").join("photo.jpg");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let res = apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        assert_eq!((res.applied, res.failed), (1, 0));
+
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&journal).unwrap();
+            f.write_all(b"{\"file_id\":9,\"fro").unwrap();
+        }
+
+        let undo = apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (1, 0), "valid entry still undone");
+        assert!(src.exists(), "file restored despite the torn tail");
+        assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Fail-closed: if the undo journal cannot open, a recorded apply must
+    /// abort BEFORE any file moves — undo protection is a precondition, not
+    /// best-effort. (audit 2026-07-14; macOS parity)
+    #[test]
+    fn unopenable_undo_journal_aborts_apply_before_any_move() {
+        let root = undo_fixture_root("undo-noopen");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("doc.txt");
+        std::fs::write(&src, b"DOC").unwrap();
+        let dst = root.join("Docs").join("doc.txt");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        // A DIRECTORY at the journal path makes the file open fail.
+        let journal = root.join("undo.ndjson");
+        std::fs::create_dir_all(&journal).unwrap();
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let res = apply.apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())]);
+        assert!(res.is_err(), "apply must fail closed without a journal");
+        assert!(src.exists(), "nothing may move without undo protection");
+        assert!(!dst.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A move that fails AFTER its write-ahead entry landed must roll the
+    /// entry back, so undo never replays a phantom; later entries continue
+    /// cleanly at the rolled-back offset. (audit 2026-07-14)
+    #[test]
+    fn failed_move_rolls_back_its_journal_entry() {
+        let root = undo_fixture_root("undo-rollback");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("ghost.txt"); // DB row exists, file does not
+        let real = root.join("real.txt");
+        std::fs::write(&real, b"REAL").unwrap();
+        let dst_missing = root.join("Sorted").join("ghost.txt");
+        let dst_real = root.join("Sorted").join("real.txt");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &missing.to_string_lossy());
+        insert_file_row(&conn, 2, &real.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let moves = vec![
+            move_fixture(1, &missing.to_string_lossy(), &dst_missing.to_string_lossy()),
+            move_fixture(2, &real.to_string_lossy(), &dst_real.to_string_lossy()),
+        ];
+        let res = apply.apply(&moves).unwrap();
+        assert_eq!((res.applied, res.failed), (1, 1));
+
+        let journal_text = std::fs::read_to_string(&journal).unwrap();
+        assert_eq!(
+            journal_text.lines().count(),
+            1,
+            "phantom entry must be rolled back: {journal_text:?}"
+        );
+        assert!(journal_text.contains("real.txt"));
+
+        let undo = apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (1, 0), "no phantom replay");
+        assert!(real.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An apply that journals nothing (here: a pure no-op move) must NOT
+    /// truncate the previous run's journal — that undo history is the user's
+    /// only path back. (audit 2026-07-14)
+    #[test]
+    fn non_journaling_apply_preserves_the_prior_journal() {
+        let root = undo_fixture_root("undo-preserve");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("song.mp3");
+        std::fs::write(&src, b"MP3").unwrap();
+        let dst = root.join("Music").join("song.mp3");
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let res = apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        assert_eq!((res.applied, res.failed), (1, 0));
+        let first_journal = std::fs::read_to_string(&journal).unwrap();
+        assert_eq!(first_journal.lines().count(), 1);
+
+        // Second run: the file is already exactly where the plan wants it — a
+        // no-op that journals nothing and must leave run 1's journal intact.
+        let res2 = apply
+            .apply(&[move_fixture(1, &dst.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        assert_eq!(res2.failed, 0);
+        assert_eq!(
+            std::fs::read_to_string(&journal).unwrap(),
+            first_journal,
+            "a non-journaling apply truncated the prior undo journal"
+        );
+
+        let undo = apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (1, 0));
+        assert!(src.exists(), "run 1 still undoable after the no-op run");
         let _ = std::fs::remove_dir_all(&root);
     }
 

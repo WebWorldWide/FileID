@@ -59,15 +59,15 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust 1.90
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: '1.90'
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -92,7 +92,7 @@ jobs:
           codesign --force --sign - platforms/cli/target/release/fileid
           codesign --force --sign - platforms/tui/target/release/fileid-tui
 
-      - name: Package toolset
+      - name: Package toolset + staged payload privacy scan
         run: python scripts/package-tools.py --label "${{ matrix.artifact }}"
 
       - name: Privacy scan (Unix)
@@ -113,7 +113,7 @@ jobs:
             platforms/tui/target/release/fileid-tui.exe
 
       - name: Upload tool bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Windows archives remain CI-only until their PE payloads use the
           # protected release signer. The publication download pattern excludes them.
@@ -128,12 +128,14 @@ jobs:
     name: Build Windows release (publication gated)
     needs: tools-release
     runs-on: windows-latest
+    outputs:
+      publish: ${{ steps.mode.outputs.publish }}
     defaults:
       run:
         working-directory: platforms/windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Verify product version contract
         shell: pwsh
@@ -152,13 +154,13 @@ jobs:
           Write-Host "Release version contract OK: $productVersion"
 
       - name: Install Rust (1.90, x64 + arm64 targets)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: 1.90
           targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
       - name: Install .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
 
@@ -207,7 +209,7 @@ jobs:
 
       - name: Upload unsigned dry-run artifacts
         if: steps.mode.outputs.publish != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: FileID-Windows-unsigned-${{ github.run_number }}
           path: |
@@ -231,9 +233,14 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
+      - name: Enforce Hugging Face-only runtime egress before publication
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        run: python ../../shared/scripts/check_runtime_egress.py
+
       - name: Download signed/non-Windows CLI/TUI bundles
         if: steps.mode.outputs.publish == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: tools-*
           merge-multiple: true
@@ -261,12 +268,13 @@ jobs:
           if ($lines.Count -ne $payloads.Count) { throw "checksum coverage is incomplete" }
           Get-Content "dist/installer/SHA256SUMS.txt"
 
-      - name: Create GitHub release
+      - name: Stage release-ready assets
         if: steps.mode.outputs.publish == 'true'
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $stage = "dist/release-ready"
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item $stage -ItemType Directory -Force | Out-Null
           $assets = @(
             "dist/installer/FileIDSetup.exe",
             "dist/installer/FileID-x64.msi",
@@ -275,8 +283,39 @@ jobs:
           )
           $assets += Get-ChildItem -LiteralPath "$env:GITHUB_WORKSPACE/release-tools" -File |
             Select-Object -ExpandProperty FullName
-          & gh release create "${{ github.ref_name }}" `
-            --title "FileID ${{ github.ref_name }}" `
-            --generate-notes `
-            @assets
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
+          $staged = Get-ChildItem -LiteralPath $stage -File
+          if ($staged.Count -ne $assets.Count) { throw "release-ready stage is incomplete" }
+
+      - name: Upload release-ready assets
+        if: steps.mode.outputs.publish == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-release-ready-${{ github.run_id }}
+          path: platforms/windows/dist/release-ready/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    name: Publish signed release
+    needs: windows-release
+    if: needs.windows-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release-ready assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: FileID-release-ready-${{ github.run_id }}
+          path: release-assets
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -ge 5
+          gh release create "${{ github.ref_name }}" \
+            --title "FileID ${{ github.ref_name }}" \
+            --generate-notes \
+            release-assets/*

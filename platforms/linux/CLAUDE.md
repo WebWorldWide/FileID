@@ -8,7 +8,7 @@ This file covers the Linux code under `platforms/linux/`. For the macOS referenc
 
 - **Engine**: Rust (`fileid-engine`), single-binary release with LTO. Talks newline-delimited JSON over stdio. Owns the SQLite WAL DB, scan pipeline, ML inference. **Shared with the Windows port** — same crate at `platforms/windows/src/engine/`, referenced via Cargo path dependency. V15.5 cfg-gated the Win32 surface (`shell/*.rs` modules + `ort` DirectML feature) so the same code compiles on Linux. On **Linux** the `ort` dependency is configured to **statically link the CPU ONNX Runtime** (`download-binaries` without `load-dynamic`): pyke ships only a static `libonnxruntime.a` for Linux x64, so a load-dynamic build had no `.so` to `dlopen` and ML silently failed — static linking bakes the runtime in and makes full-ML work. CPU EP only on Linux; GPU is future work. See `shared/docs/DECISIONS.md` (2026-06-30).
 - **App**: GTK4 + libadwaita via `gtk4-rs`. Rust binary, single executable. Adwaita HeaderBar / NavigationView / dark mode follows the system; brand palette (gold #FFCC00, lavender #B19BCE, cyan #A0E2EA, pink #F2A6C0) applied via custom CSS provider.
-- **Distribution**: Flatpak (planned, primary), AppImage (planned, secondary). Both produced by the same Cargo binary; the manifest just wraps it.
+- **Distribution**: Flatpak (primary, required CI build) and AppImage (secondary, native-runtime verification pending). Flatpak uses generated checksum-pinned Cargo sources, pinned ONNX Runtime archives, the GNOME 49/Rust SDK, and an offline build sandbox.
 
 ## Layout
 

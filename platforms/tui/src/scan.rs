@@ -59,6 +59,7 @@ pub fn spawn_scan(
                             snap.total_files
                         )));
                         let _ = tx.send(LoadMsg::Done(Box::new(snap)));
+                        data::run_deferred_dupes(&db, &tx);
                     }
                     Err(e) => {
                         let _ = tx.send(LoadMsg::Error(format!("scan ok, reload failed: {e}")));

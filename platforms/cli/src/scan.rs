@@ -36,7 +36,11 @@ ON CONFLICT(path_text) DO UPDATE SET
     scanned_at  = excluded.scanned_at,
     kind        = excluded.kind,
     extension   = excluded.extension,
-    has_text    = CASE WHEN ?9 = 1 THEN 1 ELSE files.has_text END
+    has_text    = CASE
+                    WHEN ?10 = 1 THEN excluded.has_text
+                    WHEN ?9 = 1 THEN 1
+                    ELSE files.has_text
+                  END
 RETURNING id";
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
@@ -62,11 +66,13 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let mut indexed: u64 = 0;
     let mut skipped: u64 = 0;
     let mut text_indexed: u64 = 0;
+    let mut failed: u64 = 0;
+    let mut warnings = Vec::new();
 
     let tx = conn.transaction().context("begin scan transaction")?;
     {
         let mut sel = tx
-            .prepare("SELECT scanned_at FROM files WHERE path_text = ?1")
+            .prepare("SELECT scanned_at, size_bytes, modified_at FROM files WHERE path_text = ?1")
             .context("prepare existing-row probe")?;
         let mut upsert = tx.prepare(UPSERT_SQL).context("prepare files upsert")?;
         let mut del_doc = tx
@@ -78,16 +84,28 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
 
         for entry in WalkDir::new(&root_abs).follow_links(false) {
             let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
+                Ok(entry) => entry,
+                Err(error) => {
+                    failed += 1;
+                    if warnings.len() < 5 {
+                        warnings.push(format!("walk: {error}"));
+                    }
+                    continue;
+                }
             };
             if !entry.file_type().is_file() {
                 continue;
             }
             let path = entry.path();
             let meta = match std::fs::metadata(path) {
-                Ok(m) => m,
-                Err(_) => continue,
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    failed += 1;
+                    if warnings.len() < 5 {
+                        warnings.push(format!("metadata {}: {error}", path.display()));
+                    }
+                    continue;
+                }
             };
             let size = meta.len();
             if size == 0 {
@@ -107,16 +125,35 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             let created = system_time_to_unix(meta.created().ok());
 
             if !rescan {
-                let prior: Option<f64> = sel.query_row(params![path_text], |r| r.get(0)).ok();
-                if let (Some(prev), Some(modi)) = (prior, modified) {
-                    if prev >= modi {
+                let prior: Option<(f64, i64, f64)> = sel
+                    .query_row(params![path_text], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .ok();
+                if let (Some((scanned_at, prior_size, prior_modified)), Some(current_modified)) =
+                    (prior, modified)
+                {
+                    if scanned_at >= current_modified
+                        && prior_size == size as i64
+                        && (prior_modified - current_modified).abs() < f64::EPSILON
+                    {
                         skipped += 1;
                         continue;
                     }
                 }
             }
 
-            let text = extract_plaintext(&ext, size, path);
+            let authoritative_text = is_plaintext_ext(&ext);
+            let text = match extract_plaintext(&ext, size, path) {
+                Ok(text) => text,
+                Err(error) => {
+                    failed += 1;
+                    if warnings.len() < 5 {
+                        warnings.push(error.to_string());
+                    }
+                    continue;
+                }
+            };
             let has_text = i64::from(text.is_some());
 
             let file_id: i64 = upsert
@@ -130,7 +167,8 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
                         now,
                         kind.as_str(),
                         ext,
-                        has_text
+                        has_text,
+                        i64::from(authoritative_text)
                     ],
                     |r| r.get(0),
                 )
@@ -173,6 +211,8 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             "indexed": indexed,
             "skipped": skipped,
             "textIndexed": text_indexed,
+            "failed": failed,
+            "warnings": warnings,
             "durationMs": elapsed.as_millis() as u64,
         }));
     } else {
@@ -182,7 +222,14 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         } else {
             String::new()
         };
-        println!("{}", ctx.bold("Scan complete."));
+        if failed > 0 {
+            println!(
+                "{}",
+                ctx.bold("Scan complete (partial — some files were unreadable).")
+            );
+        } else {
+            println!("{}", ctx.bold("Scan complete."));
+        }
         println!("  Root:         {}", root_abs.display());
         println!(
             "  Indexed:      {indexed}  {}",
@@ -193,6 +240,12 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             ctx.dim("(full-text search)")
         );
         println!("  Duration:     {secs:.2}s{rate}");
+        if failed > 0 {
+            println!("  Failed:       {failed}");
+            for warning in &warnings {
+                println!("    {warning}");
+            }
+        }
         if indexed > 0 {
             println!("  Search it:    {}", ctx.bold("fileid search \"<words>\""));
         }
@@ -209,8 +262,34 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             );
         }
     }
+    if failed > 0 {
+        return Err(PartialScan { failed }.into());
+    }
     Ok(())
 }
+
+/// A scan whose results committed successfully but which skipped unreadable
+/// files or directories. Surfaced as its own error type so `main` can exit
+/// with the dedicated partial code (3, rsync-style) instead of hard failure —
+/// on a real corpus a locked file or ACL-restricted folder is routine, and a
+/// wrapper keying on the exit code must be able to tell "index is usable,
+/// some files were missed" apart from "the scan itself failed".
+#[derive(Debug)]
+pub struct PartialScan {
+    pub failed: u64,
+}
+
+impl std::fmt::Display for PartialScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "scan completed partially: {} file or traversal error(s); indexed results were committed",
+            self.failed
+        )
+    }
+}
+
+impl std::error::Error for PartialScan {}
 
 fn now_unix() -> f64 {
     SystemTime::now()
@@ -226,17 +305,18 @@ fn system_time_to_unix(t: Option<SystemTime>) -> Option<f64> {
 
 /// Read a small plain-text file as lossy UTF-8 for FTS indexing. Binary
 /// documents (docx/pdf/…) return None — their extractors live in the engine.
-fn extract_plaintext(ext: &str, size: u64, path: &Path) -> Option<String> {
+fn extract_plaintext(ext: &str, size: u64, path: &Path) -> Result<Option<String>> {
     if size > TEXT_CAP_BYTES || !is_plaintext_ext(ext) {
-        return None;
+        return Ok(None);
     }
-    let bytes = std::fs::read(path).ok()?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("read plaintext {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes);
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        None
+        Ok(None)
     } else {
-        Some(trimmed.to_string())
+        Ok(Some(trimmed.to_string()))
     }
 }
 
@@ -253,4 +333,22 @@ fn is_plaintext_ext(ext: &str) -> bool {
             | "php" | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r"
             | "jl" | "lua" | "dart" | "vue" | "pl" | "pm" | "ps1"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plaintext_read_failure_is_not_silently_treated_as_empty_text() {
+        let missing = std::env::temp_dir().join(format!(
+            "fileid-missing-text-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(extract_plaintext("txt", 10, &missing).is_err());
+    }
 }

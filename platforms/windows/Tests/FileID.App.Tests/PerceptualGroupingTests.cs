@@ -3,8 +3,10 @@
 // directly, separate from the SQLite query that feeds it. Mirrors the macOS
 // SharedTests/PerceptualGroupingTests.swift case-for-case.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using FileID.Services;
 using Xunit;
 
@@ -117,4 +119,88 @@ public class PerceptualGroupingTests
         Assert.Empty(PerceptualGrouping.GroupByHamming(new List<(long, long)>(), maxHamming: 8));
         Assert.Empty(PerceptualGrouping.GroupByHamming(Items((1, I(0x0))), maxHamming: 8));
     }
+
+    [Fact]
+    public void MultiIndexMatchesBruteForceAcrossRandomizedThresholds()
+    {
+        var random = new Random(0xF11E1D);
+        var items = Enumerable.Range(0, 600)
+            .Select(i => ((long)i + 1, random.NextInt64()))
+            .ToList();
+        items.Add((10_001, items[7].Item2));
+        items.Add((10_002, items[11].Item2 ^ 0x3F));
+
+        foreach (var threshold in new[] { 0, 1, 4, 8, 12 })
+        {
+            var expected = BruteForceGroups(items, threshold);
+            var actual = PerceptualGrouping.GroupByHamming(items, threshold);
+            Assert.Equal(Normalize(expected), Normalize(actual));
+        }
+    }
+
+    [Fact]
+    public void RandomTwentyThousandSetStaysBelowPairwiseComparisonBudget()
+    {
+        var random = new Random(0x2060);
+        var items = Enumerable.Range(0, 20_000)
+            .Select(i => ((long)i + 1, random.NextInt64()))
+            .ToList();
+
+        var measured = PerceptualGrouping.GroupByHammingMeasured(items, maxHamming: 8);
+        long bruteForcePairs = (long)items.Count * (items.Count - 1) / 2;
+        Assert.True(measured.Comparisons < bruteForcePairs / 10,
+            $"candidate comparisons {measured.Comparisons:N0} were not sufficiently subquadratic against {bruteForcePairs:N0} all-pairs");
+    }
+
+    [Fact]
+    public void CancellationIsObservedBeforeCandidateSweep()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var items = Items((1, 0), (2, 1));
+        Assert.Throws<OperationCanceledException>(() =>
+            PerceptualGrouping.GroupByHamming(items, 8, cts.Token));
+    }
+
+    private static List<List<long>> BruteForceGroups(
+        IReadOnlyList<(long Id, long Phash)> items,
+        int threshold)
+    {
+        var parent = Enumerable.Range(0, items.Count).ToArray();
+        int Find(int value)
+        {
+            while (parent[value] != value)
+            {
+                parent[value] = parent[parent[value]];
+                value = parent[value];
+            }
+            return value;
+        }
+        void Union(int left, int right)
+        {
+            int a = Find(left);
+            int b = Find(right);
+            if (a != b) parent[Math.Max(a, b)] = Math.Min(a, b);
+        }
+        for (int i = 0; i < items.Count; i++)
+        {
+            for (int j = i + 1; j < items.Count; j++)
+            {
+                if (PerceptualGrouping.HammingDistance(items[i].Phash, items[j].Phash) <= threshold)
+                {
+                    Union(i, j);
+                }
+            }
+        }
+        return Enumerable.Range(0, items.Count)
+            .GroupBy(Find)
+            .Select(group => group.Select(i => items[i].Id).ToList())
+            .Where(group => group.Count >= 2)
+            .ToList();
+    }
+
+    private static string Normalize(IEnumerable<List<long>> groups)
+        => string.Join("|", groups
+            .Select(group => string.Join(",", group.OrderBy(id => id)))
+            .OrderBy(group => group, StringComparer.Ordinal));
 }

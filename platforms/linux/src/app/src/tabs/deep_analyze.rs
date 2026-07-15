@@ -348,12 +348,16 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     wire_actions(&ui, &folder_btn, &smart_apply_all);
 
     // ── Live engine events → cards ───────────────────────────────────────────
-    glib::MainContext::default().spawn_local(clone!(@strong ui => async move {
-        let rx = ui.engine.borrow_mut().subscribe();
-        while let Ok(ev) = rx.recv().await {
-            apply_event(&ui, ev);
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        async move {
+            let rx = ui.engine.borrow_mut().subscribe();
+            while let Ok(ev) = rx.recv().await {
+                apply_event(&ui, ev);
+            }
         }
-    }));
+    ));
 
     // Initial fill.
     refresh(&ui);
@@ -422,56 +426,91 @@ fn send_cmd(engine: &Rc<RefCell<EngineClient>>, payload: CommandPayload) {
 
 fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Button) {
     // Analyze entire library → deepAnalyzeAll.
-    ui.run_btn.connect_clicked(clone!(@strong ui => move |_| {
-        if ui.in_flight.get() { return; }
-        let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-            model_kind: ui.active_kind.get().to_string(),
-            skip_existing: ui.skip_check.is_active(),
-            tags_only: false,
-            propose_renames: true,
-        });
-        begin_run(&ui);
-        send_cmd(&ui.engine, payload);
-    }));
-
-    // Analyze a picked folder → deepAnalyzeFolder.
-    folder_btn.connect_clicked(clone!(@strong ui => move |btn| {
-        if ui.in_flight.get() { return; }
-        let dialog = gtk::FileDialog::builder()
-            .title("Pick a folder to Deep Analyze")
-            .modal(true)
-            .build();
-        let parent = btn.root().and_downcast::<gtk::Window>();
-        dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, clone!(@strong ui => move |res| {
-            let Ok(file) = res else { return };
-            let Some(path) = file.path() else { return };
-            let payload = CommandPayload::DeepAnalyzeFolder(DeepAnalyzeFolderPayload {
-                path_prefix: path.to_string_lossy().into_owned(),
+    ui.run_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            if ui.in_flight.get() {
+                return;
+            }
+            let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                 model_kind: ui.active_kind.get().to_string(),
+                skip_existing: ui.skip_check.is_active(),
+                tags_only: false,
+                propose_renames: true,
             });
             begin_run(&ui);
             send_cmd(&ui.engine, payload);
-        }));
-    }));
+        }
+    ));
+
+    // Analyze a picked folder → deepAnalyzeFolder.
+    folder_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |btn| {
+            if ui.in_flight.get() {
+                return;
+            }
+            let dialog = gtk::FileDialog::builder()
+                .title("Pick a folder to Deep Analyze")
+                .modal(true)
+                .build();
+            let parent = btn.root().and_downcast::<gtk::Window>();
+            dialog.select_folder(
+                parent.as_ref(),
+                gio::Cancellable::NONE,
+                clone!(
+                    #[strong]
+                    ui,
+                    move |res| {
+                        let Ok(file) = res else { return };
+                        let Some(path) = file.path() else { return };
+                        let payload = CommandPayload::DeepAnalyzeFolder(DeepAnalyzeFolderPayload {
+                            path_prefix: path.to_string_lossy().into_owned(),
+                            model_kind: ui.active_kind.get().to_string(),
+                        });
+                        begin_run(&ui);
+                        send_cmd(&ui.engine, payload);
+                    }
+                ),
+            );
+        }
+    ));
 
     // Cancel → deepAnalyzeCancel.
-    ui.cancel_btn
-        .connect_clicked(clone!(@strong ui => move |_| {
+    ui.cancel_btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
             send_cmd(&ui.engine, CommandPayload::DeepAnalyzeCancel(Empty {}));
-        }));
+        }
+    ));
 
     // Apply all smart-name renames → renameFiles.
-    apply_all.connect_clicked(clone!(@strong ui => move |_| {
-        let renames: Vec<RenameEntry> = ui
-            .proposed
-            .borrow()
-            .iter()
-            .map(|r| RenameEntry { file_id: r.id, new_name: r.new_name() })
-            .collect();
-        if renames.is_empty() { return; }
-        send_cmd(&ui.engine, CommandPayload::RenameFiles(RenameFilesPayload { renames }));
-        schedule_refresh(&ui, 900);
-    }));
+    apply_all.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            let renames: Vec<RenameEntry> = ui
+                .proposed
+                .borrow()
+                .iter()
+                .map(|r| RenameEntry {
+                    file_id: r.id,
+                    new_name: r.new_name(),
+                })
+                .collect();
+            if renames.is_empty() {
+                return;
+            }
+            send_cmd(
+                &ui.engine,
+                CommandPayload::RenameFiles(RenameFilesPayload { renames }),
+            );
+            schedule_refresh(&ui, 900);
+        }
+    ));
 }
 
 /// Optimistic refresh after a fire-and-forget command (the engine's
@@ -582,7 +621,9 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.download_card.set_visible(true);
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
-        EngineEvent::Error(_) | EngineEvent::Exited => end_run(ui),
+        EngineEvent::Error(_) | EngineEvent::ModelDownloadFailed { .. } | EngineEvent::Exited => {
+            end_run(ui)
+        }
         _ => {}
     }
 }
@@ -594,18 +635,26 @@ fn refresh(ui: &Rc<DeepUi>) {
     ui.lbl_active.set_text(vlm_by_key(&active).display);
 
     let rx = query_status(active.clone());
-    glib::MainContext::default().spawn_local(clone!(@strong ui => async move {
-        if let Ok(c) = rx.recv().await {
-            apply_status(&ui, c);
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        async move {
+            if let Ok(c) = rx.recv().await {
+                apply_status(&ui, c);
+            }
         }
-    }));
+    ));
 
     let rx2 = query_proposed();
-    glib::MainContext::default().spawn_local(clone!(@strong ui => async move {
-        if let Ok(rows) = rx2.recv().await {
-            apply_proposed(&ui, rows);
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        ui,
+        async move {
+            if let Ok(rows) = rx2.recv().await {
+                apply_proposed(&ui, rows);
+            }
         }
-    }));
+    ));
 }
 
 fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
@@ -685,13 +734,20 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         .valign(gtk::Align::Center)
         .build();
     let id = row.id;
-    reanalyze.connect_clicked(clone!(@strong ui => move |_| {
-        send_cmd(&ui.engine, CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
-            file_id: id,
-            model_kind: ui.active_kind.get().to_string(),
-        }));
-        begin_run(&ui);
-    }));
+    reanalyze.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            send_cmd(
+                &ui.engine,
+                CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
+                    file_id: id,
+                    model_kind: ui.active_kind.get().to_string(),
+                }),
+            );
+            begin_run(&ui);
+        }
+    ));
     hbox.append(&reanalyze);
 
     let rename = gtk::Button::builder()
@@ -700,12 +756,22 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         .valign(gtk::Align::Center)
         .build();
     let new_name = row.new_name();
-    rename.connect_clicked(clone!(@strong ui => move |_| {
-        send_cmd(&ui.engine, CommandPayload::RenameFiles(RenameFilesPayload {
-            renames: vec![RenameEntry { file_id: id, new_name: new_name.clone() }],
-        }));
-        schedule_refresh(&ui, 700);
-    }));
+    rename.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            send_cmd(
+                &ui.engine,
+                CommandPayload::RenameFiles(RenameFilesPayload {
+                    renames: vec![RenameEntry {
+                        file_id: id,
+                        new_name: new_name.clone(),
+                    }],
+                }),
+            );
+            schedule_refresh(&ui, 700);
+        }
+    ));
     hbox.append(&rename);
 
     hbox
@@ -790,26 +856,32 @@ fn populate_picker(ui: &Rc<DeepUi>) {
         }
 
         let key = vlm.key;
-        btn.connect_clicked(clone!(@strong ui => move |_| {
-            ui.active_kind.set(key);
-            for row in ui.pick_rows.borrow().iter() {
-                let active = row.key == key;
-                if active {
-                    row.btn.add_css_class("file-tile-selected");
-                    row.indicator.set_text("●");
-                    row.indicator.add_css_class("gold-accent");
-                    row.title.add_css_class("gold-accent");
-                } else {
-                    row.btn.remove_css_class("file-tile-selected");
-                    row.indicator.set_text("○");
-                    row.indicator.remove_css_class("gold-accent");
-                    row.title.remove_css_class("gold-accent");
+        btn.connect_clicked(clone!(
+            #[strong]
+            ui,
+            move |_| {
+                ui.active_kind.set(key);
+                for row in ui.pick_rows.borrow().iter() {
+                    let active = row.key == key;
+                    if active {
+                        row.btn.add_css_class("file-tile-selected");
+                        row.indicator.set_text("●");
+                        row.indicator.add_css_class("gold-accent");
+                        row.title.add_css_class("gold-accent");
+                    } else {
+                        row.btn.remove_css_class("file-tile-selected");
+                        row.indicator.set_text("○");
+                        row.indicator.remove_css_class("gold-accent");
+                        row.title.remove_css_class("gold-accent");
+                    }
                 }
+                ui.skip_check.set_label(Some(&format!(
+                    "Skip images already analyzed by {}",
+                    vlm_by_key(key).display
+                )));
+                refresh(&ui);
             }
-            ui.skip_check
-                .set_label(Some(&format!("Skip images already analyzed by {}", vlm_by_key(key).display)));
-            refresh(&ui);
-        }));
+        ));
 
         ui.picker_box.append(&btn);
         ui.pick_rows.borrow_mut().push(PickRow {
@@ -1017,7 +1089,11 @@ fn build_explainer() -> gtk::Box {
         .valign(gtk::Align::Start)
         .tooltip_text("Hide this explanation")
         .build();
-    dismiss.connect_clicked(clone!(@weak card => move |_| card.set_visible(false)));
+    dismiss.connect_clicked(clone!(
+        #[weak]
+        card,
+        move |_| card.set_visible(false)
+    ));
     row.append(&icon);
     row.append(&text);
     row.append(&dismiss);

@@ -2,7 +2,7 @@
 #
 # AUR package for the FileID Linux GTK4 app (native Arch build).
 # Arch rolling ships gtk4 4.14+ and libadwaita 1.5+, matching the app's
-# `gtk4 0.8` / `libadwaita 0.6` bindings — no Flatpak runtime needed.
+# `gtk4 0.9` / `libadwaita 0.7` bindings — no Flatpak runtime needed.
 #
 # Generate .SRCINFO before publishing:  makepkg --printsrcinfo > .SRCINFO
 
@@ -11,7 +11,7 @@ pkgver=0.1.1
 pkgrel=1
 pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files locally (GTK4)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/AdamNolle/FileID"
+url="https://github.com/WebWorldWide/FileID"
 license=('Apache-2.0')
 # Native package builds link the engine against Arch's ONNX Runtime shared
 # library instead of downloading the portable static archive.
@@ -20,12 +20,12 @@ makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=('tesseract: OCR for image/document text extraction'
             'ffmpeg: video keyframe thumbnails'
             'libheif: HEIC/HEIF image decoding (Arch libheif bundles the libde265 HEVC decoder)')
-source=("git+https://github.com/AdamNolle/FileID.git#tag=v${pkgver}")
-sha256sums=('SKIP')
+source=("https://github.com/WebWorldWide/FileID/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('d12d2f1502404482c2d330b92d31738ca476feb88e4342f19e20d896d53e7b32')
 options=('!lto')  # the engine's release profile already sets fat LTO
 
 prepare() {
-  cd "${srcdir}/FileID/platforms/linux"
+  cd "${srcdir}/FileID-${pkgver}/platforms/linux"
   # Vendor crates offline against the committed lockfile (reproducible, and the
   # cargo crate fetch is the only build step that needs network — makepkg has it).
   export CARGO_HOME="${srcdir}/cargo-home"
@@ -33,7 +33,7 @@ prepare() {
 }
 
 build() {
-  cd "${srcdir}/FileID/platforms/linux"
+  cd "${srcdir}/FileID-${pkgver}/platforms/linux"
   export CARGO_HOME="${srcdir}/cargo-home"
   export RUSTUP_TOOLCHAIN=stable
   # Point ort at Arch's shared ONNX Runtime so `download-binaries` does not
@@ -48,7 +48,7 @@ build() {
 }
 
 package() {
-  cd "${srcdir}/FileID"
+  cd "${srcdir}/FileID-${pkgver}"
   local target="platforms/linux/target/release"
   local data="platforms/linux/data"
 

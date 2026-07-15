@@ -87,7 +87,9 @@ Prereqs:
 | `windows-engine.yml` | x64, arm64-native, arm64-cross | `cargo fmt --check`, `clippy --all-targets -D warnings`, `cargo deny`, soft-warn `cargo audit`, source-URL allowlist, build, test, startup + `verifyCudaPack` smokes, telemetry-string scan |
 | `windows-app.yml` | x64, arm64 | `msbuild` Debug + Release, self-contained publish, xUnit tests, `dotnet format`, vulnerable-package scan, telemetry-string scan, startup smoke |
 | `macos.yml` | swiftpm | `swift build`/`swift test`, startup smoke, source-URL allowlist, telemetry-string scan |
-| `linux.yml` | ubuntu engine + CLI + GTK app | engine `cargo fmt --check`/`clippy --all-targets -D warnings`/`test --lib`/telemetry-string scan, CLI `clippy -D warnings`/build/smoke test, GTK app `cargo build` (required) + advisory `clippy` + telemetry-string scan |
+| `linux.yml` | ubuntu engine + CLI + TUI + GTK app | locked format/clippy `-D warnings`, tests, builds, schema checks, and telemetry-string scans |
+| `packaging.yml` | GNOME 49 Flatpak | generated Cargo-source drift test, offline-sandbox release build, bundle + SHA-256 artifact |
+| `policy.yml` | workflow policy | immutable external Action reference enforcement + negative tests |
 
 `cargo fmt --check` is effectively a no-op: `rustfmt.toml` sets `disable_all_formatting = true` (the codebase uses hand-aligned columns rustfmt can't preserve). The gate stays wired so it starts enforcing if that setting is ever dropped — style is enforced by review.
 
@@ -95,11 +97,11 @@ On-hardware verification (the third TESTING.md layer) runs on an RTX 2060 agains
 
 ## Linux distribution & packaging
 
-The Linux GTK4 app ships to **every distro** through declarative packaging under `packaging/` — see [`packaging/README.md`](packaging/README.md) for the full matrix and per-channel build commands. One Cargo binary (`fileid-linux`) plus the engine it spawns (`FileIDEngine`); each channel just wraps them and reuses the **single** desktop/metadata/icon source in `platforms/linux/data/` (never a copy).
+The Linux GTK4 app ships to **every distro** through declarative packaging under `packaging/` — see [`packaging/README.md`](../../packaging/README.md) for the full matrix and per-channel build commands. One Cargo binary (`fileid-linux`) plus the engine it spawns (`FileIDEngine`); each channel just wraps them and reuses the **single** desktop/metadata/icon source in `platforms/linux/data/` (never a copy).
 
 | Channel | Covers | Native dep on |
 |---|---|---|
-| **Flatpak** (primary) | Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora/openSUSE — anywhere flatpak runs | GNOME 46 runtime (GTK 4.14 + libadwaita 1.5, matching the `gtk4 0.8`/`adw 0.6` bindings) |
+| **Flatpak** (primary) | Debian/Ubuntu/Arch/Gentoo/NixOS/Fedora/openSUSE — anywhere Flatpak runs | GNOME 49 runtime (backward-compatible with the GTK 4.14/libadwaita 1.5 API floor) |
 | **AppImage** (secondary) | Most x86_64 distros, no install/sandbox | bundles its own GTK4/libadwaita |
 | **Nix flake** | NixOS / any Nix user | nixpkgs `gtk4`/`libadwaita`/`onnxruntime` |
 | **AUR `PKGBUILD`** | Arch / Manjaro / EndeavourOS | system `gtk4`/`libadwaita`/`onnxruntime` |
@@ -108,8 +110,8 @@ Rules when touching packaging:
 
 - **Reuse `platforms/linux/data/`.** The `.desktop`, `metainfo.xml`, and `.svg` icon are the single source for all channels; add new desktop assets there, not in a channel directory.
 - **No telemetry in `finish-args`.** The Flatpak grants `--share=network` for exactly one reason — user-initiated HuggingFace model downloads — and never `--filesystem=host`. Do not add host-wide or background-network permissions.
-- **ONNX Runtime is the sharp edge.** The engine's `ort` crate is locked to `load-dynamic` + `download-binaries` (you may not edit it from packaging): it downloads `libonnxruntime.so` at build time and dlopen's it at runtime. Each manifest documents how it handles that (Flatpak: build-step `--share=network` + staged `.so` + `ORT_DYLIB_PATH`; Nix/AUR: system `onnxruntime` via `ORT_LIB_LOCATION`/`ORT_DYLIB_PATH`). See `shared/docs/DECISIONS.md` (2026-06-20 Linux distribution entry).
-- **The Flatpak CI job is advisory.** `.github/workflows/packaging.yml` runs `flatpak-builder` with `continue-on-error: true` until the ONNX-in-sandbox build is verified green on real Linux. Keep it advisory until then; don't let it red-gate `main`, and don't fake a pass.
+- **Keep Flatpak source-complete and offline.** `cargo-sources.json` must exactly match `platforms/linux/Cargo.lock`; run `generate-cargo-sources.py --check`. The Rust SDK extension supplies the toolchain, and the SHA-pinned ONNX Runtime archives enter through manifest sources plus `ORT_LIB_LOCATION`. Never restore rustup, build-network access, or a Cargo/ort download fallback.
+- **Flatpak is a required gate.** `.github/workflows/packaging.yml` builds and bundles it without `continue-on-error`. Before Flathub submission, replace the bounded local source directories with the immutable archive of the audited release commit and regenerate sources from that archive's lockfile.
 
 ## When to update which doc
 

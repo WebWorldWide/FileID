@@ -38,7 +38,7 @@ public struct TaggedFile: Sendable {
     /// tags (no score). DBWriter writes a NULL score for any tag not present here.
     public var tagScores: [String: Double]?
     public var phash: UInt64?                // dHash (0 = none / failed)
-    public var contentHash: Data?            // SHA-256 byte-exact identity; nil on read error
+    public var contentHash: Data?            // SHA-256 full/sampled rename identity; nil on read error
     public var aestheticScore: Double?       // 0..1
     public var hasFaces: Bool
     public var facePrints: [Data]            // archived VNFaceObservation feature prints
@@ -552,8 +552,8 @@ public actor DBWriter {
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
         //   file_ref binds the volume-local inode (st_ino) computed at discovery,
         //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:));
-        //   content_hash is the cross-platform SHA-256 identity shared with the
-        //   Rust engine. COALESCE preserves a previously-stored identity when the
+        //   content_hash is the persisted SHA-256 full/sampled identity shared with
+        //   the Rust engine. COALESCE preserves a previously-stored identity when the
         //   incoming value is NULL.
         try db.cachedStatement(sql: """
             INSERT INTO files

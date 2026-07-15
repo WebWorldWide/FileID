@@ -6,11 +6,9 @@
 # identically on macOS, Linux, and Windows. It is its OWN standalone Cargo
 # workspace (mirroring platforms/cli), not a member of any platform workspace.
 #
-# Engine integration mirrors the CLI: reads go through the engine's library
-# surface IN-PROCESS (db::open_read + migrations, paths, pipeline::restructure,
-# discovery::FileKind) so the DB/IPC contract can never drift. Live engine
-# command-spawn over stdio (scan/cluster) is a documented follow-on — see the
-# README "Stubbed" section.
+# Engine integration mirrors the CLI: reads and planning use the library surface
+# in-process; scans spawn FileIDEngine over the canonical NDJSON IPC so the
+# async/ORT lifecycle stays isolated without schema drift.
 
 [workspace]
 

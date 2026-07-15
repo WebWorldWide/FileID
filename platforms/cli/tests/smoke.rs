@@ -6,6 +6,7 @@
 //! scan → search → info entirely with FTS (no ML models). Must run green on
 //! any host with the engine's bundled SQLite (FTS5).
 
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -46,6 +47,35 @@ fn stdout(out: &Output) -> String {
 
 fn json(out: &Output) -> serde_json::Value {
     serde_json::from_str(&stdout(out)).expect("parse json stdout")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn runtime_install_json_abort_and_no_source_are_machine_safe() {
+    let abort = Command::new(bin())
+        .args(["--json", "runtime", "install", "--force"])
+        .env(
+            "FILEID_ORT_DYLIB_URL",
+            "https://huggingface.co/fileid/runtime/resolve/main/runtime.tgz",
+        )
+        .env("FILEID_ORT_DYLIB_SHA256", "a".repeat(64))
+        .output()
+        .expect("spawn runtime abort");
+    assert!(abort.status.success());
+    let abort_json = json(&abort);
+    assert_eq!(abort_json["installed"], false);
+    assert_eq!(abort_json["aborted"], true);
+
+    let no_source = Command::new(bin())
+        .args(["--json", "runtime", "install", "--force", "--yes"])
+        .env_remove("FILEID_ORT_DYLIB_URL")
+        .env_remove("FILEID_ORT_DYLIB_SHA256")
+        .output()
+        .expect("spawn runtime no-source");
+    assert!(!no_source.status.success());
+    let no_source_json = json(&no_source);
+    assert_eq!(no_source_json["installed"], false);
+    assert_eq!(no_source_json["error"], "no_source_configured");
 }
 
 #[test]
@@ -164,7 +194,41 @@ fn scan_then_search_then_info_model_free() {
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert!(ends_with(v["path"].as_str().unwrap_or(""), "alpha.txt"));
 
-    // --- restructure --plan over the indexed (text) files ---
+    // --- a same-path replacement with a future scanned_at must not be skipped ---
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE files SET scanned_at = 999999999999.0 WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    }
+    std::fs::write(&alpha, "   ").unwrap();
+    let out = run(&["--db", db_s, "--json", "scan", corpus.to_str().unwrap()]);
+    assert!(out.status.success(), "replacement rescan failed");
+    let scan = json(&out);
+    assert_eq!(scan["indexed"].as_u64(), Some(1));
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let (has_text, docs): (i64, i64) = conn
+            .query_row(
+                "SELECT has_text, (SELECT COUNT(*) FROM doc_text WHERE file_id = files.id) \
+                 FROM files WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            has_text, 0,
+            "authoritative plaintext rescan must clear has_text"
+        );
+        assert_eq!(
+            docs, 0,
+            "authoritative plaintext rescan must clear doc_text"
+        );
+    }
+
+    // --- restructure --plan over the indexed files ---
     let out = run(&["--db", db_s, "--json", "restructure", "--plan"]);
     assert!(out.status.success(), "restructure --plan failed");
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("plan json");
@@ -773,7 +837,14 @@ fn dedupe_apply_json_real_emits_pure_json() {
 /// (which the model-free CLI scan never populates) has a group to act on.
 fn seed_content_hash(db: &Path, a: &str, b: &str) {
     let conn = rusqlite::Connection::open(db).expect("open db for seeding");
-    let blob: Vec<u8> = (0u8..32).collect();
+    let path: String = conn
+        .query_row(
+            "SELECT path_text FROM files WHERE path_text LIKE ?1",
+            [format!("%{a}")],
+            |row| row.get(0),
+        )
+        .expect("find first duplicate path");
+    let blob = sha2::Sha256::digest(std::fs::read(path).expect("read duplicate")).to_vec();
     for name in [a, b] {
         conn.execute(
             "UPDATE files SET content_hash = ?1 WHERE path_text LIKE ?2",
@@ -1008,4 +1079,78 @@ fn no_subcommand_prints_friendly_intro() {
         !out.status.success(),
         "an unknown subcommand must still error"
     );
+}
+
+/// A scan that hits an unreadable file must still commit everything readable
+/// and exit with the dedicated partial code (3) — not success (the pre-audit
+/// silent-success bug) and not hard failure (which wrappers read as "results
+/// unusable"). (audit 2026-07-14)
+#[test]
+fn partial_scan_commits_results_and_exits_with_code_3() {
+    // Root can read 0o000 files, which would turn the partial scan clean.
+    #[cfg(unix)]
+    if std::env::var("USER").as_deref() == Ok("root") {
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("fileid-smoke-partial-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let corpus = base.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    let db = base.join("lib.sqlite");
+    std::fs::write(corpus.join("good.txt"), "readable text file contents").unwrap();
+    let locked = corpus.join("locked.txt");
+    std::fs::write(&locked, "unreadable contents").unwrap();
+
+    #[cfg(windows)]
+    let _guard = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // share_mode(0): no sharing — the child process's read fails with a
+        // sharing violation while directory metadata stays readable.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let out = run(&[
+        "--db",
+        db.to_str().unwrap(),
+        "--no-color",
+        "scan",
+        corpus.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "partial scan must exit 3; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("partially"),
+        "stderr must explain the partial result"
+    );
+    assert!(
+        db.exists(),
+        "partial scan must still create + commit the db"
+    );
+    assert!(
+        stdout(&out).contains("partial"),
+        "stdout header must not claim a clean completion: {}",
+        stdout(&out)
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644));
+    }
+    #[cfg(windows)]
+    drop(_guard);
+    let _ = std::fs::remove_dir_all(&base);
 }

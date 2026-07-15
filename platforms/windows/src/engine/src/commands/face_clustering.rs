@@ -62,20 +62,23 @@ pub(crate) async fn handle_run_face_clustering(
             // cluster. `face_quality` = YuNet det.score × landmark geometry, so this
             // naturally keeps well-detected frontal faces on any corpus. 0 disables.
             //
-            // TRADE-OFF: 0.35 is PRECISION-tuned. On this scanned/old corpus the
-            // recurring-face quality median is ~0.37, so 0.35 drops the lower tail —
-            // but sub-0.35 faces embed as noise (same-person cosine ~0.14 ==
-            // different-person) and can't be correctly clustered anyway, so little
-            // ACHIEVABLE recall is lost (it took the owner's labelled F1 0.89→1.0).
-            // Full-84k-corpus recall at 0.35 is still owed (NEXT.md); a modern
-            // high-quality library sits well above 0.35 so most faces pass. Lower
-            // it for a very-low-quality corpus where the People tab comes up sparse.
+            // TRADE-OFF, recalibrated on the full 84,582-face Adlon corpus
+            // (2026-07-14 re-cluster sweep, RTX 5080 box): the old 0.35 default —
+            // tuned for precision on a 185-face labelled subset — sat at the top
+            // of the geometry-capped 0.23–0.42 real-world quality range and left
+            // 67% of detected faces unassigned. 0.25 with k_nn=32 doubles
+            // assigned faces (27,921 → 53,955) while the biggest clusters get
+            // TIGHTER (top-cluster mean cosine-to-centroid 0.606 → 0.642), i.e.
+            // the recovered faces are the same people, not contamination. Faces
+            // below 0.25 still embed as noise (same-person cosine ~0.14) and
+            // stay gated. Raise it for precision-critical small libraries; 0
+            // disables the gate entirely.
             let min_cluster_quality: f32 = std::env::var("FILEID_FACE_CLUSTER_MIN_QUALITY")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 1.0))
-                .unwrap_or(0.35);
+                .unwrap_or(0.25);
             {
                 let mut stmt = conn.prepare(
                     "SELECT id, arcface_embedding, COALESCE(face_quality, 0.0) \

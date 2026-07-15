@@ -476,11 +476,16 @@ fn classify_entry(
         }
     };
     let size = metadata.len();
+    // Compute the reconciliation hash BEFORE any eligibility early-return:
+    // "seen" means present under the root, not pipeline-eligible. A zero-byte
+    // or unsupported-kind file that discovery skips is still physically there,
+    // and omitting it from `seen` would let a clean-walk reconciliation
+    // soft-hide its catalog row as "no longer present" while it plainly exists.
+    let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     if size == 0 {
-        return ClassifiedEntry { discovered: None, seen_path_hash: None };
+        return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
     }
     let fingerprint = path_fingerprint(&path);
-    let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     let modified = metadata
         .modified()
         .ok()
@@ -533,7 +538,10 @@ fn classify_entry(
         .map(FileKind::from_extension)
         .unwrap_or(FileKind::Other);
     if kind == FileKind::Other {
-        return ClassifiedEntry { discovered: None, seen_path_hash: None };
+        // Present but not pipeline-eligible: keep it in `seen` so a catalog row
+        // whose kind mapping changed across versions is never soft-hidden as
+        // "no longer present" while the file still exists on disk.
+        return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
     }
 
     // Volume-local file id: lets the dbwriter heal a renamed/moved file's
@@ -655,6 +663,34 @@ mod tests {
     #[test]
     fn kind_from_extension_unknown_is_other() {
         assert_eq!(FileKind::from_extension("xyz"), FileKind::Other);
+    }
+
+    /// Zero-byte and unsupported-kind files are skipped by the pipeline but are
+    /// still PRESENT on disk, so they must stay in the reconciliation seen-set —
+    /// otherwise a clean walk soft-hides their catalog rows as "no longer
+    /// present" while the files plainly exist. (audit 2026-07-14)
+    #[test]
+    fn skipped_but_present_files_stay_in_the_seen_set() {
+        let dir = std::env::temp_dir().join(format!("fileid-disc-seen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zero = dir.join("truncated.jpg");
+        std::fs::write(&zero, b"").unwrap();
+        let other = dir.join("notes.xyz");
+        std::fs::write(&other, b"payload").unwrap();
+
+        let skips: HashMap<SkipFingerprint, (i64, Option<f64>)> = HashMap::new();
+        let errs = AtomicU64::new(0);
+
+        let z = classify_entry(&zero, &skips, &errs);
+        assert!(z.discovered.is_none(), "zero-byte file must not be catalogued");
+        assert!(z.seen_path_hash.is_some(), "zero-byte file is present and must be seen");
+
+        let o = classify_entry(&other, &skips, &errs);
+        assert!(o.discovered.is_none(), "unsupported kind must not be catalogued");
+        assert!(o.seen_path_hash.is_some(), "unsupported-kind file is present and must be seen");
+
+        assert_eq!(errs.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -936,17 +972,18 @@ mod tests {
         assert_eq!(errors.load(Ordering::Relaxed), 0);
 
         // Zero-byte and unsupported-kind files resolve to None (skipped) here,
-        // so the consumer never has to re-stat to decide.
+        // so the consumer never has to re-stat to decide — but they are still
+        // present on disk, so they stay in the reconciliation seen-set.
         let empty = root.join("empty.jpg");
         fs::write(&empty, b"").unwrap();
         let empty_result = classify_entry(&empty, &skip, &errors);
         assert!(empty_result.discovered.is_none());
-        assert!(empty_result.seen_path_hash.is_none());
+        assert!(empty_result.seen_path_hash.is_some());
         let other = root.join("notes.xyz");
         fs::write(&other, b"data").unwrap();
         let other_result = classify_entry(&other, &skip, &errors);
         assert!(other_result.discovered.is_none());
-        assert!(other_result.seen_path_hash.is_none());
+        assert!(other_result.seen_path_hash.is_some());
 
         // R4-01: skip honors size+mtime, not bare membership. An entry whose
         // stored size+mtime MATCH the live file is skipped (unchanged)...

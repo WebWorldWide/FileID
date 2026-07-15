@@ -9,8 +9,9 @@
 //! rather than read gigabytes per file.
 #![allow(dead_code)] // wired into the rename/move rebind path within Phase 3.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::Digest;
 
@@ -28,6 +29,100 @@ const INTERIOR_CHUNK: usize = 64 * 1024;
 /// catalog row instead of being recomputed. Opens long paths safely.
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
     hash_with_threshold(path, size, FULL_HASH_MAX_BYTES)
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactDuplicateCandidate {
+    pub id: i64,
+    pub path: PathBuf,
+    pub indexed_size: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactDuplicateGroup {
+    pub hash: [u8; 32],
+    pub size: u64,
+    pub files: Vec<ExactDuplicateCandidate>,
+}
+
+#[derive(Debug)]
+pub struct ExactDuplicateGrouping {
+    pub groups: Vec<ExactDuplicateGroup>,
+    pub skipped: usize,
+}
+
+pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
+    let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() != expected_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file type or size changed before exact hashing",
+        ));
+    }
+    let mut sha = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buffer[..read]);
+    }
+    let after = file.metadata()?;
+    if !after.is_file() || after.len() != expected_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file type or size changed during exact hashing",
+        ));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&sha.finalize());
+    Ok(hash)
+}
+
+pub fn group_exact_duplicates(
+    candidates: Vec<ExactDuplicateCandidate>,
+) -> ExactDuplicateGrouping {
+    let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
+        BTreeMap::new();
+    let mut skipped = 0;
+    for candidate in candidates {
+        let Ok(size) = u64::try_from(candidate.indexed_size) else {
+            skipped += 1;
+            continue;
+        };
+        match exact_file_sha256(&candidate.path, size) {
+            Ok(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
+            Err(_) => skipped += 1,
+        }
+    }
+    let groups = by_digest
+        .into_iter()
+        .filter_map(|((size, hash), mut files)| {
+            if files.len() < 2 {
+                return None;
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+            Some(ExactDuplicateGroup { hash, size, files })
+        })
+        .collect();
+    ExactDuplicateGrouping { groups, skipped }
+}
+
+pub fn matches_known_hash_hex(path: &Path, size: u64, expected_hex: &str) -> std::io::Result<bool> {
+    let expected = match hex::decode(expected_hex) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        _ => return Ok(false),
+    };
+    if content_hash(path, size)?.as_slice() == expected.as_slice() {
+        return Ok(true);
+    }
+    let legacy = legacy_content_hashes(path, size)?;
+    Ok(legacy.v2.as_slice() == expected.as_slice()
+        || legacy
+            .v1
+            .is_some_and(|hash| hash.as_slice() == expected.as_slice()))
 }
 
 /// Every BLAKE3 digest a pre-SHA-256 build could have stamped for this file.
@@ -202,6 +297,73 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn exact_digest_rejects_same_sampled_identity_with_unsampled_difference() {
+        const MB: usize = 1024 * 1024;
+        let a = vec![7u8; 17 * MB];
+        let mut b = a.clone();
+        b[2 * MB] = 9;
+        let pa = tmp_with(&a);
+        let pb = tmp_with(&b);
+        let size = a.len() as u64;
+        assert_eq!(content_hash(&pa, size).unwrap(), content_hash(&pb, size).unwrap());
+        assert_ne!(
+            exact_file_sha256(&pa, size).unwrap(),
+            exact_file_sha256(&pb, size).unwrap()
+        );
+        let _ = std::fs::remove_file(pa);
+        let _ = std::fs::remove_file(pb);
+    }
+
+    #[test]
+    fn exact_grouping_uses_live_full_file_digest() {
+        let a = tmp_with(b"same bytes");
+        let b = tmp_with(b"same bytes");
+        let different = tmp_with(b"different!");
+        let grouping = group_exact_duplicates(vec![
+            ExactDuplicateCandidate {
+                id: 1,
+                path: a.clone(),
+                indexed_size: 10,
+            },
+            ExactDuplicateCandidate {
+                id: 2,
+                path: b.clone(),
+                indexed_size: 10,
+            },
+            ExactDuplicateCandidate {
+                id: 3,
+                path: different.clone(),
+                indexed_size: 10,
+            },
+        ]);
+        assert_eq!(grouping.skipped, 0);
+        assert_eq!(grouping.groups.len(), 1);
+        let mut ids = grouping.groups[0]
+            .files
+            .iter()
+            .map(|file| file.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2]);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+        let _ = std::fs::remove_file(different);
+    }
+
+    #[test]
+    fn known_hash_matcher_accepts_current_and_legacy_but_rejects_replacement() {
+        let path = tmp_with(b"original");
+        let current = hex::encode(content_hash(&path, 8).unwrap());
+        let legacy = hex::encode(legacy_content_hashes(&path, 8).unwrap().v2);
+        assert!(matches_known_hash_hex(&path, 8, &current).unwrap());
+        assert!(matches_known_hash_hex(&path, 8, &legacy).unwrap());
+        std::fs::write(&path, b"replaced").unwrap();
+        assert!(!matches_known_hash_hex(&path, 8, &current).unwrap());
+        assert!(!matches_known_hash_hex(&path, 8, &legacy).unwrap());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

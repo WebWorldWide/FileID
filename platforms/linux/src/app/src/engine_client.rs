@@ -14,16 +14,15 @@
 // macOS `ReadStore` / Windows `ReadStore`. We reuse the engine crate's
 // `db::open_read` + `paths::db_path` so the schema + location can't drift.
 //
-// Thumbnails are produced client-side and fully off the GTK main loop: a worker
-// thread reads raw image bytes, the call site hands those to a short-lived
-// decode thread (`decode_scaled` / the off-main-thread decode section below),
-// and only the decoded pixel `glib::Bytes` (which IS `Send`) cross back to the
-// main thread, where a `gdk::MemoryTexture` is built (GTK objects are
-// main-thread-only).
+// Thumbnails are produced client-side and fully off the GTK main loop by a
+// bounded fixed-size worker pool. Jobs retain only paths/decoder closures while
+// queued; encoded and decoded buffers exist only in active workers. Only the
+// decoded pixel `glib::Bytes` (which IS `Send`) cross back to the main thread,
+// where a `gdk::MemoryTexture` is built (GTK objects are main-thread-only).
 
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,6 +48,10 @@ pub enum EngineEvent {
     /// Terminal: scan finished with this many processed files.
     ScanComplete(u64),
     Error(String),
+    ModelDownloadFailed {
+        model_kind: String,
+        message: String,
+    },
     /// The engine process exited (crash or clean EOF). Triggers a respawn.
     Exited,
 
@@ -97,6 +100,8 @@ pub struct QuerySpec {
 }
 
 const RESPAWN_CAP: u32 = 5;
+const THUMB_QUEUE_CAP: usize = 64;
+const THUMB_WORKERS: usize = 4;
 
 // ─── Engine client ───────────────────────────────────────────────────────────
 
@@ -112,6 +117,7 @@ pub struct EngineClient {
     thumb_tx: Option<Sender<ThumbJob>>,
     next_id: u64,
     respawns: u32,
+    models_busy: bool,
     /// Set on drop so the reader thread's EOF doesn't trigger a respawn.
     shutting_down: Arc<AtomicBool>,
 }
@@ -128,8 +134,13 @@ impl EngineClient {
             thumb_tx: None,
             next_id: 0,
             respawns: 0,
+            models_busy: false,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn models_busy(&self) -> bool {
+        self.models_busy
     }
 
     /// Register a UI subscriber. Each call returns a fresh receiver that will
@@ -145,9 +156,11 @@ impl EngineClient {
     /// fan-out pump. Takes the shared `Rc<RefCell<Self>>` so the pump can drive
     /// respawns on its own. Idempotent-ish: call once after construction.
     pub fn start(this: &std::rc::Rc<std::cell::RefCell<Self>>) {
-        // Thumbnail worker.
-        let (thumb_tx, thumb_rx) = async_channel::unbounded::<ThumbJob>();
-        thread::spawn(move || thumbnail_worker(thumb_rx));
+        let (thumb_tx, thumb_rx) = async_channel::bounded::<ThumbJob>(THUMB_QUEUE_CAP);
+        for _ in 0..THUMB_WORKERS {
+            let worker_rx = thumb_rx.clone();
+            thread::spawn(move || thumbnail_worker(worker_rx));
+        }
 
         // Reader side: take the raw receiver out for the pump, keep a tx clone.
         let raw_rx = {
@@ -164,6 +177,19 @@ impl EngineClient {
         let this_pump = this.clone();
         glib::MainContext::default().spawn_local(async move {
             while let Ok(ev) = raw_rx.recv().await {
+                match &ev {
+                    EngineEvent::Progress(_)
+                    | EngineEvent::BatchLanded(_)
+                    | EngineEvent::DeepAnalyzeStarting(_) => {
+                        this_pump.borrow_mut().models_busy = true;
+                    }
+                    EngineEvent::ScanComplete(_)
+                    | EngineEvent::DeepAnalyzeComplete(_)
+                    | EngineEvent::Exited => {
+                        this_pump.borrow_mut().models_busy = false;
+                    }
+                    _ => {}
+                }
                 // Snapshot subscribers WITHOUT holding the RefCell borrow across
                 // the await below (a held borrow + await = a latent panic).
                 let subs: Vec<Sender<EngineEvent>> = this_pump.borrow().subscribers.clone();
@@ -197,7 +223,11 @@ impl EngineClient {
             rescan,
             excluded_paths: None,
         });
-        self.send(payload)
+        let result = self.send(payload);
+        if result.is_ok() {
+            self.models_busy = true;
+        }
+        result
     }
 
     /// Serialize + write an arbitrary command as one NDJSON line.
@@ -227,16 +257,39 @@ impl EngineClient {
         rx
     }
 
-    /// Request raw file bytes for a thumbnail (read off the main loop). The
-    /// caller decodes them off-thread via `decode_scaled` and builds the texture
-    /// on the main thread (see `tabs::library`). Returns `None` if the file
-    /// can't be read.
-    pub fn request_thumbnail(&self, path: String) -> Receiver<Option<Vec<u8>>> {
-        let (tx, rx) = async_channel::bounded::<Option<Vec<u8>>>(1);
-        if let Some(thumb_tx) = &self.thumb_tx {
-            let _ = thumb_tx.send_blocking(ThumbJob { path, reply: tx });
-        } else {
-            let _ = tx.send_blocking(None);
+    pub fn request_scaled_thumbnail(
+        &self,
+        path: String,
+        max_px: i32,
+    ) -> Receiver<Option<DecodedImage>> {
+        self.request_thumbnail_with(path, move |bytes| decode_scaled(bytes, max_px))
+    }
+
+    pub fn request_thumbnail_with<F>(
+        &self,
+        path: String,
+        decoder: F,
+    ) -> Receiver<Option<DecodedImage>>
+    where
+        F: FnOnce(Vec<u8>) -> Option<DecodedImage> + Send + 'static,
+    {
+        let (reply, rx) = async_channel::bounded::<Option<DecodedImage>>(1);
+        let job = ThumbJob {
+            path,
+            decoder: Box::new(decoder),
+            reply,
+        };
+        match &self.thumb_tx {
+            Some(sender) => match sender.try_send(job) {
+                Ok(()) => {}
+                Err(async_channel::TrySendError::Full(job))
+                | Err(async_channel::TrySendError::Closed(job)) => {
+                    let _ = job.reply.try_send(None);
+                }
+            },
+            None => {
+                let _ = job.reply.try_send(None);
+            }
         }
         rx
     }
@@ -245,6 +298,7 @@ impl EngineClient {
 impl Drop for EngineClient {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Relaxed);
+        self.thumb_tx.take();
         self.stdin.take(); // EOF → engine exits cleanly
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -391,7 +445,13 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
             EventPayload::ScanComplete(w) => {
                 Some(EngineEvent::ScanComplete(w.inner.processed_files))
             }
-            EventPayload::Error(w) => Some(EngineEvent::Error(w.inner.message)),
+            EventPayload::Error(w) => match w.inner.model_kind {
+                Some(model_kind) => Some(EngineEvent::ModelDownloadFailed {
+                    model_kind,
+                    message: w.inner.message,
+                }),
+                None => Some(EngineEvent::Error(w.inner.message)),
+            },
             EventPayload::DeepAnalyzeStarting(w) => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
             EventPayload::DeepAnalyzeProgress(w) => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
             EventPayload::DeepAnalyzeFileDone(w) => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
@@ -529,9 +589,12 @@ fn fts_match(s: &str) -> String {
 
 // ─── Thumbnail worker ────────────────────────────────────────────────────────
 
+type ThumbnailDecoder = Box<dyn FnOnce(Vec<u8>) -> Option<DecodedImage> + Send + 'static>;
+
 struct ThumbJob {
     path: String,
-    reply: Sender<Option<Vec<u8>>>,
+    decoder: ThumbnailDecoder,
+    reply: Sender<Option<DecodedImage>>,
 }
 
 /// Cap the bytes we'll read for a thumbnail so a stray multi-GB file can't
@@ -540,17 +603,22 @@ const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 fn thumbnail_worker(rx: Receiver<ThumbJob>) {
     while let Ok(job) = rx.recv_blocking() {
-        let bytes = read_capped(&job.path);
-        let _ = job.reply.send_blocking(bytes);
+        let decoded = read_capped(&job.path).and_then(job.decoder);
+        let _ = job.reply.send_blocking(decoded);
     }
 }
 
 fn read_capped(path: &str) -> Option<Vec<u8>> {
-    let meta = std::fs::metadata(path).ok()?;
-    if meta.len() > THUMB_MAX_BYTES {
+    let file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length > THUMB_MAX_BYTES {
         return None;
     }
-    std::fs::read(path).ok()
+    let mut bytes = Vec::with_capacity(length as usize);
+    file.take(THUMB_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= THUMB_MAX_BYTES).then_some(bytes)
 }
 
 // ─── Off-main-thread image decode ────────────────────────────────────────────
@@ -617,4 +685,105 @@ pub fn texture_from_decoded(d: &DecodedImage) -> gtk::gdk::MemoryTexture {
         gtk::gdk::MemoryFormat::R8g8b8
     };
     gtk::gdk::MemoryTexture::new(d.width, d.height, format, &d.bytes, d.rowstride as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    fn no_op_job(path: String) -> (ThumbJob, Receiver<Option<DecodedImage>>) {
+        let (reply, rx) = async_channel::bounded(1);
+        (
+            ThumbJob {
+                path,
+                decoder: Box::new(|_| None),
+                reply,
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn thumbnail_queue_has_a_hard_admission_bound() {
+        let (sender, _receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
+        for index in 0..THUMB_QUEUE_CAP {
+            let (job, _reply) = no_op_job(index.to_string());
+            assert!(sender.try_send(job).is_ok());
+        }
+        let (overflow, _reply) = no_op_job("overflow".into());
+        assert!(matches!(
+            sender.try_send(overflow),
+            Err(async_channel::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn thumbnail_decode_concurrency_never_exceeds_worker_count() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-linux-thumb-pool-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"fixture").unwrap();
+        let (sender, receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
+        let workers: Vec<_> = (0..THUMB_WORKERS)
+            .map(|_| {
+                let receiver = receiver.clone();
+                thread::spawn(move || thumbnail_worker(receiver))
+            })
+            .collect();
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut replies = Vec::new();
+        for _ in 0..(THUMB_WORKERS * 4) {
+            let active = active.clone();
+            let peak = peak.clone();
+            let (reply, rx) = async_channel::bounded(1);
+            replies.push(rx);
+            sender
+                .send_blocking(ThumbJob {
+                    path: path.to_string_lossy().into_owned(),
+                    decoder: Box::new(move |_| {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        None
+                    }),
+                    reply,
+                })
+                .unwrap();
+        }
+        drop(sender);
+        for reply in replies {
+            assert!(reply.recv_blocking().unwrap().is_none());
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(peak.load(Ordering::SeqCst) <= THUMB_WORKERS);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn capped_reader_rejects_oversized_sparse_file() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-linux-thumb-cap-{}-{}.bin",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(THUMB_MAX_BYTES + 1).unwrap();
+        drop(file);
+        assert!(read_capped(path.to_str().unwrap()).is_none());
+        let _ = std::fs::remove_file(path);
+    }
 }

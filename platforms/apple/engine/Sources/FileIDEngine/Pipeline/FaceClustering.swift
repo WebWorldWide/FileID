@@ -669,11 +669,24 @@ public enum FaceClustering {
 
     // MARK: - Phase 3: centroid-only auto-merge
 
-    /// Cap on persons considered. O(N²) pairwise centroid math; at
-    /// 5000 persons this is ~12.5M comparisons of 512-d L2 — single-digit
-    /// seconds in pure Swift. Above this we skip the pass to avoid a
-    /// pathological wall-time hit on corrupted DBs.
-    private static let autoMergePersonCap = 5000
+    /// Eligible-person ceiling before centroid search. The exact metric index
+    /// has independent distance-evaluation and qualifying-edge budgets, so a
+    /// high-dimensional or dense corpus fails closed without a partial merge.
+    private static let autoMergePersonCap = 20_000
+    private static let autoMergeEmbeddingRowCap = 250_000
+    private static let autoMergeEmbeddingByteCap: Int64 = 768 * 1024 * 1024
+    private static let autoMergeSingleEmbeddingByteCap = 16 * 1024
+
+    static func autoMergeInputWithinLimits(
+        personCount: Int, embeddingCount: Int, embeddingBytes: Int64,
+        maxEmbeddingBytes: Int
+    ) -> Bool {
+        personCount >= 0 && embeddingCount >= 0 && embeddingBytes >= 0 &&
+            maxEmbeddingBytes >= 0 && personCount <= autoMergePersonCap &&
+            embeddingCount <= autoMergeEmbeddingRowCap &&
+            embeddingBytes <= autoMergeEmbeddingByteCap &&
+            maxEmbeddingBytes <= autoMergeSingleEmbeddingByteCap
+    }
 
     /// Read ArcFace embeddings per person, build L2-normalized centroids,
     /// find centroid pairs above the cosine cutoff, union-find chain them,
@@ -689,21 +702,59 @@ public enum FaceClustering {
     ///     person pair. (audit F-C3-004)
     ///   • two user-named persons never merge — that would delete one name.
     ///     (audit F-C3-005)
-    static func tightPairAutoMerge(database: Database) async -> Int {
-        struct PrintRow: Sendable { let personID: Int64; let blob: Data; let fileCount: Int; let named: Bool }
+    static func tightPairAutoMerge(
+        database: Database,
+        searchLimits: ExactCosineJoin.Limits = .autoMerge
+    ) async -> Int {
+        struct CentroidRow: Sendable {
+            let personID: Int64
+            let sum: [Float]
+            let fileCount: Int
+            let named: Bool
+        }
         struct ReadData: Sendable {
-            let rows: [PrintRow]
+            let rows: [CentroidRow]
             // "Different people" verdicts projected onto the persons that own
             // the anchor faces RIGHT NOW (after the phase-4 persist).
             let verdictPersonPairs: [(Int64, Int64)]
+            let eligiblePersonCount: Int
+            let embeddingCount: Int
+            let embeddingBytes: Int64
+            let maxEmbeddingBytes: Int
         }
         let data: ReadData
         do {
             data = try await database.pool.read { db -> ReadData in
+                let input = try GRDB.Row.fetchOne(db, sql: """
+                    SELECT COUNT(DISTINCT fp.person_id) AS persons,
+                           COUNT(*) AS embeddings,
+                           COALESCE(SUM(LENGTH(fp.arcface_embedding)), 0) AS embedding_bytes,
+                           COALESCE(MAX(LENGTH(fp.arcface_embedding)), 0) AS max_embedding_bytes
+                    FROM face_prints fp
+                    INNER JOIN persons p ON p.id = fp.person_id
+                    WHERE fp.person_id IS NOT NULL
+                      AND LENGTH(fp.arcface_embedding) > 0
+                      AND COALESCE(p.is_unknown, 0) = 0
+                    """)
+                let eligiblePersonCount: Int = input?["persons"] ?? 0
+                let embeddingCount: Int = input?["embeddings"] ?? 0
+                let embeddingBytes: Int64 = input?["embedding_bytes"] ?? 0
+                let maxEmbeddingBytes: Int = input?["max_embedding_bytes"] ?? 0
+                guard autoMergeInputWithinLimits(
+                    personCount: eligiblePersonCount,
+                    embeddingCount: embeddingCount,
+                    embeddingBytes: embeddingBytes,
+                    maxEmbeddingBytes: maxEmbeddingBytes) else {
+                    return ReadData(rows: [], verdictPersonPairs: [],
+                                    eligiblePersonCount: eligiblePersonCount,
+                                    embeddingCount: embeddingCount,
+                                    embeddingBytes: embeddingBytes,
+                                    maxEmbeddingBytes: maxEmbeddingBytes)
+                }
                 // `named` = the user gave this cluster an identity (structured or
                 // legacy name). is_unknown persons are excluded by the WHERE so
                 // their "don't identify" verdict can never be merged away.
-                let r = try GRDB.Row.fetchAll(db, sql: """
+                let cursor = try GRDB.Row.fetchCursor(db, sql: """
                     SELECT fp.person_id AS pid, fp.arcface_embedding AS blob,
                            p.file_count AS fc,
                            (COALESCE(p.title,'') != ''
@@ -718,10 +769,29 @@ public enum FaceClustering {
                       AND LENGTH(fp.arcface_embedding) > 0
                       AND COALESCE(p.is_unknown, 0) = 0
                     """)
-                let rows = r.map { PrintRow(personID: $0["pid"] ?? 0,
-                                            blob: $0["blob"] ?? Data(),
-                                            fileCount: $0["fc"] ?? 0,
-                                            named: ($0["named"] ?? 0) != 0) }
+                var sums: [Int64: (sum: [Float], fileCount: Int, named: Bool)] = [:]
+                var dimension = 0
+                while let row = try cursor.next() {
+                    let personID: Int64 = row["pid"] ?? 0
+                    let blob: Data = row["blob"] ?? Data()
+                    guard blob.count <= autoMergeSingleEmbeddingByteCap,
+                          blob.count.isMultiple(of: MemoryLayout<Float>.stride) else { continue }
+                    let vector = ArcFaceService.blobToEmbedding(blob)
+                    guard personID != 0, !vector.isEmpty,
+                          vector.allSatisfy(\.isFinite) else { continue }
+                    if dimension == 0 { dimension = vector.count }
+                    guard vector.count == dimension else { continue }
+                    var payload = sums[personID] ?? (
+                        sum: [Float](repeating: 0, count: dimension),
+                        fileCount: row["fc"] ?? 0,
+                        named: (row["named"] ?? 0) != 0)
+                    for index in 0..<dimension { payload.sum[index] += vector[index] }
+                    sums[personID] = payload
+                }
+                let rows = sums.map { personID, payload in
+                    CentroidRow(personID: personID, sum: payload.sum,
+                                fileCount: payload.fileCount, named: payload.named)
+                }
 
                 // "Different people" verdicts. R3-15: resolve each anchor by its
                 // churn-stable (file_id, bbox) key to the face id that CURRENTLY
@@ -776,32 +846,38 @@ public enum FaceClustering {
                 for (a, b) in rawPairs {
                     if let pa = facePerson[a], let pb = facePerson[b], pa != pb { pairs.append((pa, pb)) }
                 }
-                return ReadData(rows: rows, verdictPersonPairs: pairs)
+                return ReadData(rows: rows, verdictPersonPairs: pairs,
+                                eligiblePersonCount: eligiblePersonCount,
+                                embeddingCount: embeddingCount,
+                                embeddingBytes: embeddingBytes,
+                                maxEmbeddingBytes: maxEmbeddingBytes)
             }
         } catch {
             JSONLog.shared.warn(ev: "face_auto_merge_query_failed", error: "\(error)")
             return 0
         }
+        if !autoMergeInputWithinLimits(
+            personCount: data.eligiblePersonCount,
+            embeddingCount: data.embeddingCount,
+            embeddingBytes: data.embeddingBytes,
+            maxEmbeddingBytes: data.maxEmbeddingBytes) {
+            JSONLog.shared.info(ev: "face_auto_merge_skipped",
+                                extra: ["persons": AnyCodable(data.eligiblePersonCount),
+                                        "embeddings": AnyCodable(data.embeddingCount),
+                                        "embeddingBytes": AnyCodable(data.embeddingBytes),
+                                        "maxEmbeddingBytes": AnyCodable(data.maxEmbeddingBytes),
+                                        "reason": AnyCodable("input_cap")])
+            return 0
+        }
         let rows = data.rows
         guard !rows.isEmpty else { return 0 }
 
-        // Group embeddings by person, build L2-normalized centroid.
+        // L2-normalize the streamed per-person sums into centroids.
         struct Cluster { let id: Int64; let centroid: [Float]; let fileCount: Int; let named: Bool }
-        var byPerson: [Int64: (vecs: [[Float]], fileCount: Int, named: Bool)] = [:]
-        var firstDim = 0
-        for row in rows {
-            let v = ArcFaceService.blobToEmbedding(row.blob)
-            guard !v.isEmpty else { continue }
-            if firstDim == 0 { firstDim = v.count }
-            guard v.count == firstDim else { continue }
-            byPerson[row.personID, default: ([], row.fileCount, row.named)].vecs.append(v)
-            byPerson[row.personID]?.fileCount = row.fileCount
-            byPerson[row.personID]?.named = row.named
-        }
-        guard firstDim > 0, byPerson.count >= 2 else { return 0 }
-        if byPerson.count > autoMergePersonCap {
+        guard let firstDim = rows.first?.sum.count, firstDim > 0, rows.count >= 2 else { return 0 }
+        if rows.count > autoMergePersonCap {
             JSONLog.shared.info(ev: "face_auto_merge_skipped",
-                                extra: ["persons": AnyCodable(byPerson.count),
+                                extra: ["persons": AnyCodable(rows.count),
                                         "cap": AnyCodable(autoMergePersonCap)])
             return 0
         }
@@ -809,20 +885,19 @@ public enum FaceClustering {
         // Deterministic cluster order (sorted by person id) so the edge sweep,
         // union targets, and persist are stable across runs. (audit F-C3-007)
         var clusters: [Cluster] = []
-        clusters.reserveCapacity(byPerson.count)
-        for (pid, payload) in byPerson.sorted(by: { $0.key < $1.key }) {
-            var sum = [Float](repeating: 0, count: firstDim)
-            for v in payload.vecs {
-                for i in 0..<firstDim { sum[i] += v[i] }
-            }
+        clusters.reserveCapacity(rows.count)
+        for row in rows.sorted(by: { $0.personID < $1.personID }) {
+            var sum = row.sum
+            guard sum.count == firstDim else { continue }
             // L2-normalize so cosine = dot product downstream.
             var norm: Float = 0
             for x in sum { norm += x * x }
+            guard norm.isFinite else { continue }
             let invN = Float(1) / max(.leastNonzeroMagnitude, norm.squareRoot())
             for i in 0..<firstDim { sum[i] *= invN }
-            clusters.append(Cluster(id: pid, centroid: sum,
-                                     fileCount: payload.fileCount,
-                                     named: payload.named))
+            clusters.append(Cluster(id: row.personID, centroid: sum,
+                                     fileCount: row.fileCount,
+                                     named: row.named))
         }
         let idxOf: [Int64: Int] = Dictionary(
             uniqueKeysWithValues: clusters.enumerated().map { ($0.element.id, $0.offset) }
@@ -850,30 +925,36 @@ public enum FaceClustering {
             return (ia, ib)
         }
 
-        // O(N²) pairwise cosine → candidate edges. Cluster is "small" if
-        // file_count <= 1. Merge predicate:
-        //   cos(ci, cj) >= tightAutoMergeCos                    (always)  OR
-        //   cos(ci, cj) >= smallClusterAutoMergeCos AND (i.small OR j.small)
+        // Exact metric threshold join. For normalized centroids, a cosine
+        // cutoff is an Euclidean radius; the VP tree prunes metric regions,
+        // then every candidate is rechecked with the original scalar cosine
+        // predicate. Small inputs retain the direct sweep. No union or DB write
+        // occurs unless the complete qualifying edge set fits both budgets.
         let started = Date()
-        var edges: [(cos: Float, i: Int, j: Int)] = []
-        for i in 0..<clusters.count {
-            let ci = clusters[i]
-            let smallI = ci.fileCount <= 1
-            for j in (i + 1)..<clusters.count {
-                let cj = clusters[j]
-                let smallJ = cj.fileCount <= 1
-                let cos = dotProduct(ci.centroid, cj.centroid)
-                let isTight = cos >= tightAutoMergeCos
-                let isSmallPair = cos >= smallClusterAutoMergeCos && (smallI || smallJ)
-                if isTight || isSmallPair { edges.append((cos, i, j)) }
-            }
+        let search = ExactCosineJoin.edges(
+            vectors: clusters.map(\.centroid),
+            small: clusters.map { $0.fileCount <= 1 },
+            tightThreshold: tightAutoMergeCos,
+            smallThreshold: smallClusterAutoMergeCos,
+            limits: searchLimits)
+        let edges: [ExactCosineEdge]
+        let distanceEvaluations: Int
+        switch search {
+        case let .success(found, evaluations):
+            edges = found
+            distanceEvaluations = evaluations
+        case let .limitExceeded(reason, evaluations):
+            JSONLog.shared.info(ev: "face_auto_merge_skipped",
+                                extra: ["persons": AnyCodable(clusters.count),
+                                        "reason": AnyCodable(reason),
+                                        "distanceEvaluations": AnyCodable(evaluations)])
+            return 0
         }
-        // Strongest merges first; ties broken by index so the result is stable.
-        edges.sort { $0.cos != $1.cos ? $0.cos > $1.cos : ($0.i != $1.i ? $0.i < $1.i : $0.j < $1.j) }
         let pairCount = edges.count
 
         for edge in edges {
-            let ri = find(edge.i), rj = find(edge.j)
+            let i = Int(edge.first), j = Int(edge.second)
+            let ri = find(i), rj = find(j)
             if ri == rj { continue }
             if hasNamed[ri] && hasNamed[rj] { continue }
             let conflict = blockedIdx.contains { (a, b) in
@@ -907,6 +988,7 @@ public enum FaceClustering {
             JSONLog.shared.info(ev: "face_auto_merge_done",
                                 extra: ["persons": AnyCodable(clusters.count),
                                         "pairsFound": AnyCodable(0),
+                                        "distanceEvaluations": AnyCodable(distanceEvaluations),
                                         "merged": AnyCodable(0),
                                         "seconds": AnyCodable(Date().timeIntervalSince(started))])
             return 0
@@ -980,6 +1062,7 @@ public enum FaceClustering {
         JSONLog.shared.info(ev: "face_auto_merge_done",
                             extra: ["persons": AnyCodable(clusters.count),
                                     "pairsFound": AnyCodable(pairCount),
+                                    "distanceEvaluations": AnyCodable(distanceEvaluations),
                                     "merged": AnyCodable(merged),
                                     "seconds": AnyCodable(Date().timeIntervalSince(started))])
         return merged

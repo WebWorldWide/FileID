@@ -100,7 +100,18 @@ impl Default for Hyperparameters {
                 .and_then(|s| s.trim().parse::<usize>().ok())
                 .map(|v| v.clamp(1, 64))
                 .unwrap_or(7),
-            k_nn: 10,
+            // k_nn caps how many neighbors Pass 1 sees per face; 10 truncated
+            // dense identities (anyone with >10 similar faces) into split cores
+            // that Pass 2/consolidate can't always rejoin. Measured on the full
+            // 84,582-face Adlon corpus (2026-07-14): k 10→32 alone cut person
+            // clusters 2,272 → 864 while the top clusters got TIGHTER (mean
+            // cosine-to-centroid up), i.e. it heals real fragmentation instead
+            // of chaining identities. Env-tunable for corpus-specific sweeps.
+            k_nn: std::env::var("FILEID_FACE_KNN")
+                .ok()
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .map(|v| v.clamp(4, 256))
+                .unwrap_or(32),
         }
     }
 }
