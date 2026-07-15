@@ -6,10 +6,9 @@
 # Windows. It is its OWN standalone Cargo workspace (mirroring platforms/linux),
 # not a member of any platform workspace.
 #
-# Engine integration is IN-PROCESS: the CLI calls the engine crate's public
-# library surface (db::open_writer/open_read + migrations, pipeline::discovery,
-# pipeline::restructure::classify, paths) directly, rather than spawning the
-# engine binary over stdio. Rationale in shared/docs/DECISIONS.md.
+# Read/query, model-free scan, and apply paths call the engine crate in-process.
+# Full-ML `scan --models` spawns FileIDEngine over canonical NDJSON IPC because
+# the engine owns the async/ORT lifecycle. Rationale in shared/docs/DECISIONS.md.
 
 [workspace]
 

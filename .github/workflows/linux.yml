@@ -48,10 +48,10 @@ jobs:
         working-directory: platforms/windows/src/engine
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           # MSRV pinned to 1.90 in rust-toolchain.toml (engine + CLI). Keep both
           # in sync — drift here means CI builds with a different toolchain than
@@ -60,7 +60,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -165,17 +165,17 @@ jobs:
         working-directory: platforms/cli
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           # Matches platforms/cli/rust-toolchain.toml (1.90, same as the engine).
           toolchain: 1.90
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -211,17 +211,17 @@ jobs:
         working-directory: platforms/tui
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           # Matches platforms/tui/rust-toolchain.toml (1.90, same as the engine).
           toolchain: 1.90
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -258,7 +258,7 @@ jobs:
         working-directory: platforms/linux
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install GTK4 + libadwaita system deps
         # gtk4-rs (v4_14) needs libgtk-4-dev, which pulls the glib/cairo/pango/
@@ -276,7 +276,7 @@ jobs:
             pkg-config
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           # 1.90 to match the shared engine path dependency (the app's own
           # rust-version floor is lower, but the engine pins 1.90).
@@ -284,7 +284,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry

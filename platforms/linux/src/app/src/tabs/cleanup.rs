@@ -32,9 +32,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
-use crate::engine_client::{
-    decode_scaled, texture_from_decoded, DecodedImage, EngineClient, EngineEvent,
-};
+use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
 use fileid_engine::ipc::{CommandPayload, TrashFilesPayload};
 
 /// Files larger than this carry a head+tail+size COMPOSITE `content_hash`, not a
@@ -784,18 +782,13 @@ impl Cleanup {
 
         // Thumbnail (images decode client-side; everything else gets an icon).
         if member.kind == "image" {
-            let rx = self.engine.borrow().request_thumbnail(member.path.clone());
+            let rx = self
+                .engine
+                .borrow()
+                .request_scaled_thumbnail(member.path.clone(), TILE_THUMB_PX);
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                let Ok(Some(bytes)) = rx.recv().await else {
-                    return;
-                };
-                // Decode + scale OFF the main loop; only Send pixel data crosses back.
-                let (dtx, drx) = async_channel::bounded::<Option<DecodedImage>>(1);
-                std::thread::spawn(move || {
-                    let _ = dtx.send_blocking(decode_scaled(bytes, TILE_THUMB_PX));
-                });
-                let Ok(Some(decoded)) = drx.recv().await else {
+                let Ok(Some(decoded)) = rx.recv().await else {
                     return;
                 };
                 if let Some(p) = pic_weak.upgrade() {
@@ -950,7 +943,7 @@ impl Cleanup {
                 this.trash(ids.clone());
             }
         });
-        dialog.present(anchor);
+        dialog.present(Some(anchor));
     }
 
     fn selected_bytes(&self, ids: &[i64]) -> i64 {

@@ -701,7 +701,7 @@
       },
 
       "BulkActionResult": {
-        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
+        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator. A platform that implements restore-from-trash may append its undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'); platforms without restore support emit bare 'trashFiles'. messages carries per-file results.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],

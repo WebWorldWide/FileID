@@ -277,9 +277,10 @@ async function initReleases() {
 
   // Asset name → CSS selector → download target patterns we'll look for
   const patterns = {
-    'setup-exe':  /^FileIDSetup.*\.exe$/i,
-    'x64-msi':    /(FileID|FileID-)x64.*\.msi$/i,
-    'arm64-msi':  /(FileID|FileID-)arm64.*\.msi$/i,
+    'setup-exe':  /^FileID(?:Setup|.*-Setup).*\.exe$/i,
+    'x64-msi':    /^FileID.*-x64\.msi$/i,
+    'arm64-msi':  /^FileID.*-arm64\.msi$/i,
+    'appimage':   /\.AppImage$/i,
     'dmg':        /\.dmg$/i,
   };
 

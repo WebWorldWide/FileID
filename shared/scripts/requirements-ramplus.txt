@@ -16,7 +16,7 @@
 torch==2.4.1
 torchvision==0.19.1
 numpy==1.26.4
-pillow
+pillow==10.4.0
 
 # RAM++ model deps (the ones `recognize-anything` forgets to pull):
 timm==0.9.16            # keeps the `timm.models.layers` shim ram imports (gone in 1.0)
@@ -25,6 +25,6 @@ fairscale==0.4.4        # ram/models/bert.py imports checkpoint_wrapper at modul
 scipy==1.13.1           # ram/models/swin_transformer.py imports scipy.interpolate (undeclared by recognize-anything; numpy-1.26-compatible pin)
 
 # ONNX export + fp16 conversion + validation:
-onnx
-onnxruntime
-onnxconverter-common
+onnx==1.16.2
+onnxruntime==1.19.2
+onnxconverter-common==1.14.0

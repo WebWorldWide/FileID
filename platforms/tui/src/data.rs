@@ -18,12 +18,16 @@ use rusqlite::params;
 
 use fileid_engine::pipeline::discovery::FileKind;
 use fileid_engine::pipeline::restructure::{self, FileForClassify};
+use fileid_engine::util::content_hash::{group_exact_duplicates, ExactDuplicateCandidate};
 
 /// Max rows pulled into any one list — keeps the snapshot bounded on huge
 /// libraries while staying well past what fits on screen.
 const ROW_CAP: usize = 5_000;
 const DUP_GROUP_CAP: usize = 1_000;
 const DUP_MEMBER_CAP: usize = 100;
+const DUP_CANDIDATE_CAP: usize = 5_000;
+const DUP_READ_BUDGET_BYTES: i64 = 64 * 1024 * 1024 * 1024;
+pub(crate) const PLAN_CAP: usize = 3_000;
 
 #[derive(Clone)]
 pub struct FileRow {
@@ -52,6 +56,16 @@ pub struct DupGroup {
     pub paths: Vec<String>,
 }
 
+/// The result of the (potentially slow) live full-file duplicate verification,
+/// delivered via [`LoadMsg::Dupes`] AFTER the snapshot has already painted
+/// (REGRESSION 1). Mirrors the `dupes*` fields of [`Snapshot`] one-for-one.
+#[derive(Clone, Default)]
+pub struct DupeReport {
+    pub dupes: Vec<DupGroup>,
+    pub dupes_truncated: bool,
+    pub dupe_candidate_count: i64,
+}
+
 #[derive(Clone)]
 pub struct PlanRow {
     pub source: String,
@@ -70,7 +84,14 @@ pub struct Snapshot {
     pub files_truncated: bool,
     pub people: Vec<PersonRow>,
     pub dupes: Vec<DupGroup>,
+    pub dupes_truncated: bool,
+    pub dupe_candidate_count: i64,
+    /// True between `Done` and the deferred `Dupes` message: the snapshot has
+    /// painted but duplicate verification is still reading files.
+    pub dupes_pending: bool,
     pub plan: Vec<PlanRow>,
+    pub plan_truncated: bool,
+    pub plan_candidate_count: i64,
     pub tags: HashMap<i64, Vec<String>>,
     pub snippets: HashMap<i64, String>,
     pub total_files: i64,
@@ -89,6 +110,10 @@ pub enum LoadMsg {
         label: String,
     },
     Done(Box<Snapshot>),
+    /// The deferred duplicate verification result — arrives AFTER `Done` so
+    /// the Library/People/Restructure tabs paint immediately instead of
+    /// waiting out an up-to-64-GiB live full-file hash pass. (audit 2026-07-14)
+    Dupes(Box<DupeReport>),
     Error(String),
 }
 
@@ -106,14 +131,19 @@ pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>) {
                 } else {
                     snap.files.len().to_string()
                 };
+                let plan_count = if snap.plan_truncated {
+                    format!("{} partial planned moves", snap.plan.len())
+                } else {
+                    format!("{} planned moves", snap.plan.len())
+                };
                 let _ = tx.send(LoadMsg::Status(format!(
-                    "Loaded {} files · {} people · {} duplicate groups · {} planned moves",
+                    "Loaded {} files · {} people · {}",
                     file_count,
                     snap.people.len(),
-                    snap.dupes.len(),
-                    snap.plan.len()
+                    plan_count
                 )));
                 let _ = tx.send(LoadMsg::Done(Box::new(snap)));
+                run_deferred_dupes(&db, &tx);
             }
             Err(e) => {
                 let _ = tx.send(LoadMsg::Error(format!("load failed: {e}")));
@@ -135,35 +165,37 @@ pub(crate) fn load(db: &Path, query: &str, tx: &Sender<LoadMsg>) -> Result<Snaps
 
     let _ = tx.send(LoadMsg::Status("Reading files…".into()));
     let (files, files_truncated) = load_files(&conn, &query)?;
-    let total_files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
-        .unwrap_or(files.len() as i64);
+    let total_files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
 
     let _ = tx.send(LoadMsg::Status("Reading tags…".into()));
     let file_ids: Vec<i64> = files.iter().map(|f| f.id).collect();
-    let tags = load_tags(&conn, &file_ids);
-    let snippets = load_snippets(&conn, &file_ids);
-    let total_tags: i64 = conn
-        .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))
-        .unwrap_or(0);
+    let tags = load_tags(&conn, &file_ids)?;
+    let snippets = load_snippets(&conn, &file_ids)?;
+    let total_tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?;
 
     let _ = tx.send(LoadMsg::Status("Reading people…".into()));
-    let people = load_people(&conn).unwrap_or_default();
-
-    let _ = tx.send(LoadMsg::Status("Grouping duplicates…".into()));
-    let dupes = load_dupes(&conn).unwrap_or_default();
+    let people = load_people(&conn)?;
 
     let _ = tx.send(LoadMsg::Status("Computing restructure plan…".into()));
-    let plan = compute_plan(&conn).unwrap_or_default();
+    let (plan, plan_truncated, plan_candidate_count) = compute_plan(&conn)?;
 
+    // Duplicate verification is DEFERRED to run_deferred_dupes / LoadMsg::Dupes:
+    // it live-reads up to 64 GiB off disk, and gating the whole snapshot's
+    // first paint behind it blanked every tab for minutes on a real corpus.
+    // (audit 2026-07-14)
     Ok(Snapshot {
         db_exists: true,
         query,
         files,
         files_truncated,
         people,
-        dupes,
+        dupes: Vec::new(),
+        dupes_truncated: false,
+        dupe_candidate_count: 0,
+        dupes_pending: true,
         plan,
+        plan_truncated,
+        plan_candidate_count,
         tags,
         snippets,
         total_files,
@@ -171,9 +203,49 @@ pub(crate) fn load(db: &Path, query: &str, tx: &Sender<LoadMsg>) -> Result<Snaps
     })
 }
 
+/// Run the bounded live duplicate verification AFTER the snapshot has painted
+/// and deliver it as [`LoadMsg::Dupes`]. Every caller that sends `Done` from a
+/// [`load`] result must follow with this, or the Cleanup tab stays pending.
+pub(crate) fn run_deferred_dupes(db: &Path, tx: &Sender<LoadMsg>) {
+    if !db.exists() {
+        let _ = tx.send(LoadMsg::Dupes(Box::default()));
+        return;
+    }
+    let _ = tx.send(LoadMsg::Status("Verifying duplicates…".into()));
+    let report = fileid_engine::db::open_read(db).and_then(|conn| {
+        let (dupes, dupes_truncated, dupe_candidate_count) = load_dupes(&conn)?;
+        Ok(DupeReport {
+            dupes,
+            dupes_truncated,
+            dupe_candidate_count,
+        })
+    });
+    match report {
+        Ok(report) => {
+            let dupe_count = if report.dupes_truncated {
+                format!("{} partial duplicate groups", report.dupes.len())
+            } else {
+                format!("{} duplicate groups", report.dupes.len())
+            };
+            let _ = tx.send(LoadMsg::Dupes(Box::new(report)));
+            let _ = tx.send(LoadMsg::Status(format!(
+                "Duplicates verified · {dupe_count}"
+            )));
+        }
+        Err(e) => {
+            // Deliver an empty report so the Cleanup tab leaves its pending
+            // state, then surface the failure on the status row.
+            let _ = tx.send(LoadMsg::Dupes(Box::default()));
+            let _ = tx.send(LoadMsg::Error(format!(
+                "duplicate verification failed: {e}"
+            )));
+        }
+    }
+}
+
 fn load_files(conn: &rusqlite::Connection, query: &str) -> Result<(Vec<FileRow>, bool)> {
     if !query.is_empty() {
-        let mut ids = search_file_ids(conn, query, ROW_CAP + 1);
+        let mut ids = search_file_ids(conn, query, ROW_CAP + 1)?;
         let truncated = ids.len() > ROW_CAP;
         ids.truncate(ROW_CAP);
         return Ok((load_file_rows(conn, &ids)?, truncated));
@@ -185,8 +257,7 @@ fn load_files(conn: &rusqlite::Connection, query: &str) -> Result<(Vec<FileRow>,
     )?;
     let mut rows: Vec<FileRow> = stmt
         .query_map(params![(ROW_CAP + 1) as i64], file_row)?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let truncated = rows.len() > ROW_CAP;
     rows.truncate(ROW_CAP);
     Ok((rows, truncated))
@@ -205,7 +276,7 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
-fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Vec<i64> {
+fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Result<Vec<i64>> {
     let mut ids = Vec::with_capacity(cap);
     let mut seen = HashSet::with_capacity(cap);
     let fts = raw
@@ -220,15 +291,14 @@ fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Vec<i6
         }
         let sql =
             format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 ORDER BY rank LIMIT ?2");
-        if let Ok(mut stmt) = conn.prepare(&sql) {
-            if let Ok(rows) = stmt.query_map(params![fts, cap as i64], |r| r.get::<_, i64>(0)) {
-                for id in rows.flatten() {
-                    if seen.insert(id) {
-                        ids.push(id);
-                        if ids.len() >= cap {
-                            break;
-                        }
-                    }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![fts, cap as i64], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            let id = row?;
+            if seen.insert(id) {
+                ids.push(id);
+                if ids.len() >= cap {
+                    break;
                 }
             }
         }
@@ -241,24 +311,23 @@ fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Vec<i6
             .replace('%', "\\%")
             .replace('_', "\\_");
         let like = format!("%{escaped}%");
-        if let Ok(mut stmt) = conn.prepare(
+        let mut stmt = conn.prepare(
             "SELECT id FROM files \
              WHERE lower(COALESCE(path_search, path_text)) LIKE ?1 ESCAPE '\\' \
              ORDER BY scanned_at DESC, id DESC LIMIT ?2",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![like, cap as i64], |r| r.get::<_, i64>(0)) {
-                for id in rows.flatten() {
-                    if seen.insert(id) {
-                        ids.push(id);
-                        if ids.len() >= cap {
-                            break;
-                        }
-                    }
+        )?;
+        let rows = stmt.query_map(params![like, cap as i64], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            let id = row?;
+            if seen.insert(id) {
+                ids.push(id);
+                if ids.len() >= cap {
+                    break;
                 }
             }
         }
     }
-    ids
+    Ok(ids)
 }
 
 fn load_file_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRow>> {
@@ -272,17 +341,16 @@ fn load_file_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRo
              FROM files WHERE id IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql)?;
-        for row in stmt
-            .query_map(rusqlite::params_from_iter(chunk.iter()), file_row)?
-            .flatten()
-        {
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), file_row)?;
+        for row in rows {
+            let row = row?;
             by_id.insert(row.id, row);
         }
     }
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
-fn load_tags(conn: &rusqlite::Connection, file_ids: &[i64]) -> HashMap<i64, Vec<String>> {
+fn load_tags(conn: &rusqlite::Connection, file_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
     let mut out: HashMap<i64, Vec<String>> = HashMap::new();
     for chunk in file_ids.chunks(500) {
         let placeholders = std::iter::repeat_n("?", chunk.len())
@@ -292,24 +360,22 @@ fn load_tags(conn: &rusqlite::Connection, file_ids: &[i64]) -> HashMap<i64, Vec<
             "SELECT file_id, tag FROM tags WHERE file_id IN ({placeholders}) \
              ORDER BY file_id, source, score DESC"
         );
-        let Ok(mut stmt) = conn.prepare(&sql) else {
-            continue;
-        };
-        if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        }) {
-            for (id, tag) in rows.flatten() {
-                let v = out.entry(id).or_default();
-                if v.len() < 8 && !v.iter().any(|t| t == &tag) {
-                    v.push(tag);
-                }
+        })?;
+        for row in rows {
+            let (id, tag) = row?;
+            let tags = out.entry(id).or_default();
+            if tags.len() < 8 && !tags.iter().any(|existing| existing == &tag) {
+                tags.push(tag);
             }
-        };
+        }
     }
-    out
+    Ok(out)
 }
 
-fn load_snippets(conn: &rusqlite::Connection, file_ids: &[i64]) -> HashMap<i64, String> {
+fn load_snippets(conn: &rusqlite::Connection, file_ids: &[i64]) -> Result<HashMap<i64, String>> {
     let mut out = HashMap::new();
     for table in ["doc_text", "ocr_text"] {
         for chunk in file_ids.chunks(500) {
@@ -320,22 +386,20 @@ fn load_snippets(conn: &rusqlite::Connection, file_ids: &[i64]) -> HashMap<i64, 
                 "SELECT file_id, substr(text, 1, 200) FROM {table} \
                  WHERE file_id IN ({placeholders})"
             );
-            let Ok(mut stmt) = conn.prepare(&sql) else {
-                continue;
-            };
-            if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-            }) {
-                for (id, text) in rows.flatten() {
-                    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-                    if !one_line.is_empty() {
-                        out.entry(id).or_insert(one_line);
-                    }
+            })?;
+            for row in rows {
+                let (id, text) = row?;
+                let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !one_line.is_empty() {
+                    out.entry(id).or_insert(one_line);
                 }
-            };
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 fn load_people(conn: &rusqlite::Connection) -> Result<Vec<PersonRow>> {
@@ -357,8 +421,7 @@ fn load_people(conn: &rusqlite::Connection) -> Result<Vec<PersonRow>> {
                 faces: r.get(6)?,
             })
         })?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -387,51 +450,94 @@ fn display_name(
     }
 }
 
-fn load_dupes(conn: &rusqlite::Connection) -> Result<Vec<DupGroup>> {
+fn load_dupes(conn: &rusqlite::Connection) -> Result<(Vec<DupGroup>, bool, i64)> {
+    let candidate_stats: (i64, i64) = conn.query_row(
+        "WITH candidate_sizes AS ( \
+             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             GROUP BY size_bytes HAVING COUNT(*) > 1 \
+         ) \
+         SELECT COUNT(*), COALESCE(SUM(MAX(f.size_bytes, 0)), 0) FROM files f \
+         JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
+         WHERE f.content_hash IS NOT NULL",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let candidate_count = candidate_stats.0;
     let mut stmt = conn.prepare(
-        "SELECT content_hash, MAX(size_bytes), COUNT(*) AS copies \
-         FROM files WHERE content_hash IS NOT NULL GROUP BY content_hash \
-         HAVING COUNT(*) > 1 ORDER BY copies DESC, content_hash LIMIT ?1",
+        "WITH candidate_sizes AS ( \
+             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             GROUP BY size_bytes HAVING COUNT(*) > 1 \
+         ) \
+         SELECT f.id, f.path_text, f.size_bytes \
+         FROM files f JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
+         WHERE f.content_hash IS NOT NULL \
+         ORDER BY f.size_bytes, f.path_text, f.id LIMIT ?1",
     )?;
-    let meta: Vec<(Vec<u8>, i64, i64)> = stmt
-        .query_map(params![DUP_GROUP_CAP as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    let queried = stmt
+        .query_map(params![DUP_CANDIDATE_CAP as i64], |row| {
+            Ok(ExactDuplicateCandidate {
+                id: row.get(0)?,
+                path: PathBuf::from(row.get::<_, String>(1)?),
+                indexed_size: row.get(2)?,
+            })
         })?
-        .flatten()
-        .collect();
-    let mut path_stmt = conn.prepare(
-        "SELECT path_text FROM files WHERE content_hash = ?1 ORDER BY path_text LIMIT ?2",
-    )?;
-    let mut groups = Vec::with_capacity(meta.len());
-    for (blob, size, copies) in meta {
-        let paths = path_stmt
-            .query_map(params![blob, DUP_MEMBER_CAP as i64], |r| {
-                r.get::<_, String>(0)
-            })?
-            .flatten()
-            .collect();
-        groups.push(DupGroup {
-            size,
-            copies,
-            paths,
-        });
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut selected_bytes = 0i64;
+    let mut candidates = Vec::with_capacity(queried.len());
+    for candidate in queried {
+        let bytes = candidate.indexed_size.max(0);
+        if bytes > DUP_READ_BUDGET_BYTES - selected_bytes {
+            break;
+        }
+        selected_bytes += bytes;
+        candidates.push(candidate);
     }
-    Ok(groups)
+    let grouping = group_exact_duplicates(candidates);
+    let skipped = grouping.skipped;
+    let mut groups: Vec<DupGroup> = grouping
+        .groups
+        .into_iter()
+        .map(|group| DupGroup {
+            size: i64::try_from(group.size).unwrap_or(i64::MAX),
+            copies: group.files.len() as i64,
+            paths: group
+                .files
+                .into_iter()
+                .take(DUP_MEMBER_CAP)
+                .map(|file| file.path.to_string_lossy().into_owned())
+                .collect(),
+        })
+        .collect();
+    groups.sort_by(|a, b| b.copies.cmp(&a.copies).then_with(|| a.paths.cmp(&b.paths)));
+    let candidate_truncated = candidate_count > DUP_CANDIDATE_CAP as i64;
+    let byte_truncated = candidate_stats.1 > DUP_READ_BUDGET_BYTES;
+    let group_truncated = groups.len() > DUP_GROUP_CAP;
+    groups.truncate(DUP_GROUP_CAP);
+    Ok((
+        groups,
+        candidate_truncated || byte_truncated || group_truncated || skipped > 0,
+        candidate_count,
+    ))
 }
 
 /// Build a read-only restructure preview by feeding indexed file metadata into
 /// the engine's pure `restructure::classify` — the identical rule cascade the
 /// desktop apps and CLI use. Read-only: nothing is moved.
-fn compute_plan(conn: &rusqlite::Connection) -> Result<Vec<PlanRow>> {
+fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)> {
+    let (root, candidate_count) = plan_root_and_count(conn)?;
+    if candidate_count == 0 {
+        return Ok((Vec::new(), false, 0));
+    }
+
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path_text, f.extension, f.modified_at, f.created_at, \
             f.location_lat, f.location_lon, f.has_text, \
             (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id \
              WHERE fp.file_id = f.id LIMIT 1) AS person_name \
-         FROM files f ORDER BY f.scanned_at DESC, f.id DESC LIMIT 3000",
+         FROM files f ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?1",
     )?;
     let files: Vec<FileForClassify> = stmt
-        .query_map([], |r| {
+        .query_map(params![PLAN_CAP as i64], |r| {
             let path: String = r.get(1)?;
             let ext: Option<String> = r.get(2)?;
             Ok(FileForClassify {
@@ -446,15 +552,9 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<Vec<PlanRow>> {
                 has_text: r.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
             })
         })?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-    let root = common_ancestor(files.iter().map(|f| f.source.as_path()));
-    let moves = restructure::classify(&files, &root);
-    let plan = moves
+    let plan = restructure::classify(&files, &root)
         .into_iter()
         .map(|m| PlanRow {
             source: m.source.to_string_lossy().into_owned(),
@@ -463,7 +563,36 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<Vec<PlanRow>> {
             confidence: m.confidence.as_str(),
         })
         .collect();
-    Ok(plan)
+    Ok((plan, candidate_count > PLAN_CAP as i64, candidate_count))
+}
+
+fn plan_root_and_count(conn: &rusqlite::Connection) -> Result<(PathBuf, i64)> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+    if count == 0 {
+        return Ok((
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            0,
+        ));
+    }
+    // The longest common string prefix of a sorted set equals that of its first
+    // and last members; comparing path components of those indexed extremes is
+    // therefore exact without transferring every catalog path into the TUI.
+    let first: String = conn.query_row(
+        "SELECT path_text FROM files ORDER BY path_text ASC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let last: String = conn.query_row(
+        "SELECT path_text FROM files ORDER BY path_text DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let first = PathBuf::from(first);
+    let last = PathBuf::from(last);
+    Ok((
+        common_ancestor([first.as_path(), last.as_path()].into_iter()),
+        count,
+    ))
 }
 
 /// Longest shared directory prefix of all sources; falls back to the current
@@ -523,6 +652,19 @@ pub fn human_size(bytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-tui-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     fn insert_file(conn: &rusqlite::Connection, path: &str, scanned_at: f64) -> i64 {
         conn.execute(
@@ -584,21 +726,134 @@ mod tests {
     }
 
     #[test]
+    fn required_query_failure_propagates_from_load() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-tui-load-error-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch("DROP TABLE persons;").unwrap();
+        drop(conn);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let error = load(&path, "", &tx)
+            .err()
+            .expect("missing table must fail load");
+        assert!(error.to_string().contains("no such table"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn restructure_preview_marks_cap_and_uses_full_library_root() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        for i in 0..5 {
+            insert_file(&tx, &format!("/library/a/old-{i}.txt"), (i + 1) as f64);
+        }
+        for i in 0..PLAN_CAP {
+            insert_file(&tx, &format!("/library/b/recent-{i}.txt"), (i + 100) as f64);
+        }
+        tx.commit().unwrap();
+
+        let (root, count) = plan_root_and_count(&conn).unwrap();
+        assert_eq!(root, PathBuf::from("/library"));
+        assert_eq!(count, (PLAN_CAP + 5) as i64);
+        let (plan, truncated, candidates) = compute_plan(&conn).unwrap();
+        assert!(truncated);
+        assert_eq!(candidates, count);
+        assert!(!plan.is_empty());
+    }
+
+    #[test]
     fn duplicate_snapshot_caps_paths_but_keeps_the_real_copy_count() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
+        let dir = temp_dir("duplicate-cap");
         for i in 0..(DUP_MEMBER_CAP + 25) {
-            let id = insert_file(&conn, &format!("/copies/file-{i}.bin"), i as f64);
+            let path = dir.join(format!("file-{i}.bin"));
+            std::fs::write(&path, b"x").unwrap();
+            let id = insert_file(&conn, &path.to_string_lossy(), i as f64);
             conn.execute(
                 "UPDATE files SET content_hash = X'01020304' WHERE id = ?1",
                 params![id],
             )
             .unwrap();
         }
-        let groups = load_dupes(&conn).unwrap();
+        let (groups, truncated, candidates) = load_dupes(&conn).unwrap();
+        assert!(!truncated);
+        assert_eq!(candidates, (DUP_MEMBER_CAP + 25) as i64);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].copies, (DUP_MEMBER_CAP + 25) as i64);
         assert_eq!(groups[0].paths.len(), DUP_MEMBER_CAP);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplicate_snapshot_merges_different_stored_hash_recipes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let dir = temp_dir("mixed-recipes");
+        for (i, stored) in [vec![1u8; 32], vec![2u8; 32]].into_iter().enumerate() {
+            let path = dir.join(format!("copy-{i}.bin"));
+            std::fs::write(&path, b"same").unwrap();
+            let id = insert_file(&conn, &path.to_string_lossy(), i as f64);
+            conn.execute(
+                "UPDATE files SET size_bytes = 4, content_hash = ?2 WHERE id = ?1",
+                params![id, stored],
+            )
+            .unwrap();
+        }
+        let (groups, truncated, candidates) = load_dupes(&conn).unwrap();
+        assert!(!truncated);
+        assert_eq!(candidates, 2);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].copies, 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplicate_snapshot_bounds_full_file_hash_candidates() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let tx = conn.transaction().unwrap();
+        for i in 0..=DUP_CANDIDATE_CAP {
+            let id = insert_file(&tx, &format!("/missing/copy-{i}.bin"), i as f64);
+            tx.execute(
+                "UPDATE files SET content_hash = X'01' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let (groups, truncated, candidates) = load_dupes(&conn).unwrap();
+        assert!(groups.is_empty());
+        assert!(truncated);
+        assert_eq!(candidates, (DUP_CANDIDATE_CAP + 1) as i64);
+    }
+
+    #[test]
+    fn duplicate_snapshot_bounds_full_file_hash_bytes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        for id in [1i64, 2] {
+            conn.execute(
+                "INSERT INTO files \
+                 (id, path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension, content_hash) \
+                 VALUES (?1, printf('/huge-%d.bin', ?1), ?1, ?2, 0, 0, 'other', '', X'01')",
+                params![id, DUP_READ_BUDGET_BYTES + 1],
+            )
+            .unwrap();
+        }
+        let (groups, truncated, candidates) = load_dupes(&conn).unwrap();
+        assert!(groups.is_empty());
+        assert!(truncated);
+        assert_eq!(candidates, 2);
     }
 
     #[test]
@@ -619,5 +874,49 @@ mod tests {
         assert_eq!(files.len(), ROW_CAP);
         assert!(truncated);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+    /// The first paint must not wait on duplicate verification: load() returns
+    /// a pending snapshot with no dupes, and the deferred pass delivers them
+    /// via LoadMsg::Dupes afterward. (audit 2026-07-14)
+    #[test]
+    fn snapshot_paints_before_deferred_duplicate_verification() {
+        let dir = temp_dir("deferred-dupes");
+        let db_path = dir.join("lib.sqlite");
+        {
+            let conn = fileid_engine::db::open_writer(&db_path).unwrap();
+            let a = dir.join("a.bin");
+            let b = dir.join("b.bin");
+            std::fs::write(&a, b"same-bytes").unwrap();
+            std::fs::write(&b, b"same-bytes").unwrap();
+            for p in [&a, &b] {
+                conn.execute(
+                    "INSERT INTO files \
+                     (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, \
+                      extension, path_search, content_hash) \
+                     VALUES (?1, 1, 10, 1.0, 1.0, 'doc', 'bin', ?1, x'01')",
+                    params![p.to_string_lossy()],
+                )
+                .unwrap();
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let snap = load(&db_path, "", &tx).unwrap();
+        assert!(
+            snap.dupes_pending,
+            "snapshot must paint in the pending state"
+        );
+        assert!(snap.dupes.is_empty(), "no dupes before the deferred pass");
+
+        run_deferred_dupes(&db_path, &tx);
+        let report = loop {
+            match rx.try_recv().expect("deferred pass must send messages") {
+                LoadMsg::Dupes(report) => break report,
+                _ => continue,
+            }
+        };
+        assert_eq!(report.dupes.len(), 1, "the byte-identical pair groups");
+        assert_eq!(report.dupes[0].copies, 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

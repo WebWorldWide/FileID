@@ -22,8 +22,23 @@ use crate::pipeline::restructure_feedback;
 use crate::pipeline::restructure_semantic;
 
 const RESTRUCTURE_PREVIEW_CAP: usize = 5_000;
-const LARGE_PLAN_STREAM_THRESHOLD: i64 = 50_000;
+const LARGE_PLAN_STREAM_THRESHOLD: i64 = 150_000;
 const LARGE_PLAN_CHUNK: usize = 4_096;
+
+/// Above this scoped-file count, planning streams through the scratch-SQLite
+/// rule-cascade path instead of the in-memory semantic (butler) path. The old
+/// 50k default silently denied the entire semantic planner to every real-sized
+/// library — the owner's 71,333-file corpus always got the legacy date-tree
+/// cascade. Measured on that corpus (RTX 5080 box, 2026-07-14): the semantic
+/// path plans in 16 s / 668 MB peak, and `embedding_load_cap` already bounds
+/// the heavy CLIP map per memory tier, so 150k is a comfortable ceiling, not a
+/// cliff. Env-overridable for benchmarking bigger libraries.
+fn large_plan_stream_threshold() -> i64 {
+    std::env::var("FILEID_RESTRUCTURE_LARGE_PLAN_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LARGE_PLAN_STREAM_THRESHOLD)
+}
 const STORED_PLAN_VERSION: u8 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -128,6 +143,25 @@ fn write_stored_plan_in(
         )
     })?;
     Ok((plan_id, preview))
+}
+
+/// Design §6: 'ask'-tier moves require explicit per-file consent and must
+/// never ride a bulk apply of a stored (paged/truncated) plan — the app's
+/// preview shows at most 5,000 rows, so the user cannot have reviewed them.
+/// Stream errors pass through untouched so a corrupt spool still fails loudly.
+/// A schema-carried tier selection is queued for the next IPC rev.
+/// (audit 2026-07-14)
+fn exclude_ask_tier<'a>(
+    moves: impl Iterator<Item = anyhow::Result<IpcMove>> + 'a,
+    skipped_ask: &'a mut usize,
+) -> impl Iterator<Item = anyhow::Result<IpcMove>> + 'a {
+    moves.filter(|entry| match entry {
+        Ok(m) if m.confidence.eq_ignore_ascii_case("ask") => {
+            *skipped_ask += 1;
+            false
+        }
+        _ => true,
+    })
 }
 
 fn open_stored_plan(
@@ -658,7 +692,7 @@ pub(crate) async fn handle_plan_restructure(
         })
         .await;
         match scoped_count {
-            Ok(Ok(count)) if count > LARGE_PLAN_STREAM_THRESHOLD => {
+            Ok(Ok(count)) if count > large_plan_stream_threshold() => {
                 let plan_db = std::sync::Arc::clone(&db);
                 let plan_root = library_root.clone();
                 let planned = tokio::task::spawn_blocking(move || {
@@ -886,6 +920,11 @@ pub(crate) async fn handle_plan_restructure(
         std::collections::HashSet::new();
     let mut proposed = Vec::new();
     let mut moved: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    // Files a semantic pass examined and deliberately left in place (already
+    // home, or well-placed per the stay-put guard). They are claimed exactly
+    // like moved files: the rule cascade must not re-propose date-tree moves
+    // for content the butler judged organized.
+    let mut settled: std::collections::HashSet<i64> = std::collections::HashSet::new();
     // One new-folder-name registry shared across all three semantic passes
     // (image, document, non-image) — they target the same library_root, so a
     // shared registry stops two passes minting the same new folder and silently
@@ -895,8 +934,14 @@ pub(crate) async fn handle_plan_restructure(
 
     // Butler P1: image semantic pass (CLIP-embedding content clusters).
     if semantic_files.len() >= 2 {
-        let protos = restructure_semantic::folder_prototypes(&semantic_files, 4);
-        let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path, &mut used_group_names);
+        // Junk-folder filter mirrors the doc/non-image passes: a Downloads/
+        // Desktop/temp dump (or an all-digit export artifact) is a place to
+        // organize photos OUT of, never a learn-your-style routing target.
+        let protos: Vec<_> = restructure_semantic::folder_prototypes(&semantic_files, 4)
+            .into_iter()
+            .filter(|p| !restructure_semantic::is_junk_prototype_folder(&p.path))
+            .collect();
+        let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path, &mut used_group_names, &mut settled);
         absorb_semantic_moves(moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
@@ -921,7 +966,7 @@ pub(crate) async fn handle_plan_restructure(
             })
             .collect();
         let doc_moves =
-            restructure_semantic::classify_documents(&doc_files, library_root_path, &mut used_group_names);
+            restructure_semantic::classify_documents(&doc_files, library_root_path, &mut used_group_names, &mut settled);
         absorb_semantic_moves(doc_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
@@ -934,7 +979,7 @@ pub(crate) async fn handle_plan_restructure(
     if restructure_semantic::non_image_enabled() {
         let non_image_files: Vec<restructure_semantic::SemanticFile> = files
             .iter()
-            .filter(|f| !moved.contains(&f.file_id))
+            .filter(|f| !moved.contains(&f.file_id) && !settled.contains(&f.file_id))
             .map(|f| restructure_semantic::SemanticFile {
                 file_id: f.file_id,
                 source: f.source.clone(),
@@ -944,13 +989,16 @@ pub(crate) async fn handle_plan_restructure(
             })
             .collect();
         let ni_moves =
-            restructure_semantic::classify_non_image(&non_image_files, library_root_path, &mut used_group_names);
+            restructure_semantic::classify_non_image(&non_image_files, library_root_path, &mut used_group_names, &mut settled);
         absorb_semantic_moves(ni_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
     }
 
-    // Rule cascade for everything neither semantic pass claimed.
-    let rule_files: Vec<FileForClassify> =
-        files.iter().filter(|f| !moved.contains(&f.file_id)).cloned().collect();
+    // Rule cascade for everything neither semantic pass claimed or settled.
+    let rule_files: Vec<FileForClassify> = files
+        .iter()
+        .filter(|f| !moved.contains(&f.file_id) && !settled.contains(&f.file_id))
+        .cloned()
+        .collect();
     proposed.extend(classify(&rule_files, library_root_path));
 
     // Learn-from-corrections: upgrade any planned move toward a folder the user has
@@ -1173,7 +1221,16 @@ pub(crate) async fn handle_apply_restructure(
             if let Some(plan_id) = plan_id {
                 anyhow::ensure!(moves.is_empty(), "paged plan apply must not also include moves");
                 let (moves, total) = open_stored_plan(&plan_id, &library_root)?;
-                apply.apply_iter(moves, Some(total))
+                let mut skipped_ask = 0usize;
+                let moves = exclude_ask_tier(moves, &mut skipped_ask);
+                let result = apply.apply_iter(moves, Some(total));
+                if skipped_ask > 0 {
+                    tracing::info!(
+                        skipped_ask,
+                        "[RESTRUCTURE] excluded ask-tier moves from bulk stored-plan apply"
+                    );
+                }
+                result
             } else {
                 let total = moves.len();
                 apply.apply_iter(moves.into_iter().map(Ok), Some(total))
@@ -1383,6 +1440,74 @@ mod tests {
     /// planID, and stream it through `apply_iter` — the exact path a
     /// truncated GUI plan takes when the app applies with planID + empty
     /// moves. Guards the spool/apply seam the piecewise tests can't.
+    /// Design §6: 'ask'-tier moves in a STORED plan must never bulk-apply —
+    /// the truncated-plan UI cannot have shown them for review. (audit 2026-07-14)
+    #[test]
+    fn stored_plan_bulk_apply_excludes_ask_tier_moves() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-spool-ask-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let incoming = root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let mut moves = Vec::new();
+        for (index, confidence) in ["auto", "ask", "review"].iter().enumerate() {
+            let source = incoming.join(format!("{index}.jpg"));
+            std::fs::write(&source, format!("payload-{index}")).unwrap();
+            let source_text = source.to_string_lossy().into_owned();
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0)",
+                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1],
+            )
+            .unwrap();
+            moves.push(IpcMove {
+                file_id: index as i64 + 1,
+                source: source_text,
+                destination: root
+                    .join("Sorted")
+                    .join(format!("{index}.jpg"))
+                    .to_string_lossy()
+                    .into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: (*confidence).into(),
+                reason: None,
+            });
+        }
+
+        let spool_dir = root.join("plans");
+        let root_text = root.to_string_lossy().into_owned();
+        let (plan_id, _preview) =
+            write_stored_plan_in(&spool_dir, &root_text, moves.into_iter().map(Ok), 3).unwrap();
+        let (stream, stored_total) =
+            open_stored_plan_in(&spool_dir, &plan_id, &root_text).unwrap();
+
+        let mut skipped_ask = 0usize;
+        let gated = exclude_ask_tier(stream, &mut skipped_ask);
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let apply =
+            crate::pipeline::restructure_apply::RestructureApply::new(db, root.clone(), false);
+        let result = apply.apply_iter(gated, Some(stored_total)).unwrap();
+
+        assert_eq!(result.applied, 2, "auto + review apply");
+        assert_eq!(result.failed, 0);
+        assert_eq!(skipped_ask, 1, "the ask move was excluded, not failed");
+        assert!(
+            incoming.join("1.jpg").exists(),
+            "ask-tier file must remain untouched"
+        );
+        assert!(root.join("Sorted").join("0.jpg").exists());
+        assert!(root.join("Sorted").join("2.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn stored_plan_applies_end_to_end_by_plan_id() {
         let root = std::env::temp_dir().join(format!(

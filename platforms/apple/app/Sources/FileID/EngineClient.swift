@@ -104,6 +104,21 @@ public final class EngineClient {
     /// which could reorder commands or interleave their bytes mid-line.
     private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
 
+    // MARK: - App Nap protection
+    //
+    // The old app-lifetime beginActivity token (removed in AppDelegate) kept
+    // the UI process from being App-Napped — throttled timers / coalesced
+    // updates — during a long scan or Deep Analyze run. Replaced with
+    // operation-scoped tokens so the app isn't held un-nappable while idle.
+    // (System idle-sleep during scans is handled separately by the engine's
+    // SleepGuard; this is purely App Nap for the UI process.) Each token is
+    // begun when its operation starts and ended on EVERY terminal path —
+    // completion, cancel, failure, and engine crash/exit — through the guarded
+    // helpers below (begin no-ops if already held, end no-ops if already
+    // cleared), so the pair can never leak or double-release.
+    private var scanActivityToken: NSObjectProtocol?
+    private var deepAnalyzeActivityToken: NSObjectProtocol?
+
     // Up to 3 respawns within respawnWindow; cleared on .ready.
     private static let respawnDelays: [UInt64] = [1, 4, 16]
     private static let respawnWindow: TimeInterval = 60
@@ -486,6 +501,13 @@ public final class EngineClient {
             // counter (or the phase) backwards within the same session.
             guard p.supersedes(lastProgress) else { break }
             lastProgress = p
+            // Release the App-Nap token on any terminal scan phase. Cancel /
+            // fail arrive here as a phase change (not as .scanComplete), so
+            // this is the only place those two paths surface.
+            switch p.phase {
+            case .completed, .cancelled, .failed: endScanActivity()
+            case .idle, .discovering, .tagging, .postScan: break
+            }
             // Auto-pilot: cancel + failed phases must release the
             // assistant view, otherwise the user is stuck looking at
             // "Finding people…" or similar with no way forward. The
@@ -506,6 +528,7 @@ public final class EngineClient {
             lastBatch = b
         case .scanComplete:
             lastTerminalEventAt = Date()
+            endScanActivity()
             // Auto-pilot: scan ➜ face clustering already auto-fires from
             // the engine itself, so just update the visible stage.
             // BUT: if there are no faces in the scanned library, the
@@ -568,6 +591,7 @@ public final class EngineClient {
                 // stays stuck "analyzing…" forever.
                 deepAnalyzeInFlight = false
                 deepAnalyzeProgress = nil
+                endDeepAnalyzeActivity()
                 if autoPilotActive {
                     // Deep Analyze failure during auto-pilot — same idea.
                     autoPilotStage = .ready
@@ -589,9 +613,11 @@ public final class EngineClient {
         case .deepAnalyzeStarting(let s):
             deepAnalyzeStarting = s
             deepAnalyzeInFlight = true
+            beginDeepAnalyzeActivity()
         case .deepAnalyzeProgress(let p):
             deepAnalyzeProgress = p
             deepAnalyzeInFlight = true
+            beginDeepAnalyzeActivity()
             // First per-file progress arrived — clear the "Starting…"
             // card so the progress card can take over without overlap.
             deepAnalyzeStarting = nil
@@ -606,6 +632,7 @@ public final class EngineClient {
         case .deepAnalyzeComplete(let c):
             deepAnalyzeComplete = c
             deepAnalyzeInFlight = false
+            endDeepAnalyzeActivity()
             lastTerminalEventAt = Date()
             deepAnalyzeProgress = nil
             deepAnalyzeStarting = nil
@@ -684,6 +711,11 @@ public final class EngineClient {
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
         faceClusteringInFlight = false
+        // A dead engine emits no terminal event, so release both App-Nap
+        // tokens here — this is the crash/exit leg that keeps the begin/end
+        // pairs balanced. Both helpers no-op when their token isn't held.
+        endScanActivity()
+        endDeepAnalyzeActivity()
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so without the reset the NEXT
         // apply's result is mis-attributed as the (dead) undo's. (audit R2-app)
@@ -760,6 +792,30 @@ public final class EngineClient {
             if case .crashed = self.state { return }
             self.start()
         }
+    }
+
+    // MARK: - App Nap activity (begin/end must stay balanced)
+
+    private func beginScanActivity() {
+        guard scanActivityToken == nil else { return }
+        scanActivityToken = AppSleepActivity.begin(reason: "FileID is scanning files")
+    }
+
+    private func endScanActivity() {
+        guard let token = scanActivityToken else { return }
+        AppSleepActivity.end(token)
+        scanActivityToken = nil
+    }
+
+    private func beginDeepAnalyzeActivity() {
+        guard deepAnalyzeActivityToken == nil else { return }
+        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is running Deep Analyze")
+    }
+
+    private func endDeepAnalyzeActivity() {
+        guard let token = deepAnalyzeActivityToken else { return }
+        AppSleepActivity.end(token)
+        deepAnalyzeActivityToken = nil
     }
 
     // MARK: - Commands
@@ -850,8 +906,13 @@ public final class EngineClient {
                 resolvedPath = displayPath
             }
             await MainActor.run {
-                self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
-                                      rescan: false, excludedPaths: nil))
+                // Begin the App-Nap token only if the command actually left the
+                // app; a dropped send (engine down) would otherwise leave the
+                // token held with no scan and no terminal event to release it.
+                if self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
+                                         rescan: false, excludedPaths: nil)) == true {
+                    self?.beginScanActivity()
+                }
             }
         }
     }
@@ -951,6 +1012,7 @@ public final class EngineClient {
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeFolder(prefix: String, modelKind: String) {
@@ -959,6 +1021,7 @@ public final class EngineClient {
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
@@ -967,6 +1030,7 @@ public final class EngineClient {
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeCancel() {

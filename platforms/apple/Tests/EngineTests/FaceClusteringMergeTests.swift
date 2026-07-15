@@ -106,6 +106,38 @@ struct FaceClusteringMergeTests {
         #expect(ids.contains(a) && ids.contains(b))
     }
 
+    @Test("search overload leaves every person unchanged")
+    func searchOverloadDoesNotPersistPartialPlan() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let vector = l2norm([1, 0, 0])
+        try await insertPerson(db, embedding: vector)
+        try await insertPerson(db, embedding: vector)
+        try await insertPerson(db, embedding: vector)
+
+        let merged = await FaceClustering.tightPairAutoMerge(
+            database: db,
+            searchLimits: .init(distanceEvaluations: 1, edges: 100,
+                                directPairLimit: .max))
+        #expect(merged == 0)
+        let remaining = try await personIDs(db)
+        #expect(remaining.count == 3,
+                "a rejected complete-search plan must not mutate the database")
+    }
+
+    @Test("one oversized embedding rejects auto-merge before decoding")
+    func oversizedEmbeddingFailsClosed() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let vector = l2norm([1, 0, 0])
+        try await insertPerson(db, embedding: vector)
+        try await insertPerson(db, embedding: vector)
+        try await insertPerson(db, embedding: [Float](repeating: 1, count: 4_097))
+
+        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        #expect(merged == 0)
+        let remaining = try await personIDs(db)
+        #expect(remaining.count == 3)
+    }
+
     // F-C3-005 — a bridge singleton high-cosine to two distinct NAMED persons
     // must not chain them into one identity (which would delete a name).
     @Test("a bridge singleton cannot transitively merge two named persons")
@@ -233,6 +265,141 @@ struct FaceClusteringMergeTests {
         FaceClustering.recordExtractionOutcomes(attempted: [fid], succeeded: [fid])
         #expect(!FaceClustering.permanentlyFailedExtractions().contains(fid),
                 "a later success rehabilitates the row")
+    }
+}
+
+@Suite("Exact face centroid threshold join")
+struct ExactCosineJoinTests {
+    private struct Generator {
+        var state: UInt64
+
+        mutating func next() -> Float {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float(Double(state >> 11) / Double(UInt64.max >> 11) * 2 - 1)
+        }
+    }
+
+    private func corpus(seed: UInt64, count: Int, dimension: Int) -> [[Float]] {
+        var generator = Generator(state: seed)
+        return (0..<count).map { _ in
+            l2norm((0..<dimension).map { _ in generator.next() })
+        }
+    }
+
+    @Test("person, embedding-row, and embedding-byte preflight caps are independent")
+    func inputCaps() {
+        // Precompute each Bool into a typed Int64 call so the #expect macro sees
+        // a plain Bool — the multi-arg integer arithmetic inside the macro
+        // autoclosure otherwise blows the Swift type-checker's time budget.
+        let allWithin = FaceClustering.autoMergeInputWithinLimits(
+            personCount: 20_000, embeddingCount: 250_000,
+            embeddingBytes: Int64(768) * 1024 * 1024, maxEmbeddingBytes: 16 * 1024)
+        #expect(allWithin)
+        let rowsOver = FaceClustering.autoMergeInputWithinLimits(
+            personCount: 1, embeddingCount: 250_001,
+            embeddingBytes: Int64(250_001) * 2_048, maxEmbeddingBytes: 2_048)
+        #expect(!rowsOver)
+        let bytesOver = FaceClustering.autoMergeInputWithinLimits(
+            personCount: 1, embeddingCount: 2,
+            embeddingBytes: Int64(768) * 1024 * 1024 + 1, maxEmbeddingBytes: 2_048)
+        #expect(!bytesOver)
+        let perRowOver = FaceClustering.autoMergeInputWithinLimits(
+            personCount: 1, embeddingCount: 1,
+            embeddingBytes: Int64(16) * 1024 + 1, maxEmbeddingBytes: 16 * 1024 + 1)
+        #expect(!perRowOver)
+    }
+
+    @Test("VP-tree edges equal the deterministic direct sweep")
+    func randomizedEquivalence() {
+        for seed in UInt64(1)...UInt64(8) {
+            let vectors = corpus(seed: seed, count: 120, dimension: 16)
+            let small = vectors.indices.map { $0.isMultiple(of: 7) }
+            let direct = ExactCosineJoin.edges(
+                vectors: vectors, small: small,
+                tightThreshold: 0.65, smallThreshold: 0.55,
+                limits: .init(distanceEvaluations: 1_000_000, edges: 100_000,
+                              directPairLimit: .max))
+            let indexed = ExactCosineJoin.edges(
+                vectors: vectors, small: small,
+                tightThreshold: 0.65, smallThreshold: 0.55,
+                limits: .init(distanceEvaluations: 1_000_000, edges: 100_000,
+                              directPairLimit: 0))
+            guard case let .success(directEdges, _) = direct,
+                  case let .success(indexedEdges, _) = indexed else {
+                Issue.record("both exact paths must complete")
+                continue
+            }
+            #expect(indexedEdges == directEdges)
+        }
+    }
+
+    @Test("high-dimensional ULP boundaries and singleton rules match the direct predicate")
+    func boundariesAndSingletons() {
+        let tight: Float = 0.65
+        let loose: Float = 0.55
+        let values = [tight.nextUp, tight, tight.nextDown,
+                      loose.nextUp, loose, loose.nextDown]
+        func vector(_ cosine: Float) -> [Float] {
+            var result = [Float](repeating: 0, count: 512)
+            result[0] = cosine
+            result[1] = max(0, 1 - cosine * cosine).squareRoot()
+            return result
+        }
+        var base = [Float](repeating: 0, count: 512)
+        base[0] = 1
+        var vectors = [base] + values.map(vector)
+        for dimension in 2..<34 {
+            var distractor = [Float](repeating: 0, count: 512)
+            distractor[dimension] = 1
+            vectors.append(distractor)
+        }
+        var small = Array(repeating: false, count: vectors.count)
+        small[4] = true
+        small[5] = true
+        small[6] = true
+        let direct = ExactCosineJoin.edges(
+            vectors: vectors, small: small,
+            tightThreshold: tight, smallThreshold: loose,
+            limits: .init(distanceEvaluations: 100_000, edges: 10_000,
+                          directPairLimit: .max))
+        let indexed = ExactCosineJoin.edges(
+            vectors: vectors, small: small,
+            tightThreshold: tight, smallThreshold: loose,
+            limits: .init(distanceEvaluations: 100_000, edges: 10_000,
+                          directPairLimit: 0))
+        guard case let .success(directEdges, _) = direct,
+              case let .success(indexedEdges, _) = indexed else {
+            Issue.record("boundary searches must complete")
+            return
+        }
+        #expect(indexedEdges == directEdges)
+    }
+
+    @Test("dense and adversarial searches fail before returning a partial graph")
+    func limitsFailClosed() {
+        let dense = Array(repeating: l2norm([1, 0, 0, 0]), count: 100)
+        let edgeLimited = ExactCosineJoin.edges(
+            vectors: dense, small: Array(repeating: false, count: dense.count),
+            tightThreshold: 0.65, smallThreshold: 0.55,
+            limits: .init(distanceEvaluations: 100_000, edges: 10,
+                          directPairLimit: 0))
+        guard case let .limitExceeded(reason, _) = edgeLimited else {
+            Issue.record("dense graph must reject the whole result")
+            return
+        }
+        #expect(reason == "qualifying_edges")
+
+        let spread = corpus(seed: 99, count: 100, dimension: 16)
+        let workLimited = ExactCosineJoin.edges(
+            vectors: spread, small: Array(repeating: false, count: spread.count),
+            tightThreshold: 0.65, smallThreshold: 0.55,
+            limits: .init(distanceEvaluations: 10, edges: 10_000,
+                          directPairLimit: 0))
+        guard case let .limitExceeded(workReason, _) = workLimited else {
+            Issue.record("work budget must reject the whole result")
+            return
+        }
+        #expect(workReason == "distance_evaluations")
     }
 }
 

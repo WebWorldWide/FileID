@@ -75,7 +75,7 @@ signature gold/lavender/cyan/pink accent palette.
 | --- | --- | --- |
 | **Library** | ✅ working | live `files` rows, master/detail split, searchable; detail shows kind/size/date/flags + tags + a text snippet |
 | **People** | ✅ working | live `persons` clusters (id, display name, face count, file count) |
-| **Cleanup** | ✅ working | exact-duplicate groups by BLAKE3 `content_hash`, master/detail (group → member paths) |
+| **Cleanup** | ✅ working | 5,000-candidate/64-GiB read-only full-file SHA-256 preview across legacy/current stored hash recipes, master/detail (group → member paths) |
 | **Restructure** | ✅ working (read-only) | in-process `restructure::classify` preview — proposed source → destination, category, confidence tier |
 | **Settings** | ✅ working | resolved DB path, row/tag/people/dup counts, engine wiring, stubbed-feature notes |
 | **Deep Analyze** | ⚠️ companion-only | explains the desktop VLM review workflow; model install remains available from the TUI |

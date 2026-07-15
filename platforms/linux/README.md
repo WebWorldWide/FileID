@@ -21,4 +21,4 @@ sudo apt install build-essential libgtk-4-dev libadwaita-1-dev tesseract-ocr ffm
 | `fileid` CLI / `fileid-tui` | **Verified on Linux** — scan/search/info/dedupe/restructure + the terminal UI. Built via `scripts/build-tools.sh`. |
 | GTK app — all six tabs | **Implemented + runtime-verified** (WSLg six-tab walk + earlier on-hardware pass): Library grid/search/preview, People face clusters, Cleanup dupe groups, Deep Analyze, Restructure Sankey + apply/undo, Settings model manager. LavaLamp, gold palette, springs. |
 | Shell ops | trash/reveal/tags/ocr/video/heic/**sleep** implemented (std + libc + subprocess, no new crates). HEIC decode needs `libheif-plugin-libde265` at runtime. `thumbnail` has no non-Windows caller (each app thumbnails itself). |
-| Flatpak / AppImage / Nix | Recipes in [`packaging/`](../../packaging/); CI builds the Flatpak (advisory). Real-hardware packaging validation is the remaining polish. |
+| Flatpak / AppImage / Nix | Recipes in [`packaging/`](../../packaging/); the offline-sandbox Flatpak build is required CI. Graphical launch and AppImage/Nix runtime validation remain native gates. |

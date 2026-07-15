@@ -408,6 +408,12 @@ fn main() -> ExitCode {
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.downcast_ref::<scan::PartialScan>().is_some() => {
+            // Committed-but-partial scan: results are usable, some files were
+            // unreadable. Dedicated code (rsync-style) so scripts can branch.
+            eprintln!("warning: {e:#}");
+            ExitCode::from(3)
+        }
         Err(e) => {
             eprintln!("error: {e:#}");
             ExitCode::FAILURE

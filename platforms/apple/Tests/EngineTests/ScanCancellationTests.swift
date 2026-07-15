@@ -188,12 +188,24 @@ struct ScanCancellationTests {
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
         }
-        await coord.setActiveRestructure(task)
+        let token = await coord.reserveRestructure()
+        #expect(token != nil)
+        if let token { await coord.attachRestructure(task, token: token) }
         await coord.requestCancel()
         // `await task.value` returns ONLY after the loop observed cancellation
         // and exited — proving requestCancel propagated to the registered task.
         await task.value
         #expect(task.isCancelled, "requestCancel must cancel the registered apply task")
+    }
+
+    @Test("Only one restructure operation can be reserved")
+    func restructureReservationIsExclusive() async {
+        let coord = ScanCoordinator()
+        let first = await coord.reserveRestructure()
+        #expect(first != nil)
+        #expect(await coord.reserveRestructure() == nil)
+        if let first { await coord.finishRestructure(token: first) }
+        #expect(await coord.reserveRestructure() != nil)
     }
 
 }

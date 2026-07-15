@@ -1,16 +1,5 @@
 name: Packaging (Linux — Flatpak)
 
-# Verifies the Flatpak build. ADVISORY (continue-on-error): the GNOME 46
-# rust-stable SDK extension ships a Rust older than a transitive dependency's
-# manifest requires (cpufeatures 0.3.0 → "failed to parse manifest"), so the
-# sandbox build fails on an SDK-toolchain limitation unrelated to our code.
-# Keep it advisory — surfacing progress + uploading the bundle when it works —
-# until the Flathub-offline path (cargo-sources.json + a newer rust SDK
-# extension) is verified on a real box. Must not red-gate main meanwhile.
-# This developer manifest grants build-only network for Cargo and the
-# statically linked ONNX Runtime archive; Cargo.lock checksums every crate and
-# ort-sys verifies its pinned archive SHA256, so bytes fail closed even online.
-
 on:
   push:
     branches: [main]
@@ -35,19 +24,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Flatpak — the primary, universal channel. Installs the GNOME 46 runtime +
-  # the rust-stable SDK extension (GNOME 46 is based on freedesktop-sdk 23.08),
-  # then runs flatpak-builder against packaging/flatpak/. ADVISORY end to end.
-  # ---------------------------------------------------------------------------
   flatpak:
-    name: Flatpak (GNOME 46) — x64 [advisory]
+    name: Flatpak (GNOME 49) — x64
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    continue-on-error: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Verify generated offline Cargo sources
+        run: |
+          set -euo pipefail
+          python packaging/flatpak/generate-cargo-sources.py --check
+          python packaging/flatpak/test_generate_cargo_sources.py
 
       - name: Install flatpak + flatpak-builder
         run: |
@@ -60,18 +49,15 @@ jobs:
           flatpak remote-add --if-not-exists --user flathub \
             https://flathub.org/repo/flathub.flatpakrepo
 
-      - name: Install GNOME 46 runtime + rust-stable SDK extension
+      - name: Install GNOME 49 runtime + Rust SDK extension
         run: |
           set -euo pipefail
           flatpak install -y --user flathub \
-            org.gnome.Platform//46 \
-            org.gnome.Sdk//46 \
-            org.freedesktop.Sdk.Extension.rust-stable//23.08
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.rust-stable//25.08
 
-      - name: Build the Flatpak
-        # --share=network is granted to the build step inside the developer
-        # manifest for Cargo + ort's static archive; nothing is uploaded. The
-        # shipped sandbox's network grant remains user-initiated HF downloads.
+      - name: Build the Flatpak without build-network access
         run: |
           set -euo pipefail
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
@@ -79,7 +65,7 @@ jobs:
             build-dir \
             packaging/flatpak/io.github.fileid.FileID.yaml
 
-      - name: Bundle the .flatpak (artifact)
+      - name: Bundle the .flatpak
         run: |
           set -euo pipefail
           flatpak build-bundle repo FileID.flatpak io.github.fileid.FileID
@@ -87,7 +73,7 @@ jobs:
           sha256sum --check FileID.flatpak.sha256
 
       - name: Upload Flatpak bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fileid-flatpak
           path: |

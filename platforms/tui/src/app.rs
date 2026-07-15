@@ -280,6 +280,15 @@ impl App {
                 // Re-clamp every cursor against the freshly loaded lengths.
                 self.clamp_all();
             }
+            LoadMsg::Dupes(report) => {
+                // Deferred duplicate verification landing after Done — fold it
+                // into the already-painted snapshot. (audit 2026-07-14)
+                self.data.dupes = report.dupes;
+                self.data.dupes_truncated = report.dupes_truncated;
+                self.data.dupe_candidate_count = report.dupe_candidate_count;
+                self.data.dupes_pending = false;
+                self.clamp_all();
+            }
             LoadMsg::Error(e) => {
                 self.status = e;
                 self.loading = false;
@@ -704,8 +713,9 @@ impl Browser {
     /// Re-read `cwd` in ONE shallow pass (FIX 2): split it into subdirectories
     /// (→ `rows`, sorted case-insensitively, prefixed by `..`), a dimmed file
     /// preview (→ `files`, capped), and `cwd`'s own [`DirCounts`] (→ `here`,
-    /// for the title). Bounded by [`COUNT_CAP`] so an enormous folder can't
-    /// stall the UI. An unreadable directory yields empty lists + a `notice`;
+    /// for the title). File and directory work have independent [`COUNT_CAP`]
+    /// bounds, so a file-heavy folder cannot consume the navigation budget.
+    /// An unreadable directory yields empty lists + a `notice`;
     /// never panics. `file_type()` is preferred so symlink loops aren't
     /// followed; unreadable individual entries are simply skipped. Clears the
     /// per-subdir count cache since we've navigated to a new `cwd`.
@@ -718,10 +728,6 @@ impl Browser {
         match std::fs::read_dir(&self.cwd) {
             Ok(entries) => {
                 for entry in entries.flatten() {
-                    if here.dirs + here.files >= COUNT_CAP {
-                        here.capped = true;
-                        break;
-                    }
                     let path = entry.path();
                     let name = dir_label(&path);
                     // Hidden-by-default: skip dot-entries unless toggled on, so the
@@ -730,14 +736,25 @@ impl Browser {
                     if !self.show_hidden && name.starts_with('.') {
                         continue;
                     }
+                    // Both budgets exhausted: every further entry can only
+                    // re-set `capped`, so stop enumerating — a 200k-entry flat
+                    // folder must not be walked to the end on every refresh.
+                    // (audit 2026-07-14: the independent-budget fix dropped the
+                    // early break entirely.)
+                    if here.dirs >= COUNT_CAP && here.files >= COUNT_CAP {
+                        here.capped = true;
+                        break;
+                    }
                     let is_dir = entry
                         .file_type()
                         .map(|t| t.is_dir())
                         .unwrap_or_else(|_| path.is_dir());
-                    if is_dir {
+                    if is_dir && here.dirs < COUNT_CAP {
                         here.dirs += 1;
                         dirs.push(path);
-                    } else {
+                    } else if is_dir {
+                        here.capped = true;
+                    } else if here.files < COUNT_CAP {
                         here.files += 1;
                         let is_image = is_image_path(&path);
                         if is_image {
@@ -746,6 +763,8 @@ impl Browser {
                         if files.len() < FILE_LIST_CAP {
                             files.push(FileEntry { name, is_image });
                         }
+                    } else {
+                        here.capped = true;
                     }
                 }
                 self.notice = None;
@@ -1457,6 +1476,30 @@ mod tests {
         );
         // Second call is served from cache (same result, no re-walk).
         assert_eq!(b.count_for(&huge), Some(counts));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn browser_keeps_directories_after_file_count_cap() {
+        let mut base = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        base.push(format!("fileid-tui-nav-cap-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        for i in 0..(COUNT_CAP + 5) {
+            std::fs::write(base.join(format!("f{i:04}.bin")), "x").unwrap();
+        }
+        let wanted = base.join("z-navigable");
+        std::fs::create_dir_all(&wanted).unwrap();
+
+        let browser = Browser::open(base.clone());
+        assert!(browser.here.capped);
+        assert!(browser
+            .rows
+            .iter()
+            .any(|row| matches!(row, BrowseRow::Dir(path) if path == &wanted)));
         let _ = std::fs::remove_dir_all(&base);
     }
 

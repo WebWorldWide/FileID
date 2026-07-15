@@ -84,7 +84,7 @@ rasterizes PDFs.)
 | `fileid search --similar <path-or-id> [--limit N]` | Visual / semantic nearest-neighbor: ranks files by cosine similarity to the seed file's CLIP embedding. Clear message when no embeddings are present. | reads embeddings |
 | `fileid info <path-or-id>` | A file's metadata, flags, tags, people, and a text snippet. | No |
 | `fileid people` | Person clusters (id, name, face count). Empty until a full engine scan with face models has run. | reads only |
-| `fileid dedupe [--exact\|--similar] [--threshold N]` | List duplicate groups. `--exact`: byte-identical by BLAKE3 `content_hash`. `--similar`: near-dups by perceptual-hash Hamming distance (default ≤ 8). | reads only |
+| `fileid dedupe [--exact\|--similar] [--threshold N]` | List duplicate groups. `--exact`: bounded full-file SHA-256 over same-size candidates, including legacy/current stored-hash mixtures. `--similar`: exact radius-8 perceptual-hash grouping through a wide multi-index. | reads files / phashes |
 | `fileid dedupe --apply [--similar] [--dry-run] [--delete] [--yes]` | Keep one file per group, remove the rest — to Trash/Recycle Bin (recoverable; Windows + Linux) or permanently with `--delete`. SAFE: nothing removed without `--apply`; prompts unless `--yes`. | reads signal |
 | `fileid restructure --plan [root]` | Compute + print the proposed reorg using the engine's exact rule cascade. Read-only. | No |
 | `fileid restructure --apply [--dry-run] [--symlinks] [--yes] [root]` | Execute the plan via the engine's exact `applyRestructure` code path (collision-uniquify, stale-plan + path-traversal guards, undo journal). `--symlinks` previews without moving. Prompts unless `--yes`. | No |
