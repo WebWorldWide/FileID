@@ -25,6 +25,14 @@
     <OutputType>Package</OutputType>
     <OutputName Condition="'$(Platform)' == 'x64'">FileID-x64</OutputName>
     <OutputName Condition="'$(Platform)' == 'arm64'">FileID-arm64</OutputName>
+    <!-- ICE60: fires on versioned, language-neutral NATIVE DLLs (e_sqlite3.dll
+         from SQLitePCLRaw.bundle_e_sqlite3, added when the NuGet SQLite CVE was
+         patched) because they carry a version resource but no Language column
+         and are not fonts. This is the documented ICE60 false-positive for
+         native libraries — Windows' own installers suppress it. Safe because
+         these are single-binary, culture-invariant native DLLs with no
+         language variants to disambiguate. -->
+    <SuppressIces>ICE60</SuppressIces>
     <!-- WiX 4's wix.exe accepts only `full` or `none` for -pdbType.
          Override the platforms-wide `portable` default from
          Directory.Build.props (intended for .NET assemblies, not MSIs). -->
