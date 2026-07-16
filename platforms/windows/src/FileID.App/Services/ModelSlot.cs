@@ -166,6 +166,13 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         {
             TotalBytes = newTotal;
         }
+        // The engine's total is an estimate; real bytes can overshoot it (the
+        // user's 15 GB VLM install ended at "15.21 GB of 15.18 GB"). Grow the
+        // displayed total so the label never claims more-done-than-total.
+        if (BytesDone is { } done && TotalBytes is { } t && done > t)
+        {
+            TotalBytes = done;
+        }
         Message = p.Message;
         LastProgressAt = DateTime.UtcNow;
         if (p.Fraction >= 1.0)

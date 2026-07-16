@@ -8,6 +8,18 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-15 — Fresh-install feedback round: Deep Analyze was 100% broken on the new runtime; preview keys, install UI, cancel affordance
+
+The owner's true first-run (post-wipe install of the refreshed v0.1.1) surfaced four defects, all root-caused on their real log/DB and fixed + live-verified via UIA on the dev box:
+
+- **Deep Analyze broken outright (showstopper):** the updated llama.cpp runtime (b9254) removed `--no-display-prompt` from `llama-mtmd-cli`; the engine passed it unconditionally → instant exit(1) on EVERY single-file analyze, surfaced as a misleading "model isn't installed". Flag removed (mtmd-cli never echoes the prompt on any build). A redacted 8-line stderr tail is now attached to nonzero-exit errors so the next runtime break is diagnosable from app.log. Verified: Mistral-24B captions a real Adlon photo end-to-end ("MADISON SQUARE GARDEN" read off the scoreboard, proposed name `madison-square-garden-empty`) with llama.cpp's CPU spill handling the 13.6 GB model on the 16 GB 5080.
+- **VLM selection drift:** onboarding installed Mistral but `SelectedVlmModelKind` stayed at the qwen default (`WasUserChosen=false`) — the Welcome combo + Install-all path never persisted the pick, so every preview Analyze targeted uninstalled weights. `SeedDeepVlmFromSentinels` now re-points Settings at the installed VLM when the persisted pick has no weights on disk (an explicit user choice still wins). Verified self-heal on launch.
+- **Accidental-Analyze guard:** the preview sheet's Analyze button is now a two-state control — while a run this sheet started is in flight it reads "Cancel analysis" and sends `DeepAnalyzeCancel`; auto-resets on `DeepAnalyzeComplete` (new `[ENGINE-SUB:FilePreviewSheet]` subscription, SafeRun + dispatcher-marshaled) and on navigation. All transitions live-verified, including the cancel IPC.
+- **Preview arrow keys dead / video work:** added Left/Right `KeyboardAccelerator`s on the sheet (input-preprocessing path — fires even when the ContentDialog's key handling starves the routed tunnel) with a same-keystroke tick dedupe against the routed handler, and eager `MediaPlayer` creation so `MediaFailed` always attaches (codec failures were a silent black surface). Live-verified: Right 3→4 exactly one step, Left×2 4→2. Video playback path compile-verified only (owner's fresh scan has no video rows yet).
+- **Model-install UI glitch/flash + fit:** owner's log showed ~20 progress events/s (19k+ for the 15 GB Mistral) — engine `PROGRESS_THROTTLE_MS` 50→250 plus a time floor on the simple-download path; label churn killed (Consolas progress/rate lines single-line + rate row reserved for the whole download); `BytesDone` can no longer exceed the displayed total ("15.21 GB of 15.18 GB"); Welcome sheet Width=600 → adaptive Min/MaxWidth and the overlay Border fits small windows (verified at 1000×640: footer visible, internal scroll). 
+
+Gates: engine 449/451 + clippy 0 (Windows + WSL 1.90), app 244/244 + IpcSchema 48/48, format clean.
+
 ## 2026-07-14 — Audit iteration 14: Adlon soak GREEN, measured face/restructure recalibration, undo-journal crash-safety port
 
 Independent re-review of the whole uncommitted audit tree (multi-agent adversarial pass + three subsystem deep audits), then measured fixes against the real corpus. The pending uncapped Adlon soak (NEXT item 4) is GREEN: 71,333 files at 43 f/s, peak 5,441 MB, all 12 assertions, WAL checkpointed, privacy gate clean, corpus fingerprint byte-identical before/after.

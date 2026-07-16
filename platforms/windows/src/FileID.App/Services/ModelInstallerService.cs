@@ -905,6 +905,31 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                        && installed.Contains(persisted, StringComparer.Ordinal)
             ? persisted
             : installed[0];
+        // The persisted pick can point at weights that were never installed
+        // while a DIFFERENT VLM is fully on disk (fresh onboarding: pick
+        // Mistral in the Welcome combo → Install all → settings still hold
+        // the qwen default). Every Deep Analyze consumer reads Settings
+        // directly, so leave it stale and each Analyze fails with a
+        // misleading "model isn't installed". Re-point Settings at the
+        // installed model; an explicit user pick (WasUserChosen) still wins.
+        if (!string.Equals(selected, persisted, StringComparison.Ordinal))
+        {
+            try
+            {
+                var s = AppViewModel.Instance.Settings;
+                if (!s.SelectedVlmModelWasUserChosen)
+                {
+                    s.SelectedVlmModelKind = selected;
+                    s.Save();
+                    DebugLog.Info(
+                        $"[INSTALL] SelectedVlmModelKind self-healed to installed '{selected}' (was '{persisted}', no weights on disk).");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("[INSTALL] VLM selection self-heal failed: " + ex.Message);
+            }
+        }
         SelectDeepVlmModel(selected, userInitiated: false);
     }
 
