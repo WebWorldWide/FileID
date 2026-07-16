@@ -50,8 +50,13 @@
          ../FileID.Bundle/Bundle.wxs so a failure installing one packaged
          MSI doesn't unwind packages that already committed past the
          checkpoint. -->
+    <!-- AllowSameVersionUpgrades: release assets are refreshed in place under
+         the same version (e.g. the two v0.1.1 rebuilds); without this,
+         re-running a same-version setup leaves the OLD files installed and
+         can double-register the product. -->
     <MajorUpgrade
         Schedule="afterInstallExecute"
+        AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of FileID is already installed." />
 
     <!-- Per-machine install with arch-aware Program Files target. -->
