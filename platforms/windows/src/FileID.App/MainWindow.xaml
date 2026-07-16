@@ -123,8 +123,13 @@
               Grid.Row="1"
               Background="#CC0D0D14"
               Visibility="Collapsed">
+            <!-- MinWidth dropped from 580 and an outer margin added so the
+                 sheet shrinks with the window instead of clipping on small /
+                 highly-scaled displays; the sheet's internal ScrollViewer
+                 absorbs the vertical overflow within the constrained row. -->
             <Border MaxWidth="720"
-                    MinWidth="580"
+                    MinWidth="320"
+                    Margin="24,16"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
                     CornerRadius="12"

@@ -45,6 +45,9 @@ public sealed partial class FilePreviewSheet : UserControl
         PreviewKeyDown += OnPreviewKeyDown;
         Loaded += OnSheetLoaded;
         IsTabStop = true;
+        // Auto-reset the Analyze/Cancel button when the engine finishes the
+        // run this sheet started. Detached in CloseFromHost.
+        ViewModels.EngineClient.Instance.PropertyChanged += OnEngineChangedForAnalyze;
     }
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
@@ -62,6 +65,8 @@ public sealed partial class FilePreviewSheet : UserControl
     {
         if (_unloaded) return;
         _unloaded = true;
+        try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChangedForAnalyze; }
+        catch { /* best-effort */ }
         try { _loadingDelayTimer?.Stop(); } catch { }
         StopAndClearMedia();
         DisposeMediaPlayer();
@@ -95,6 +100,43 @@ public sealed partial class FilePreviewSheet : UserControl
     private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         => HandleKeyDown(e);
 
+    // Accelerator path (see the XAML comment): fires even when the routed
+    // KeyDown never reaches the dialog handler. Accelerators are evaluated
+    // BEFORE routed key events, so when we handle one here the routed path
+    // never fires (no double-navigation); when we decline (TextBox focused),
+    // the key continues to the routed pipeline where HandleKeyDown's own
+    // typing guard also declines and the caret key reaches the TextBox.
+    private void OnLeftAccelerator(
+        Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
+        Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
+        => args.Handled = TryNavigateFromAccelerator(-1);
+
+    private void OnRightAccelerator(
+        Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
+        Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
+        => args.Handled = TryNavigateFromAccelerator(+1);
+
+    // Set when an accelerator navigates, so the routed pass for the SAME
+    // keystroke (the dialog handler runs with handledEventsToo:true and
+    // deliberately ignores e.Handled — see HandleKeyDown) can't navigate a
+    // second time. Both passes run within one input dispatch, so a short
+    // wall-clock window is a reliable same-keystroke discriminator.
+    private long _acceleratorNavTick;
+
+    private bool TryNavigateFromAccelerator(int delta)
+    {
+        var focused = XamlRoot is null
+            ? null
+            : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
+        if (focused is TextBox) return false; // typing — give the caret key back
+        _acceleratorNavTick = Environment.TickCount64;
+        NavigateSibling(delta);
+        return true;
+    }
+
+    private bool AcceleratorAlreadyNavigated()
+        => Environment.TickCount64 - _acceleratorNavTick < 100;
+
     /// <summary>Arrow-key sibling nav + Space play/pause + Esc close. Public
     /// because the host wires it on the ContentDialog via
     /// AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true): once the
@@ -120,12 +162,12 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             case Windows.System.VirtualKey.Left:
                 if (typing) return;
-                NavigateSibling(-1);
+                if (!AcceleratorAlreadyNavigated()) NavigateSibling(-1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Right:
                 if (typing) return;
-                NavigateSibling(+1);
+                if (!AcceleratorAlreadyNavigated()) NavigateSibling(+1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Space:
@@ -193,6 +235,9 @@ public sealed partial class FilePreviewSheet : UserControl
 
         TagInput.Text = string.Empty;
         TagStatusText.Visibility = Visibility.Collapsed;
+        // Navigation resets the Analyze button for the NEW file; a run already
+        // in flight keeps going (the Deep Analyze tab shows its progress).
+        if (_analyzeRunning) SetAnalyzeIdle();
         // Refresh the proposed-rename card from the DB (separate query
         // because the sheet may be opened for a file the LibraryView
         // hasn't loaded yet).
@@ -645,10 +690,17 @@ public sealed partial class FilePreviewSheet : UserControl
             // The prior image frame is kept on screen until a new surface binds
             // (deferred-loading); collapse it now that the media surface is up.
             PreviewImage.Visibility = Visibility.Collapsed;
+            // Ensure a MediaPlayer exists BEFORE binding the source: the
+            // element creates one lazily, so `MediaPlayer is { }` could still
+            // be null here — skipping the MediaFailed attach and leaving a
+            // codec/DRM failure as a silent black surface with no message.
+            if (PreviewMedia.MediaPlayer is null)
+            {
+                PreviewMedia.SetMediaPlayer(new Windows.Media.Playback.MediaPlayer());
+            }
             PreviewMedia.Source = src;
             PreviewMedia.Visibility = Visibility.Visible;
-            // Attach failure handler on the (lazily-created) MediaPlayer; detach
-            // first so rapid sibling navigation can't multi-subscribe.
+            // Detach first so rapid sibling navigation can't multi-subscribe.
             if (PreviewMedia.MediaPlayer is { } mp)
             {
                 mp.MediaFailed -= OnMediaPlayerFailed;
@@ -1044,23 +1096,63 @@ public sealed partial class FilePreviewSheet : UserControl
         return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
     }
 
+    // While a run started from THIS sheet is in flight the button becomes
+    // "Cancel analysis" — an accidental click must never cost a multi-minute
+    // VLM run with no way out. Reset to idle by DeepAnalyzeComplete (see
+    // OnEngineChangedForAnalyze), by navigation, or by the cancel itself.
+    private bool _analyzeRunning;
+
     private async void OnAnalyzeClicked(object sender, RoutedEventArgs e)
     {
         if (FileId <= 0) return;
+        if (_analyzeRunning)
+        {
+            try { await ViewModels.EngineClient.Instance.DeepAnalyzeCancelAsync(); }
+            catch (Exception ex) { Services.DebugLog.Warn("Analyze cancel failed: " + ex); }
+            SetAnalyzeIdle();
+            return;
+        }
         try
         {
-            AnalyzeButton.IsEnabled = false;
+            SetAnalyzeRunning();
             await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, ViewModels.AppViewModel.Instance.Settings.SelectedVlmModelKind);
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("Analyze failed: " + ex);
-        }
-        finally
-        {
-            AnalyzeButton.IsEnabled = true;
+            SetAnalyzeIdle();
         }
     }
+
+    private void SetAnalyzeRunning()
+    {
+        _analyzeRunning = true;
+        AnalyzeGlyph.Glyph = "\uE711"; // Cancel (X)
+        AnalyzeLabel.Text = "Cancel analysis";
+        ToolTipService.SetToolTip(AnalyzeButton, "Stop the Deep Analyze run for this file");
+    }
+
+    private void SetAnalyzeIdle()
+    {
+        _analyzeRunning = false;
+        AnalyzeGlyph.Glyph = "\uE945";
+        AnalyzeLabel.Text = "Analyze";
+        ToolTipService.SetToolTip(AnalyzeButton, "Run Deep Analyze (VLM) on this file");
+    }
+
+    private void OnEngineChangedForAnalyze(object? s, System.ComponentModel.PropertyChangedEventArgs e)
+        => Services.DebugLog.SafeRun("FilePreviewSheet.OnEngineChangedForAnalyze", () =>
+        {
+            if (e.PropertyName != nameof(ViewModels.EngineClient.DeepAnalyzeComplete)) return;
+            Services.DebugLog.Debug($"[ENGINE-SUB:FilePreviewSheet] {e.PropertyName}");
+            // Nominally already the UI thread (Apply dispatches there), but per
+            // the platform rule treat that as untrusted: post XAML writes
+            // through the captured dispatcher.
+            DispatcherQueue?.TryEnqueue(() =>
+            {
+                if (_analyzeRunning) SetAnalyzeIdle();
+            });
+        });
 
     private void OnRevealClicked(object sender, RoutedEventArgs e)
         => Services.DebugLog.SafeRun(nameof(OnRevealClicked), () => Services.SafeOpen.Reveal(FilePath));

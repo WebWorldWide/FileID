@@ -21,7 +21,8 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:svc="using:FileID.Services"
     mc:Ignorable="d"
-    Width="600">
+    MinWidth="320"
+    MaxWidth="600">
 
     <Grid Padding="28">
         <Grid.RowDefinitions>
@@ -92,16 +93,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Clip.Message, Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Clip.BytesPerSecond, Svc.Clip.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Clip.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -162,16 +167,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.RamPlus.Message, Svc.RamPlus.Fraction, Svc.RamPlus.BytesDone, Svc.RamPlus.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.RamPlus.BytesPerSecond, Svc.RamPlus.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.RamPlus.Status, Svc.RamPlus.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.RamPlus.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -231,16 +240,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Arcface.Message, Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Arcface.BytesPerSecond, Svc.Arcface.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Arcface.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -314,16 +327,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.DeepVlm.Message, Svc.DeepVlm.Fraction, Svc.DeepVlm.BytesDone, Svc.DeepVlm.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.DeepVlm.BytesPerSecond, Svc.DeepVlm.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.DeepVlm.Status, Svc.DeepVlm.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.DeepVlm.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -385,16 +402,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Bge.Message, Svc.Bge.Fraction, Svc.Bge.BytesDone, Svc.Bge.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Bge.BytesPerSecond, Svc.Bge.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Bge.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -457,16 +478,20 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Whisper.Message, Svc.Whisper.Fraction, Svc.Whisper.BytesDone, Svc.Whisper.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Whisper.BytesPerSecond, Svc.Whisper.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Whisper.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -528,10 +553,12 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Accelerator.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
+                                   MaxLines="1"
+                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Accelerator.BytesPerSecond, Svc.Accelerator.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind ShowRateEta(Svc.Accelerator.Status, Svc.Accelerator.HasStarted), Mode=OneWay}"
+                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Accelerator.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap" />
+                                   />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Accelerator.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"

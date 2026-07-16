@@ -32,7 +32,13 @@ use sha2::{Digest, Sha256};
 pub const PARALLEL_PARTS: usize = 12;
 const PROGRESS_REPORT_INTERVAL_BYTES: u64 = 1024 * 1024; // 1 MB
 const MIN_BYTES_FOR_PARALLEL: u64 = 5 * 1024 * 1024;     // 5 MB
-const PROGRESS_THROTTLE_MS: u64 = 50;                    // 20 Hz — smoother bar + finer EMA
+// 4 Hz. The old 50 ms (20 Hz) cadence was chosen for bar smoothness, but each
+// event crosses IPC → JSON parse → PropertyChanged → x:Bind re-eval across
+// every bound row on the app's UI thread — at 20 Hz for a 15 GB VLM that is
+// ~19,000 events of pure UI churn (the Welcome sheet visibly glitched, and
+// app.log grew megabytes of [INSTALL] spam). A progress bar repainting 4×/s
+// is indistinguishable to the eye; the EMA rate uses its own 500 ms sampler.
+const PROGRESS_THROTTLE_MS: u64 = 250;
 const MAX_UNSIZED_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Total concurrent in-flight HTTP requests across ALL prewarm tasks.
@@ -507,6 +513,10 @@ where
         let hard_limit = stream_hard_limit(total, request.expected_bytes);
         let mut stream = resp.bytes_stream();
         let mut last_report = bytes_done.load(Ordering::Relaxed);
+        // Time floor alongside the byte gate: on a fast connection 1 MB
+        // intervals alone still fire tens of events per second (see
+        // PROGRESS_THROTTLE_MS — same UI-churn rationale).
+        let mut last_report_at = Instant::now();
         let mut chunk_err: Option<anyhow::Error> = None;
 
         while let Some(chunk) = stream.next().await {
@@ -542,7 +552,9 @@ where
                 return Err(anyhow::Error::new(e).context("writing chunk"));
             }
             let cur = bytes_done.fetch_add(chunk.len() as u64, Ordering::Relaxed) + chunk.len() as u64;
-            if cur - last_report >= PROGRESS_REPORT_INTERVAL_BYTES {
+            if cur - last_report >= PROGRESS_REPORT_INTERVAL_BYTES
+                && last_report_at.elapsed().as_millis() >= PROGRESS_THROTTLE_MS as u128
+            {
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
                 progress(DownloadProgress {
                     url: request.url.clone(),
@@ -551,6 +563,7 @@ where
                     bytes_per_second: cur as f64 / elapsed,
                 });
                 last_report = cur;
+                last_report_at = Instant::now();
             }
         }
         tokio::io::AsyncWriteExt::flush(&mut file).await.context("final flush")?;
