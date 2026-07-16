@@ -3967,3 +3967,26 @@ pinned 1.22 wins); a full-AI `scan --models` then pinned `ORT_DYLIB_PATH` to it
 and ran inference (SFace/YuNet/MobileCLIP warmup complete, model loaded, "AI scan
 complete"). CLI `cargo build` + `clippy --all-targets -D warnings` + `cargo test`
 (incl. new SHA-mismatch + dylib-locator + `.dSYM`-exclusion tests) all green.
+
+## 2026-07-15 — VLM child processes: version-drift defense, not version pinning
+
+The b9254 llama.cpp runtime silently removed `--no-display-prompt` from
+`llama-mtmd-cli`, turning every single-file Deep Analyze into an instant
+exit(1) with stderr discarded (`Stdio::null()`) — undiagnosable from logs, and
+invisible to CI because no gate runs the real runtime binary. Two standing
+rules from this:
+
+1. **Pass only flags mtmd-cli itself documents** — never llama-cli flags that
+   happen to be accepted by older builds. The runtime pack updates on its own
+   cadence; the engine must tolerate flag drift in both directions.
+2. **Child stderr is never `Stdio::null()`** on failure-capable subprocess
+   paths — keep a small redacted ring (8 lines) and attach it to the error.
+   Full-stream capture stays at `debug!` (llama.cpp emits tens of KB); the
+   tail is what makes a field failure diagnosable from one WARN line.
+
+Related same-session calls: engine download-progress events are floored at
+250 ms (20 Hz measured on the owner's fresh install = 19k+ events per model,
+pure UI churn — a bar repainting 4×/s is visually identical), and
+`SeedDeepVlmFromSentinels` re-points `SelectedVlmModelKind` at whatever VLM is
+actually on disk when the persisted pick has no weights (invariant: Settings
+never names uninstalled weights unless the user explicitly chose them).

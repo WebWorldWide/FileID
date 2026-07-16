@@ -297,8 +297,11 @@ pub async fn caption(
         if req.greedy {
             cmd.arg("--temp").arg("0");
         }
-        // Don't print the prompt back at us; we only want the completion.
-        cmd.arg("--no-display-prompt");
+        // NOTE: never pass `--no-display-prompt` here. It's a llama-cli flag;
+        // llama-mtmd-cli b9254 rejects it with `error: invalid argument` and
+        // exits 1 — which broke EVERY single-file Deep Analyze on the updated
+        // runtime (mtmd-cli never echoes the prompt anyway, so nothing is
+        // lost by omitting it on older builds either).
         // P2: offload all layers to the GPU, mirroring the persistent server
         // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
         // this the per-file CLI path ran the entire VLM decode + vision
@@ -330,16 +333,29 @@ pub async fn caption(
         // pipe captured but never read, the child blocks on its next stderr
         // write once the OS pipe buffer fills while we block reading stdout —
         // a deadlock that hangs Deep Analyze. Read it to EOF on its own task.
+        // Keep a short redacted tail of stderr so a nonzero exit can say WHY
+        // (e.g. the b9254 `error: invalid argument: --no-display-prompt` that
+        // silently broke Deep Analyze was only visible at debug level).
+        let stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
         if let Some(stderr) = child.stderr.take() {
             // llama.cpp echoes the --image arg (a user path) into its
             // diagnostics; the model/binary paths are app-structural and
             // pass redaction unchanged.
             let image_raw = req.image_path.to_string_lossy().into_owned();
             let image_redacted = crate::platform::redact_path_for_log(&req.image_path);
+            let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
-                    tracing::debug!(target: "vlm", "{}", l.replace(&image_raw, &image_redacted));
+                    let red = l.replace(&image_raw, &image_redacted);
+                    if let Ok(mut t) = tail.lock() {
+                        if t.len() >= 8 {
+                            t.pop_front();
+                        }
+                        t.push_back(red.clone());
+                    }
+                    tracing::debug!(target: "vlm", "{}", red);
                 }
             });
         }
@@ -379,7 +395,14 @@ pub async fn caption(
 
         let status = child.wait().await.context("waiting on VLM child")?;
         if !status.success() {
-            bail!("VLM exited with status {:?}", status);
+            let tail = stderr_tail
+                .lock()
+                .map(|t| t.iter().cloned().collect::<Vec<_>>().join(" | "))
+                .unwrap_or_default();
+            if tail.is_empty() {
+                bail!("VLM exited with status {:?}", status);
+            }
+            bail!("VLM exited with status {:?} — stderr tail: {}", status, tail);
         }
         Ok(CaptionResult { text: text.trim().to_string() })
     }
