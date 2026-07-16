@@ -258,7 +258,11 @@ public sealed partial class WelcomeSheet : UserControl
 
     internal string RateEtaLabel(double bytesPerSecond, double etaSeconds)
     {
-        if (bytesPerSecond <= 0) return string.Empty;
+        // The rate row stays VISIBLE for the whole download (gated by
+        // VisibleIfDownloading) so its appearance can't reflow every row
+        // below mid-install; a non-breaking space keeps the reserved line's
+        // height stable until the first EMA sample lands.
+        if (bytesPerSecond <= 0) return " ";
         var rate = $"{FormatBytes((ulong)bytesPerSecond)}/s";
         var eta = etaSeconds > 0 ? " · " + FormatEta(etaSeconds) + " remaining" : string.Empty;
         return rate + eta;
