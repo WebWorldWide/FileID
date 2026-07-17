@@ -102,11 +102,13 @@
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="FileIDIcon" />
         <RemoveFolder Id="RemoveStartMenuDir" Directory="StartMenuDir" On="uninstall" />
-        <!-- HKLM, not HKCU: this is a perMachine package and the shortcut
-             lands in the all-users Start Menu. An HKCU keypath here (the
-             ICE38/ICE57 shape) would strand the value when a different user
-             uninstalls and can trigger repair prompts in multi-user setups. -->
-        <RegistryValue Root="HKLM"
+        <!-- HKCU is REQUIRED here, not a bug: ICE38/ICE43/ICE57 (enforced by
+             the WiX v4 build) treat a ProgramMenuFolder shortcut component as
+             user-profile data and hard-fail an HKLM keypath (proven by the
+             2026-07-17 v0.1.1 tag run). The stranded-HKCU-value-on-multi-user-
+             uninstall is the documented, accepted trade-off of the canonical
+             shortcut pattern — do not "fix" this to HKLM again. -->
+        <RegistryValue Root="HKCU"
                        Key="Software\FileID\Installed"
                        Name="StartMenuShortcut"
                        Type="integer"
