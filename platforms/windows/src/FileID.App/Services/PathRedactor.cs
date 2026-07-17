@@ -1,4 +1,4 @@
-namespace FileID.Services;
+﻿namespace FileID.Services;
 
 internal static class PathRedactor
 {

@@ -4,17 +4,6 @@
 import Foundation
 import Darwin
 
-// `mach_task_self_` is a stable, effectively-constant port name for the current
-// task, but Swift 6.0/6.1 (Xcode 16's SDK) flags the imported Darwin global
-// `var` as shared mutable state and needs the nonisolated(unsafe) escape hatch;
-// Swift 6.2+ (Xcode 26) does not flag it and warns the annotation is redundant.
-// Split on the compiler so both toolchains build warning-free.
-#if compiler(>=6.2)
-private let fileidMachTaskSelf: mach_port_t = mach_task_self_
-#else
-private nonisolated(unsafe) let fileidMachTaskSelf: mach_port_t = mach_task_self_
-#endif
-
 public enum Hardware {
 
     public static let physicalMemoryGB: Double = {
@@ -117,15 +106,15 @@ public enum Hardware {
 
     /// Resident-set MB of the current process.
     public static func residentMB() -> Int {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
-        let kr = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(fileidMachTaskSelf, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        guard kr == KERN_SUCCESS else { return 0 }
-        return Int(info.resident_size / (1024 * 1024))
+        // proc_pidinfo(getpid(), …) avoids the Darwin `mach_task_self_` global
+        // var, which Swift 6 on the Xcode 16 SDK rejects as shared mutable state
+        // (and there is no use-site annotation that suppresses reading it). getpid()
+        // is a plain function and is concurrency-safe on every toolchain.
+        var info = proc_taskinfo()
+        let size = Int32(MemoryLayout<proc_taskinfo>.size)
+        let got = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &info, size)
+        guard got == size else { return 0 }
+        return Int(info.pti_resident_size / (1024 * 1024))
     }
 
     /// Available system memory in MB (free + inactive + speculative pages).
