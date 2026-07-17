@@ -204,8 +204,8 @@ jobs:
             "developer.download.nvidia.com"
             "developer.nvidia.com"
             "schemas.microsoft.com"
-            "schemas.openxmlformats.org",
-            "ai.google.dev",
+            "schemas.openxmlformats.org"
+            "ai.google.dev"
             "docs.nvidia.com"
           )
           hits=()
