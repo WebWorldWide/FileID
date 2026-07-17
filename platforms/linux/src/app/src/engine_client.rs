@@ -827,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // intentional compile-time bound checks
     fn engine_event_channels_are_bounded() {
         assert!(RAW_EVENT_CAP > 0 && RAW_EVENT_CAP <= 8);
         assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);

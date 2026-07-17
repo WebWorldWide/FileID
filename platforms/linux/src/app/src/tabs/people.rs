@@ -648,24 +648,24 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
         }
         Mode::Unknown => {
             let ids: Vec<i64> = ui.unknown_checked.borrow().iter().copied().collect();
-            if !ids.is_empty() {
-                if send_cmd(
+            if !ids.is_empty()
+                && send_cmd(
                     ui,
                     CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
                         person_ids: ids.clone(),
                     }),
-                ) {
-                    set_status(
-                        ui,
-                        format!(
-                            "Marked {} cluster{} as unknown.",
-                            ids.len(),
-                            plural(ids.len() as i64)
-                        ),
-                    );
-                    set_mode(ui, Mode::Normal);
-                    schedule_reload_burst(ui);
-                }
+                )
+            {
+                set_status(
+                    ui,
+                    format!(
+                        "Marked {} cluster{} as unknown.",
+                        ids.len(),
+                        plural(ids.len() as i64)
+                    ),
+                );
+                set_mode(ui, Mode::Normal);
+                schedule_reload_burst(ui);
             }
         }
         Mode::Normal => {}
