@@ -36,7 +36,7 @@ uuid       = { version = "1", features = ["v4", "serde"] }
 chrono     = { version = "0.4.20", features = ["serde"] }
 
 # SQLite. Bundled libsqlite3 + FTS5 for byte-faithful schema parity.
-rusqlite = { version = "0.31", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }
+rusqlite = { version = "0.40", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }
 # FTS5 ships in `bundled` since rusqlite 0.31; explicit feature flag isn't needed but documented here.
 
 # Logs — structured local-only tracing. Replaces JSONLog.swift. NEVER goes off-device.

@@ -44,7 +44,7 @@ crossterm = "0.28"
 # Already an engine dependency; declaring it here at the same version means
 # Cargo unifies it (no new crate in the lock graph). Used for the read SQL the
 # TUI runs against connections returned by `fileid_engine::db::open_read`.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Same rationale as rusqlite: already in the lock graph (an engine dependency),
 # so declaring it here unifies to the same version — NO new crate. Required to
