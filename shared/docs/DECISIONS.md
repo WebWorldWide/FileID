@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-07-16 — Model-license terms hosts (ai.google.dev, docs.nvidia.com) added to the source URL allowlist
+
+The new model-license acceptance gate shows the user the governing terms as a
+browser-opened link before a restricted download: Google's Gemma terms
+(`ai.google.dev/gemma/terms`) and NVIDIA's cuDNN/CUDA EULAs (`docs.nvidia.com/...`).
+These are opened in the user's browser (HyperlinkButton / Process.Start / xdg-open),
+never fetched by the app, so they are display-only links, not egress — the same
+category as the already-allowed `developer.nvidia.com` CUDA-pack host. Both hosts
+were added to `windows-engine.yml`'s source URL allowlist per its documented
+"edit the list AND add a DECISIONS.md rationale" policy. This does not widen the
+app's actual network egress, which remains user-initiated Hugging Face downloads
+only (enforced separately by `check_runtime_egress.py`).
+
 ## 2026-07-16 — The mutation gate fails a queued action fast ONLY when a scan is paused, never behind a running op
 
 `spawn_mutation` serializes every mutating command behind one `tokio::sync::Mutex`, and `StartScan` deliberately holds it for the scan's whole life so `WipeLibrary` can wait an in-flight scan out (via its own cancel + 10 s timeout) before truncating the DB — that interlock is load-bearing and must not be broken. The bug: the gate was acquired with no timeout, so a *paused* scan (an unbounded, user-controlled hold) hung every other mutation forever with no event. Two tempting fixes were rejected: (a) ungating `StartScan` — breaks the wipe interlock (`exclusive_gate_times_out_while_a_mutation_is_active` proves wipe relies on it); (b) a blanket acquisition timeout — spuriously fails a mutation legitimately queued behind a *running* scan / long DeepAnalyzeAll / ApplyRestructure that will free the gate on its own (minutes is normal on a 10k-file library). The chosen fix polls the gate (2 s slices) and emits a retriable `library_busy` error ONLY when `scan_state.is_paused()` — the sole holder that is genuinely unbounded. A paused scan always holds the gate (a queued-but-unstarted scan hasn't set `scan_state`), so the check has no false positive. `lock_owned()` consumes the `Arc`, so it's cloned per poll (cheap). This is Windows-engine code compiled+tested here but not run on hardware — owner runtime-verify the pause→mutate→busy path.

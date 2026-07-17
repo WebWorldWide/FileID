@@ -274,8 +274,8 @@ internal sealed partial class EngineClient
     /// cannot mistake a live engine for a safely stopped one.</summary>
     public async Task<bool> StopAndWaitForExitAsync(
         TimeSpan timeout,
-        CancellationToken ct = default,
-        bool restartAfterLateExit = false)
+        bool restartAfterLateExit = false,
+        CancellationToken ct = default)
     {
         try
         {
@@ -323,7 +323,7 @@ internal sealed partial class EngineClient
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
         if (!await StopAndWaitForExitAsync(
-                TimeSpan.FromSeconds(10), ct, restartAfterLateExit: true).ConfigureAwait(false))
+                TimeSpan.FromSeconds(10), ct: ct, restartAfterLateExit: true).ConfigureAwait(false))
         {
             throw new TimeoutException("The existing engine did not stop; restart was aborted.");
         }

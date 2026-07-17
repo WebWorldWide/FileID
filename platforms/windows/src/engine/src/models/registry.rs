@@ -896,7 +896,7 @@ mod tests {
             id: "test_runtime",
             display_name: "Test runtime",
             files: vec![FileEntry {
-                url: "https://example.invalid/llama-runtime.zip".into(),
+                url: "https://huggingface.co/test/llama-runtime.zip".into(),
                 dest: root.join("llama-runtime.zip"),
                 sha256: Some("00".repeat(32)),
                 approx_bytes: 1,
