@@ -46,7 +46,7 @@ tracing-appender   = "0.2"
 
 # Errors.
 anyhow    = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Filesystem walk + path utilities. Faster than std::fs::read_dir at scale.
 walkdir   = "2"
