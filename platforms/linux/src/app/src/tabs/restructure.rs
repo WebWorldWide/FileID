@@ -521,6 +521,8 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         keyboard_node,
         #[weak]
         sankey,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
         move |_, key, _, _| {
             let total = {
                 let state = state.borrow();
