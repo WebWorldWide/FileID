@@ -408,6 +408,8 @@ public actor DeepAnalyze {
         }
         let ciA = CIImage(cgImage: cgA)
         let ciB = CIImage(cgImage: cgB)
+        let boxCIA = UncheckedSendableBox(ciA)
+        let boxCIB = UncheckedSendableBox(ciB)
 
         let systemPrompt = """
         You are a face-matching assistant. You will see two cropped face photos. Answer in EXACTLY this format on two lines:
@@ -425,7 +427,7 @@ public actor DeepAnalyze {
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Are these two cropped face photos of the same person?",
-                          images: [.ciImage(ciA), .ciImage(ciB)], videos: [])
+                          images: [.ciImage(boxCIA.value), .ciImage(boxCIB.value)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 256, height: 256)
@@ -553,6 +555,7 @@ public actor DeepAnalyze {
             return AnalysisResult(description: "Could not decode image.", proposedName: nil)
         }
         let ciImage = CIImage(cgImage: cg)
+        let boxCI = UncheckedSendableBox(ciImage)
 
         // Build the prompt. Face names (if face clustering has run) are
         // injected as context so the VLM can reference people by their
@@ -582,7 +585,7 @@ public actor DeepAnalyze {
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Describe this image and propose a filename.",
-                          images: [.ciImage(ciImage)], videos: [])
+                          images: [.ciImage(boxCI.value)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 448, height: 448)
@@ -636,7 +639,7 @@ public actor DeepAnalyze {
             try await container.perform { (context: ModelContext) -> Void in
                 try Task.checkCancellation()
                 let chat: [Chat.Message] = [
-                    .user(Self.tagPrompt, images: [.ciImage(ciImage)], videos: [])
+                    .user(Self.tagPrompt, images: [.ciImage(boxCI.value)], videos: [])
                 ]
                 var tagInput = UserInput(chat: chat)
                 tagInput.processing.resize = .init(width: 448, height: 448)
@@ -1109,6 +1112,16 @@ public actor DeepAnalyze {
     private struct SendableGeneratorRef: @unchecked Sendable {
         let generator: AVAssetImageGenerator
         init(_ generator: AVAssetImageGenerator) { self.generator = generator }
+    }
+
+    /// Wrapper asserting a value is safe to hand into MLX's `@Sendable`
+    /// ModelContainer.perform closure. Used for CIImage snapshots: the older
+    /// Xcode 16 SDK doesn't mark CIImage Sendable (Xcode 26 does), so a raw
+    /// capture fails only on CI's toolchain. The snapshot is immutable at the
+    /// call site, so the assertion holds on both.
+    private struct UncheckedSendableBox<T>: @unchecked Sendable {
+        let value: T
+        init(_ value: T) { self.value = value }
     }
 
     nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int) async -> CGImage? {
