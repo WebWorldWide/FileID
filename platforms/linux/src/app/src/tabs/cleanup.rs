@@ -1502,6 +1502,7 @@ fn build_group(
 
 /// Recompute keeper flags + totals after an optimistic member removal. Members
 /// stay in rank order, so element 0 is the best surviving keeper.
+#[allow(dead_code)] // kept for the in-place group refresh not yet wired to the UI
 fn recompute_group(g: &mut DupGroup) {
     g.keeper_bytes = g.members.first().map(|m| m.size).unwrap_or(0);
     for (i, m) in g.members.iter_mut().enumerate() {
