@@ -117,7 +117,7 @@ quick-xml = "0.41"
 # audio files in the library get real content-style tag chips. MPL-2.0 (file-
 # level copyleft; fine for separate use). YAMNet sound-event tagging + Whisper
 # transcription are documented follow-ups (need offline ONNX conversion).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
 
 # Native llama.cpp bindings (in-process VLM inference, no subprocess).
 # Off by default to keep CI build fast — adds ~150 MB build artifacts +
