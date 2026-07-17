@@ -64,6 +64,10 @@ fn record_acceptance_in(root: &Path, policy: LicensePolicy) -> std::io::Result<(
     Ok(())
 }
 
+// gtk::Dialog is deprecated in GTK 4.10+; this is the app's only use of it.
+// Suppress the deprecation (which -D warnings turns into a build error) rather
+// than rewrite to adw::AlertDialog blind — a proper migration is tracked in NEXT.
+#[allow(deprecated)]
 pub(crate) fn ensure_or_prompt(button: &gtk::Button, model_kind: &'static str) -> bool {
     let Some(policy) = policy_for(model_kind) else {
         return true;
