@@ -9,6 +9,9 @@
 param(
     [Parameter(Mandatory)] [string] $PublishRoot,
     [Parameter(Mandatory)] [string] $OutputFile,
+    [Parameter(Mandatory)]
+    [ValidateSet("x64", "arm64")]
+    [string] $Architecture,
     [string] $ComponentGroupName = "PublishedFiles",
     [string] $DirectoryRefId = "INSTALLFOLDER"
 )
@@ -99,11 +102,11 @@ foreach ($f in $files) {
     $compId = "cmp_$hashHex"
     $fileId = "fil_$hashHex"
 
-    # Stable component GUID per relative path. Required for proper upgrade
-    # behavior — same path → same GUID across versions so the installer
-    # knows it's the same file slot.
+    # Stable component GUID per architecture + relative path. Same-architecture
+    # upgrades retain component identity; x64 and ARM64 never co-own a component
+    # if Windows Installer briefly sees both products during migration.
     $guidHash = [System.Security.Cryptography.MD5]::Create().ComputeHash(
-        [System.Text.Encoding]::UTF8.GetBytes($rel.ToLowerInvariant())
+        [System.Text.Encoding]::UTF8.GetBytes("$Architecture|$($rel.ToLowerInvariant())")
     )
     $guidHex = [System.BitConverter]::ToString($guidHash).Replace('-','')
     $componentGuid = "{0}-{1}-{2}-{3}-{4}" -f `

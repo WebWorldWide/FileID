@@ -21,7 +21,7 @@ mod ui;
 
 use std::io::{self, Stdout};
 use std::process::ExitCode;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender as Sender};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -98,8 +98,9 @@ fn run(db_flag: Option<std::path::PathBuf>) -> Result<()> {
     // async load lands.
     app.missing_models = scan::missing_models_display();
 
-    let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::channel();
-    data::spawn_load(ctx.db.clone(), String::new(), tx.clone());
+    let (tx, rx): (Sender<LoadMsg>, Receiver<LoadMsg>) = mpsc::sync_channel(256);
+    let generation = app.advance_load_generation();
+    data::spawn_load(ctx.db.clone(), String::new(), tx.clone(), generation);
 
     // RAII: the guard owns the terminal and its `Drop` is the single source of
     // truth for teardown — it restores cooked mode + the main screen on a normal
@@ -140,7 +141,8 @@ fn event_loop(
         // a download finishes and re-appears if one failed.
         let was_loading = app.loading;
         let mut got_msg = false;
-        while let Ok(msg) = rx.try_recv() {
+        for _ in 0..64 {
+            let Ok(msg) = rx.try_recv() else { break };
             app.apply_load(msg);
             got_msg = true;
         }
@@ -167,18 +169,21 @@ fn event_loop(
 
         if app.reload_requested {
             app.reload_requested = false;
-            data::spawn_load(ctx.db.clone(), app.search.clone(), tx.clone());
+            let generation = app.advance_load_generation();
+            data::spawn_load(ctx.db.clone(), app.search.clone(), tx.clone(), generation);
         }
         // A confirmed folder-pick arms a scan; drive it on a worker thread so
         // the UI stays live (q keeps quitting; the TerminalGuard still restores
         // the terminal). The thread streams status + reloads on completion.
         if let Some(root) = app.scan_requested.take() {
+            let generation = app.advance_load_generation();
             scan::spawn_scan(
                 ctx.db.clone(),
                 root,
                 ctx.engine_data_home.clone(),
                 app.search.clone(),
                 tx.clone(),
+                generation,
             );
         }
         // A Settings `D` arms an AI-model download; drive it on a worker thread
@@ -186,21 +191,19 @@ fn event_loop(
         // The thread streams progress to the status line and reloads on success.
         if app.download_requested {
             app.download_requested = false;
+            let generation = app.advance_load_generation();
             download = Some(models::spawn_download(
                 ctx.db.clone(),
                 app.search.clone(),
                 tx.clone(),
+                generation,
             ));
         }
         if app.should_quit {
             // Kill (don't take) an in-flight download child so it can't keep
             // running orphaned; the worker thread still reclaims + reaps it.
             if let Some(handle) = &download {
-                if let Ok(mut slot) = handle.lock() {
-                    if let Some(child) = slot.as_mut() {
-                        let _ = child.kill();
-                    }
-                }
+                handle.cancel();
             }
             return Ok(());
         }

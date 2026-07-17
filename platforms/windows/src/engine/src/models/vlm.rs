@@ -141,15 +141,14 @@ impl VlmRunner {
                  Settings -> Performance -> 'Install llama.cpp runtime'."
             )
         }
+        let safe_vulkan_dir = crate::platform::redact_path_for_log(&vulkan_dir);
         #[cfg(windows)]
         bail!(
-            "llama.cpp runtime not found under {}. Install it with your Deep Analyze model or from Settings -> Performance.",
-            vulkan_dir.display()
+            "llama.cpp runtime not found under {safe_vulkan_dir}. Install it with your Deep Analyze model or from Settings -> Performance."
         );
         #[cfg(not(windows))]
         bail!(
-            "llama.cpp runtime not found under {} or on PATH. Install a current llama.cpp build that includes llama-mtmd-cli, then try again.",
-            vulkan_dir.display()
+            "llama.cpp runtime not found under {safe_vulkan_dir} or on PATH. Install a current llama.cpp build that includes llama-mtmd-cli, then try again."
         )
     }
 }
@@ -201,7 +200,8 @@ pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
 }
 
 fn sanity_check_binary(p: &PathBuf) -> Result<()> {
-    let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
+    let safe_path = crate::platform::redact_path_for_log(p);
+    let meta = std::fs::metadata(p).with_context(|| format!("stat {safe_path}"))?;
     let len = meta.len();
     // Floor is 20 KB, not 3 MB: modern llama.cpp ships a thin launcher
     // (llama-mtmd-cli.exe ~89 KB, the heavy code lives in mtmd.dll / ggml DLLs),
@@ -211,18 +211,18 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
     if !(20_000..=200_000_000).contains(&len) {
         bail!(
             "{}: unexpected size {} bytes (expected 20 KB..200 MB)",
-            p.display(),
+            safe_path,
             len
         );
     }
     use std::io::Read;
-    let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
+    let mut f = std::fs::File::open(p).with_context(|| format!("open {safe_path}"))?;
     #[cfg(windows)]
     {
         let mut buf = [0u8; 2];
         f.read_exact(&mut buf).context("reading PE header")?;
         if buf != [b'M', b'Z'] {
-            bail!("{}: not a PE binary (missing MZ header)", p.display());
+            bail!("{safe_path}: not a PE binary (missing MZ header)");
         }
     }
     #[cfg(target_os = "linux")]
@@ -230,7 +230,7 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
         let mut buf = [0u8; 4];
         f.read_exact(&mut buf).context("reading ELF header")?;
         if buf != [0x7f, b'E', b'L', b'F'] {
-            bail!("{}: not an ELF binary", p.display());
+            bail!("{safe_path}: not an ELF binary");
         }
     }
     #[cfg(target_os = "macos")]
@@ -239,7 +239,7 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
         f.read_exact(&mut buf).context("reading Mach-O header")?;
         let magic = u32::from_be_bytes(buf);
         if !matches!(magic, 0xfeedface | 0xfeedfacf | 0xcefaedfe | 0xcffaedfe | 0xcafebabe | 0xbebafeca | 0xcafebabf | 0xbfbafeca) {
-            bail!("{}: not a Mach-O binary", p.display());
+            bail!("{safe_path}: not a Mach-O binary");
         }
     }
     // Header + size pass even if dependent libraries are missing.
@@ -258,16 +258,22 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
             "{}: --version exited with status {:?}. The binary is present but \
              likely missing dependent DLLs (a Performance Pack install probably \
              didn't finish). Re-install from Settings -> Performance.",
-            p.display(),
+            safe_path,
             o.status.code()
         ),
         Err(err) => bail!(
             "{}: could not spawn for --version probe ({err}). Likely \
              missing dependent DLLs — re-install the runtime from \
              Settings -> Performance.",
-            p.display()
+            safe_path
         ),
     }
+}
+
+fn redact_vlm_stderr_line(line: String, replacements: &[(String, String)]) -> String {
+    replacements
+        .iter()
+        .fold(line, |value, (raw, redacted)| value.replace(raw, redacted))
 }
 
 /// Caption an image. Streams stdout line-by-line, calling `on_token`
@@ -326,7 +332,10 @@ pub async fn caption(
         // don't orphan llama-mtmd-cli for the OS session.
         cmd.kill_on_drop(true);
 
-        let mut child = cmd.spawn().with_context(|| format!("spawn {}", runner.binary.display()))?;
+        let safe_binary = crate::platform::redact_path_for_log(&runner.binary);
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("spawn {safe_binary}"))?;
         // Drain stderr concurrently. llama.cpp is extremely verbose on stderr
         // (backend init, full model/mmproj metadata, sampling params, timings —
         // tens of KB, emitted during load BEFORE any stdout token). With the
@@ -339,16 +348,18 @@ pub async fn caption(
         let stderr_tail: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
             Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
         if let Some(stderr) = child.stderr.take() {
-            // llama.cpp echoes the --image arg (a user path) into its
-            // diagnostics; the model/binary paths are app-structural and
-            // pass redaction unchanged.
-            let image_raw = req.image_path.to_string_lossy().into_owned();
-            let image_redacted = crate::platform::redact_path_for_log(&req.image_path);
+            let replacements = [
+                (&req.image_path, crate::platform::redact_path_for_log(&req.image_path)),
+                (&req.gguf_path, crate::platform::redact_path_for_log(&req.gguf_path)),
+                (&req.mmproj_path, crate::platform::redact_path_for_log(&req.mmproj_path)),
+                (&runner.binary, crate::platform::redact_path_for_log(&runner.binary)),
+            ]
+            .map(|(path, redacted)| (path.to_string_lossy().into_owned(), redacted));
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
-                    let red = l.replace(&image_raw, &image_redacted);
+                    let red = redact_vlm_stderr_line(l, &replacements);
                     if let Ok(mut t) = tail.lock() {
                         if t.len() >= 8 {
                             t.pop_front();
@@ -477,7 +488,7 @@ pub(crate) async fn discrete_gpu_device(binary: &std::path::Path) -> Option<Stri
         .await
         .insert(binary.to_path_buf(), resolved.clone());
     if let Some(dev) = &resolved {
-        tracing::info!(%dev, binary = %binary.display(), "[VLM] pinning llama.cpp to discrete GPU");
+        tracing::info!(%dev, binary = %crate::platform::redact_path_for_log(binary), "[VLM] pinning llama.cpp to discrete GPU");
     }
     resolved
 }
@@ -545,7 +556,22 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_weights, parse_best_vulkan_device};
+    use super::{find_weights, parse_best_vulkan_device, redact_vlm_stderr_line};
+
+    #[test]
+    fn stderr_redaction_replaces_every_known_persistent_path() {
+        let replacements = vec![
+            ("C:\\Users\\alice\\AppData\\Local\\FileID\\Models\\llama.exe".to_string(), "…/llama.exe".to_string()),
+            ("C:\\Users\\alice\\Pictures\\private.jpg".to_string(), "…/private.jpg".to_string()),
+        ];
+        let redacted = redact_vlm_stderr_line(
+            "binary C:\\Users\\alice\\AppData\\Local\\FileID\\Models\\llama.exe image C:\\Users\\alice\\Pictures\\private.jpg".to_string(),
+            &replacements,
+        );
+        assert!(!redacted.contains("C:\\Users\\alice"));
+        assert!(redacted.contains("…/llama.exe"));
+        assert!(redacted.contains("…/private.jpg"));
+    }
 
     #[test]
     fn picks_discrete_over_integrated() {

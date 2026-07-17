@@ -89,7 +89,9 @@ pub struct App {
     pub search: String,
     pub search_active: bool,
     pub status: String,
+    pending_scan_warning: Option<String>,
     pub loading: bool,
+    pub load_generation: u64,
     pub show_help: bool,
     pub should_quit: bool,
     /// Set when the user asks for a reload; `main` consumes it and re-spawns
@@ -153,7 +155,9 @@ impl App {
             search: String::new(),
             search_active: false,
             status: "Starting…".to_string(),
+            pending_scan_warning: None,
             loading: true,
+            load_generation: 0,
             show_help: false,
             should_quit: false,
             reload_requested: false,
@@ -172,6 +176,13 @@ impl App {
             missing_models: Vec::new(),
             status_error: false,
         }
+    }
+
+    pub fn advance_load_generation(&mut self) -> u64 {
+        self.pending_scan_warning = None;
+        self.load_generation = self.load_generation.wrapping_add(1).max(1);
+        crate::data::begin_generation(self.load_generation);
+        self.load_generation
     }
 
     /// Files visible under the current search filter (Library tab).
@@ -255,9 +266,22 @@ impl App {
     /// Fold a loader message into state.
     pub fn apply_load(&mut self, msg: LoadMsg) {
         match msg {
+            LoadMsg::Versioned {
+                generation,
+                message,
+            } => {
+                if generation == self.load_generation {
+                    self.apply_load(*message);
+                }
+            }
             LoadMsg::Status(s) => {
                 self.status = s;
                 self.status_error = false;
+            }
+            LoadMsg::ScanPartial(warning) => {
+                self.status = warning.clone();
+                self.pending_scan_warning = Some(warning);
+                self.status_error = true;
             }
             LoadMsg::DownloadProgress { percent, label } => {
                 // Clamp defensively (the parser already does, but the gauge must
@@ -288,6 +312,10 @@ impl App {
                 self.data.dupe_candidate_count = report.dupe_candidate_count;
                 self.data.dupes_pending = false;
                 self.clamp_all();
+                if let Some(warning) = self.pending_scan_warning.take() {
+                    self.status = warning;
+                    self.status_error = true;
+                }
             }
             LoadMsg::Error(e) => {
                 self.status = e;
@@ -295,6 +323,7 @@ impl App {
                 self.scanning = false;
                 self.downloading = false;
                 self.download = None;
+                self.pending_scan_warning = None;
                 self.status_error = true;
             }
         }
@@ -1236,6 +1265,51 @@ mod tests {
         app.apply_load(LoadMsg::Done(Box::new(snap)));
         assert!(!app.loading);
         assert_eq!(app.cursor(), 0);
+    }
+
+    #[test]
+    fn partial_scan_warning_survives_reload_and_duplicate_verification() {
+        let mut app = app_with_files(0);
+        let warning = "Scan partial: 9/10 files, 1 failed".to_string();
+        app.apply_load(LoadMsg::ScanPartial(warning.clone()));
+        app.apply_load(LoadMsg::Status("Reading files…".into()));
+        app.apply_load(LoadMsg::Done(Box::default()));
+        app.apply_load(LoadMsg::Status(
+            "Duplicates verified · 0 duplicate groups".into(),
+        ));
+        app.apply_load(LoadMsg::Dupes(Box::default()));
+
+        assert_eq!(app.status, warning);
+        assert!(app.status_error);
+        assert!(app.pending_scan_warning.is_none());
+    }
+
+    #[test]
+    fn stale_versioned_completion_cannot_replace_newer_snapshot() {
+        let mut app = app_with_files(0);
+        app.load_generation = 2;
+        let newer = Snapshot {
+            db_exists: true,
+            query: "newer".into(),
+            total_files: 2,
+            ..Snapshot::default()
+        };
+        app.apply_load(LoadMsg::Versioned {
+            generation: 2,
+            message: Box::new(LoadMsg::Done(Box::new(newer))),
+        });
+        let stale = Snapshot {
+            db_exists: true,
+            query: "stale".into(),
+            total_files: 1,
+            ..Snapshot::default()
+        };
+        app.apply_load(LoadMsg::Versioned {
+            generation: 1,
+            message: Box::new(LoadMsg::Done(Box::new(stale))),
+        });
+        assert_eq!(app.data.query, "newer");
+        assert_eq!(app.data.total_files, 2);
     }
 
     #[test]

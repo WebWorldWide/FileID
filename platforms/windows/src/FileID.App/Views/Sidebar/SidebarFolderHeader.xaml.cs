@@ -219,13 +219,24 @@ public sealed partial class SidebarFolderHeader : UserControl
         DebugLog.Info("[WIPE] stage 2: shutdown engine");
         try
         {
-            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
+            if (!await EngineClient.Instance.StopAndWaitForExitAsync(
+                    TimeSpan.FromSeconds(10), restartAfterLateExit: true))
+            {
+                DebugLog.Warn("[WIPE] stage 2 timed out; refusing to delete a live engine's database");
+                await ShowAlertAsync(
+                    "Couldn't safely wipe the library",
+                    "The engine did not stop in time, so FileID left your database untouched. Close FileID and try again.");
+                return;
+            }
             DebugLog.Info("[WIPE] stage 2 complete");
         }
         catch (Exception ex)
         {
-            DebugLog.Warn("[WIPE] stage 2 (shutdown) threw: " + ex.Message);
-            // Continue anyway — engine may already be dead.
+            DebugLog.Warn("[WIPE] stage 2 (shutdown) threw; wipe aborted: " + ex.Message);
+            await ShowAlertAsync(
+                "Couldn't safely wipe the library",
+                "The engine could not be stopped, so FileID left your database untouched. Close FileID and try again.");
+            return;
         }
 
         DebugLog.Info("[WIPE] stage 3: delete DB files");

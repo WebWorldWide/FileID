@@ -95,7 +95,7 @@ public enum Hardware {
     /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
     /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
     /// runtime pressure adaptation is the separate F-3 item.
-    public enum MemoryTier { case low, balanced, high }
+    public enum MemoryTier: Sendable { case low, balanced, high }
 
     public static let memoryTier: MemoryTier = {
         let gb = physicalMemoryGB

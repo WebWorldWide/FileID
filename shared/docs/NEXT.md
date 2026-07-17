@@ -1,5 +1,14 @@
 # NEXT — resume here
 
+## STATUS 2026-07-16 — cross-platform safety + macOS Deep Analyze tree audited (3 rounds) + fixed; landing on branch `crossplatform-safety-and-macos-deepanalyze-0.1.1`
+
+The large uncommitted tree (macOS Deep Analyze/VLM/CLIP port, model-license gating, archive path-safety, engine-lifecycle safety, read-only fingerprinting) was driven to landable: a 3-round adversarial audit (~50 agents, converged clean) fixed **11 defects** (STATE top), the full local gate is green, cargo-audit is clean (quinn-proto RUSTSEC-2026-0185 patched + Flatpak sources regenerated), and a read-only Adlon scan proved the engine is byte-identical-on-corpus. Resume order:
+
+1. **Confirm GitHub CI green on the branch/PR, then merge to `main`.** CI is the only validation for the C# (WinUI) and GTK/Linux fixes — they were adversarially read-reviewed but not compiled here. Watch: windows-app (`ModelLicenseGate` file-persistence + `Product.wxs`/wixproj ICE61), linux (Deep Analyze license-gate wiring), engine, macos, policy, packaging (Flatpak cargo-sources).
+2. **Refresh the release with the changes** — DECISION PENDING (owner): bump patch → cut a new `v0.1.2` tag, or refresh `v0.1.1` in place. `release.yml` is tag-triggered (`v*`) and builds unsigned Windows MSI/Setup + macOS/Linux/Windows tool bundles; still unsigned-validation-only until a signing provider is enrolled.
+3. **Owner runtime-verify (Windows, can't run here):** (a) the mutation-gate change — pause a scan, then issue a mutation, and confirm a `library_busy` error (not a hang) rather than the old indefinite block; (b) the license gate now actually installs the CUDA/cuDNN pack + Gemma on a shipped unpackaged build (was 100% blocked). Known fail-safe edge (LOW): if a scan is *queued behind a long op* when Wipe is clicked, wipe times out "nothing wiped" and succeeds on retry (it never truncates during a scan) — a scan-cancel flag checked at `handle_start_scan` entry would tighten it if it ever annoys.
+4. **[5] deferred as engine-parity, not a bug:** a file truncated content→0 bytes keeps its stale row/metadata on both the engine and the CLI (seen-but-not-catalogued). Re-indexing truncated files as empty is a cross-platform change (engine + CLI together), not a CLI-only fix — do it as a deliberate parity change if desired.
+
 ## STATUS 2026-07-14 — iteration 14 landed (soak green, faces/restructure recalibrated, undo hardened); resume with the triaged queue
 
 The uncapped Adlon soak (old item 4) is DONE and green — see STATE top + `.ralph/baseline/iteration14-adlon-experiments.log`. New measured defaults: face quality gate 0.25, `FILEID_FACE_KNN` 32, restructure large-plan threshold 150k. Resume order:

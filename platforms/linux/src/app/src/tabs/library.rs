@@ -324,22 +324,45 @@ fn build_tile() -> gtk::Box {
 
 const THUMB_CACHE_CAP: usize = 512;
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ThumbCacheKey {
+    id: i64,
+    path: String,
+    size_bytes: i64,
+    modified_bits: Option<u64>,
+    file_ref: Option<i64>,
+    content_hash: Option<Vec<u8>>,
+}
+
+impl ThumbCacheKey {
+    fn for_row(row: &FileRow) -> Self {
+        Self {
+            id: row.id,
+            path: row.path.clone(),
+            size_bytes: row.size_bytes,
+            modified_bits: row.modified_at.map(f64::to_bits),
+            file_ref: row.file_ref,
+            content_hash: row.content_hash.clone(),
+        }
+    }
+}
+
 thread_local! {
-    // GridView re-binds tiles on every scroll/recycle; without this each
-    // re-bind re-reads + re-decodes the file. Session-scoped, FIFO-bounded.
-    static THUMB_CACHE: RefCell<(HashMap<String, gtk::gdk::Texture>, VecDeque<String>)> =
-        RefCell::new((HashMap::new(), VecDeque::new()));
+    static THUMB_CACHE: RefCell<(
+        HashMap<ThumbCacheKey, gtk::gdk::Texture>,
+        VecDeque<ThumbCacheKey>,
+    )> = RefCell::new((HashMap::new(), VecDeque::new()));
 }
 
-fn thumb_cache_get(path: &str) -> Option<gtk::gdk::Texture> {
-    THUMB_CACHE.with(|c| c.borrow().0.get(path).cloned())
+fn thumb_cache_get(key: &ThumbCacheKey) -> Option<gtk::gdk::Texture> {
+    THUMB_CACHE.with(|cache| cache.borrow().0.get(key).cloned())
 }
 
-fn thumb_cache_put(path: String, tex: gtk::gdk::Texture) {
-    THUMB_CACHE.with(|c| {
-        let (map, order) = &mut *c.borrow_mut();
-        if map.insert(path.clone(), tex).is_none() {
-            order.push_back(path);
+fn thumb_cache_put(key: ThumbCacheKey, texture: gtk::gdk::Texture) {
+    THUMB_CACHE.with(|cache| {
+        let (map, order) = &mut *cache.borrow_mut();
+        if map.insert(key.clone(), texture).is_none() {
+            order.push_back(key);
             while order.len() > THUMB_CACHE_CAP {
                 if let Some(evict) = order.pop_front() {
                     map.remove(&evict);
@@ -397,16 +420,16 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     ));
 
     if row.kind == "image" {
-        let path = row.path.clone();
-        if let Some(tex) = thumb_cache_get(&path) {
+        let key = ThumbCacheKey::for_row(&row);
+        if let Some(tex) = thumb_cache_get(&key) {
             pic.set_paintable(Some(&tex));
             return;
         }
         pic.set_paintable(None::<&gtk::gdk::Texture>);
-        let want = path.clone();
+        let want = key.clone();
         let rx = engine
             .borrow()
-            .request_scaled_thumbnail(path, TILE_THUMB_PX);
+            .request_scaled_thumbnail(key.path.clone(), TILE_THUMB_PX);
         let pic_weak = pic.downgrade();
         let li_weak = list_item.downgrade();
         glib::MainContext::default().spawn_local(async move {
@@ -453,6 +476,7 @@ fn open_preview(
         return;
     }
     let idx = Rc::new(Cell::new(start.min(n - 1)));
+    let preview_generation = Rc::new(Cell::new(0u64));
 
     let dialog = adw::Dialog::new();
     dialog.set_content_width(1000);
@@ -508,6 +532,7 @@ fn open_preview(
         let prev_btn = prev_btn.clone();
         let next_btn = next_btn.clone();
         let idx = idx.clone();
+        let preview_generation = preview_generation.clone();
         Rc::new(move || {
             let pos = idx.get();
             let Some(row) = row_at(&model, pos) else {
@@ -518,7 +543,10 @@ fn open_preview(
             prev_btn.set_sensitive(pos > 0);
             next_btn.set_sensitive(pos + 1 < model.n_items());
             meta_scroll.set_child(Some(&build_meta(&row)));
-            load_preview_image(&engine, &pic, &row);
+            pic.set_paintable(None::<&gtk::gdk::Texture>);
+            let generation = preview_generation.get().wrapping_add(1);
+            preview_generation.set(generation);
+            load_preview_image(&engine, &pic, &row, preview_generation.clone(), generation);
         })
     };
 
@@ -635,7 +663,13 @@ fn build_meta(row: &FileRow) -> gtk::Box {
 }
 
 /// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.
-fn load_preview_image(engine: &Rc<RefCell<EngineClient>>, pic: &gtk::Picture, row: &FileRow) {
+fn load_preview_image(
+    engine: &Rc<RefCell<EngineClient>>,
+    pic: &gtk::Picture,
+    row: &FileRow,
+    active_generation: Rc<Cell<u64>>,
+    generation: u64,
+) {
     if row.kind == "image" {
         let rx = engine
             .borrow()
@@ -645,6 +679,9 @@ fn load_preview_image(engine: &Rc<RefCell<EngineClient>>, pic: &gtk::Picture, ro
             let Ok(Some(decoded)) = rx.recv().await else {
                 return;
             };
+            if active_generation.get() != generation {
+                return;
+            }
             if let Some(pic) = pic_weak.upgrade() {
                 pic.set_paintable(Some(&texture_from_decoded(&decoded)));
             }
@@ -682,11 +719,11 @@ fn meta_row(key: &str, value: &str) -> gtk::Box {
 /// True if `list_item` still represents the file at `want` — i.e. the recycled
 /// `GridView` tile has not been rebound to another row while a thumbnail was in
 /// flight. Used to drop stale decodes before they paint onto the wrong tile.
-fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &str) -> bool {
+fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &ThumbCacheKey) -> bool {
     li_weak
         .upgrade()
         .and_then(|li| li.item())
         .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
-        .map(|o| o.borrow::<FileRow>().path == want)
+        .map(|object| ThumbCacheKey::for_row(&object.borrow::<FileRow>()) == *want)
         .unwrap_or(false)
 }

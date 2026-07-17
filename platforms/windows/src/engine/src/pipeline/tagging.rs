@@ -540,7 +540,7 @@ impl ModelStack {
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {
                     Ok(model) => {
-                        tracing::info!(model = "MobileCLIP", path = %p.display(), "model loaded (batch-coordinator mode)");
+                        tracing::info!(model = "MobileCLIP", path = %crate::platform::redact_path_for_log(&p), "model loaded (batch-coordinator mode)");
                         Some(ClipBatchCoordinator::spawn(model))
                     }
                     Err(err) => {
@@ -549,7 +549,7 @@ impl ModelStack {
                     }
                 },
                 Ok(p) => {
-                    tracing::info!(model = "MobileCLIP", path = %p.display(), "model not installed; stage will skip");
+                    tracing::info!(model = "MobileCLIP", path = %crate::platform::redact_path_for_log(&p), "model not installed; stage will skip");
                     None
                 }
                 Err(err) => {
@@ -579,7 +579,7 @@ impl ModelStack {
         ) {
             (Ok(wp), Ok(vp)) if wp.exists() && vp.exists() => match BgeText::load(wp.clone(), vp) {
                 Ok(m) => {
-                    tracing::info!(model = "BGE-small", path = %wp.display(), "model loaded");
+                    tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model loaded");
                     Some(Mutex::new(m))
                 }
                 Err(err) => {
@@ -588,7 +588,7 @@ impl ModelStack {
                 }
             },
             (Ok(wp), _) => {
-                tracing::info!(model = "BGE-small", path = %wp.display(), "model not installed; stage will skip");
+                tracing::info!(model = "BGE-small", path = %crate::platform::redact_path_for_log(&wp), "model not installed; stage will skip");
                 None
             }
             (Err(err), _) => {
@@ -627,13 +627,13 @@ impl ModelStack {
                         match crate::models::ram_plus::RamPlusTagger::load(p.clone(), tags_path.clone()) {
                             Ok(tagger) => {
                                 if tagger.supports_dynamic_batch() {
-                                    tracing::info!(model = "RAM++", path = %p.display(), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
+                                    tracing::info!(model = "RAM++", path = %crate::platform::redact_path_for_log(&p), batch_size = ram_batch_size, "model loaded (batch-coordinator mode)");
                                     let coord = crate::models::ram_plus_batch::RamPlusBatchCoordinator::spawn(tagger);
                                     (None, coord)
                                 } else {
                                     tracing::warn!(
                                         model = "RAM++",
-                                        path = %p.display(),
+                                        path = %crate::platform::redact_path_for_log(&p),
                                         batch_size = ram_batch_size,
                                         "FILEID_RAMPLUS_BATCH_SIZE requested but installed ONNX does not expose a dynamic batch axis; using single-image pool"
                                     );
@@ -698,7 +698,7 @@ where
         }
     };
     if !p.exists() {
-        tracing::info!(model = label, path = %p.display(), "model not installed; stage will skip");
+        tracing::info!(model = label, path = %crate::platform::redact_path_for_log(&p), "model not installed; stage will skip");
         return None;
     }
     let mut pool = Vec::with_capacity(pool_size);
@@ -731,7 +731,7 @@ where
     if pool.is_empty() {
         None
     } else {
-        tracing::info!(model = label, path = %p.display(), pool_size = pool.len(), "model pool loaded");
+        tracing::info!(model = label, path = %crate::platform::redact_path_for_log(&p), pool_size = pool.len(), "model pool loaded");
         Some(pool)
     }
 }
@@ -2448,6 +2448,27 @@ pub fn resize_rgb_quality(
         image::imageops::FilterType::Triangle,
     )
     .into_raw()
+}
+
+#[allow(dead_code)]
+pub fn compute_dhash_for_path(path: &std::path::Path) -> anyhow::Result<i64> {
+    let (width, height) = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .into_dimensions()?;
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    anyhow::ensure!(
+        pixels > 0 && pixels <= MAX_DECODED_PIXELS,
+        "image dimensions exceed the perceptual-hash safety cap"
+    );
+    let image = image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()?
+        .to_rgb8();
+    Ok(compute_dhash(
+        image.as_raw(),
+        width as usize,
+        height as usize,
+    ))
 }
 
 /// Difference-hash perceptual fingerprint. 9×8 grayscale → 64 bits, one

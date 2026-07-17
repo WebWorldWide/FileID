@@ -201,8 +201,22 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         tx.commit().context("committing wipe")?;
         Ok(())
     })();
-    if let Err(e) = conn.execute_batch("PRAGMA foreign_keys = ON") {
-        tracing::error!(error = %e, "wipe_all: re-enabling foreign_keys failed; connection FK enforcement may remain OFF");
+    let restore_foreign_keys = (|| -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .context("re-enabling foreign_keys after wipe")?;
+        let enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        if enabled != 1 {
+            anyhow::bail!("foreign_keys remained disabled after wipe");
+        }
+        Ok(())
+    })();
+    if let Err(restore_error) = restore_foreign_keys {
+        return match wipe {
+            Ok(()) => Err(restore_error),
+            Err(wipe_error) => Err(anyhow::anyhow!(
+                "wipe failed: {wipe_error:#}; foreign-key recovery also failed: {restore_error:#}"
+            )),
+        };
     }
     wipe?;
 

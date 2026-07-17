@@ -47,6 +47,15 @@ build() {
   cargo build --release --frozen -p fileid-engine --bin FileIDEngine
 }
 
+check() {
+  cd "${srcdir}/FileID-${pkgver}/platforms/linux"
+  export CARGO_HOME="${srcdir}/cargo-home"
+  export RUSTUP_TOOLCHAIN=stable
+  export ORT_LIB_LOCATION=/usr/lib
+  export ORT_PREFER_DYNAMIC_LINK=1
+  cargo test --frozen -p fileid-engine --lib
+}
+
 package() {
   cd "${srcdir}/FileID-${pkgver}"
   local target="platforms/linux/target/release"

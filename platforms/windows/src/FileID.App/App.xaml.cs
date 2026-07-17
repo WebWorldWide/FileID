@@ -59,7 +59,7 @@ public partial class App : Application
         {
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
-            Trace($"State dir = {AppPaths.Root}");
+            Trace($"State dir = {PathRedactor.Redact(AppPaths.Root)}");
             // Prime the disk thumbnail cache size counter so Settings →
             // Diagnostics shows a real number without waiting for the
             // first sweep. Off the UI thread: a warm cache is a recursive
@@ -78,7 +78,7 @@ public partial class App : Application
             // session can be correlated to a specific build + engine binary.
             var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
             var enginePath = AppPaths.EngineExePath;
-            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={AppPaths.Root}, engine={enginePath}");
+            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={PathRedactor.Redact(AppPaths.Root)}, engine={PathRedactor.Redact(enginePath)}");
 
             Trace("EngineClient.StartAsync");
             // Captured on EngineStartedTask so the install flow can poll
