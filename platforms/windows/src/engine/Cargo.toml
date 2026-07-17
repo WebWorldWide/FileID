@@ -80,7 +80,7 @@ blake3 = "1"
 # Image pipeline. image-rs covers JPEG/PNG/WebP/TIFF; HEIC would need
 # libheif-rs separately.
 image            = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
-kamadak-exif     = "0.5"
+kamadak-exif     = "0.6"
 # turbojpeg considered + dropped: requires a system libjpeg-turbo install
 # (no `vendored` feature upstream). The system-dep cost beats the JPEG-decode
 # speedup for the "user just downloads and runs" promise. Revisit when a
