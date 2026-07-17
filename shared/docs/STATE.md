@@ -8,6 +8,10 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-17 — Windows prod-readiness audit: clean bill on code; 5 hardening fixes (installer ARM64 guard, MSI keypath, CI smoke gate, stray file, test-matrix case)
+
+Deep solo audit of `platforms/windows` (two 14-agent fleet attempts died on session usage limits first). Verified green: `cargo clippy -D warnings`, ~450 engine tests, downloader SHA-256-before-rename, trash/restructure kill-tolerant journals + reparse TOCTOU re-checks, OneDrive placeholders never hydrated, EngineClient bounded backoff + 3-strike. No new blockers — the six tracked release gates remain the path to prod. Fixed (working tree, needs branch/PR/CI): stray `main 2.rs` deleted; `Bundle.wxs` x64-only bundles now refuse ARM64 hosts (was: silent empty "successful" install); `Product.wxs` shortcut keypath HKCU→HKLM (perMachine ICE38/57) + upgrade-while-running documented; `windows-app.yml` smoke fails on ANY <5 s exit (crash-with-exit-0 previously passed); clean-VM matrix gains the mid-scan-upgrade case. Details: NEXT.md top entry.
+
 ## 2026-07-16 — Landed the mid-flight cross-platform safety + macOS Deep Analyze tree: 3-round adversarial audit, 11 defects fixed, Adlon-validated, quinn-proto CVE patched
 
 Picked up a large uncommitted working tree (103 modified + 16 new files) — the macOS Deep Analyze / VLM / CLIP port, cross-platform model-license acceptance gating, archive (zip-slip) path-safety, engine-lifecycle safety, and read-only corpus fingerprinting — and drove it to landable.

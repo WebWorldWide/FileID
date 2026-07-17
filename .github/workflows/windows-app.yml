@@ -342,12 +342,12 @@ jobs:
           $exe = Join-Path $publishDir "FileID.exe"
           if (-not (Test-Path $exe)) { throw "FileID.exe not found at $exe" }
           # Launch without redirecting stdin/stdout — the app expects to
-          # spawn its engine and message-pump. The headless runner has no
-          # display, so we expect the app to fail fast OR keep ticking
-          # for a couple seconds before we kill it. Either way, a NULL
-          # ref / startup crash inside OnLaunched would surface as an
-          # immediate exit with non-zero code; the smoke validates we
-          # didn't ship that.
+          # spawn its engine and message-pump. GitHub's windows runners
+          # provide an interactive desktop session, so a healthy build
+          # stays alive past the 5 s window. ANY exit inside it fails —
+          # a startup crash can exit 0 (a swallowed OnLaunched exception
+          # tearing down the dispatcher), so exit code alone proves
+          # nothing.
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = (Resolve-Path $exe).Path
           $psi.UseShellExecute = $false
@@ -355,11 +355,10 @@ jobs:
           $proc = [System.Diagnostics.Process]::Start($psi)
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
-            $code = $proc.ExitCode
-            if ($code -ne 0) {
-              throw "FileID.exe exited within 5 s with code $code — likely startup crash."
-            }
-            Write-Host "FileID.exe exited cleanly within 5 s (expected on a headless runner)."
+            # If a legitimate headless fast-exit path ever appears, gate it
+            # explicitly (env flag + asserted log line) rather than
+            # re-allowing exit 0 here.
+            throw "FileID.exe exited within 5 s (code $($proc.ExitCode)) — startup smoke expects the app to stay alive."
           } else {
             Write-Host "FileID.exe still running after 5 s — clean startup. Killing for cleanup."
             try { $proc.Kill() } catch { }

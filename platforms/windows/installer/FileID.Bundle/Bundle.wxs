@@ -59,6 +59,15 @@
     <bal:Condition Condition="VersionNT64 OR NativeMachine = 43620"
                    Message="FileID requires a 64-bit edition of Windows." />
 
+    <!-- An x64-only bundle (-SkipArm64 dev builds) must refuse ARM64 hosts:
+         with no arm64 packages in the chain, every InstallCondition below is
+         false on ARM64 and Burn would register a "successful" install with
+         nothing on disk (the v0.0.1 x64-only asset had this shape). -->
+    <?if $(var.IncludeArm64) != true ?>
+    <bal:Condition Condition="NOT (NativeMachine = 43620)"
+                   Message="This installer contains only the x64 build of FileID. Please download the ARM64 installer for this PC." />
+    <?endif?>
+
     <Chain>
       <!-- Rollback boundary: the shared Windows App Runtime is permanent, while
            each FileID MSI remains its own atomic Windows Installer transaction. -->
