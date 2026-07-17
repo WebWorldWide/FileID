@@ -70,7 +70,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = "0.3"
 
 # Hex / SHA256 for model integrity verification.
-sha2 = "0.10"
+sha2 = "0.11"
 hex  = "0.4"
 # BLAKE3 content hashing for rename/move detection (Phase 3 identity). Faster
 # than SHA-256 on commodity CPUs, pure-Rust + SIMD (no C/C++ build dep). See
