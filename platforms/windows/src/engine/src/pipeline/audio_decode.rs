@@ -8,6 +8,7 @@
 //! the decode path is build-verified (real-file decode is exercised on-hardware).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use symphonia::core::audio::{AudioBufferRef, Signal};
@@ -28,17 +29,27 @@ const MAX_SECONDS: usize = 120;
 
 /// Decode `path` to a 16 kHz mono 16-bit PCM WAV at `out_wav`. Best-effort transcoder
 /// for the audio-AI pipeline; returns Err on an undecodable/empty stream.
-pub(crate) fn decode_to_wav16_mono(path: &Path, out_wav: &Path) -> Result<()> {
-    let (samples, src_hz) = decode_mono_f32(path)?;
+pub(crate) fn decode_to_wav16_mono(
+    path: &Path,
+    out_wav: &Path,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let (samples, src_hz) = decode_mono_f32(path, cancel)?;
     if samples.is_empty() {
         anyhow::bail!("audio decode produced no samples");
     }
     let resampled = resample_linear(&samples, src_hz, TARGET_HZ);
+    if cancel.load(Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
     write_wav16_mono(&resampled, TARGET_HZ, out_wav)
 }
 
 /// Decode + downmix to mono f32 at the SOURCE sample rate. Returns (samples, src_hz).
-fn decode_mono_f32(path: &Path) -> Result<(Vec<f32>, u32)> {
+fn decode_mono_f32(path: &Path, cancel: &AtomicBool) -> Result<(Vec<f32>, u32)> {
     let p = crate::util::path_safety::to_extended_length(path);
     let file = std::fs::File::open(&p).with_context(|| format!("open {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
@@ -65,6 +76,9 @@ fn decode_mono_f32(path: &Path) -> Result<(Vec<f32>, u32)> {
     let max_samples = MAX_SECONDS * src_hz as usize;
     let mut out: Vec<f32> = Vec::new();
     while let Ok(packet) = format.next_packet() {
+        if cancel.load(Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
         if packet.track_id() != track_id {
             continue;
         }

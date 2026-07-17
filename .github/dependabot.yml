@@ -5,3 +5,39 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/platforms/windows/src/engine"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/platforms/cli"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/platforms/tui"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: "/platforms/linux"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: nuget
+    directory: "/platforms/windows"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: swift
+    directory: "/platforms/apple"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

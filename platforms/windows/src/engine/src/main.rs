@@ -139,7 +139,7 @@ async fn async_main() -> Result<()> {
     // accelerator-pack pin below; the Linux system/download-binaries path).
     #[cfg(target_os = "macos")]
     if let Some(dylib) = ort_runtime::pin_dylib_path() {
-        tracing::info!(path = %dylib.display(), "[ORT] pinned ORT_DYLIB_PATH to installed ONNX Runtime dylib");
+        tracing::info!(path = %platform::redact_path_for_log(&dylib), "[ORT] pinned ORT_DYLIB_PATH to installed ONNX Runtime dylib");
     }
 
     // VRAM probe at startup. The ML session-pool sizer clamps pool size to
@@ -192,7 +192,7 @@ async fn async_main() -> Result<()> {
             if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
                 if !models::ep_guard::is_disabled(ep) {
                     if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
-                        tracing::info!(ep, path = %dll.display(), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
+                        tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
                         std::env::set_var("ORT_DYLIB_PATH", &dll);
                     }
                 }
@@ -209,7 +209,7 @@ async fn async_main() -> Result<()> {
     // card isn't being used.
     let cuda_dll_failures: Vec<std::path::PathBuf> =
         if let Some(cuda_bin) = models::runtime::system_cuda_toolkit_dir() {
-            tracing::info!(dir = %cuda_bin.display(), "[EP] registering system CUDA toolkit bin dir");
+            tracing::info!(dir = %platform::redact_path_for_log(&cuda_bin), "[EP] registering system CUDA toolkit bin dir");
             platform::register_dll_dirs_under(&cuda_bin)
         } else {
             Vec::new()
@@ -224,7 +224,7 @@ async fn async_main() -> Result<()> {
         match db::open_writer(&db_path) {
             Ok(c) => Some(std::sync::Arc::new(parking_lot::Mutex::new(c))),
             Err(err) => {
-                tracing::error!(?err, ?db_path, "failed to open database");
+                tracing::error!(?err, path = %platform::redact_path_for_log(&db_path), "failed to open database");
                 None
             }
         };
@@ -235,7 +235,7 @@ async fn async_main() -> Result<()> {
     if !cuda_dll_failures.is_empty() {
         let dirs = cuda_dll_failures
             .iter()
-            .map(|p| p.display().to_string())
+            .map(platform::redact_path_for_log)
             .collect::<Vec<_>>()
             .join("; ");
         let msg = format!(
@@ -382,6 +382,12 @@ async fn async_main() -> Result<()> {
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_restructure_active = restructure_active.clone();
 
+    // Every filesystem/DB mutation is serialized. Wipe requests cancellation
+    // before taking the same permit, so it observes a fully quiescent library
+    // or fails without deleting anything.
+    let mutation_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let dispatch_mutation_gate = mutation_gate.clone();
+
     // Sidebar job tracker (macOS JobQueue parity): scan / cluster /
     // deep-analyze jobs push on accept and finish via RAII guards;
     // every transition emits a queueState event. Until this wiring the
@@ -466,6 +472,7 @@ async fn async_main() -> Result<()> {
                                     &dispatch_face_cluster_active,
                                     &dispatch_restructure_apply_cancel,
                                     &dispatch_restructure_active,
+                                    &dispatch_mutation_gate,
                                     &dispatch_jobs,
                                     &dispatch_http_client,
                                     &text,
@@ -758,6 +765,56 @@ async fn emit_deep_analyze_busy(sink: &Sink) {
     .await;
 }
 
+async fn spawn_mutation<F>(
+    gate: &Arc<tokio::sync::Mutex<()>>,
+    sink: &Sink,
+    scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
+    operation: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let gate = gate.clone();
+    let sink = sink.clone();
+    let scan_state = scan_state.clone();
+    tokio::spawn(async move {
+        // StartScan also holds this gate for its whole life (so WipeLibrary can
+        // wait an in-flight scan out before truncating the DB). A *running* scan
+        // or a long mutation frees the gate on its own, so wait for those. But a
+        // *paused* scan holds it for an unbounded, user-controlled time — waiting
+        // on that would hang this mutation forever with no event. Poll the gate
+        // and bail with a retriable library_busy error only when the holder is a
+        // paused scan; wipe keeps its own cancel + 10 s timeout path.
+        let _permit = loop {
+            // lock_owned() consumes the Arc, so clone it per attempt (cheap).
+            match tokio::time::timeout(std::time::Duration::from_secs(2), gate.clone().lock_owned())
+                .await
+            {
+                Ok(permit) => break permit,
+                Err(_) => {
+                    let scan_paused = scan_state
+                        .lock()
+                        .as_ref()
+                        .is_some_and(|coord| coord.is_paused());
+                    if scan_paused {
+                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                            kind: "library_busy".into(),
+                            message: "The library scan is paused, so this action can't run yet. \
+                                      Resume or cancel the scan, then try again."
+                                .into(),
+                            path: None,
+                            model_kind: None,
+                        }))))
+                        .await;
+                        return;
+                    }
+                }
+            }
+        };
+        operation.await;
+    });
+    tokio::task::yield_now().await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_line(
     sink: &Sink,
@@ -770,6 +827,7 @@ async fn handle_line(
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
     restructure_apply_cancel: &Arc<std::sync::atomic::AtomicBool>,
     restructure_active: &Arc<std::sync::atomic::AtomicBool>,
+    mutation_gate: &Arc<tokio::sync::Mutex<()>>,
     jobs: &job_queue::JobQueue,
     http_client: &Arc<reqwest::Client>,
     line: &str,
@@ -781,7 +839,7 @@ async fn handle_line(
     if line.is_empty() {
         return;
     }
-    let cmd: IpcCommand = match serde_json::from_str(line) {
+    let mut cmd: IpcCommand = match serde_json::from_str(line) {
         Ok(c) => c,
         Err(err) => {
             // IPC parity with macOS: emit command_decode_failed so a
@@ -801,6 +859,17 @@ async fn handle_line(
             return;
         }
     };
+    if let Err(message) = ipc::normalize_and_validate_command(&mut cmd.payload) {
+        tracing::warn!(%message, "IPC command rejected by semantic resource limits");
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "command_limit_exceeded".into(),
+            message,
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+        return;
+    }
 
     match cmd.payload {
         CommandPayload::RequestStatus(_) => {
@@ -839,9 +908,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::restructure::handle_plan_restructure(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::ApplyRestructure(payload) => {
             let Some(db) = db else {
@@ -863,19 +933,17 @@ async fn handle_line(
                 emit_restructure_busy(sink).await;
                 return;
             }
+            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
-            // Fresh apply: clear any stale cancel from a prior operation so this
-            // apply isn't pre-stopped. Reset + the CancelScan set are serialized
-            // by the command loop, so they can't race each other.
-            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let cancel_c = restructure_apply_cancel.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 commands::restructure::handle_apply_restructure(sink_c, db_c, payload, cancel_c)
                     .await;
-            });
+            })
+            .await;
         }
         CommandPayload::UndoRestructure(payload) => {
             let Some(db) = db else {
@@ -894,18 +962,17 @@ async fn handle_line(
                 emit_restructure_busy(sink).await;
                 return;
             }
+            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
-            // Same cancellable, fresh-flag treatment as apply — undo does real
-            // on-disk moves too. (R2)
-            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let cancel_c = restructure_apply_cancel.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 commands::restructure::handle_undo_restructure(sink_c, db_c, payload, cancel_c)
                     .await;
-            });
+            })
+            .await;
         }
         CommandPayload::StartScan(payload) => {
             let Some(db) = db else {
@@ -916,10 +983,11 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let state_c = scan_state.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _track = track;
                 commands::scan::handle_start_scan(sink_c, db_c, state_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::PauseScan(_) => {
             if let Some(coord) = scan_state.lock().as_ref() {
@@ -949,9 +1017,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_apply_tags(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::RenameFiles(payload) => {
             let Some(db) = db else {
@@ -960,9 +1029,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_rename_files(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::TrashFiles(payload) => {
             let Some(db) = db else {
@@ -971,9 +1041,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_trash_files(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::MergeClusters(payload) => {
             let Some(db) = db else {
@@ -982,9 +1053,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_merge_clusters(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::EmbedTextQuery(payload) => {
             let sink_c = sink.clone();
@@ -999,9 +1071,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_rename_person(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::MarkPersonsAsUnknown(payload) => {
             let Some(db) = db else {
@@ -1010,9 +1083,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_mark_persons_as_unknown(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::FindMergeSuggestions(_) => {
             // Availability guard preserved (no DB → no read connection), but the
@@ -1035,9 +1109,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::bulk::handle_mark_persons_different(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::EmbedImageQuery(payload) => {
             let Some(db) = db else {
@@ -1068,11 +1143,12 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 let _track = track;
                 commands::deep_analyze::handle_deep_analyze_file(sink_c, db_c, payload, cancel).await;
-            });
+            })
+            .await;
         }
         CommandPayload::DeepAnalyzeFolder(payload) => {
             let Some(db) = db else {
@@ -1092,11 +1168,12 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 let _track = track;
                 commands::deep_analyze::handle_deep_analyze_folder(sink_c, db_c, payload, cancel).await;
-            });
+            })
+            .await;
         }
         CommandPayload::DeepAnalyzeAll(payload) => {
             let Some(db) = db else {
@@ -1116,11 +1193,12 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let cancel = deep_analyze_cancel.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 let _track = track;
                 commands::deep_analyze::handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;
-            });
+            })
+            .await;
         }
         CommandPayload::DeepAnalyzeCancel(_) => {
             deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1133,9 +1211,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::trash::handle_restore_from_trash(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::RevertMerge(payload) => {
             let Some(db) = db else {
@@ -1144,9 +1223,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::trash::handle_revert_merge(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
         CommandPayload::RunFaceClustering(_) => {
             let Some(db) = db else {
@@ -1172,11 +1252,12 @@ async fn handle_line(
             let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Cluster faces");
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 let _guard = guard;
                 let _track = track;
                 commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
-            });
+            })
+            .await;
         }
         CommandPayload::WipeLibrary(_) => {
             let Some(db) = db else {
@@ -1189,12 +1270,18 @@ async fn handle_line(
             let fca_c = face_cluster_active.clone();
             let da_cancel_c = deep_analyze_cancel.clone();
             let da_active_c = deep_analyze_active.clone();
-            tokio::spawn(async move {
-                commands::wipe::handle_wipe_library(
-                    sink_c, db_c, state_c, fca_c, da_cancel_c, da_active_c,
-                )
-                .await;
-            });
+            commands::wipe::handle_wipe_library(
+                sink_c,
+                db_c,
+                state_c,
+                fca_c,
+                da_cancel_c,
+                da_active_c,
+                restructure_apply_cancel.clone(),
+                restructure_active.clone(),
+                mutation_gate.clone(),
+            )
+            .await;
         }
         CommandPayload::GenerateVideoThumbnail(payload) => {
             let sink_c = sink.clone();
@@ -1209,9 +1296,10 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
+            spawn_mutation(mutation_gate, sink, scan_state, async move {
                 commands::scan::handle_purge_excluded(sink_c, db_c, payload).await;
-            });
+            })
+            .await;
         }
     }
 }
@@ -1254,6 +1342,67 @@ mod tests {
         );
         // Still reports the observed byte count so logs stay actionable.
         assert!(msg.contains("99999"), "message must include the seen byte count: {msg}");
+    }
+
+    #[tokio::test]
+    async fn queued_mutation_does_not_block_later_control_frames() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let held = gate.lock().await;
+        let (sink, _rx) = Sink::channel_for_test(4);
+        let scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_operation = ran.clone();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            spawn_mutation(&gate, &sink, &scan_state, async move {
+                ran_operation.store(true, std::sync::atomic::Ordering::Release);
+            }),
+        )
+        .await
+        .expect("queuing a mutation must not wait for the active operation");
+        assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
+
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !ran.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued mutation should run after the permit is released");
+    }
+
+    #[tokio::test]
+    async fn queued_mutation_observes_cancellation_requested_while_waiting() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let held = gate.lock().await;
+        let (sink, _rx) = Sink::channel_for_test(4);
+        let scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let operation_cancelled = cancelled.clone();
+        let operation_observed = observed.clone();
+
+        spawn_mutation(&gate, &sink, &scan_state, async move {
+            operation_observed.store(
+                operation_cancelled.load(std::sync::atomic::Ordering::Acquire),
+                std::sync::atomic::Ordering::Release,
+            );
+        })
+        .await;
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        drop(held);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !observed.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued mutation should retain cancellation set after enqueue");
     }
 
     // F-C1-015: parent identity is pinned by an OpenProcess handle + the

@@ -23,7 +23,8 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender as Sender;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
@@ -34,7 +35,43 @@ use crate::data::{self, LoadMsg};
 /// it on quit. The worker thread parks the child here after spawning and reclaims
 /// it (to reap) once the streams close; the UI thread only ever `kill()`s through
 /// it, never `take()`s — so the two can't race over ownership.
-pub type DownloadHandle = Arc<Mutex<Option<Child>>>;
+#[derive(Clone)]
+pub struct DownloadHandle {
+    child: Arc<Mutex<Option<Child>>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl DownloadHandle {
+    fn new() -> Self {
+        Self {
+            child: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Ok(mut slot) = self.child.lock() {
+            if let Some(child) = slot.as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    fn register(&self, mut child: Child) -> Result<()> {
+        let mut slot = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("model download child lock poisoned"))?;
+        if self.cancelled.load(Ordering::Acquire) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("model download was cancelled");
+        }
+        *slot = Some(child);
+        Ok(())
+    }
+}
 
 /// The CLI invocation, as a const so the SHARED CONTRACT (incl. the hidden
 /// `--porcelain-progress` flag that emits the machine-readable `PROGRESS` lines
@@ -63,10 +100,15 @@ const DOWNLOAD_ARGS: [&str; 9] = [
 /// `Done` (which clears the gauge); any failure becomes a single `LoadMsg::Error`.
 /// Returns a [`DownloadHandle`] the caller keeps so it can `kill()` the child on
 /// quit (the CLI has no parent watchdog, so it would otherwise orphan).
-pub fn spawn_download(db: PathBuf, query: String, tx: Sender<LoadMsg>) -> DownloadHandle {
-    let child_slot: DownloadHandle = Arc::new(Mutex::new(None));
-    let worker_slot = Arc::clone(&child_slot);
-    std::thread::spawn(move || match run_download(&tx, &worker_slot) {
+pub fn spawn_download(
+    db: PathBuf,
+    query: String,
+    tx: Sender<LoadMsg>,
+    generation: u64,
+) -> DownloadHandle {
+    let handle = DownloadHandle::new();
+    let worker_handle = handle.clone();
+    std::thread::spawn(move || match run_download(&tx, &worker_handle) {
         Ok(()) => {
             let _ = tx.send(LoadMsg::Status(
                 "AI models installed — refreshing…".to_string(),
@@ -75,33 +117,38 @@ pub fn spawn_download(db: PathBuf, query: String, tx: Sender<LoadMsg>) -> Downlo
             // weights, not library rows), but it refreshes state and clears the
             // `downloading`/`loading` flags. A not-yet-created scratch DB loads
             // as an empty snapshot rather than erroring.
-            match data::load(&db, &query, &tx) {
+            match data::load(&db, &query, &tx, generation) {
                 Ok(snap) => {
                     let _ = tx.send(LoadMsg::Status(
                         "AI models ready. Press s to scan a folder with full AI.".to_string(),
                     ));
-                    let _ = tx.send(LoadMsg::Done(Box::new(snap)));
-                    data::run_deferred_dupes(&db, &tx);
+                    let _ = data::send_versioned(&tx, generation, LoadMsg::Done(Box::new(snap)));
+                    data::run_deferred_dupes(&db, &tx, generation);
                 }
                 Err(e) => {
-                    let _ = tx.send(LoadMsg::Error(format!(
-                        "models installed, but reload failed: {e}"
-                    )));
+                    let _ = data::send_versioned(
+                        &tx,
+                        generation,
+                        LoadMsg::Error(format!("models installed, but reload failed: {e}")),
+                    );
                 }
             }
         }
         Err(e) => {
-            let _ = tx.send(LoadMsg::Error(e.to_string()));
+            let _ = data::send_versioned(&tx, generation, LoadMsg::Error(e.to_string()));
         }
     });
-    child_slot
+    handle
 }
 
 /// Locate the `fileid` CLI, spawn the model download, and forward each line of
 /// its output to the status line until it exits. Returns `Ok` on a zero exit,
 /// else a descriptive error (CLI missing / non-zero exit) — never panics. The
 /// spawned child is parked in `child_slot` so the UI can `kill()` it on quit.
-fn run_download(tx: &Sender<LoadMsg>, child_slot: &DownloadHandle) -> Result<()> {
+fn run_download(tx: &Sender<LoadMsg>, handle: &DownloadHandle) -> Result<()> {
+    if handle.cancelled.load(Ordering::Acquire) {
+        anyhow::bail!("model download was cancelled");
+    }
     let Some(bin) = locate_fileid_cli() else {
         anyhow::bail!(
             "`{}` command not found — install the FileID CLI or put it on PATH (or set \
@@ -135,9 +182,7 @@ fn run_download(tx: &Sender<LoadMsg>, child_slot: &DownloadHandle) -> Result<()>
     // engine, the `fileid` CLI has no parent-PID/EOF watchdog, so without this it
     // would keep downloading (orphaned) after the TUI exits. The pipes are taken
     // first; once streaming hits EOF this thread reclaims the child and reaps it.
-    if let Ok(mut slot) = child_slot.lock() {
-        *slot = Some(child);
-    }
+    handle.register(child)?;
 
     let stderr_handle = stderr.map(|err| {
         let tx = tx.clone();
@@ -152,12 +197,15 @@ fn run_download(tx: &Sender<LoadMsg>, child_slot: &DownloadHandle) -> Result<()>
 
     // Reclaim the child (the UI thread may have `kill()`-ed it, but never takes
     // it) and reap it so no zombie is left — bounded, never blocking the UI.
-    let Some(mut child) = child_slot.lock().ok().and_then(|mut s| s.take()) else {
+    let Some(mut child) = handle.child.lock().ok().and_then(|mut slot| slot.take()) else {
         anyhow::bail!("model download was cancelled");
     };
     let status = child
         .wait()
         .context("waiting for the model download to finish")?;
+    if handle.cancelled.load(Ordering::Acquire) {
+        anyhow::bail!("model download was cancelled");
+    }
     if status.success() {
         Ok(())
     } else {
@@ -272,6 +320,20 @@ fn which_on_path(exe: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_before_child_registration_kills_the_spawned_child() {
+        let handle = DownloadHandle::new();
+        handle.cancel();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(handle.register(child).is_err());
+        assert!(handle.child.lock().unwrap().is_none());
+    }
 
     #[test]
     fn fileid_exe_name_matches_platform() {

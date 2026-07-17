@@ -12,10 +12,11 @@
 // `useOfflineMode: true` and it loads from the local cache.
 //
 // Resumable: we skip files that already exist at the expected size —
-// but only once a `.fileid-verified-<revision>` sentinel attests a
-// fully verified fetch; without it, on-disk files are re-hashed
-// against the LFS oid before being trusted. A valid sentinel skips
-// the tree listing entirely, so installed models load fully offline.
+// but only once a `.fileid-verified-<revision>` manifest attests every
+// installed file by path, size, and SHA-256; without it, on-disk files
+// are re-hashed against the LFS oid before being trusted. A valid
+// manifest skips the tree listing entirely, so installed models load
+// fully offline.
 // Integrity: the tree listing + file URLs are pinned to the immutable
 // HF revision from ModelManifest, and each LFS file's sha256 (its LFS
 // oid) is enforced by the downloader before the atomic promote. Small
@@ -36,6 +37,7 @@ public enum VLMDownloaderError: Error {
     case treeListFailed(status: Int)
     case treeDecodeFailed
     case noFilesListed
+    case attestationFailed
 }
 
 public actor VLMDownloader {
@@ -65,18 +67,24 @@ public actor VLMDownloader {
         // no sentinel, an on-disk file must re-prove its LFS sha256
         // (streamed re-hash, no download) before it's skipped.
         let verifiedSentinel = modelDir.appendingPathComponent(".fileid-verified-\(revision)")
-        let sentinelValid = FileManager.default.fileExists(atPath: verifiedSentinel.path)
+        var sentinelValid = FileManager.default.fileExists(atPath: verifiedSentinel.path)
 
         // Sentinel-first: a verified fetch of this pinned revision already
         // attested every file on disk, so the install must load fully
-        // offline — no HF tree round-trip. That round-trip both wedged
-        // installed models behind network reachability (offline Macs could
-        // never run Deep Analyze) and emitted non-download egress on every
-        // first load, against PRIVACY.md. The payload check guards a stale
-        // sentinel over a hand-emptied model dir.
-        if sentinelValid, hasModelPayload(modelDir) {
+        // offline — no HF tree round-trip. Revalidating the manifest catches
+        // missing and same-size-corrupt files before the offline model load.
+        if sentinelValid,
+           await Self.verifiedSentinelIsValid(verifiedSentinel, modelDir: modelDir, revision: revision) {
             progress(1.0, 0, 0)
             return
+        }
+        if sentinelValid {
+            try? FileManager.default.removeItem(at: verifiedSentinel)
+            // Revalidation failed, so the sentinel is gone: on-disk files can no
+            // longer be trusted on size alone. Clearing the flag forces the todo
+            // loop below to re-prove each file's sha256 (or re-fetch it) instead
+            // of skipping same-size-corrupt files it just proved invalid.
+            sentinelValid = false
         }
 
         let files = try await listRepoFiles(repo: repo, revision: revision)
@@ -123,7 +131,12 @@ public actor VLMDownloader {
         }
 
         if todo.isEmpty {
-            Self.writeVerifiedSentinel(verifiedSentinel)
+            try await Self.writeVerifiedSentinel(
+                verifiedSentinel,
+                modelDir: modelDir,
+                revision: revision,
+                files: downloadable
+            )
             progress(1.0, 0, 0)
             return
         }
@@ -200,17 +213,93 @@ public actor VLMDownloader {
             }
         }
 
-        Self.writeVerifiedSentinel(verifiedSentinel)
+        try await Self.writeVerifiedSentinel(
+            verifiedSentinel,
+            modelDir: modelDir,
+            revision: revision,
+            files: downloadable
+        )
     }
 
-    private static func writeVerifiedSentinel(_ sentinel: URL) {
-        do {
-            try Data().write(to: sentinel)
-        } catch {
-            JSONLog.shared.warn(ev: "vlm_sentinel_write_failed",
-                                path: redactPathForLog(sentinel.path),
-                                error: "\(error)")
+    struct VerifiedSentinel: Codable, Sendable {
+        struct File: Codable, Sendable {
+            let path: String
+            let size: Int64
+            let sha256: String
         }
+
+        let version: Int
+        let revision: String
+        let files: [File]
+    }
+
+    static func writeVerifiedSentinel(
+        _ sentinel: URL,
+        modelDir: URL,
+        revision: String,
+        files: [VLMRepoFile]
+    ) async throws {
+        let payload = try await Task.detached(priority: .utility) {
+            let entries = try files.sorted { $0.path < $1.path }.map { file in
+                guard let url = safeModelFileURL(file.path, modelDir: modelDir),
+                      let values = try? url.resourceValues(forKeys: [
+                          .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey
+                      ]),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true else {
+                    throw VLMDownloaderError.attestationFailed
+                }
+                let actualSize = Int64(values.fileSize ?? -1)
+                guard actualSize >= 0, file.size <= 0 || actualSize == file.size else {
+                    throw VLMDownloaderError.attestationFailed
+                }
+                let actual = try sha256HexOfFile(at: url).lowercased()
+                if let expected = file.sha256, actual != expected.lowercased() {
+                    throw VLMDownloaderError.attestationFailed
+                }
+                return VerifiedSentinel.File(path: file.path, size: actualSize, sha256: actual)
+            }
+            let manifest = VerifiedSentinel(version: 1, revision: revision, files: entries)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            return try encoder.encode(manifest)
+        }.value
+        try payload.write(to: sentinel, options: .atomic)
+    }
+
+    static func verifiedSentinelIsValid(
+        _ sentinel: URL,
+        modelDir: URL,
+        revision: String
+    ) async -> Bool {
+        await Task.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: sentinel),
+                  let manifest = try? JSONDecoder().decode(VerifiedSentinel.self, from: data),
+                  manifest.version == 1,
+                  manifest.revision == revision,
+                  !manifest.files.isEmpty else { return false }
+            for file in manifest.files {
+                guard let url = safeModelFileURL(file.path, modelDir: modelDir),
+                      let values = try? url.resourceValues(forKeys: [
+                          .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey
+                      ]),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true,
+                      Int64(values.fileSize ?? -1) == file.size,
+                      let actual = try? sha256HexOfFile(at: url),
+                      actual.lowercased() == file.sha256.lowercased() else { return false }
+            }
+            return true
+        }.value
+    }
+
+    private nonisolated static func safeModelFileURL(_ path: String, modelDir: URL) -> URL? {
+        guard !path.hasPrefix("/"),
+              !path.split(separator: "/").contains("..") else { return nil }
+        let root = modelDir.standardizedFileURL.path
+        let file = modelDir.appendingPathComponent(path).standardizedFileURL
+        guard file.path.hasPrefix(root + "/") else { return nil }
+        return file
     }
 
     // MARK: - HF tree listing
@@ -275,14 +364,6 @@ public actor VLMDownloader {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let n = attrs[.size] as? Int64 else { return nil }
         return n
-    }
-
-    /// Anything beyond our own dot-sentinels (.fileid-*, .cache) counts —
-    /// configs, tokenizer JSON, safetensors all qualify.
-    private nonisolated func hasModelPayload(_ modelDir: URL) -> Bool {
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: modelDir.path)
-        else { return false }
-        return entries.contains { !$0.hasPrefix(".") }
     }
 
     private static func shouldDownload(_ f: VLMRepoFile) -> Bool {

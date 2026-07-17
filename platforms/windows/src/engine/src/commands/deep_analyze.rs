@@ -447,29 +447,39 @@ async fn run_deep_analyze_batch(
     // including the cancel-early path below.
     let server = match weights {
         Some((gguf, mmproj)) => {
-            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj).await {
+            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj, &cancel).await {
                 Ok(s) => {
                     // A2: verify the server accepts our multimodal payload shape
                     // BEFORE committing the whole batch to it. If it rejects the
                     // request (e.g. 400 on the image_url data-URI — a format that
                     // was never hardware-verified), fall back to the per-file CLI
                     // instead of failing every file silently.
-                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s).await {
+                    let probe = tokio::select! {
+                        result = crate::pipeline::deep_analyze::vlm_server_payload_ok(&s) => result,
+                        _ = async {
+                            while !cancel.load(Ordering::Relaxed) {
+                                tokio::time::sleep(Duration::from_millis(100)).await;
+                            }
+                        } => Err(anyhow::anyhow!("VLM payload self-test cancelled")),
+                    };
+                    match probe {
                         Ok(()) => {
                             tracing::info!(model_kind, "[VLM-SERVER] persistent server up; payload self-test OK; using it for the batch");
                             Some(s)
                         }
                         Err(probe_err) => {
                             tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
-                            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                                kind: "vlm_server_payload_rejected".into(),
-                                message: format!(
-                                    "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
-                                ),
-                                path: None,
-                                model_kind: None,
-                            }))))
-                            .await;
+                            if !cancel.load(Ordering::Relaxed) {
+                                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                                    kind: "vlm_server_payload_rejected".into(),
+                                    message: format!(
+                                        "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
+                                    ),
+                                    path: None,
+                                    model_kind: None,
+                                }))))
+                                .await;
+                            }
                             None
                         }
                     }
@@ -484,6 +494,19 @@ async fn run_deep_analyze_batch(
     };
 
     let total = file_ids.len() as u64;
+    if cancel.load(Ordering::Relaxed) {
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+            DeepAnalyzeComplete {
+                processed: 0,
+                failed: 0,
+                total_seconds: 0.0,
+                model_kind: model_kind.to_string(),
+                cancelled: true,
+            },
+        ))))
+        .await;
+        return;
+    }
     let mut processed = 0u64;
     let mut failed = 0u64;
     // Use the persistent server until it errors; if it dies mid-batch and a CLI
@@ -693,6 +716,19 @@ async fn run_deep_analyze_batch(
                 .await;
             }
             Err(err) => {
+                if cancel.load(Ordering::Relaxed) {
+                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                        DeepAnalyzeComplete {
+                            processed,
+                            failed,
+                            total_seconds: started_at.elapsed().as_secs_f64(),
+                            model_kind: model_kind.to_string(),
+                            cancelled: true,
+                        },
+                    ))))
+                    .await;
+                    return;
+                }
                 failed += 1;
                 tracing::warn!(?err, file_id, "deep analyze file failed");
                 // F-C1-021: a per-file error (unreadable image, decode failure,

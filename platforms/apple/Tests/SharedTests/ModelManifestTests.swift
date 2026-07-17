@@ -79,6 +79,20 @@ struct ModelManifestTests {
         }
     }
 
+    @Test("VLM license policies match the canonical manifest")
+    func vlmLicensePoliciesMatchJSON() throws {
+        let manifest = try manifestJSON()
+        let rows = try #require(manifest["vlmRepos"] as? [[String: Any]])
+        let licenses = try #require(manifest["vlmRepoLicenses"] as? [String: String])
+        for row in rows {
+            let repo = try #require(row["repo"] as? String)
+            let kindValue = try #require(row["kind"] as? String)
+            let kind = try #require(AIModelKind(rawValue: kindValue))
+            #expect(kind.licensePolicyKey == licenses[repo])
+            #expect((kind.licenseTermsURL != nil) == (licenses[repo] == "Gemma"))
+        }
+    }
+
     @Test("lookup helpers resolve by exact URL / repo")
     func lookupHelpers() throws {
         let sface = try #require(URL(string:

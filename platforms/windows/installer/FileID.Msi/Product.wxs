@@ -39,9 +39,12 @@
     <!-- Single .cab, embedded in the .msi so the artifact is one file. -->
     <Media Id="1" Cabinet="FileID.cab" EmbedCab="yes" />
 
-    <!-- Replace any older version. Schedule afterInstallExecute so files
-         from the new install land before old files come out — minimizes
-         flicker if the user has the app open.
+    <!-- Replace older versions and the same-version package of the other
+         architecture. Removal runs after InstallInitialize, before new files
+         are laid down: x64 and ARM64 intentionally use different component
+         GUIDs, so removing the old product after copying the new one could
+         otherwise delete paths the new architecture just installed. This
+         schedule remains inside the rollback boundary.
 
          A single MSI's install is already an atomic Windows Installer
          transaction (it rolls back wholesale on failure), so there is no
@@ -51,7 +54,8 @@
          MSI doesn't unwind packages that already committed past the
          checkpoint. -->
     <MajorUpgrade
-        Schedule="afterInstallExecute"
+        Schedule="afterInstallInitialize"
+        AllowSameVersionUpgrades="yes"
         DowngradeErrorMessage="A newer version of FileID is already installed." />
 
     <!-- Per-machine install with arch-aware Program Files target. -->

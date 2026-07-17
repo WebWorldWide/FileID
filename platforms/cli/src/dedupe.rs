@@ -27,6 +27,10 @@ use fileid_engine::util::content_hash::{
 
 use crate::context::{display_path, human_size, print_json, Ctx};
 
+const MAX_SIMILAR_THRESHOLD: u32 = 16;
+const MAX_GENERIC_INDEX_ENTRIES: usize = 2_000_000;
+const MAX_SIMILAR_COMPARISONS: u64 = 5_000_000;
+
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub fn run(
     ctx: &Ctx,
@@ -46,6 +50,11 @@ pub fn run(
     } else {
         (exact, similar)
     };
+    if do_similar && threshold > MAX_SIMILAR_THRESHOLD {
+        anyhow::bail!(
+            "similar threshold {threshold} exceeds the supported maximum of {MAX_SIMILAR_THRESHOLD} bits"
+        );
+    }
 
     // `--apply` (and a bare `--dry-run` preview) take the destructive path.
     if apply || dry_run {
@@ -93,7 +102,7 @@ struct ExactGroup {
 
 fn exact_buckets(conn: &rusqlite::Connection) -> Result<(Option<Vec<ExactDuplicateGroup>>, usize)> {
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL",
+        "SELECT COUNT(*) FROM files WHERE failed = 0 AND content_hash IS NOT NULL",
         [],
         |r| r.get(0),
     )?;
@@ -102,12 +111,12 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<(Option<Vec<ExactDuplica
     }
     let candidate_stats: (i64, i64) = conn.query_row(
         "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
              GROUP BY size_bytes HAVING COUNT(*) > 1 \
          ) \
          SELECT COUNT(*), COALESCE(SUM(MAX(f.size_bytes, 0)), 0) \
          FROM files f JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.content_hash IS NOT NULL",
+         WHERE f.failed = 0 AND f.content_hash IS NOT NULL",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -127,12 +136,12 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<(Option<Vec<ExactDuplica
     }
     let mut stmt = conn.prepare(
         "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
              GROUP BY size_bytes HAVING COUNT(*) > 1 \
          ) \
          SELECT f.id, f.path_text, f.size_bytes \
          FROM files f JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.content_hash IS NOT NULL \
+         WHERE f.failed = 0 AND f.content_hash IS NOT NULL \
          ORDER BY f.size_bytes, f.path_text, f.id",
     )?;
     let candidates = stmt
@@ -178,7 +187,7 @@ fn exact_listing_candidates(
     conn: &rusqlite::Connection,
 ) -> Result<Option<(Vec<ExactDuplicateCandidate>, ListingPartial)>> {
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM files WHERE content_hash IS NOT NULL",
+        "SELECT COUNT(*) FROM files WHERE failed = 0 AND content_hash IS NOT NULL",
         [],
         |r| r.get(0),
     )?;
@@ -190,7 +199,7 @@ fn exact_listing_candidates(
     let mut stmt = conn.prepare(
         "WITH twins AS ( \
              SELECT content_hash AS h, size_bytes AS s FROM files \
-             WHERE content_hash IS NOT NULL \
+             WHERE failed = 0 AND content_hash IS NOT NULL \
              GROUP BY content_hash, size_bytes HAVING COUNT(*) > 1 \
          ), \
          twin_rows AS ( \
@@ -198,10 +207,11 @@ fn exact_listing_candidates(
                     HEX(f.content_hash) AS class_key \
              FROM files f JOIN twins t \
                ON t.h = f.content_hash AND t.s = f.size_bytes \
+             WHERE f.failed = 0 \
          ), \
          fallback AS ( \
              SELECT f.id, f.path_text, f.size_bytes FROM files f \
-             WHERE f.content_hash IS NOT NULL \
+             WHERE f.failed = 0 AND f.content_hash IS NOT NULL \
                AND NOT EXISTS (SELECT 1 FROM twins t \
                                WHERE t.h = f.content_hash AND t.s = f.size_bytes) \
          ), \
@@ -391,7 +401,8 @@ fn similar_groups(
     conn: &rusqlite::Connection,
     threshold: u32,
 ) -> Result<Option<Vec<SimilarGroup>>> {
-    let mut stmt = conn.prepare("SELECT id, phash FROM files WHERE phash IS NOT NULL")?;
+    let mut stmt =
+        conn.prepare("SELECT id, phash FROM files WHERE failed = 0 AND phash IS NOT NULL")?;
     let rows: Vec<(i64, i64)> = stmt
         .query_map(params![], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -399,7 +410,7 @@ fn similar_groups(
         return Ok(None);
     }
 
-    let components = similar_components(&rows, threshold);
+    let components = similar_components(&rows, threshold)?;
     let ids: Vec<i64> = components.iter().flatten().copied().collect();
     let mut metadata = load_file_metadata(conn, &ids)?;
     let groups = components
@@ -414,25 +425,33 @@ fn similar_groups(
     Ok(Some(groups))
 }
 
-fn similar_components(rows: &[(i64, i64)], threshold: u32) -> Vec<Vec<i64>> {
-    similar_components_with_comparisons(rows, threshold).0
+fn similar_components(rows: &[(i64, i64)], threshold: u32) -> Result<Vec<Vec<i64>>> {
+    Ok(similar_components_with_comparisons(rows, threshold)?.0)
 }
 
 fn similar_components_with_comparisons(
     rows: &[(i64, i64)],
     threshold: u32,
-) -> (Vec<Vec<i64>>, u64) {
+) -> Result<(Vec<Vec<i64>>, u64)> {
+    if threshold > MAX_SIMILAR_THRESHOLD {
+        anyhow::bail!(
+            "similar threshold {threshold} exceeds the supported maximum of {MAX_SIMILAR_THRESHOLD} bits"
+        );
+    }
+    if threshold != 8 {
+        let entries = rows.len().saturating_mul((threshold + 1) as usize);
+        if entries > MAX_GENERIC_INDEX_ENTRIES {
+            anyhow::bail!(
+                "similar candidate index would require {entries} entries; limit is {MAX_GENERIC_INDEX_ENTRIES}"
+            );
+        }
+    }
     let n = rows.len();
     let mut parent: Vec<usize> = (0..n).collect();
-    let comparisons = if threshold >= 64 {
-        for i in 1..n {
-            union(&mut parent, 0, i);
-        }
-        0
-    } else if threshold == 8 {
-        similar_radius_eight(rows, &mut parent)
+    let comparisons = if threshold == 8 {
+        similar_radius_eight(rows, &mut parent)?
     } else {
-        similar_generic(rows, threshold, &mut parent)
+        similar_generic(rows, threshold, &mut parent)?
     };
     let mut comps: BTreeMap<usize, Vec<i64>> = BTreeMap::new();
     for (idx, row) in rows.iter().enumerate() {
@@ -450,10 +469,10 @@ fn similar_components_with_comparisons(
             }
         })
         .collect();
-    (groups, comparisons)
+    Ok((groups, comparisons))
 }
 
-fn similar_radius_eight(rows: &[(i64, i64)], parent: &mut [usize]) -> u64 {
+fn similar_radius_eight(rows: &[(i64, i64)], parent: &mut [usize]) -> Result<u64> {
     const BLOCKS: [(usize, usize); 3] = [(0, 21), (21, 21), (42, 22)];
     let neighbor_masks = [
         hamming_masks_two(21),
@@ -487,6 +506,9 @@ fn similar_radius_eight(rows: &[(i64, i64)], parent: &mut [usize]) -> u64 {
         }
         for other in candidates {
             comparisons += 1;
+            if comparisons > MAX_SIMILAR_COMPARISONS {
+                anyhow::bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            }
             if (hash ^ rows[other].1 as u64).count_ones() <= 8 {
                 union(parent, idx, other);
             }
@@ -497,7 +519,7 @@ fn similar_radius_eight(rows: &[(i64, i64)], parent: &mut [usize]) -> u64 {
         }
         exact_representative.insert(hash, idx);
     }
-    comparisons
+    Ok(comparisons)
 }
 
 fn hamming_masks_two(width: usize) -> Vec<u64> {
@@ -512,7 +534,7 @@ fn hamming_masks_two(width: usize) -> Vec<u64> {
     masks
 }
 
-fn similar_generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize]) -> u64 {
+fn similar_generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize]) -> Result<u64> {
     let blocks = (threshold + 1) as usize;
     let mut by_block: Vec<HashMap<u64, Vec<usize>>> = (0..blocks).map(|_| HashMap::new()).collect();
     let mut exact_representative: HashMap<u64, usize> = HashMap::new();
@@ -538,6 +560,9 @@ fn similar_generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize]) ->
         }
         for other in candidates {
             comparisons += 1;
+            if comparisons > MAX_SIMILAR_COMPARISONS {
+                anyhow::bail!("similar candidate comparisons exceeded the {MAX_SIMILAR_COMPARISONS} safety limit");
+            }
             if (hash ^ rows[other].1 as u64).count_ones() <= threshold {
                 union(parent, idx, other);
             }
@@ -554,7 +579,7 @@ fn similar_generic(rows: &[(i64, i64)], threshold: u32, parent: &mut [usize]) ->
         }
         exact_representative.insert(hash, idx);
     }
-    comparisons
+    Ok(comparisons)
 }
 
 fn load_file_metadata(
@@ -567,7 +592,7 @@ fn load_file_metadata(
             .collect::<Vec<_>>()
             .join(",");
         let sql =
-            format!("SELECT id, path_text, size_bytes FROM files WHERE id IN ({placeholders})");
+            format!("SELECT id, path_text, size_bytes FROM files WHERE failed = 0 AND id IN ({placeholders})");
         let mut stmt = conn.prepare(&sql)?;
         for (id, path, size) in stmt
             .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
@@ -654,6 +679,7 @@ struct Victim {
     id: i64,
     path: String,
     size: i64,
+    planned_phash: Option<i64>,
 }
 
 struct ExactGroupGuard {
@@ -662,8 +688,15 @@ struct ExactGroupGuard {
     hash: [u8; 32],
 }
 
+struct SimilarKeeperGuard {
+    keeper_path: String,
+    size: i64,
+    planned_phash: Option<i64>,
+}
+
 struct VictimGroup {
     exact_guard: Option<ExactGroupGuard>,
+    similar_guard: Option<SimilarKeeperGuard>,
     victims: Vec<Victim>,
 }
 
@@ -970,72 +1003,24 @@ fn remove_victim_groups(
                 result.failed += group.victims.len();
                 continue;
             }
-            // Re-open the keeper and current victim immediately before each path
-            // operation; the group preflight alone can be minutes stale on large files.
-            for (index, victim) in group.victims.iter().enumerate() {
-                if !exact_pair_still_matches(guard, victim) {
-                    result.failed += group.victims.len() - index;
-                    break;
-                }
-                let removed = if delete {
-                    std::fs::remove_file(&victim.path).is_ok()
-                } else {
-                    fileid_engine::shell::trash::trash(&[PathBuf::from(&victim.path)])
-                        .into_iter()
-                        .next()
-                        .unwrap_or(false)
-                };
-                if removed {
+        }
+        for (index, victim) in group.victims.iter().enumerate() {
+            if group
+                .similar_guard
+                .as_ref()
+                .is_some_and(|guard| !similar_keeper_still_matches(guard))
+            {
+                result.failed += group.victims.len() - index;
+                break;
+            }
+            match remove_quarantined_victim(victim, group.exact_guard.as_ref(), delete) {
+                RemovalOutcome::Removed => {
                     removed_ids.push(victim.id);
                     result.removed += 1;
                     result.reclaimed += victim.size;
-                } else if delete {
-                    result.failed += 1;
-                } else {
-                    result.unsupported += 1;
                 }
-            }
-            continue;
-        }
-
-        let eligible: Vec<bool> = group
-            .victims
-            .iter()
-            .map(victim_path_still_matches_size)
-            .collect();
-        let mut outcomes = vec![false; group.victims.len()];
-        if delete {
-            for (index, victim) in group.victims.iter().enumerate() {
-                if eligible[index] {
-                    outcomes[index] = std::fs::remove_file(&victim.path).is_ok();
-                }
-            }
-        } else {
-            let selected: Vec<(usize, PathBuf)> = group
-                .victims
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| eligible[*index])
-                .map(|(index, victim)| (index, PathBuf::from(&victim.path)))
-                .collect();
-            let paths: Vec<PathBuf> = selected.iter().map(|(_, path)| path.clone()).collect();
-            let trashed = fileid_engine::shell::trash::trash(&paths);
-            for ((index, _), ok) in selected.into_iter().zip(trashed) {
-                outcomes[index] = ok;
-            }
-        }
-
-        for (index, (victim, removed)) in group.victims.iter().zip(outcomes).enumerate() {
-            if !eligible[index] {
-                result.failed += 1;
-            } else if removed {
-                removed_ids.push(victim.id);
-                result.removed += 1;
-                result.reclaimed += victim.size;
-            } else if delete {
-                result.failed += 1;
-            } else {
-                result.unsupported += 1;
+                RemovalOutcome::Failed => result.failed += 1,
+                RemovalOutcome::Unsupported => result.unsupported += 1,
             }
         }
     }
@@ -1048,21 +1033,146 @@ fn remove_victim_groups(
     Ok(result)
 }
 
-fn victim_path_still_matches_size(victim: &Victim) -> bool {
-    let Ok(metadata) = std::fs::metadata(&victim.path) else {
-        return false;
-    };
-    metadata.is_file() && victim.size >= 0 && metadata.len() == victim.size as u64
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemovalOutcome {
+    Removed,
+    Failed,
+    Unsupported,
 }
 
-fn exact_pair_still_matches(guard: &ExactGroupGuard, victim: &Victim) -> bool {
-    exact_file_sha256(Path::new(&guard.keeper_path), guard.size)
-        .is_ok_and(|hash| hash == guard.hash)
-        && u64::try_from(victim.size).is_ok_and(|size| {
-            size == guard.size
-                && exact_file_sha256(Path::new(&victim.path), size)
-                    .is_ok_and(|hash| hash == guard.hash)
+fn remove_quarantined_victim(
+    victim: &Victim,
+    exact_guard: Option<&ExactGroupGuard>,
+    delete: bool,
+) -> RemovalOutcome {
+    let original = Path::new(&victim.path);
+    let quarantine = match quarantine(original) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!(
+                "dedupe: could not quarantine {}: {error}",
+                display_path(original.to_string_lossy().as_ref())
+            );
+            return RemovalOutcome::Failed;
+        }
+    };
+
+    let valid = if let Some(guard) = exact_guard {
+        exact_file_sha256(Path::new(&guard.keeper_path), guard.size)
+            .is_ok_and(|hash| hash == guard.hash)
+            && exact_file_sha256(&quarantine, guard.size).is_ok_and(|hash| hash == guard.hash)
+    } else {
+        let size_matches = u64::try_from(victim.size).is_ok_and(|size| {
+            std::fs::metadata(&quarantine)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+        });
+        size_matches
+            && victim.planned_phash.is_some_and(|planned| {
+                fileid_engine::pipeline::tagging::compute_dhash_for_path(&quarantine)
+                    .is_ok_and(|live| live == planned)
+            })
+    };
+    if !valid {
+        restore_quarantine(&quarantine, original);
+        return RemovalOutcome::Failed;
+    }
+
+    if delete {
+        return if std::fs::remove_file(&quarantine).is_ok() {
+            RemovalOutcome::Removed
+        } else {
+            restore_quarantine(&quarantine, original);
+            RemovalOutcome::Failed
+        };
+    }
+
+    if let Err(error) = fileid_engine::util::rename_no_replace(&quarantine, original) {
+        eprintln!(
+            "dedupe: validated file could not be restored to its original name before Trash ({error}); recovery copy remains at {}",
+            display_path(quarantine.to_string_lossy().as_ref())
+        );
+        return RemovalOutcome::Failed;
+    }
+    let restored_is_still_valid = if let Some(guard) = exact_guard {
+        exact_file_sha256(Path::new(&guard.keeper_path), guard.size)
+            .is_ok_and(|hash| hash == guard.hash)
+            && exact_file_sha256(original, guard.size).is_ok_and(|hash| hash == guard.hash)
+    } else {
+        u64::try_from(victim.size).is_ok_and(|size| {
+            std::fs::metadata(original)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+                && victim.planned_phash.is_some_and(|planned| {
+                    fileid_engine::pipeline::tagging::compute_dhash_for_path(original)
+                        .is_ok_and(|live| live == planned)
+                })
         })
+    };
+    if !restored_is_still_valid {
+        return RemovalOutcome::Failed;
+    }
+
+    let trash_path = original.to_path_buf();
+    let removed = fileid_engine::shell::trash::trash(std::slice::from_ref(&trash_path))
+        .into_iter()
+        .next()
+        .unwrap_or(false);
+    if removed {
+        RemovalOutcome::Removed
+    } else if trash_unavailable_on_this_platform() {
+        RemovalOutcome::Unsupported
+    } else {
+        RemovalOutcome::Failed
+    }
+}
+
+fn quarantine(original: &Path) -> std::io::Result<PathBuf> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let parent = original
+        .parent()
+        .ok_or_else(|| std::io::Error::other("victim has no parent directory"))?;
+    let name = original
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    for _ in 0..32 {
+        let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{name}.fileid-quarantine-{}-{sequence}",
+            std::process::id()
+        ));
+        match fileid_engine::util::rename_no_replace(original, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a quarantine path",
+    ))
+}
+
+fn restore_quarantine(quarantine: &Path, original: &Path) {
+    if let Err(error) = fileid_engine::util::rename_no_replace(quarantine, original) {
+        eprintln!(
+            "dedupe: validation failed and automatic restore was blocked ({error}); recovery copy remains at {}",
+            display_path(quarantine.to_string_lossy().as_ref())
+        );
+    }
+}
+
+fn similar_keeper_still_matches(guard: &SimilarKeeperGuard) -> bool {
+    u64::try_from(guard.size).is_ok_and(|size| {
+        std::fs::metadata(&guard.keeper_path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
+            && guard.planned_phash.is_some_and(|planned| {
+                fileid_engine::pipeline::tagging::compute_dhash_for_path(Path::new(
+                    &guard.keeper_path,
+                ))
+                .is_ok_and(|live| live == planned)
+            })
+    })
 }
 
 fn exact_group_still_matches(guard: &ExactGroupGuard, victims: &[Victim]) -> bool {
@@ -1098,11 +1208,13 @@ fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
                     size: group.size,
                     hash: group.hash,
                 }),
+                similar_guard: None,
                 victims: files
                     .map(|file| Victim {
                         id: file.id,
                         path: file.path.to_string_lossy().into_owned(),
                         size: file.indexed_size,
+                        planned_phash: None,
                     })
                     .collect(),
             }
@@ -1124,17 +1236,33 @@ fn similar_victims(conn: &rusqlite::Connection, threshold: u32) -> Result<Victim
             groups: Vec::new(),
         });
     };
+    let phashes: HashMap<i64, i64> = {
+        let mut stmt = conn.prepare("SELECT id, phash FROM files WHERE phash IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
     let groups = groups
         .into_iter()
         .map(|group| {
             let mut files = group.files;
             files.sort_by_key(|(id, _, _)| *id);
+            let keeper = files.first().cloned();
             VictimGroup {
                 exact_guard: None,
+                similar_guard: keeper.map(|(id, path, size)| SimilarKeeperGuard {
+                    keeper_path: path,
+                    size,
+                    planned_phash: phashes.get(&id).copied(),
+                }),
                 victims: files
                     .into_iter()
                     .skip(1)
-                    .map(|(id, path, size)| Victim { id, path, size })
+                    .map(|(id, path, size)| Victim {
+                        id,
+                        path,
+                        size,
+                        planned_phash: phashes.get(&id).copied(),
+                    })
                     .collect(),
             }
         })
@@ -1162,6 +1290,83 @@ mod tests {
         path
     }
 
+    fn bmp_gradient(reverse: bool) -> Vec<u8> {
+        let row_bytes = 28u32;
+        let image_bytes = row_bytes * 8;
+        let file_bytes = 54 + image_bytes;
+        let mut bytes = Vec::with_capacity(file_bytes as usize);
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&file_bytes.to_le_bytes());
+        bytes.extend_from_slice(&[0; 4]);
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&9i32.to_le_bytes());
+        bytes.extend_from_slice(&8i32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&image_bytes.to_le_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        for _ in 0..8 {
+            for x in 0..9 {
+                let value = (if reverse { (8 - x) * 28 } else { x * 28 }) as u8;
+                bytes.extend_from_slice(&[value, value, value]);
+            }
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn similar_delete_preserves_same_size_replacement() {
+        let original = bmp_gradient(false);
+        let replacement = bmp_gradient(true);
+        assert_eq!(original.len(), replacement.len());
+        let victim_path = temp_file("similar-replaced", &original);
+        let planned_phash =
+            fileid_engine::pipeline::tagging::compute_dhash_for_path(&victim_path).unwrap();
+        std::fs::write(&victim_path, &replacement).unwrap();
+        let victim = Victim {
+            id: 1,
+            path: victim_path.to_string_lossy().into_owned(),
+            size: original.len() as i64,
+            planned_phash: Some(planned_phash),
+        };
+
+        assert_eq!(
+            remove_quarantined_victim(&victim, None, true),
+            RemovalOutcome::Failed
+        );
+        assert_eq!(std::fs::read(&victim_path).unwrap(), replacement);
+        let _ = std::fs::remove_file(victim_path);
+    }
+
+    #[test]
+    fn exact_delete_validates_the_quarantined_object() {
+        let keeper = temp_file("quarantine-keeper", b"original");
+        let victim_path = temp_file("quarantine-victim", b"original");
+        let guard = ExactGroupGuard {
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            size: 8,
+            hash: exact_file_sha256(&keeper, 8).unwrap(),
+        };
+        std::fs::write(&victim_path, b"replaced").unwrap();
+        let victim = Victim {
+            id: 1,
+            path: victim_path.to_string_lossy().into_owned(),
+            size: 8,
+            planned_phash: None,
+        };
+
+        assert_eq!(
+            remove_quarantined_victim(&victim, Some(&guard), true),
+            RemovalOutcome::Failed
+        );
+        assert_eq!(std::fs::read(&victim_path).unwrap(), b"replaced");
+        let _ = std::fs::remove_file(keeper);
+        let _ = std::fs::remove_file(victim_path);
+    }
+
     #[test]
     fn exact_group_revalidation_rejects_changed_keeper_or_victim() {
         let keeper = temp_file("keeper", b"original");
@@ -1176,6 +1381,7 @@ mod tests {
             id: 1,
             path: victim_path.to_string_lossy().into_owned(),
             size: 8,
+            planned_phash: None,
         };
         assert!(exact_group_still_matches(
             &guard,
@@ -1213,10 +1419,12 @@ mod tests {
                 size: 8,
                 hash,
             }),
+            similar_guard: None,
             victims: vec![Victim {
                 id: 1,
                 path: victim_path.to_string_lossy().into_owned(),
                 size: 8,
+                planned_phash: None,
             }],
         }];
         std::fs::write(&keeper, b"replaced").unwrap();
@@ -1232,6 +1440,52 @@ mod tests {
             1
         );
         let _ = std::fs::remove_file(keeper);
+        let _ = std::fs::remove_file(victim_path);
+    }
+
+    #[test]
+    fn similar_apply_changed_keeper_removes_nothing_and_keeps_db_row() {
+        let bytes = bmp_gradient(false);
+        let keeper = temp_file("similar-apply-keeper", &bytes);
+        let victim_path = temp_file("similar-apply-victim", &bytes);
+        let planned_phash =
+            fileid_engine::pipeline::tagging::compute_dhash_for_path(&keeper).unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files \
+             (id, path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension, phash) \
+             VALUES (1, ?1, 1, ?2, 0, 0, 'image', 'bmp', ?3)",
+            params![victim_path.to_string_lossy(), bytes.len() as i64, planned_phash],
+        )
+        .unwrap();
+        let groups = vec![VictimGroup {
+            exact_guard: None,
+            similar_guard: Some(SimilarKeeperGuard {
+                keeper_path: keeper.to_string_lossy().into_owned(),
+                size: bytes.len() as i64,
+                planned_phash: Some(planned_phash),
+            }),
+            victims: vec![Victim {
+                id: 1,
+                path: victim_path.to_string_lossy().into_owned(),
+                size: bytes.len() as i64,
+                planned_phash: Some(planned_phash),
+            }],
+        }];
+        std::fs::remove_file(&keeper).unwrap();
+
+        let result = remove_victim_groups(&mut conn, &groups, true).unwrap();
+        assert_eq!(result.removed, 0);
+        assert_eq!(result.failed, 1);
+        assert!(victim_path.exists());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM files WHERE id = 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
         let _ = std::fs::remove_file(victim_path);
     }
 
@@ -1279,7 +1533,7 @@ mod tests {
     #[test]
     fn identical_phashes_collapse_before_candidate_search() {
         let rows: Vec<(i64, i64)> = (0..100_000).map(|id| (id, 42)).collect();
-        let groups = similar_components(&rows, 8);
+        let groups = similar_components(&rows, 8).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), rows.len());
     }
@@ -1287,7 +1541,31 @@ mod tests {
     #[test]
     fn hamming_components_preserve_transitive_groups() {
         let rows = vec![(1, 0b0000), (2, 0b0001), (3, 0b0011), (4, 0b1111_0000)];
-        assert_eq!(similar_components(&rows, 1), vec![vec![1, 2, 3]]);
+        assert_eq!(similar_components(&rows, 1).unwrap(), vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn generic_similar_search_rejects_threshold_and_index_amplification() {
+        let small = vec![(1, 0), (2, 1)];
+        assert!(similar_components(&small, MAX_SIMILAR_THRESHOLD + 1)
+            .unwrap_err()
+            .to_string()
+            .contains("supported maximum"));
+
+        let rows = vec![(1, 0); MAX_GENERIC_INDEX_ENTRIES / 17 + 1];
+        assert!(similar_components(&rows, 16)
+            .unwrap_err()
+            .to_string()
+            .contains("candidate index"));
+    }
+
+    #[test]
+    fn generic_similar_search_stops_at_comparison_budget() {
+        let rows = (0..3_200).map(|id| (id, id)).collect::<Vec<(i64, i64)>>();
+        assert!(similar_components(&rows, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("comparisons exceeded"));
     }
 
     fn brute_components(rows: &[(i64, i64)], threshold: u32) -> Vec<Vec<i64>> {
@@ -1333,7 +1611,7 @@ mod tests {
                 rows[4].1 = i64::MIN;
                 rows[5].1 = (i64::MIN as u64 ^ 0b1111) as i64;
             }
-            let mut indexed = similar_components(&rows, 8);
+            let mut indexed = similar_components(&rows, 8).unwrap();
             indexed.sort();
             assert_eq!(indexed, brute_components(&rows, 8));
         }
@@ -1348,8 +1626,10 @@ mod tests {
             (2, distance_eight as i64),
             (3, distance_nine as i64),
         ];
-        assert_eq!(similar_components(&rows[..2], 8), vec![vec![1, 2]]);
-        assert!(similar_components(&[rows[0], rows[2]], 8).is_empty());
+        assert_eq!(similar_components(&rows[..2], 8).unwrap(), vec![vec![1, 2]]);
+        assert!(similar_components(&[rows[0], rows[2]], 8)
+            .unwrap()
+            .is_empty());
     }
 
     fn random_phashes(count: usize) -> Vec<(i64, i64)> {
@@ -1367,7 +1647,7 @@ mod tests {
     #[test]
     fn radius_eight_100k_comparison_bound() {
         let rows = random_phashes(100_000);
-        let (_, comparisons) = similar_components_with_comparisons(&rows, 8);
+        let (_, comparisons) = similar_components_with_comparisons(&rows, 8).unwrap();
         println!("radius-8 100k final comparisons: {comparisons}");
         assert!(
             comparisons < 5_000_000,
@@ -1379,9 +1659,10 @@ mod tests {
     #[ignore = "250k high-cardinality scale regression; run explicitly"]
     fn radius_eight_250k_comparison_bound() {
         let rows = random_phashes(250_000);
-        let (_, comparisons) = similar_components_with_comparisons(&rows, 8);
-        println!("radius-8 250k final comparisons: {comparisons}");
-        assert!(comparisons < 30_000_000);
+        match similar_components_with_comparisons(&rows, 8) {
+            Ok((_, comparisons)) => assert!(comparisons <= MAX_SIMILAR_COMPARISONS),
+            Err(error) => assert!(error.to_string().contains("comparisons exceeded")),
+        }
     }
     /// The read-only listing must not bail at its caps (that turned the
     /// command into a hard error on backup-heavy corpora): stored-hash twin

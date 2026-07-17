@@ -63,42 +63,9 @@ fn available_disk_bytes_existing(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Redact a user path for logs: keep last two components; pass
-/// app-structural paths verbatim.
+/// Redact a path for persistent logs, retaining only its last two components.
 pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     use std::path::Component;
-    let s = path.as_ref().to_string_lossy().to_string();
-    let s_lower = s.to_lowercase();
-    // App-structural paths: pass through ONLY the engine's own state dir
-    // (`%LOCALAPPDATA%\FileID\…` / the per-OS equivalent). ENG-97: the old broad
-    // `\fileid\` / `/fileid/` substring match leaked any USER path that merely
-    // contained a folder named "FileID" (e.g. a dev checkout at C:\Code\FileID\…)
-    // verbatim, username and all — defeating redaction for a whole class of real
-    // paths. Anchor on the actual resolved root instead.
-    if let Ok(root) = crate::paths::root() {
-        let mut root_prefix = root.to_string_lossy().to_lowercase();
-        if !root_prefix.is_empty() {
-            if s_lower == root_prefix {
-                return s;
-            }
-            // Require a path-separator boundary so a sibling dir whose name
-            // merely STARTS with the app root (e.g. `…\Local\FileIDBackup\…`)
-            // does not string-prefix-match and leak. (ENG-97)
-            if !root_prefix.ends_with(['\\', '/']) {
-                root_prefix.push(std::path::MAIN_SEPARATOR);
-            }
-            if s_lower.starts_with(&root_prefix) {
-                return s;
-            }
-        }
-    }
-    // NOTE: no `contains("appdata\\local\\fileid\\")` fallback. The `root()`
-    // branch above already passes through THIS engine's own state tree (root()
-    // resolves from LOCALAPPDATA to exactly `…\AppData\Local\FileID`). A path
-    // under a DIFFERENT `AppData\Local\FileID` (another user, or a backup like
-    // `D:\Backups\AppData\Local\FileID\…`) is NOT this engine's tree and MUST be
-    // redacted — the old unanchored `contains` leaked those verbatim (#26).
-    //
     // Only Normal components are PII candidates — Prefix (drive letter,
     // UNC server\share) and RootDir are protocol/topology, never PII.
     // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
@@ -179,18 +146,12 @@ mod redaction_tests {
     }
 
     #[test]
-    fn passes_through_app_structural_path() {
-        // The engine's OWN state tree (under the resolved root) passes through
-        // for debugging — derive it from root() rather than hardcoding a
-        // username, since only THIS engine's tree is exempt from redaction (#26).
+    fn redacts_app_structural_path() {
         if let Ok(root) = crate::paths::root() {
-            let s = root
-                .join("Models")
-                .join("arcface")
-                .join("weights.onnx")
-                .to_string_lossy()
-                .to_string();
-            assert_eq!(redact_path_for_log(&s), s);
+            let path = root.join("Models").join("arcface").join("weights.onnx");
+            let redacted = redact_path_for_log(&path);
+            assert_eq!(redacted, "…/arcface/weights.onnx");
+            assert!(!redacted.contains(&root.to_string_lossy().to_string()));
         }
     }
 
@@ -219,15 +180,11 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log(r"C:\"), "…");
     }
 
-    /// App structural paths are returned UNCHANGED — they refer to
-    /// FileID's own dirs (logs, models, sentinels) and are useful for
-    /// debugging without redaction. Derived from the resolved root so the
-    /// passthrough is keyed on THIS engine's tree, not a hardcoded username.
     #[test]
-    fn app_structural_logs_path_unchanged() {
+    fn app_structural_logs_path_is_redacted() {
         if let Ok(root) = crate::paths::root() {
-            let s = root.join("logs").join("app.log").to_string_lossy().to_string();
-            assert_eq!(redact_path_for_log(&s), s);
+            let path = root.join("logs").join("app.log");
+            assert_eq!(redact_path_for_log(path), "…/logs/app.log");
         }
     }
 
@@ -1270,10 +1227,10 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
         wide.push(0);
         let cookie = unsafe { AddDllDirectory(PCWSTR(wide.as_ptr())) };
         if cookie.is_null() {
-            tracing::warn!(dir = %dir.display(), "AddDllDirectory returned null");
+            tracing::warn!(dir = %redact_path_for_log(dir), "AddDllDirectory returned null");
             false
         } else {
-            tracing::info!(dir = %dir.display(), "[EP] AddDllDirectory registered pack dir");
+            tracing::info!(dir = %redact_path_for_log(dir), "[EP] AddDllDirectory registered pack dir");
             true
         }
     }

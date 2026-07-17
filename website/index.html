@@ -143,13 +143,13 @@
       <div class="kicker"><span class="kicker-dot"></span>Privacy posture</div>
       <h2>100% on-device.<br /><em>Zero</em> telemetry.</h2>
       <p class="privacy-lede">
-        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. The only outbound traffic is downloading models from upstream HuggingFace repos when you ask for them.
+        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. The signed-release contract permits only user-requested downloads from Hugging Face; current Windows development builds also retain six audited GitHub/NVIDIA runtime URLs and cannot pass the publication gate until those files are mirrored.
       </p>
       <ul class="privacy-list">
         <li><strong>Local SQLite WAL database</strong> in your app-support directory.</li>
-        <li><strong>Models download directly from HuggingFace</strong> — FileID never redistributes weights.</li>
-        <li><strong>Outbound allowlist:</strong> hardcoded hosts. Anything else fails CI.</li>
-        <li><strong>Privacy gate</strong> scans every shipped binary against a 24-string deny-list before release.</li>
+        <li><strong>Model weights download directly from Hugging Face</strong> — FileID never redistributes weights.</li>
+        <li><strong>Outbound allowlist:</strong> CI rejects any addition beyond the documented development baseline, and signed publication requires Hugging Face-only egress.</li>
+        <li><strong>Privacy gate</strong> scans every shipped binary against a 23-string deny-list before release.</li>
       </ul>
     </div>
     <div class="privacy-card glass reveal">
@@ -160,23 +160,24 @@
       <div class="privacy-stats">
         <div class="stat">
           <div class="stat-val">0</div>
-          <div class="stat-label">telemetry strings detected across every published binary</div>
+          <div class="stat-label">telemetry strings allowed in any release binary</div>
         </div>
         <div class="stat">
-          <div class="stat-val">24</div>
+          <div class="stat-val">23</div>
           <div class="stat-label">deny-listed SDK substrings (Sentry, Datadog, Firebase, …)</div>
         </div>
         <div class="stat">
           <div class="stat-val">1</div>
-          <div class="stat-label">outbound host at runtime: huggingface.co (model downloads)</div>
+          <div class="stat-label">permitted destination family for signed releases: Hugging Face</div>
         </div>
       </div>
       <div class="privacy-gate">
         <pre><code><span class="c-key">$</span> <span class="c-cmd">privacy_scan</span> --binary FileIDEngine.exe
 <span class="c-ok">✓</span> 0 telemetry strings
-<span class="c-ok">✓</span> 0 unauthorized hosts
-<span class="c-ok">✓</span> Authenticode signature valid
-<span class="c-ok">→</span> gate passed</code></pre>
+<span class="c-ok">✓</span> 0 unreviewed runtime hosts
+<span class="c-key">!</span> 6 audited development runtime URLs remain outside the release allowlist
+<span class="c-key">—</span> signed publication disabled until egress and credential gates pass
+<span class="c-ok">→</span> source policy passed; release gate pending</code></pre>
       </div>
     </div>
   </div>
@@ -187,11 +188,9 @@
   <div class="band-inner">
     <div class="section-head reveal">
       <div class="kicker"><span class="kicker-dot"></span>Releases</div>
-      <h2>Download for your platform.</h2>
-      <p class="section-sub">Auto-detects your CPU on Windows (x64 vs ARM64). Apple Silicon build for macOS. Linux ships a GTK4 app plus an AppImage on the releases page.</p>
+      <h2>Signed builds are not published yet.</h2>
+      <p class="section-sub">The platform cards show the intended release formats. Current workflow artifacts are unsigned validation builds and are not public installers; build from source or watch the releases page for the first signed release.</p>
     </div>
-
-    <div id="releaseStatus" class="release-status" hidden></div>
 
     <div class="downloads reveal-stagger">
 
@@ -205,18 +204,14 @@
           <span class="dl-badge">10 22H2+ · 11</span>
         </div>
         <p class="dl-blurb">Standard MSI install under <code>Program Files\FileID\</code>. Start menu shortcut. WinUI 3 app + Rust engine. Auto-detects x64 vs ARM64 (Snapdragon X Elite).</p>
-        <div class="dl-actions" data-platform="windows">
-          <a class="btn btn-gold btn-block" data-asset="setup-exe" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
+        <div class="dl-actions">
+          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
-              <span class="btn-pri">FileIDSetup.exe</span>
-              <span class="btn-sec">one download, auto-picks x64 / ARM64</span>
+              <span class="btn-pri">Windows releases page</span>
+              <span class="btn-sec">signed installers pending</span>
             </span>
           </a>
-          <div class="dl-sub">
-            <a class="btn-link" data-asset="x64-msi" href="https://github.com/WebWorldWide/FileID/releases/latest">FileID-x64.msi</a>
-            <a class="btn-link" data-asset="arm64-msi" href="https://github.com/WebWorldWide/FileID/releases/latest">FileID-arm64.msi</a>
-          </div>
         </div>
       </article>
 
@@ -230,12 +225,12 @@
           <span class="dl-badge">15+ · Apple Silicon</span>
         </div>
         <p class="dl-blurb">Drag to Applications. SwiftUI app + Swift engine on MLX / CoreML / Neural Engine. The canonical reference port — every tab ships end-to-end.</p>
-        <div class="dl-actions" data-platform="macos">
-          <a class="btn btn-gold btn-block" data-asset="dmg" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
+        <div class="dl-actions">
+          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
-              <span class="btn-pri">FileID.dmg</span>
-              <span class="btn-sec">Apple Silicon (arm64)</span>
+              <span class="btn-pri">macOS releases page</span>
+              <span class="btn-sec">signed and notarized build pending</span>
             </span>
           </a>
         </div>
@@ -251,12 +246,12 @@
           <span class="dl-badge">GTK4 · x86_64</span>
         </div>
         <p class="dl-blurb">GTK4 + libadwaita app over the shared Rust engine — all six tabs, plus the headless <code>fileid</code> CLI and <code>fileid-tui</code>. Grab the AppImage or build from source.</p>
-        <div class="dl-actions" data-platform="linux">
-          <a class="btn btn-gold btn-block" data-asset="appimage" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
+        <div class="dl-actions">
+          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
-              <span class="btn-pri">FileID.AppImage</span>
-              <span class="btn-sec">portable · x86_64</span>
+              <span class="btn-pri">Linux releases page</span>
+              <span class="btn-sec">attested build pending</span>
             </span>
           </a>
           <div class="dl-sub">

@@ -29,6 +29,7 @@ public actor DeepAnalyze {
     private var container: ModelContainer?
     private var loadedKind: AIModelKind?
     private var cancelRequested: Bool = false
+    private var currentAnalysisTask: Task<AnalysisResult, Never>?
     private var prewarmTask: Task<Void, Never>?
     /// Honored by setPrewarmTask if a Cancel arrives before the
     /// JobQueue dispatches the work.
@@ -72,6 +73,7 @@ public actor DeepAnalyze {
     public func requestCancel() {
         let wasCancelled = cancelRequested
         cancelRequested = true
+        currentAnalysisTask?.cancel()
         // F-C3-024 + R-11: abort an in-flight cold load/download so the
         // single-lane JobQueue doesn't stay wedged for the whole multi-GB fetch
         // after the user cancels — but only when THIS run is the last waiter on
@@ -84,6 +86,17 @@ public actor DeepAnalyze {
     }
     public func clearCancel()   { cancelRequested = false }
     public func isCancelled() -> Bool { cancelRequested }
+
+    public func runCancellableAnalysis(
+        _ operation: @escaping @Sendable () async -> AnalysisResult
+    ) async -> AnalysisResult {
+        let task = Task { await operation() }
+        currentAnalysisTask = task
+        if cancelRequested { task.cancel() }
+        let result = await task.value
+        currentAnalysisTask = nil
+        return result
+    }
 
     public func cancelPrewarm() {
         // R-11: cancel only the prewarm's outer task — its awaitLoad bails from
@@ -143,6 +156,9 @@ public actor DeepAnalyze {
         progress: (@Sendable (Double, String, Int64, Int64) -> Void)? = nil
     ) async throws {
         try Task.checkCancellation()
+        guard ModelLicenseAcceptance.isAccepted(for: kind) else {
+            throw ModelLicenseAcceptanceRequired(kind: kind)
+        }
         if container != nil, loadedKind == kind {
             loadState = .ready(kind)
             return
@@ -392,6 +408,8 @@ public actor DeepAnalyze {
         }
         let ciA = CIImage(cgImage: cgA)
         let ciB = CIImage(cgImage: cgB)
+        let boxCIA = UncheckedSendableBox(ciA)
+        let boxCIB = UncheckedSendableBox(ciB)
 
         let systemPrompt = """
         You are a face-matching assistant. You will see two cropped face photos. Answer in EXACTLY this format on two lines:
@@ -409,7 +427,7 @@ public actor DeepAnalyze {
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Are these two cropped face photos of the same person?",
-                          images: [.ciImage(ciA), .ciImage(ciB)], videos: [])
+                          images: [.ciImage(boxCIA.value), .ciImage(boxCIB.value)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 256, height: 256)
@@ -537,6 +555,7 @@ public actor DeepAnalyze {
             return AnalysisResult(description: "Could not decode image.", proposedName: nil)
         }
         let ciImage = CIImage(cgImage: cg)
+        let boxCI = UncheckedSendableBox(ciImage)
 
         // Build the prompt. Face names (if face clustering has run) are
         // injected as context so the VLM can reference people by their
@@ -562,10 +581,11 @@ public actor DeepAnalyze {
         let params = generateParams
         do {
             try await container.perform { (context: ModelContext) -> Void in
+                try Task.checkCancellation()
                 let chat: [Chat.Message] = [
                     .system(systemPrompt),
                     .user("Describe this image and propose a filename.",
-                          images: [.ciImage(ciImage)], videos: [])
+                          images: [.ciImage(boxCI.value)], videos: [])
                 ]
                 var userInput = UserInput(chat: chat)
                 userInput.processing.resize = .init(width: 448, height: 448)
@@ -574,6 +594,7 @@ public actor DeepAnalyze {
                     input: lmInput, parameters: params, context: context
                 )
                 for await item in stream {
+                    try Task.checkCancellation()
                     if let chunk = item.chunk {
                         collector.append(chunk)
                         // V14.9-L1: per-token callback for live caption streaming.
@@ -616,8 +637,9 @@ public actor DeepAnalyze {
         let tagParams = tagGenerateParams
         do {
             try await container.perform { (context: ModelContext) -> Void in
+                try Task.checkCancellation()
                 let chat: [Chat.Message] = [
-                    .user(Self.tagPrompt, images: [.ciImage(ciImage)], videos: [])
+                    .user(Self.tagPrompt, images: [.ciImage(boxCI.value)], videos: [])
                 ]
                 var tagInput = UserInput(chat: chat)
                 tagInput.processing.resize = .init(width: 448, height: 448)
@@ -626,6 +648,7 @@ public actor DeepAnalyze {
                     input: lmInput, parameters: tagParams, context: context
                 )
                 for await item in stream {
+                    try Task.checkCancellation()
                     if let chunk = item.chunk { tagCollector.append(chunk) }
                 }
             }
@@ -847,20 +870,30 @@ public actor DeepAnalyze {
     /// CGImage isn't Sendable, but the box's lock makes the hand-off safe and
     /// the CIImage is built on the actor afterward.
     private nonisolated static func decodeImageOffActor(url: URL, maxPixelSize: Int) async -> ImageBox {
-        await Task.detached(priority: .userInitiated) {
-            let box = ImageBox()
-            autoreleasepool { box.set(loadCGImage(url: url, maxPixelSize: maxPixelSize)) }
-            return box
-        }.value
+        let state = ImageDecodeState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard state.install(continuation) else { return }
+                let worker = Task.detached(priority: .userInitiated) {
+                    let box = ImageBox()
+                    let image = await loadCGImage(url: url, maxPixelSize: maxPixelSize)
+                    autoreleasepool { box.set(image) }
+                    state.finish(box)
+                }
+                state.attach(worker)
+            }
+        } onCancel: {
+            state.cancel()
+        }
     }
 
-    nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) -> CGImage? {
+    nonisolated static func loadCGImage(url: URL, maxPixelSize: Int) async -> CGImage? {
         let ext = url.pathExtension.lowercased()
         if ext == "pdf" {
             return renderFirstPDFPage(url: url, maxPixelSize: maxPixelSize)
         }
         if isVideoExtension(ext) {
-            return extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize)
+            return await extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize)
         }
         // Try ImageIO first — fast for images via thumbnail decode.
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
@@ -932,6 +965,123 @@ public actor DeepAnalyze {
         func get() -> CGImage? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
+    private final class ImageDecodeState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<ImageBox, Never>?
+        private var worker: Task<Void, Never>?
+        private var finished = false
+
+        func install(_ continuation: CheckedContinuation<ImageBox, Never>) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !finished else {
+                continuation.resume(returning: ImageBox())
+                return false
+            }
+            self.continuation = continuation
+            return true
+        }
+
+        func attach(_ worker: Task<Void, Never>) {
+            lock.lock()
+            if finished {
+                lock.unlock()
+                worker.cancel()
+                return
+            }
+            self.worker = worker
+            lock.unlock()
+        }
+
+        func finish(_ box: ImageBox) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            worker = nil
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: box)
+        }
+
+        func cancel() {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            let worker = worker
+            self.worker = nil
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            worker?.cancel()
+            continuation?.resume(returning: ImageBox())
+        }
+    }
+
+    private final class VideoAssetBox: @unchecked Sendable {
+        let value: AVAsset
+        init(_ value: AVAsset) { self.value = value }
+    }
+
+    private final class VideoDurationState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Double?, Never>?
+        private var loader: Task<Void, Never>?
+        private var timeout: Task<Void, Never>?
+        private var finished = false
+
+        func install(_ continuation: CheckedContinuation<Double?, Never>) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !finished else {
+                continuation.resume(returning: nil)
+                return false
+            }
+            self.continuation = continuation
+            return true
+        }
+
+        func attach(loader: Task<Void, Never>, timeout: Task<Void, Never>) {
+            lock.lock()
+            if finished {
+                lock.unlock()
+                loader.cancel()
+                timeout.cancel()
+                return
+            }
+            self.loader = loader
+            self.timeout = timeout
+            lock.unlock()
+        }
+
+        func finish(_ value: Double?) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            let loader = loader
+            let timeout = timeout
+            self.loader = nil
+            self.timeout = nil
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            loader?.cancel()
+            timeout?.cancel()
+            continuation?.resume(returning: value)
+        }
+
+        func cancel() { finish(nil) }
+    }
+
     /// Common video container extensions. Mirrors FileTypes.kind.
     nonisolated static func isVideoExtension(_ ext: String) -> Bool {
         switch ext {
@@ -949,7 +1099,32 @@ public actor DeepAnalyze {
     /// memory. Returns nil if the asset is unreadable (DRM, partial
     /// download, codec we can't decode, etc.) — Deep Analyze then
     /// silently skips the file just like it would for a missing PDF.
-    nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int) -> CGImage? {
+    nonisolated static func representativeVideoTime(durationSeconds: Double?) -> CMTime {
+        guard let durationSeconds, durationSeconds.isFinite, durationSeconds > 0 else {
+            return CMTime(seconds: 1, preferredTimescale: 600)
+        }
+        return CMTime(seconds: durationSeconds * 0.25, preferredTimescale: 600)
+    }
+
+    /// Thread-safe wrapper so the @Sendable cancellation handler can reach
+    /// AVAssetImageGenerator.cancelAllCGImageGeneration() — documented safe to
+    /// call from any thread — without capturing the non-Sendable generator.
+    private struct SendableGeneratorRef: @unchecked Sendable {
+        let generator: AVAssetImageGenerator
+        init(_ generator: AVAssetImageGenerator) { self.generator = generator }
+    }
+
+    /// Wrapper asserting a value is safe to hand into MLX's `@Sendable`
+    /// ModelContainer.perform closure. Used for CIImage snapshots: the older
+    /// Xcode 16 SDK doesn't mark CIImage Sendable (Xcode 26 does), so a raw
+    /// capture fails only on CI's toolchain. The snapshot is immutable at the
+    /// call site, so the assertion holds on both.
+    private struct UncheckedSendableBox<T>: @unchecked Sendable {
+        let value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    nonisolated static func extractVideoKeyframe(url: URL, maxPixelSize: Int) async -> CGImage? {
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false
         ])
@@ -959,19 +1134,64 @@ public actor DeepAnalyze {
         generator.requestedTimeToleranceAfter  = CMTime(seconds: 0.5, preferredTimescale: 600)
         generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
 
-        // Try 25% in first; fall back to 0s if that fails (very short
-        // clip or unseekable asset).
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        let target: CMTime
-        if durationSeconds.isFinite, durationSeconds > 0 {
-            target = CMTime(seconds: durationSeconds * 0.25, preferredTimescale: 600)
-        } else {
-            target = .zero
+        // Await the async generation instead of parking a thread on a
+        // DispatchSemaphore. extractVideoKeyframe runs inside a detached task on
+        // the cooperative pool, so a blocking wait here pins a cooperative thread;
+        // a wave of hanging NAS extractions could then starve the whole engine
+        // runtime (DB writer, IPC drain, command loop). generateCGImageAsynchronously
+        // invokes its handler exactly once — success, failure, or cancellation — and
+        // the caller's wall-clock timeout cancels this task, which cancels the
+        // in-flight generation via cancelAllCGImageGeneration.
+        //
+        // cancelAllCGImageGeneration() is documented safe to call from any thread,
+        // so an @unchecked Sendable box lets the @Sendable cancellation handler
+        // reach the generator without capturing the non-Sendable type directly.
+        let generatorRef = SendableGeneratorRef(generator)
+        func generate(at time: CMTime) async -> CGImage? {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<CGImage?, Never>) in
+                    generatorRef.generator.generateCGImageAsynchronously(for: time) { image, _, _ in
+                        continuation.resume(returning: image)
+                    }
+                }
+            } onCancel: {
+                generatorRef.generator.cancelAllCGImageGeneration()
+            }
         }
-        if let cg = try? generator.copyCGImage(at: target, actualTime: nil) {
-            return cg
+
+        let durationSeconds = await loadVideoDurationSeconds(asset, timeoutSeconds: 8)
+        guard !Task.isCancelled else {
+            generator.cancelAllCGImageGeneration()
+            return nil
         }
-        return try? generator.copyCGImage(at: .zero, actualTime: nil)
+        let target = representativeVideoTime(durationSeconds: durationSeconds)
+        if let image = await generate(at: target) { return image }
+        guard !Task.isCancelled else { return nil }
+        return await generate(at: .zero)
+    }
+
+    nonisolated static func loadVideoDurationSeconds(
+        _ asset: AVAsset,
+        timeoutSeconds: UInt64
+    ) async -> Double? {
+        let asset = VideoAssetBox(asset)
+        let state = VideoDurationState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard state.install(continuation) else { return }
+                let loader = Task {
+                    let duration = try? await asset.value.load(.duration)
+                    state.finish(duration?.seconds)
+                }
+                let timeout = Task {
+                    try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
+                    state.finish(nil)
+                }
+                state.attach(loader: loader, timeout: timeout)
+            }
+        } onCancel: {
+            state.cancel()
+        }
     }
 
     nonisolated static func renderFirstPDFPage(url: URL, maxPixelSize: Int) -> CGImage? {
@@ -1009,6 +1229,13 @@ public actor DeepAnalyze {
 /// is cancelled; `bail` returns true only for the final outstanding waiter, the
 /// one allowed to actually cancel the shared task. Lock-guarded so the
 /// non-isolated `withTaskCancellationHandler` onCancel can touch it safely.
+private struct ModelLicenseAcceptanceRequired: LocalizedError, Sendable {
+    let kind: AIModelKind
+    var errorDescription: String? {
+        "The \(kind.licenseName) must be accepted in FileID before downloading or using \(kind.displayName)."
+    }
+}
+
 final class ModelLoadGate: @unchecked Sendable {
     private let lock = NSLock()
     private var waiters = 0

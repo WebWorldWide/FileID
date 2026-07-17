@@ -18,6 +18,21 @@ use crate::pipeline::tagging::ModelStack;
 use crate::platform;
 use crate::scan_session::ScanSession;
 
+enum BlockingWait<T> {
+    Completed(Result<T, tokio::task::JoinError>),
+    TimedOut(tokio::task::JoinHandle<T>),
+}
+
+async fn wait_for_blocking<T: Send + 'static>(
+    mut task: tokio::task::JoinHandle<T>,
+    timeout: Duration,
+) -> BlockingWait<T> {
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(result) => BlockingWait::Completed(result),
+        Err(_) => BlockingWait::TimedOut(task),
+    }
+}
+
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -176,10 +191,8 @@ pub(crate) async fn handle_start_scan(
     // 120 s still catches a genuinely hung or corrupt model file.
     let models_worker_count = platform::default_worker_cap() as usize;
     // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
-    // is where a bad GPU pack DLL crashes the process). If we get past the
-    // `.await` at all — success, Rust error, or timeout — the process survived,
-    // so disarm; only a hard native crash leaves the breadcrumb for the next
-    // launch's ep_guard to disable the EP. See models::ep_guard.
+    // is where a bad GPU pack DLL crashes the process). A timed-out blocking load
+    // keeps both this guard and the scan reservation until the loader really exits.
     // Arm the override-aware EP that will actually attempt the first native
     // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
     // active_provider() which ignores the override — see runtime::armed_provider.
@@ -190,17 +203,18 @@ pub(crate) async fn handle_start_scan(
     // native crash skips the drop (process gone) and keeps the breadcrumb.
     let armed_ep = models::runtime::armed_provider();
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
-    let load_result = tokio::time::timeout(
-        Duration::from_secs(120),
+    let load_result = wait_for_blocking(
         tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
+        Duration::from_secs(120),
     )
     .await;
-    // We survived the bind (success, Rust error, or timeout) — disarm now; the
-    // guard's drop covers the graceful-shutdown-mid-load cancellation instead.
-    drop(ep_guard);
     let models = match load_result {
-        Ok(Ok(m)) => Arc::new(m),
-        Ok(Err(err)) => {
+        BlockingWait::Completed(Ok(m)) => {
+            drop(ep_guard);
+            Arc::new(m)
+        }
+        BlockingWait::Completed(Err(err)) => {
+            drop(ep_guard);
             tracing::error!(?err, "model stack load panicked");
             // macOS: a dylib that resolved at pre-flight but fails to load is
             // almost always the wrong architecture or older than the required
@@ -230,8 +244,8 @@ pub(crate) async fn handle_start_scan(
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
             return;
         }
-        Err(_elapsed) => {
-            tracing::error!("model stack load timed out after 120s");
+        BlockingWait::TimedOut(load_task) => {
+            tracing::error!("model stack load timed out after 120s; retaining scan reservation until the blocking loader exits");
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Failed,
             ))))
@@ -239,18 +253,23 @@ pub(crate) async fn handle_start_scan(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_load_timeout".into(),
                 message:
-                    "Loading inference models took longer than 120 seconds and was \
-                     stopped.\n\nThis usually means the model is too large for the \
-                     available memory or GPU, or a model file is incomplete. Try:\n\
-                     • Close other memory- or GPU-heavy apps and start the scan again.\n\
-                     • Reinstall the models from Settings → Local AI to repair an \
-                     incomplete download.\n\
+                    "Loading inference models took longer than 120 seconds. The native \
+                     loader cannot be cancelled safely, so FileID will reject another scan \
+                     until it finishes. Restart the engine before retrying if it remains stuck.\n\nTry:\n\
+                     • Close other memory- or GPU-heavy apps.\n\
+                     • Reinstall the models from Settings → Local AI.\n\
                      • Pick a smaller Deep Analyze model in Settings → Local AI."
                         .into(),
                 path: None,
                 model_kind: None,
             }))))
             .await;
+            let late_result = load_task.await;
+            drop(ep_guard);
+            match late_result {
+                Ok(_) => tracing::warn!("[SCAN] timed-out model loader eventually exited"),
+                Err(err) => tracing::warn!(?err, "[SCAN] timed-out model loader eventually failed"),
+            }
             *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_timeout");
             return;
@@ -361,6 +380,32 @@ pub(crate) async fn handle_start_scan(
 /// given excluded folders (files on disk untouched). Sent when the user adds
 /// an exclusion so the Library reflects it without waiting for a rescan; the
 /// same purge also runs at every scan start as the durable backstop.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_blocking_load_remains_joinable() {
+        let release = Arc::new(AtomicBool::new(false));
+        let release_for_task = release.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            while !release_for_task.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            7
+        });
+
+        let timed_out = wait_for_blocking(task, Duration::from_millis(10)).await;
+        let BlockingWait::TimedOut(task) = timed_out else {
+            panic!("blocking loader unexpectedly completed before the timeout");
+        };
+        assert!(!task.is_finished());
+        release.store(true, Ordering::Release);
+        assert_eq!(task.await.unwrap(), 7);
+    }
+}
+
 pub(crate) async fn handle_purge_excluded(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,

@@ -84,6 +84,10 @@ impl DupGroup {
     }
 }
 
+struct PendingTrash {
+    ids: HashSet<i64>,
+}
+
 struct LoadResult {
     groups: Vec<DupGroup>,
     /// Number of candidate rows considered (files with a content hash, or images
@@ -112,6 +116,7 @@ struct Cleanup {
     skipped: RefCell<HashSet<String>>, // group keys hidden from the view
     query_gen: Cell<u64>,
     deleting: Cell<bool>,
+    pending_trash: RefCell<Option<PendingTrash>>,
     last_candidates: Cell<usize>,
     last_warning: RefCell<Option<String>>,
     reload_throttle: Cell<Instant>,
@@ -265,6 +270,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         skipped: RefCell::new(HashSet::new()),
         query_gen: Cell::new(0),
         deleting: Cell::new(false),
+        pending_trash: RefCell::new(None),
         last_candidates: Cell::new(0),
         last_warning: RefCell::new(None),
         reload_throttle: Cell::new(Instant::now() - Duration::from_secs(10)),
@@ -346,6 +352,12 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                     }
                     EngineEvent::ScanComplete(_) => this.reload(),
+                    EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
+                        this.finish_trash(result);
+                    }
+                    EngineEvent::Exited if this.deleting.get() => {
+                        this.fail_trash("The engine exited before confirming the Trash operation.");
+                    }
                     _ => {}
                 }
             }
@@ -631,16 +643,15 @@ impl Cleanup {
         // Initial per-group selected state.
         update_group_selection_widgets(&self.selection.borrow(), &group_sizes, &sel_lbl, &del_btn);
 
-        // Per-group delete (no confirmation, mirroring the reference).
         {
             let this = self.clone();
             let ids = member_ids.clone();
-            del_btn.connect_clicked(move |_| {
+            del_btn.connect_clicked(move |button| {
                 let to_trash: Vec<i64> = {
                     let sel = this.selection.borrow();
                     ids.iter().copied().filter(|id| sel.contains(id)).collect()
                 };
-                this.trash(to_trash);
+                this.confirm_trash(to_trash, button);
             });
         }
         // Skip group.
@@ -799,32 +810,35 @@ impl Cleanup {
             pic.set_paintable(icon_paintable(icon_for_kind(&member.kind), 96).as_ref());
         }
 
-        // Whole-tile click toggles this copy's selection.
-        let gesture = gtk::GestureClick::new();
+        let toggle = gtk::ToggleButton::builder()
+            .active(selected_now)
+            .has_frame(false)
+            .tooltip_text(format!("Select {}", member.name))
+            .child(&outer)
+            .build();
         let this = self.clone();
         let id = member.id;
         let outer_weak = outer.downgrade();
         let ind_weak = indicator.downgrade();
-        gesture.connect_released(move |_, _, _, _| {
-            let now_selected = {
-                let mut sel = this.selection.borrow_mut();
-                if sel.contains(&id) {
-                    sel.remove(&id);
-                    false
-                } else {
-                    sel.insert(id);
-                    true
-                }
-            };
-            if let Some(o) = outer_weak.upgrade() {
+        toggle.connect_toggled(move |button| {
+            let now_selected = button.is_active();
+            {
+                let mut selection = this.selection.borrow_mut();
                 if now_selected {
-                    o.add_css_class("file-tile-selected");
+                    selection.insert(id);
                 } else {
-                    o.remove_css_class("file-tile-selected");
+                    selection.remove(&id);
                 }
             }
-            if let Some(im) = ind_weak.upgrade() {
-                im.set_icon_name(Some(checkbox_icon(now_selected)));
+            if let Some(outer) = outer_weak.upgrade() {
+                if now_selected {
+                    outer.add_css_class("file-tile-selected");
+                } else {
+                    outer.remove_css_class("file-tile-selected");
+                }
+            }
+            if let Some(indicator) = ind_weak.upgrade() {
+                indicator.set_icon_name(Some(checkbox_icon(now_selected)));
             }
             update_group_selection_widgets(
                 &this.selection.borrow(),
@@ -834,9 +848,8 @@ impl Cleanup {
             );
             this.update_global_summary();
         });
-        outer.add_controller(gesture);
 
-        outer.upcast()
+        toggle.upcast()
     }
 
     // ── Header summary ───────────────────────────────────────────────────────
@@ -920,6 +933,10 @@ impl Cleanup {
                 .map(|m| m.id)
                 .collect()
         };
+        self.confirm_trash(ids, anchor);
+    }
+
+    fn confirm_trash(self: &Rc<Self>, ids: Vec<i64>, anchor: &gtk::Button) {
         if ids.is_empty() {
             return;
         }
@@ -958,69 +975,126 @@ impl Cleanup {
     }
 
     fn trash(self: &Rc<Self>, ids: Vec<i64>) {
-        // Single-flight guard: the delete buttons have no second confirmation, so
-        // a rapid double-tap would otherwise trash the same ids twice.
         if ids.is_empty() || self.deleting.get() {
             return;
         }
         self.deleting.set(true);
+        self.pending_trash.replace(Some(PendingTrash {
+            ids: ids.iter().copied().collect(),
+        }));
+        self.status_label
+            .set_text("Moving selected files to Trash…");
+        self.reveal_status();
 
-        let freed = self.selected_bytes(&ids);
-        let _ = self
+        let result = self
             .engine
             .borrow_mut()
             .send(CommandPayload::TrashFiles(TrashFilesPayload {
-                file_ids: ids.clone(),
+                file_ids: ids,
             }));
+        if let Err(error) = result {
+            self.fail_trash(&format!("Could not send the Trash command: {error}"));
+        }
+    }
 
-        // Optimistic local prune — the delayed reconcile reload re-reads the DB
-        // to reflect what the engine actually trashed/pruned.
-        let idset: HashSet<i64> = ids.iter().copied().collect();
+    fn finish_trash(self: &Rc<Self>, result: fileid_engine::ipc::BulkActionResult) {
+        let reported: HashSet<i64> = result
+            .messages
+            .iter()
+            .filter_map(|message| message.file_id)
+            .collect();
+        let belongs_to_pending = {
+            let pending = self.pending_trash.borrow();
+            pending
+                .as_ref()
+                .is_some_and(|pending| reported.is_empty() || !reported.is_disjoint(&pending.ids))
+        };
+        if !belongs_to_pending {
+            return;
+        }
+        let pending = self
+            .pending_trash
+            .borrow_mut()
+            .take()
+            .expect("pending trash");
+        let operation_error = result.messages.iter().find_map(|message| {
+            (!message.ok && message.file_id.is_none())
+                .then(|| message.message.clone())
+                .flatten()
+        });
+        if let Some(message) = operation_error {
+            self.deleting.set(false);
+            self.status_label
+                .set_text(&format!("Trash operation failed: {message}"));
+            self.reveal_status();
+            return;
+        }
+        let succeeded: Vec<i64> = result
+            .messages
+            .iter()
+            .filter(|message| message.ok)
+            .filter_map(|message| message.file_id)
+            .filter(|id| pending.ids.contains(id))
+            .collect();
+        let freed = self.selected_bytes(&succeeded);
         {
-            let mut sel = self.selection.borrow_mut();
-            for id in &ids {
-                sel.remove(id);
+            let mut selection = self.selection.borrow_mut();
+            for id in &succeeded {
+                selection.remove(id);
             }
         }
-        {
-            let mut groups = self.groups.borrow_mut();
-            for g in groups.iter_mut() {
-                let removed_count = g.members.iter().filter(|m| idset.contains(&m.id)).count();
-                let removed_bytes: i64 = g
-                    .members
-                    .iter()
-                    .filter(|m| idset.contains(&m.id))
-                    .map(|m| m.size)
-                    .sum();
-                g.members.retain(|m| !idset.contains(&m.id));
-                g.total_members = g.total_members.saturating_sub(removed_count);
-                g.total_bytes = g.total_bytes.saturating_sub(removed_bytes);
-            }
-            groups.retain(|g| g.total_members >= 2 && !g.members.is_empty());
-            for g in groups.iter_mut() {
-                recompute_group(g);
-            }
-        }
-        self.rebuild_list();
-        self.update_global_summary();
-
-        let n = ids.len();
-        self.status_label.set_text(&format!(
-            "Trashed {n} file{} · freed {:.1} MB · restore from Trash to undo",
-            plural(n),
-            freed as f64 / BYTES_PER_MB,
-        ));
-        self.status_bar.set_visible(true);
-        // Springy reveal on the shared brand spring (the project's motion
-        // signature) — a discrete, user-triggered event, so it never re-fires
-        // during a scan the way a per-card animation would.
-        let bar = self.status_bar.clone();
-        let _ = crate::spring::animate(&self.status_bar, 0.0, 1.0, move |v| bar.set_opacity(v));
         self.deleting.set(false);
+        if result.failed == 0 {
+            self.status_label.set_text(&format!(
+                "Trashed {} file{} · freed {:.1} MB · restore from Trash to undo",
+                result.succeeded,
+                plural(result.succeeded as usize),
+                freed as f64 / BYTES_PER_MB,
+            ));
+        } else {
+            let details = result
+                .messages
+                .iter()
+                .filter(|message| !message.ok)
+                .filter_map(|message| {
+                    message
+                        .file_id
+                        .filter(|id| pending.ids.contains(id))
+                        .map(|id| {
+                            format!(
+                                "#{id}: {}",
+                                message
+                                    .message
+                                    .as_deref()
+                                    .unwrap_or("Trash rejected the file")
+                            )
+                        })
+                })
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            self.status_label.set_text(&format!(
+                "Trashed {}; {} could not be moved and remain on disk. Failed files may disappear from this duplicate group after reload. {}",
+                result.succeeded, result.failed, details,
+            ));
+        }
+        self.reveal_status();
+        self.reload();
+    }
 
-        // Reconcile against the DB once the engine has processed the deletion.
-        let this = self.clone();
-        glib::timeout_add_local_once(Duration::from_millis(1000), move || this.reload());
+    fn fail_trash(&self, message: &str) {
+        self.pending_trash.borrow_mut().take();
+        self.deleting.set(false);
+        self.status_label.set_text(message);
+        self.reveal_status();
+    }
+
+    fn reveal_status(&self) {
+        self.status_bar.set_visible(true);
+        let bar = self.status_bar.clone();
+        let _ = crate::spring::animate(&self.status_bar, 0.0, 1.0, move |value| {
+            bar.set_opacity(value);
+        });
     }
 }
 
@@ -1428,6 +1502,7 @@ fn build_group(
 
 /// Recompute keeper flags + totals after an optimistic member removal. Members
 /// stay in rank order, so element 0 is the best surviving keeper.
+#[allow(dead_code)] // kept for the in-place group refresh not yet wired to the UI
 fn recompute_group(g: &mut DupGroup) {
     g.keeper_bytes = g.members.first().map(|m| m.size).unwrap_or(0);
     for (i, m) in g.members.iter_mut().enumerate() {
@@ -1558,6 +1633,10 @@ fn checkbox_icon(selected: bool) -> &'static str {
     }
 }
 
+fn is_trash_result(action: &str) -> bool {
+    action == "trashFiles" || action.starts_with("trashFiles:")
+}
+
 fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -1589,6 +1668,13 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn trash_results_accept_engine_batch_suffixes() {
+        assert!(is_trash_result("trashFiles"));
+        assert!(is_trash_result("trashFiles:batch-id"));
+        assert!(!is_trash_result("applyTags"));
     }
 
     #[test]

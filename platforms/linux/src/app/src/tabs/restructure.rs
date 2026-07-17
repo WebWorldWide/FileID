@@ -16,7 +16,7 @@
 // Ask-confidence moves start UNchecked (RESTRUCTURE.md §6) — the user must opt
 // them in before applying.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::path::Path;
@@ -505,6 +505,54 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
     sankey.add_controller(click);
+
+    sankey.set_focusable(true);
+    sankey.set_tooltip_text(Some(
+        "Folder map. Use Left and Right to choose a folder, then Enter to open details.",
+    ));
+    let keyboard_node = Rc::new(Cell::new(0usize));
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(clone!(
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        #[strong]
+        keyboard_node,
+        #[weak]
+        sankey,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, _| {
+            let total = {
+                let state = state.borrow();
+                state.sankey.sources.len() + state.sankey.destinations.len()
+            };
+            if total == 0 {
+                return glib::Propagation::Proceed;
+            }
+            match key {
+                gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
+                    keyboard_node.set(keyboard_node.get().checked_sub(1).unwrap_or(total - 1));
+                }
+                gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
+                    keyboard_node.set((keyboard_node.get() + 1) % total);
+                }
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::space => {
+                    if let Some((scope, _)) = keyboard_node_scope(&state, keyboard_node.get()) {
+                        open_drilldown(&state, &ui, scope);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                _ => return glib::Propagation::Proceed,
+            }
+            if let Some((_, label)) = keyboard_node_scope(&state, keyboard_node.get()) {
+                sankey.set_tooltip_text(Some(&format!("Selected folder map node: {label}")));
+            }
+            glib::Propagation::Stop
+        }
+    ));
+    sankey.add_controller(keys);
 
     // ── Header pick button ────────────────────────────────────────────────────
     pick_btn.connect_clicked(clone!(
@@ -1794,6 +1842,28 @@ fn hit_test_node(
         }
     }
     None
+}
+
+fn keyboard_node_scope(state: &Rc<RefCell<State>>, index: usize) -> Option<(DrillScope, String)> {
+    let state = state.borrow();
+    let source_count = state.sankey.sources.len();
+    let node = if index < source_count {
+        state.sankey.sources.get(index)?
+    } else {
+        state.sankey.destinations.get(index - source_count)?
+    };
+    let scope = if index < source_count {
+        if node.is_rollup {
+            DrillScope::SourceFolders(node.rollup_members.clone())
+        } else {
+            DrillScope::Source(node.identity.clone())
+        }
+    } else if node.is_rollup {
+        DrillScope::DestBuckets(node.rollup_members.clone())
+    } else {
+        DrillScope::Bucket(node.identity.clone())
+    };
+    Some((scope, format!("{} — {} files", node.label, node.count)))
 }
 
 // ─── Plan → view-model mapping ───────────────────────────────────────────────

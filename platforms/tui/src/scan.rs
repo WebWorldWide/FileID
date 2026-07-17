@@ -22,7 +22,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender as Sender;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
@@ -47,27 +47,43 @@ pub fn spawn_scan(
     engine_data_home: Option<PathBuf>,
     query: String,
     tx: Sender<LoadMsg>,
+    generation: u64,
 ) {
     std::thread::spawn(
         move || match run_scan(&db, &root, engine_data_home.as_deref(), &tx) {
             Ok(summary) => {
-                let _ = tx.send(LoadMsg::Status(format!("{summary} — reloading library…")));
-                match data::load(&db, &query, &tx) {
+                let _ = tx.send(LoadMsg::Status(format!(
+                    "{} — reloading library…",
+                    summary.message
+                )));
+                if summary.failed > 0 {
+                    let _ = data::send_versioned(
+                        &tx,
+                        generation,
+                        LoadMsg::ScanPartial(summary.message.clone()),
+                    );
+                }
+                match data::load(&db, &query, &tx, generation) {
                     Ok(snap) => {
                         let _ = tx.send(LoadMsg::Status(format!(
-                            "{summary} · {} files indexed",
-                            snap.total_files
+                            "{} · {} files indexed",
+                            summary.message, snap.total_files
                         )));
-                        let _ = tx.send(LoadMsg::Done(Box::new(snap)));
-                        data::run_deferred_dupes(&db, &tx);
+                        let _ =
+                            data::send_versioned(&tx, generation, LoadMsg::Done(Box::new(snap)));
+                        data::run_deferred_dupes(&db, &tx, generation);
                     }
                     Err(e) => {
-                        let _ = tx.send(LoadMsg::Error(format!("scan ok, reload failed: {e}")));
+                        let _ = data::send_versioned(
+                            &tx,
+                            generation,
+                            LoadMsg::Error(format!("scan ok, reload failed: {e}")),
+                        );
                     }
                 }
             }
             Err(e) => {
-                let _ = tx.send(LoadMsg::Error(e.to_string()));
+                let _ = data::send_versioned(&tx, generation, LoadMsg::Error(e.to_string()));
             }
         },
     );
@@ -75,12 +91,17 @@ pub fn spawn_scan(
 
 /// Pre-flight, spawn the engine, send `startScan`, and stream events until the
 /// scan completes. Returns a one-line success summary or a descriptive error.
+struct ScanSummary {
+    message: String,
+    failed: u64,
+}
+
 fn run_scan(
     db: &Path,
     root: &Path,
     engine_data_home: Option<&Path>,
     tx: &Sender<LoadMsg>,
-) -> Result<String> {
+) -> Result<ScanSummary> {
     let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
 
     // ── Pre-flight 1: models installed? Give a clear, actionable message
@@ -178,14 +199,14 @@ fn run_scan(
             processed,
             failed,
             seconds,
-        } => Ok(format!(
-            "Scan complete: {processed}/{total} files{} in {seconds:.1}s",
-            if failed > 0 {
-                format!(", {failed} failed")
+        } => Ok(ScanSummary {
+            message: if failed > 0 {
+                format!("Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s")
             } else {
-                String::new()
-            }
-        )),
+                format!("Scan complete: {processed}/{total} files in {seconds:.1}s")
+            },
+            failed,
+        }),
         // The engine's own `models_not_installed` (the pre-flight gate didn't
         // catch it — e.g. a pin bump) maps to the SAME actionable TUI message.
         ScanOutcome::Error { kind, message } => {

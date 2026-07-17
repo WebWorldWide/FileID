@@ -1091,7 +1091,7 @@ async fn download_range_with_retry(
         // of treating an oversized part as "already done" (which kept bad bytes).
         if existing_len > range_len {
             tracing::warn!(
-                part = %part_path.display(), existing_len, range_len,
+                part = %crate::platform::redact_path_for_log(part_path), existing_len, range_len,
                 "discarding oversized stale part before resume"
             );
             let _ = tokio::fs::remove_file(part_path).await;
@@ -1160,7 +1160,7 @@ async fn download_range_with_retry(
             RangeResumeAction::Proceed => {}
             RangeResumeAction::DiscardAndRetry => {
                 tracing::warn!(
-                    part = %part_path.display(), %status, existing_len, range_len,
+                    part = %crate::platform::redact_path_for_log(part_path), %status, existing_len, range_len,
                     "range resume not honored (416/non-206); discarding stale part and re-fetching"
                 );
                 // Un-count the bytes we're discarding. `existing_len` (> 0 on
@@ -1275,7 +1275,7 @@ pub fn install_model_blocking(
     progress: Arc<dyn Fn(InstallFileProgress) + Send + Sync>,
 ) -> Result<()> {
     // Already installed (sentinel present) → nothing to do.
-    if crate::models::registry::sentinel_path(model).is_some_and(|p| p.exists()) {
+    if crate::models::registry::installation_complete(model) {
         return Ok(());
     }
 
@@ -1353,7 +1353,14 @@ pub fn install_model_blocking(
                     .with_context(|| format!("creating {}", parent.display()))?;
             }
             let tmp = sentinel.with_extension("installed.tmp");
-            tokio::fs::write(&tmp, model.id.as_bytes())
+            // Write the same attestation the prewarm path writes (registry
+            // installation_attestation): for zip-entry runtime packs
+            // installation_complete() requires the sentinel to contain the full
+            // per-artifact hash manifest, so a bare model.id marker would leave
+            // every CLI-installed pack reported not-installed and re-downloaded.
+            let sentinel_body = crate::models::registry::installation_attestation(model)
+                .context("attesting installed model files for the install sentinel")?;
+            tokio::fs::write(&tmp, sentinel_body.as_bytes())
                 .await
                 .context("writing install sentinel")?;
             tokio::fs::rename(&tmp, &sentinel)

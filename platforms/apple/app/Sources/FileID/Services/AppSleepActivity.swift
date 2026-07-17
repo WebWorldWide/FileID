@@ -4,7 +4,8 @@ enum AppSleepActivity {
     /// Scoped activity for a single awaited operation (model installers). The
     /// token is balanced by `defer`, so App Nap can't throttle the UI process
     /// while `operation` runs.
-    static func run(reason: String, operation: () async -> Void) async {
+    @MainActor
+    static func run(reason: String, operation: @MainActor () async -> Void) async {
         let token = begin(reason: reason)
         defer { end(token) }
         await operation()

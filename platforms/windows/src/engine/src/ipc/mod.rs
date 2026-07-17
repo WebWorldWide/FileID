@@ -191,6 +191,81 @@ pub enum CommandPayload {
     PurgeExcluded(PurgeExcludedPayload),
 }
 
+const MAX_BULK_ITEMS: usize = 100_000;
+const MAX_RESTRUCTURE_MOVES: usize = 250_000;
+const MAX_EXCLUDED_PATHS: usize = 10_000;
+const MAX_TAGS_PER_COMMAND: usize = 1_024;
+const MAX_APPLY_TAG_OPERATIONS: usize = 100_000;
+
+pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Result<(), String> {
+    fn check_len(field: &str, len: usize, max: usize) -> Result<(), String> {
+        if len > max {
+            Err(format!("{field} contains {len} items; maximum is {max}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn dedupe_ids(ids: &mut Vec<i64>) {
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        ids.retain(|id| seen.insert(*id));
+    }
+
+    fn dedupe_strings(values: &mut Vec<String>) {
+        let mut seen = std::collections::HashSet::with_capacity(values.len());
+        values.retain(|value| seen.insert(value.clone()));
+    }
+
+    match payload {
+        CommandPayload::StartScan(payload) => {
+            if let Some(paths) = &mut payload.excluded_paths {
+                check_len("startScan.excludedPaths", paths.len(), MAX_EXCLUDED_PATHS)?;
+                dedupe_strings(paths);
+            }
+        }
+        CommandPayload::PurgeExcluded(payload) => {
+            check_len("purgeExcluded.excludedPaths", payload.excluded_paths.len(), MAX_EXCLUDED_PATHS)?;
+            dedupe_strings(&mut payload.excluded_paths);
+        }
+        CommandPayload::ApplyRestructure(payload) => {
+            check_len("applyRestructure.moves", payload.moves.len(), MAX_RESTRUCTURE_MOVES)?;
+            let mut seen = std::collections::HashSet::with_capacity(payload.moves.len());
+            payload.moves.retain(|entry| seen.insert(entry.file_id));
+        }
+        CommandPayload::ApplyTags(payload) => {
+            check_len("applyTags.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
+            check_len("applyTags.tags", payload.tags.len(), MAX_TAGS_PER_COMMAND)?;
+            dedupe_ids(&mut payload.file_ids);
+            dedupe_strings(&mut payload.tags);
+            let operations = payload.file_ids.len().saturating_mul(payload.tags.len());
+            if operations > MAX_APPLY_TAG_OPERATIONS {
+                return Err(format!(
+                    "applyTags expands to {operations} file/tag operations; maximum is {MAX_APPLY_TAG_OPERATIONS}"
+                ));
+            }
+        }
+        CommandPayload::RenameFiles(payload) => {
+            check_len("renameFiles.renames", payload.renames.len(), MAX_BULK_ITEMS)?;
+            let mut seen = std::collections::HashSet::with_capacity(payload.renames.len());
+            payload.renames.retain(|entry| seen.insert(entry.file_id));
+        }
+        CommandPayload::TrashFiles(payload) => {
+            check_len("trashFiles.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
+            dedupe_ids(&mut payload.file_ids);
+        }
+        CommandPayload::MarkPersonsAsUnknown(payload) => {
+            check_len("markPersonsAsUnknown.personIDs", payload.person_ids.len(), MAX_BULK_ITEMS)?;
+            dedupe_ids(&mut payload.person_ids);
+        }
+        CommandPayload::RevertMerge(payload) => {
+            check_len("revertMerge.faceIDsToRevert", payload.face_ids_to_revert.len(), MAX_BULK_ITEMS)?;
+            dedupe_ids(&mut payload.face_ids_to_revert);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
 /// an empty struct with no fields encodes as `{}` like Swift produces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1181,6 +1256,62 @@ mod tests {
         assert_eq!(j, "\"discovering\"");
         let j2 = serde_json::to_string(&ScanPhase::PostScan).unwrap();
         assert_eq!(j2, "\"postScan\"");
+    }
+
+    #[test]
+    fn destructive_command_ids_are_deduplicated_before_dispatch() {
+        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7, 7, 9, 7, 9],
+        });
+        normalize_and_validate_command(&mut payload).unwrap();
+        let CommandPayload::TrashFiles(payload) = payload else {
+            unreachable!();
+        };
+        assert_eq!(payload.file_ids, vec![7, 9]);
+    }
+
+    #[test]
+    fn destructive_command_rejects_max_plus_one_items() {
+        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![1; MAX_BULK_ITEMS + 1],
+        });
+        let error = normalize_and_validate_command(&mut payload).unwrap_err();
+        assert!(error.contains("maximum"));
+    }
+
+    #[test]
+    fn apply_tags_rejects_excessive_cartesian_work() {
+        let mut payload = CommandPayload::ApplyTags(ApplyTagsPayload {
+            file_ids: (0..1_001).collect(),
+            tags: (0..100).map(|index| format!("tag-{index}")).collect(),
+            mode: TagMode::Add,
+        });
+        let error = normalize_and_validate_command(&mut payload).unwrap_err();
+        assert!(error.contains("file/tag operations"));
+    }
+
+    #[test]
+    fn restructure_moves_dedupe_by_file_id() {
+        let move_for = |file_id| RestructureMove {
+            file_id,
+            source: format!("/source/{file_id}"),
+            destination: format!("/destination/{file_id}"),
+            category: "Documents".into(),
+            tier: None,
+            confidence: "auto".into(),
+            reason: None,
+        };
+        let mut payload = CommandPayload::ApplyRestructure(ApplyRestructurePayload {
+            library_root: "/".into(),
+            plan_id: None,
+            moves: vec![move_for(1), move_for(1), move_for(2)],
+            use_symlinks: false,
+        });
+        normalize_and_validate_command(&mut payload).unwrap();
+        let CommandPayload::ApplyRestructure(payload) = payload else {
+            unreachable!();
+        };
+        assert_eq!(payload.moves.iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![1, 2]);
     }
 
     /// Every CommandPayload variant must round-trip through serde without

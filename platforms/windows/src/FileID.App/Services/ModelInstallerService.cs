@@ -248,6 +248,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     public async Task InstallDeepVlmAsync(string modelKind)
     {
+        if (!await ModelLicenseGate.EnsureAcceptedAsync([modelKind]).ConfigureAwait(true))
+        {
+            return;
+        }
         if (!CanInstallVlm(modelKind))
         {
             throw new InvalidOperationException($"{VlmRecommendation.DisplayName(modelKind)} does not fit this PC safely.");
@@ -324,6 +328,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private async Task InstallAcceleratorAsync()
     {
         var kinds = _acceleratorInstallKinds;
+        if (!await ModelLicenseGate.EnsureAcceptedAsync(kinds).ConfigureAwait(true))
+        {
+            return;
+        }
         ClearCancelMarks(kinds);
         foreach (var kind in kinds)
         {
@@ -497,6 +505,21 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         try
         {
+            var restrictedKinds = new List<string>();
+            if (DeepVlm.Status != ModelInstallStatus.Installed)
+            {
+                restrictedKinds.Add(_deepVlmModelKind);
+            }
+            var includeAccelerator = IncludeAcceleratorInInstallAll();
+            if (includeAccelerator)
+            {
+                restrictedKinds.AddRange(_acceleratorInstallKinds);
+            }
+            if (!await ModelLicenseGate.EnsureAcceptedAsync(restrictedKinds).ConfigureAwait(true))
+            {
+                return;
+            }
+
             // pre-stamp every not-yet-installed slot to
             // Downloading + "Queued — starting download…" BEFORE awaiting.
             // The three TryInstallAsync calls race for EngineClient._writeLock
@@ -528,7 +551,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 Whisper,
                 DeepVlm,
             };
-            if (IncludeAcceleratorInInstallAll())
+            if (includeAccelerator)
             {
                 slotsToInstall.Add(Accelerator);
             }
@@ -1304,7 +1327,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             : SlotForErrorPath(error.Path);
         if (slot is null)
         {
-            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={error.Path ?? "<null>"})");
+            var safePath = error.Path is null ? "<null>" : PathRedactor.Redact(error.Path);
+            DebugLog.Warn($"[INSTALL] engine error '{kind}' has no routable slot (modelKind={error.ModelKind ?? "<null>"}, path={safePath})");
             return;
         }
         DebugLog.Info($"[INSTALL] engine error → {slot.DisplayLabel}.Fail(): {error.Message}");

@@ -8,6 +8,8 @@
 //   4. Persist to `deep_analyze_results` (migration v3).
 //   5. Emit `deepAnalyzeProgress` IPC events on every N files.
 
+use anyhow::Context;
+
 /// Enumerates the VLM model kinds the Deep Analyze pipeline can run.
 /// Kept around (even though the registry is the source of truth for
 /// download metadata) so unit tests can sanity-check id uniqueness +
@@ -120,9 +122,12 @@ pub async fn analyze_file(
     //              case it renders → VLM (visual understanding); `model_to_vlm` makes the
     //              metadata branch return None so we fall through to rasterize below.
     // Rasterizable kinds (image/video/pdf) return None here and take the VLM path.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
     let weights = vlm::find_weights(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights.is_some()).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights.is_some(), &cancel).await?
     {
         return Ok(outcome);
     }
@@ -138,7 +143,7 @@ pub async fn analyze_file(
             // A 3D model we couldn't render → fall back to its embedded-name metadata so
             // the file still gets a descriptive name (other kinds propagate the error).
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel).await?
             {
                 return Ok(outcome);
             }
@@ -415,6 +420,7 @@ async fn analyze_metadata_named_file(
     model_kind: &str,
     mode: AnalyzeMode,
     model_to_vlm: bool,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
     let (path_text, kind): (String, String) = {
         let conn = db.lock();
@@ -446,26 +452,15 @@ async fn analyze_metadata_named_file(
         return Ok(None);
     }
 
-    // The naming work blocks (symphonia decode, whisper subprocess, obj/mtl parse) — run
-    // it off the async executor so a multi-second transcription doesn't stall the runtime.
-    let (description, proposed_name, tags) = match tokio::task::spawn_blocking(move || {
-        metadata_naming_blocking(&path_text, &kind, &ext)
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let cancel_for_task = cancel.clone();
+    let (description, proposed_name, tags) = tokio::task::spawn_blocking(move || {
+        metadata_naming_blocking(&path_text, &kind, &ext, &cancel_for_task)
     })
     .await
-    {
-        Ok(triple) => triple,
-        // A panic (or cancellation) inside the blocking namer must not be
-        // silently recorded as "analyzed, no metadata" — that marks a whole
-        // class of files done while producing nothing. Surface it (no path in
-        // the log) and degrade to empty metadata.
-        Err(join_err) => {
-            tracing::warn!(
-                panicked = join_err.is_panic(),
-                "metadata naming task failed; recording empty metadata"
-            );
-            (None, None, Vec::new())
-        }
-    };
+    .context("metadata naming task failed")??;
 
     // Mode-gate (mirror the VLM path's per-mode outputs).
     let description = if matches!(
@@ -516,7 +511,11 @@ fn metadata_naming_blocking(
     path_text: &str,
     kind: &str,
     ext: &str,
-) -> (Option<String>, Option<String>, Vec<String>) {
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<(Option<String>, Option<String>, Vec<String>)> {
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
     let path = std::path::Path::new(path_text);
     if kind == "audio" {
         let m = crate::pipeline::audio_meta::extract_structured(path);
@@ -531,14 +530,14 @@ fn metadata_naming_blocking(
         }
         // No descriptive title → try whisper transcription on the speech.
         if name.is_none() {
-            if let Some((tn, td)) = transcribe_audio_name(path) {
+            if let Some((tn, td)) = transcribe_audio_name(path, cancel)? {
                 name = Some(tn);
                 if desc.is_none() {
                     desc = Some(td);
                 }
             }
         }
-        (desc, name, tags)
+        Ok((desc, name, tags))
     } else {
         // is_3d_model_ext(ext) — the only other kind reaching here.
         let _ = ext;
@@ -550,21 +549,39 @@ fn metadata_naming_blocking(
             push_unique(&mut tags, t);
         }
         tags.truncate(6);
-        (desc, name, tags)
+        Ok((desc, name, tags))
     }
 }
 
 /// Transcribe an audio file with whisper.cpp → (name, caption). None if the runtime or
 /// model isn't installed, the decode fails, or the transcript is empty — the caller then
 /// keeps the embedded-metadata name (or an empty success).
-fn transcribe_audio_name(path: &std::path::Path) -> Option<(String, String)> {
-    let runner = crate::models::whisper::WhisperRunner::find().ok()?;
-    let model = crate::models::whisper::WhisperRunner::find_model()?;
+fn transcribe_audio_name(
+    path: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<Option<(String, String)>> {
+    let Ok(runner) = crate::models::whisper::WhisperRunner::find() else {
+        return Ok(None);
+    };
+    let Some(model) = crate::models::whisper::WhisperRunner::find_model() else {
+        return Ok(None);
+    };
     let tmp = std::env::temp_dir().join(format!("fileid-whisper-{}.wav", uuid::Uuid::new_v4()));
     let _guard = TempFileGuard(Some(tmp.clone()));
-    crate::pipeline::audio_decode::decode_to_wav16_mono(path, &tmp).ok()?;
-    let transcript = runner.transcribe(&model, &tmp).ok()?;
-    name_from_transcript(&transcript)
+    if crate::pipeline::audio_decode::decode_to_wav16_mono(path, &tmp, cancel).is_err() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            anyhow::bail!("cancelled");
+        }
+        return Ok(None);
+    }
+    let transcript = match runner.transcribe(&model, &tmp, cancel) {
+        Ok(transcript) => transcript,
+        Err(_) if cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+            anyhow::bail!("cancelled");
+        }
+        Err(_) => return Ok(None),
+    };
+    Ok(name_from_transcript(&transcript))
 }
 
 /// First ~8 transcript words → a sanitized filename stem; the leading sentence → a
@@ -814,8 +831,11 @@ pub(crate) async fn analyze_file_via_server(
 
     // Audio is named from metadata; 3D models render → VLM (the server is loaded, so
     // `model_to_vlm = true`). Same branch as `analyze_file`, before rasterize.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, true).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, true, &cancel).await?
     {
         return Ok(outcome);
     }
@@ -825,7 +845,7 @@ pub(crate) async fn analyze_file_via_server(
         Err(e) => {
             // A 3D model we couldn't render → fall back to embedded-name metadata.
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel).await?
             {
                 return Ok(outcome);
             }

@@ -924,22 +924,6 @@ img { display: block; max-width: 100%; }
 }
 
 /* ───── DOWNLOAD ───── */
-.release-status {
-  margin-bottom: 32px;
-  padding: 12px 18px;
-  font-size: 13.5px;
-  color: var(--fg-soft);
-  background: rgba(255,204,0,0.06);
-  border: 1px solid rgba(255,204,0,0.25);
-  border-radius: var(--r-s);
-}
-.release-status strong { color: var(--gold); }
-.release-status a {
-  color: var(--gold);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
 .downloads {
   display: grid;
   grid-template-columns: 1.2fr 1fr 1fr;

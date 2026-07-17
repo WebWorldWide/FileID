@@ -31,8 +31,13 @@
          and are not fonts. This is the documented ICE60 false-positive for
          native libraries — Windows' own installers suppress it. Safe because
          these are single-binary, culture-invariant native DLLs with no
-         language variants to disambiguate. -->
-    <SuppressIces>ICE60</SuppressIces>
+         language variants to disambiguate.
+         ICE61: the expected, documented consequence of AllowSameVersionUpgrades
+         in Product.wxs — that flag sets the Upgrade table's VersionMax inclusive
+         so a same-version cross-arch package majors-upgrades in place, which is
+         exactly what ICE61 ("should remove only older versions") flags. WiX's own
+         docs say to suppress ICE61 when using AllowSameVersionUpgrades. -->
+    <SuppressIces>ICE60;ICE61</SuppressIces>
     <!-- WiX 4's wix.exe accepts only `full` or `none` for -pdbType.
          Override the platforms-wide `portable` default from
          Directory.Build.props (intended for .NET assemblies, not MSIs). -->
@@ -56,12 +61,10 @@
     <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Platform)\</IntermediateOutputPath>
 
-    <!-- Per-arch upgrade codes — must NEVER change between releases.
-         Different arches get different upgrade codes so the Burn bundle
-         can install both side-by-side if needed (it never does — chain
-         picks one — but the GUIDs stay distinct for safety). -->
-    <UpgradeCodeX64>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCodeX64>
-    <UpgradeCodeArm64>2C6F80B1-5D53-5B7F-AB23-80AB0AF2C6D5</UpgradeCodeArm64>
+    <!-- One cross-architecture product family. Keep this UpgradeCode stable:
+         an ARM64 MSI must major-upgrade an x64 MSI (including the same product
+         version) rather than registering two owners for Program Files\FileID. -->
+    <UpgradeCode>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCode>
   </PropertyGroup>
 
   <ItemGroup>
@@ -79,9 +82,9 @@
          from Directory.Build.props (single source: platforms/windows/VERSION),
          so Product.wxs uses $(var.Version) instead of a hardcoded literal. -->
     <DefineConstants Condition="'$(Platform)' == 'x64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCode);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
     <DefineConstants Condition="'$(Platform)' == 'arm64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCode);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -102,7 +105,7 @@
        Ids + GUIDs derived from each file's relative path so upgrade
        behavior stays correct across versions. -->
   <Target Name="GeneratePublishedFiles" BeforeTargets="CoreCompile">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot;"
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot; -Architecture &quot;$(Platform)&quot;"
           ConsoleToMSBuild="true" />
   </Target>
 

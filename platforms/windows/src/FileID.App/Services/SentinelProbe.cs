@@ -8,14 +8,96 @@
 // prewarm on every Settings load / engine Ready (repeated 0%→100% progress
 // spam with outcome=already_installed).
 
+using System;
 using System.IO;
+using System.Linq;
 
 namespace FileID.Services;
 
 internal static class SentinelProbe
 {
     public static bool Installed(string modelId) =>
-        InstalledIn(Path.Combine(AppPaths.ModelsDir, ".sentinels"), modelId);
+        InstalledIn(Path.Combine(AppPaths.ModelsDir, ".sentinels"), modelId)
+        && RequiredArtifactsPresent(modelId);
+
+    private static bool RequiredArtifactsPresent(string modelId)
+        => RequiredArtifactsPresentIn(AppPaths.ModelsDir, modelId);
+
+    internal static bool RequiredArtifactsPresentIn(string root, string modelId)
+    {
+        bool FilePresent(string relative, long minimumBytes = 1)
+        {
+            try
+            {
+                var info = new FileInfo(Path.Combine(root, relative));
+                return info.Exists && info.Length >= minimumBytes;
+            }
+            catch { return false; }
+        }
+        bool TreeContains(string relative, long minimumBytes, params string[] names)
+        {
+            try
+            {
+                var directory = Path.Combine(root, relative);
+                if (!Directory.Exists(directory)) return false;
+                foreach (var path in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+                {
+                    var name = Path.GetFileName(path);
+                    if (names.Contains(name, StringComparer.OrdinalIgnoreCase)
+                        && new FileInfo(path).Length >= minimumBytes)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+        bool Vlm(string kind)
+        {
+            var directory = Path.Combine("vlm", VlmWeightDirs.DirNameFor(kind));
+            return FilePresent(Path.Combine(directory, "model.gguf"), 1_048_576)
+                && FilePresent(Path.Combine(directory, "mmproj.gguf"), 1_048_576);
+        }
+
+        return modelId switch
+        {
+            "arcface" => FilePresent(Path.Combine("yunet", "face_detection_yunet_2023mar.onnx"), 100_000)
+                && FilePresent(Path.Combine("sface", "face_recognition_sface_2021dec.onnx"), 1_000_000),
+            "mobileclip_s2" => FilePresent(Path.Combine("mobileclip", "mobileclip_s2_image.onnx"), 1_000_000),
+            "clip_text" => FilePresent(Path.Combine("clip_text", "clip_text.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("clip_text", "vocab.json"), 1_000)
+                && FilePresent(Path.Combine("clip_text", "merges.txt"), 1_000),
+            "ram_plus" => FilePresent(Path.Combine("ram_plus", "ram_plus.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("ram_plus", "ram_plus_tags.txt"), 1_000)
+                && FilePresent(Path.Combine("ram_plus", "ram_plus_thresholds.txt"), 1_000),
+            "mistral_small_3_2" or "qwen2_5_vl_7b" or "gemma_3_4b" => Vlm(modelId),
+            "llama_runtime_x64" => TreeContains("llama.cpp", 20_000, "llama-server.exe")
+                && TreeContains("llama.cpp", 20_000, "llama-mtmd-cli.exe")
+                && TreeContains("llama.cpp", 20_000, "mtmd.dll"),
+            "whisper" => TreeContains("whisper.cpp", 20_000, "main.exe", "whisper-cli.exe")
+                && FilePresent(Path.Combine("whisper", "ggml-base.bin"), 1_000_000),
+            "cudnn_runtime_x64" => TreeContains("cudnn", 1_000_000, "cudnn64_9.dll"),
+            "ort_cuda_x64" => TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime_providers_cuda.dll"),
+            "ort_openvino_x64" => TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime.dll")
+                && TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime_providers_openvino.dll"),
+            "llama_runtime_cuda_x64" => TreeContains("llama.cpp-cuda", 20_000, "llama-server.exe")
+                && TreeContains("llama.cpp-cuda", 20_000, "llama-mtmd-cli.exe")
+                && TreeContains("llama.cpp-cuda", 20_000, "mtmd.dll")
+                && TreeContains("llama.cpp-cuda", 1_000_000, "cudart64_12.dll")
+                && TreeContains("llama.cpp-cuda", 1_000_000, "cublas64_12.dll"),
+            "bge_text" => FilePresent(Path.Combine("bge_text", "bge_small.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("bge_text", "vocab.txt"), 1_000),
+            "florence2_base" => FilePresent(Path.Combine("florence2", "vision_encoder.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("florence2", "embed_tokens.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("florence2", "encoder_model.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("florence2", "decoder_model_merged.onnx"), 1_000_000)
+                && FilePresent(Path.Combine("florence2", "tokenizer.json"), 1_000)
+                && FilePresent(Path.Combine("florence2", "config.json"), 1_000),
+            _ => false,
+        };
+    }
 
     public static bool InstalledIn(string sentinelsDir, string modelId)
     {

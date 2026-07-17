@@ -71,9 +71,23 @@ public enum Tagging {
                 tagsEvaluated: true
             )
         }
-        // Single choke point: stamp the volume-local identity (st_ino) computed
-        // at discovery onto every TaggedFile so DBWriter's rename/move heal can
-        // re-bind a moved file's row instead of orphaning its tags/faces/OCR.
+        if tagged.contentHash == nil && !Task.isCancelled {
+            let contentSize = UInt64(max(0, discovered.sizeBytes))
+            let state = ContentHashContinuation()
+            tagged.contentHash = await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    state.install(continuation)
+                    visionQueue.async {
+                        state.finish(ContentHash.compute(url: url, size: contentSize))
+                    }
+                    visionQueue.asyncAfter(deadline: .now() + 30) {
+                        state.finish(nil)
+                    }
+                }
+            } onCancel: {
+                state.finish(nil)
+            }
+        }
         tagged.fileRef = discovered.fileRef
         return tagged
     }
@@ -372,18 +386,21 @@ public enum Tagging {
         }
     }
 
-    /// Extract a video keyframe with a hard wall-clock bound. `extractVideoKeyframe` is
-    /// synchronous AVFoundation that can hang on an unresponsive (NAS) file, so it runs on
-    /// a utility queue and we give up after `timeout` (the worker thread continues; the
-    /// orphaned extract finishes or dies with the process).
+    /// Extract a video keyframe with a hard wall-clock bound. AVFoundation duration/decode
+    /// can hang on an unresponsive NAS file, so it runs in a detached task and is cancelled
+    /// when the caller's timeout expires.
     private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> CGImage? {
         let box = KeyframeBox()
         let sema = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .utility).async {
-            box.set(DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize))
+        let task = Task.detached(priority: .utility) {
+            box.set(await DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize))
             sema.signal()
         }
-        return sema.wait(timeout: .now() + timeout) == .timedOut ? nil : box.get()
+        if sema.wait(timeout: .now() + timeout) == .timedOut {
+            task.cancel()
+            return nil
+        }
+        return box.get()
     }
 
     private final class KeyframeBox: @unchecked Sendable {
@@ -726,5 +743,35 @@ public enum Tagging {
         if let lonRef = gps?[kCGImagePropertyGPSLongitudeRef] as? String, lonRef == "W",
            let l = lon { lon = -l }
         return (cameraModel, lat, lon)
+    }
+}
+
+private final class ContentHashContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data?, Never>?
+    private var finished = false
+
+    func install(_ continuation: CheckedContinuation<Data?, Never>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(returning: nil)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func finish(_ value: Data?) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
     }
 }

@@ -1061,6 +1061,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private async Task InstallCudaLlamaAsync(Button button)
     {
+        if (!await Services.ModelLicenseGate
+                .EnsureAcceptedAsync(["llama_runtime_cuda_x64"])
+                .ConfigureAwait(true))
+        {
+            return;
+        }
         var originalContent = button.Content;
         try
         {
@@ -1092,6 +1098,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
+        if (!await Services.ModelLicenseGate
+                .EnsureAcceptedAsync(["cudnn_runtime_x64"])
+                .ConfigureAwait(true))
+        {
+            return;
+        }
         var originalContent = button.Content;
         try
         {

@@ -108,6 +108,27 @@ public sealed class InstallerContractTests
     }
 
     [Fact]
+    public void Msi_UsesOneCrossArchitectureUpgradeFamilyWithDistinctComponents()
+    {
+        var project = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "installer", "FileID.Msi", "FileID.Msi.wixproj"));
+        var product = XDocument.Load(PathInRepo(
+            "platforms", "windows", "installer", "FileID.Msi", "Product.wxs"));
+        var generator = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "installer", "FileID.Msi", "Generate-Components.ps1"));
+        XNamespace wix = "http://wixtoolset.org/schemas/v4/wxs";
+
+        Assert.Contains("<UpgradeCode>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCode>", project, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpgradeCodeX64", project, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpgradeCodeArm64", project, StringComparison.Ordinal);
+        var majorUpgrade = product.Descendants(wix + "MajorUpgrade").Single();
+        Assert.Equal("yes", (string?)majorUpgrade.Attribute("AllowSameVersionUpgrades"));
+        Assert.Equal("afterInstallInitialize", (string?)majorUpgrade.Attribute("Schedule"));
+        Assert.Contains("-Architecture &quot;$(Platform)&quot;", project, StringComparison.Ordinal);
+        Assert.Contains("$Architecture|$($rel.ToLowerInvariant())", generator, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Msi_RefusesToPackageWithoutNativeInferenceAndPdfRuntimes()
     {
         var project = File.ReadAllText(PathInRepo("platforms", "windows", "installer", "FileID.Msi", "FileID.Msi.wixproj"));
