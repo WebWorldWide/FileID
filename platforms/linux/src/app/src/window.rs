@@ -15,11 +15,71 @@ use adw::prelude::*;
 use gtk::glib;
 use gtk::glib::clone;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::engine_client::{EngineClient, EngineEvent};
 
+#[derive(Clone)]
+struct ActiveWindow {
+    window: adw::ApplicationWindow,
+    folder_label: gtk::Label,
+    start_button: gtk::Button,
+    selected_folder: Rc<RefCell<Option<String>>>,
+}
+
+thread_local! {
+    static ACTIVE_WINDOW: RefCell<Option<ActiveWindow>> = const { RefCell::new(None) };
+}
+
 pub fn on_activate(app: &adw::Application) {
+    if !present_existing(None) {
+        build_window(app, None);
+    }
+}
+
+pub fn on_open(app: &adw::Application, files: &[gtk::gio::File]) {
+    let folder = files
+        .iter()
+        .filter_map(gtk::gio::File::path)
+        .find(|path| path.is_dir());
+    if !present_existing(folder.clone()) {
+        build_window(app, folder);
+    }
+}
+
+fn present_existing(folder: Option<PathBuf>) -> bool {
+    ACTIVE_WINDOW.with_borrow(|active| {
+        let Some(active) = active else { return false };
+        if let Some(path) = folder {
+            apply_folder(
+                &path,
+                &active.folder_label,
+                &active.start_button,
+                &active.selected_folder,
+            );
+        }
+        active.window.present();
+        true
+    })
+}
+
+fn apply_folder(
+    path: &std::path::Path,
+    folder_label: &gtk::Label,
+    start_button: &gtk::Button,
+    selected_folder: &Rc<RefCell<Option<String>>>,
+) {
+    let display = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    folder_label.set_text(&display);
+    selected_folder.replace(Some(path.to_string_lossy().into_owned()));
+    start_button.set_sensitive(true);
+}
+
+fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     let (dw, dh) = std::env::var("FILEID_WIN_SIZE")
         .ok()
         .and_then(|s| {
@@ -243,6 +303,23 @@ pub fn on_activate(app: &adw::Application) {
 
     // ── Folder pick → enable scan ────────────────────────────────────────────
     let selected_folder: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    if let Some(path) = initial_folder {
+        apply_folder(&path, &folder_label, &start_btn, &selected_folder);
+    }
+    ACTIVE_WINDOW.with_borrow_mut(|active| {
+        *active = Some(ActiveWindow {
+            window: window.clone(),
+            folder_label: folder_label.clone(),
+            start_button: start_btn.clone(),
+            selected_folder: selected_folder.clone(),
+        });
+    });
+    let engine_for_close = engine.clone();
+    window.connect_close_request(move |_| {
+        ACTIVE_WINDOW.with_borrow_mut(|active| *active = None);
+        engine_for_close.borrow_mut().shutdown();
+        glib::Propagation::Proceed
+    });
     pick_btn.connect_clicked(clone!(
         #[weak]
         window,
@@ -274,7 +351,7 @@ pub fn on_activate(app: &adw::Application) {
                                     .file_name()
                                     .map(|s| s.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                                folder_label.set_label(&display);
+                                folder_label.set_text(&display);
                                 *selected_folder.borrow_mut() =
                                     Some(path.to_string_lossy().into_owned());
                                 start_btn.set_sensitive(true);

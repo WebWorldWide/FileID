@@ -418,9 +418,18 @@ struct DeepUi {
 
 // ─── Command routing ─────────────────────────────────────────────────────────
 
-fn send_cmd(engine: &Rc<RefCell<EngineClient>>, payload: CommandPayload) {
-    if let Err(err) = engine.borrow_mut().send(payload) {
-        tracing::warn!(target: "deep_analyze", "send failed: {err}");
+fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
+    match ui.engine.borrow_mut().send(payload) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(target: "deep_analyze", "send failed: {error}");
+            end_run(ui);
+            ui.completion_icon.set_text("!");
+            ui.completion_label
+                .set_text(&format!("Command could not be sent: {error}"));
+            reveal(&ui.completion_card);
+            false
+        }
     }
 }
 
@@ -429,18 +438,26 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
     ui.run_btn.connect_clicked(clone!(
         #[strong]
         ui,
-        move |_| {
+        move |button| {
             if ui.in_flight.get() {
                 return;
             }
+            // Gate a restricted-model (e.g. Gemma) download behind license
+            // acceptance, like macOS gates every Deep Analyze entry point. On
+            // acceptance the gate re-emits this click so the run proceeds.
+            let kind = ui.active_kind.get();
+            if !crate::model_license::ensure_or_prompt(button, kind) {
+                return;
+            }
             let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-                model_kind: ui.active_kind.get().to_string(),
+                model_kind: kind.to_string(),
                 skip_existing: ui.skip_check.is_active(),
                 tags_only: false,
                 propose_renames: true,
             });
-            begin_run(&ui);
-            send_cmd(&ui.engine, payload);
+            if send_cmd(&ui, payload) {
+                begin_run(&ui);
+            }
         }
     ));
 
@@ -450,6 +467,11 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
         ui,
         move |btn| {
             if ui.in_flight.get() {
+                return;
+            }
+            // Gate the restricted-model download before opening the picker; the
+            // gate re-emits this click after acceptance (parity with macOS).
+            if !crate::model_license::ensure_or_prompt(btn, ui.active_kind.get()) {
                 return;
             }
             let dialog = gtk::FileDialog::builder()
@@ -470,8 +492,9 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
                             path_prefix: path.to_string_lossy().into_owned(),
                             model_kind: ui.active_kind.get().to_string(),
                         });
-                        begin_run(&ui);
-                        send_cmd(&ui.engine, payload);
+                        if send_cmd(&ui, payload) {
+                            begin_run(&ui);
+                        }
                     }
                 ),
             );
@@ -483,7 +506,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
         #[strong]
         ui,
         move |_| {
-            send_cmd(&ui.engine, CommandPayload::DeepAnalyzeCancel(Empty {}));
+            send_cmd(&ui, CommandPayload::DeepAnalyzeCancel(Empty {}));
         }
     ));
 
@@ -504,11 +527,12 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             if renames.is_empty() {
                 return;
             }
-            send_cmd(
-                &ui.engine,
+            if send_cmd(
+                &ui,
                 CommandPayload::RenameFiles(RenameFilesPayload { renames }),
-            );
-            schedule_refresh(&ui, 900);
+            ) {
+                schedule_refresh(&ui, 900);
+            }
         }
     ));
 }
@@ -737,15 +761,22 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
     reanalyze.connect_clicked(clone!(
         #[strong]
         ui,
-        move |_| {
-            send_cmd(
-                &ui.engine,
+        move |button| {
+            // Gate the restricted-model download (parity with macOS, which gates
+            // every Deep Analyze entry point); the gate re-emits on acceptance.
+            let kind = ui.active_kind.get();
+            if !crate::model_license::ensure_or_prompt(button, kind) {
+                return;
+            }
+            if send_cmd(
+                &ui,
                 CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
                     file_id: id,
-                    model_kind: ui.active_kind.get().to_string(),
+                    model_kind: kind.to_string(),
                 }),
-            );
-            begin_run(&ui);
+            ) {
+                begin_run(&ui);
+            }
         }
     ));
     hbox.append(&reanalyze);
@@ -760,16 +791,17 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         #[strong]
         ui,
         move |_| {
-            send_cmd(
-                &ui.engine,
+            if send_cmd(
+                &ui,
                 CommandPayload::RenameFiles(RenameFilesPayload {
                     renames: vec![RenameEntry {
                         file_id: id,
                         new_name: new_name.clone(),
                     }],
                 }),
-            );
-            schedule_refresh(&ui, 700);
+            ) {
+                schedule_refresh(&ui, 700);
+            }
         }
     ));
     hbox.append(&rename);
@@ -898,9 +930,7 @@ fn model_install_info(key: &str) -> (bool, f64) {
     match registry::lookup_full(key) {
         LookupResult::Found(model) => {
             let bytes: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
-            let installed = registry::sentinel_path(&model)
-                .map(|p| p.exists())
-                .unwrap_or(false);
+            let installed = registry::installation_complete(&model);
             (installed, bytes as f64 / 1_073_741_824.0)
         }
         LookupResult::Unknown => (false, 0.0),

@@ -21,6 +21,7 @@
 // a springy reveal on the shared brand spring.
 
 use std::cell::{Cell, RefCell};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -330,7 +331,12 @@ fn build_model_card(
                 .iter()
                 .filter_map(|(p, _)| std::fs::metadata(p).ok().map(|m| m.len()))
                 .sum();
-            let installed = files.iter().all(|(p, _)| p.exists());
+            let installed = match fileid_engine::models::registry::lookup_full(kind) {
+                fileid_engine::models::registry::LookupResult::Found(model) => {
+                    fileid_engine::models::registry::installation_complete(&model)
+                }
+                fileid_engine::models::registry::LookupResult::Unknown => false,
+            };
 
             if installed {
                 {
@@ -493,13 +499,20 @@ fn build_model_card(
                     let transfer = transfer.clone();
                     let timer = timer.clone();
                     cancel_btn.connect_clicked(move |_| {
-                        let _ = engine.borrow_mut().send(CommandPayload::CancelPrewarm(
+                        let result = engine.borrow_mut().send(CommandPayload::CancelPrewarm(
                             CancelPrewarmPayload {
                                 model_kind: Some(kind.to_string()),
                             },
                         ));
-                        transfer.borrow_mut().notice("Download cancelled.");
-                        stop_timer(&timer);
+                        match result {
+                            Ok(()) => {
+                                transfer.borrow_mut().notice("Download cancelled.");
+                                stop_timer(&timer);
+                            }
+                            Err(error) => transfer
+                                .borrow_mut()
+                                .notice(format!("Cancel command failed: {error}")),
+                        }
                         rerender(&again);
                     });
                 }
@@ -536,7 +549,10 @@ fn build_model_card(
                     let timer = timer.clone();
                     let files = files.clone();
                     let card_weak = card.downgrade();
-                    dl_btn.connect_clicked(move |_| {
+                    dl_btn.connect_clicked(move |button| {
+                        if !crate::model_license::ensure_or_prompt(button, kind) {
+                            return;
+                        }
                         stop_timer(&timer);
                         transfer.borrow_mut().start();
                         let sent = engine.borrow_mut().send(CommandPayload::PrewarmModel(
@@ -748,9 +764,10 @@ fn build_engine_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
         #[weak]
         status,
         move |_| {
-            // Shutdown → clean exit → EngineClient's fan-out pump auto-respawns.
-            let _ = engine.borrow_mut().send(CommandPayload::Shutdown(Empty {}));
-            status.set_label("Status: restarting…");
+            match engine.borrow_mut().send(CommandPayload::Shutdown(Empty {})) {
+                Ok(()) => status.set_label("Status: restarting…"),
+                Err(error) => status.set_label(&format!("Restart failed: {error}")),
+            }
         }
     ));
     row.append(&restart);
@@ -759,11 +776,15 @@ fn build_engine_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
     refresh.connect_clicked(clone!(
         #[strong]
         engine,
+        #[weak]
+        status,
         move |_| {
-            // RequestStatus re-emits `ready`, refreshing the label above.
-            let _ = engine
+            if let Err(error) = engine
                 .borrow_mut()
-                .send(CommandPayload::RequestStatus(Empty {}));
+                .send(CommandPayload::RequestStatus(Empty {}))
+            {
+                status.set_label(&format!("Refresh failed: {error}"));
+            }
         }
     ));
     row.append(&refresh);
@@ -1294,9 +1315,25 @@ fn read_log_tail(max_lines: usize) -> String {
     let Some((_, path)) = newest else {
         return "No engine log yet. Run a scan to generate logs.".to_string();
     };
-    let Ok(content) = std::fs::read_to_string(&path) else {
+    const MAX_LOG_TAIL_BYTES: u64 = 512 * 1024;
+    let Ok(mut file) = std::fs::File::open(&path) else {
         return String::new();
     };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let start_offset = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(start_offset)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity((len - start_offset) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    if start_offset > 0 {
+        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=newline);
+        }
+    }
+    let content = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     lines[start..].join("\n")

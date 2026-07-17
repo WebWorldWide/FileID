@@ -269,93 +269,7 @@ function init3DLogo() {
 }
 
 /* ───────────────────────────────────────────────
-   3) LIVE GITHUB RELEASES — graceful fallback
-   ─────────────────────────────────────────────── */
-async function initReleases() {
-  const status = document.getElementById('releaseStatus');
-  if (!status) return;
-
-  // Asset name → CSS selector → download target patterns we'll look for
-  const patterns = {
-    'setup-exe':  /^FileID(?:Setup|.*-Setup).*\.exe$/i,
-    'x64-msi':    /^FileID.*-x64\.msi$/i,
-    'arm64-msi':  /^FileID.*-arm64\.msi$/i,
-    'appimage':   /\.AppImage$/i,
-    'dmg':        /\.dmg$/i,
-  };
-
-  try {
-    const res = await fetch('https://api.github.com/repos/WebWorldWide/FileID/releases?per_page=5', {
-      headers: { 'Accept': 'application/vnd.github+json' },
-    });
-    if (!res.ok) throw new Error('http ' + res.status);
-    const releases = await res.json();
-    if (!Array.isArray(releases) || releases.length === 0) {
-      // No releases yet — show the polite "build from source" notice
-      showNoReleases(status);
-      return;
-    }
-
-    const latest = releases.find(r => !r.draft && !r.prerelease) || releases[0];
-    const assets = latest.assets || [];
-    if (assets.length === 0) {
-      showNoReleases(status);
-      return;
-    }
-
-    // Match assets → buttons
-    let matched = 0;
-    document.querySelectorAll('[data-asset]').forEach(el => {
-      const key = el.getAttribute('data-asset');
-      const pat = patterns[key];
-      if (!pat) return;
-      const a = assets.find(x => pat.test(x.name));
-      if (a) {
-        el.setAttribute('href', a.browser_download_url);
-        // Update the secondary label with size if it's the block primary
-        const sec = el.querySelector('.btn-sec');
-        if (sec && a.size) {
-          const mb = (a.size / 1024 / 1024).toFixed(1);
-          const original = sec.textContent;
-          sec.textContent = `${original} · ${mb} MB`;
-        }
-        matched++;
-      }
-    });
-
-    const tag = latest.tag_name || latest.name || 'latest';
-    const date = latest.published_at ? new Date(latest.published_at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '';
-    if (matched > 0) {
-      status.hidden = false;
-      status.innerHTML = `
-        <strong>${escapeHtml(tag)}</strong> — released ${escapeHtml(date)}.
-        <a href="${latest.html_url}" target="_blank" rel="noopener">View release notes ↗</a>
-      `;
-    } else {
-      showNoReleases(status);
-    }
-  } catch (err) {
-    // Network blocked, rate-limit, no releases — fall through silently to the static markup
-    showNoReleases(status);
-  }
-}
-
-function showNoReleases(status) {
-  status.hidden = false;
-  status.innerHTML = `
-    <strong>No release builds shipping yet.</strong>
-    Compile your own using <code>./build.sh</code> below, or
-    <a href="https://github.com/WebWorldWide/FileID/releases" target="_blank" rel="noopener">watch the releases page</a>
-    for the first signed installer.
-  `;
-}
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-}
-
-/* ───────────────────────────────────────────────
-   4) SCROLL REVEAL — IntersectionObserver
+   3) SCROLL REVEAL — IntersectionObserver
    ─────────────────────────────────────────────── */
 function initReveals() {
   if (reduceMotion) {
@@ -420,7 +334,6 @@ function initCardTilt() {
 function boot() {
   initLavaLamp();
   init3DLogo();
-  initReleases();
   initReveals();
   initCardTilt();
 }

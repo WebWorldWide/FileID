@@ -44,12 +44,25 @@ const PERSON_THUMB_CACHE_CAP: usize = 256;
 const BORDERLINE_MIN: f32 = 0.45;
 const BORDERLINE_MAX: f32 = 0.65;
 const VERY_LIKELY: f32 = 0.55;
+const SUGGESTION_FACE_ROW_CAP: usize = 100_000;
+const SUGGESTION_PERSON_CAP: usize = 2_000;
+const SUGGESTION_RESULT_CAP: usize = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
     Merge,
     Unknown,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct PersonThumbKey {
+    path: String,
+    bbox: Option<String>,
+    size_bytes: i64,
+    modified_bits: Option<u64>,
+    file_ref: Option<i64>,
+    content_hash: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -66,6 +79,10 @@ struct PersonRow {
     face_count: i64,
     rep_path: Option<String>,
     rep_bbox: Option<String>,
+    rep_size_bytes: i64,
+    rep_modified: Option<f64>,
+    rep_file_ref: Option<i64>,
+    rep_content_hash: Option<Vec<u8>>,
 }
 
 impl PersonRow {
@@ -185,12 +202,19 @@ where
     }
 }
 
+struct PendingSuggestion {
+    row: glib::WeakRef<gtk::Box>,
+    button: glib::WeakRef<gtk::Button>,
+}
+
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
 
     persons: RefCell<Vec<PersonRow>>,
     person_by_id: RefCell<HashMap<i64, PersonRow>>,
     suggestions: RefCell<Vec<Candidate>>,
+    pending_suggestions: RefCell<VecDeque<PendingSuggestion>>,
+    merge_results_pending: Cell<usize>,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
     show_hidden: Cell<bool>,
@@ -202,7 +226,7 @@ struct Ui {
     // Keyed by (representative photo path, face bbox): two people can share a
     // representative photo but crop different faces from it, so the path alone
     // would make the second card reuse the first card's face crop.
-    thumb_cache: RefCell<BoundedLru<(String, Option<String>), gtk::gdk::MemoryTexture>>,
+    thumb_cache: RefCell<BoundedLru<PersonThumbKey, gtk::gdk::MemoryTexture>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
@@ -372,6 +396,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         persons: RefCell::new(Vec::new()),
         person_by_id: RefCell::new(HashMap::new()),
         suggestions: RefCell::new(Vec::new()),
+        pending_suggestions: RefCell::new(VecDeque::new()),
+        merge_results_pending: Cell::new(0),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
         show_hidden: Cell::new(false),
@@ -430,6 +456,47 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                     }
                     EngineEvent::ScanComplete(_) => reload(&ui),
+                    EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
+                        let outstanding = ui.merge_results_pending.get();
+                        if outstanding == 0 {
+                            continue;
+                        }
+                        ui.merge_results_pending.set(outstanding - 1);
+                        if let Some(pending) = ui.pending_suggestions.borrow_mut().pop_front() {
+                            if result.failed == 0 && result.succeeded > 0 {
+                                if let Some(row) = pending.row.upgrade() {
+                                    row.set_visible(false);
+                                }
+                                set_status(&ui, "Merge complete.".to_string());
+                                schedule_reload_burst(&ui);
+                            } else {
+                                if let Some(button) = pending.button.upgrade() {
+                                    button.set_sensitive(true);
+                                    button.set_label("Merge");
+                                }
+                                let detail = result
+                                    .messages
+                                    .iter()
+                                    .find_map(|item| {
+                                        (!item.ok).then_some(item.message.as_deref()).flatten()
+                                    })
+                                    .unwrap_or("the engine rejected the merge");
+                                set_status(&ui, format!("Merge failed: {detail}"));
+                            }
+                        } else if result.failed > 0 {
+                            let detail = result
+                                .messages
+                                .iter()
+                                .find_map(|item| {
+                                    (!item.ok).then_some(item.message.as_deref()).flatten()
+                                })
+                                .unwrap_or("the engine rejected a merge");
+                            set_status(&ui, format!("Merge failed: {detail}"));
+                        }
+                        if ui.merge_results_pending.get() == 0 {
+                            schedule_reload_burst(&ui);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -582,22 +649,23 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
         Mode::Unknown => {
             let ids: Vec<i64> = ui.unknown_checked.borrow().iter().copied().collect();
             if !ids.is_empty() {
-                send_cmd(
+                if send_cmd(
                     ui,
                     CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
                         person_ids: ids.clone(),
                     }),
-                );
-                set_status(
-                    ui,
-                    format!(
-                        "Marked {} cluster{} as unknown.",
-                        ids.len(),
-                        plural(ids.len() as i64)
-                    ),
-                );
-                set_mode(ui, Mode::Normal);
-                schedule_reload_burst(ui);
+                ) {
+                    set_status(
+                        ui,
+                        format!(
+                            "Marked {} cluster{} as unknown.",
+                            ids.len(),
+                            plural(ids.len() as i64)
+                        ),
+                    );
+                    set_mode(ui, Mode::Normal);
+                    schedule_reload_burst(ui);
+                }
             }
         }
         Mode::Normal => {}
@@ -680,42 +748,61 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
         vbox.add_css_class("file-tile-selected");
     }
 
-    // Weak self-refs in the click handler: the gesture is owned by `vbox`, so a
-    // strong capture would be a retain cycle that leaks every card on reload.
-    let gesture = gtk::GestureClick::new();
+    let action = if ui.mode.get() == Mode::Normal {
+        "Open"
+    } else {
+        "Select"
+    };
+    let button = gtk::ToggleButton::builder()
+        .has_frame(false)
+        .active(checked)
+        .tooltip_text(format!("{action} {}", p.display_name()))
+        .child(&vbox)
+        .build();
     let vbox_weak = vbox.downgrade();
     let check_weak = check.downgrade();
     let ui_g = ui.clone();
-    gesture.connect_released(move |_, _, _, _| {
+    button.connect_clicked(move |button| {
         let (Some(vbox), Some(check)) = (vbox_weak.upgrade(), check_weak.upgrade()) else {
             return;
         };
-        on_card_clicked(&ui_g, pid, &vbox, &check);
+        match ui_g.mode.get() {
+            Mode::Normal => {
+                button.set_active(false);
+                open_person_detail(&ui_g, pid);
+            }
+            Mode::Merge => {
+                let on = toggle(&ui_g.merge_checked, pid);
+                button.set_active(on);
+                update_check_visual(&check, &vbox, on);
+                update_bulk_strip(&ui_g);
+            }
+            Mode::Unknown => {
+                let on = toggle(&ui_g.unknown_checked, pid);
+                button.set_active(on);
+                update_check_visual(&check, &vbox, on);
+                update_bulk_strip(&ui_g);
+            }
+        }
     });
-    vbox.add_controller(gesture);
 
     match p.rep_path.clone() {
-        Some(rp) => load_card_thumb(ui, &pic, rp, p.rep_bbox.clone()),
+        Some(path) => load_card_thumb(
+            ui,
+            &pic,
+            PersonThumbKey {
+                path,
+                bbox: p.rep_bbox.clone(),
+                size_bytes: p.rep_size_bytes,
+                modified_bits: p.rep_modified.map(f64::to_bits),
+                file_ref: p.rep_file_ref,
+                content_hash: p.rep_content_hash.clone(),
+            },
+        ),
         None => pic.set_paintable(person_icon().as_ref()),
     }
 
-    vbox.upcast()
-}
-
-fn on_card_clicked(ui: &Rc<Ui>, pid: i64, vbox: &gtk::Box, check: &gtk::Image) {
-    match ui.mode.get() {
-        Mode::Normal => open_person_detail(ui, pid),
-        Mode::Merge => {
-            let on = toggle(&ui.merge_checked, pid);
-            update_check_visual(check, vbox, on);
-            update_bulk_strip(ui);
-        }
-        Mode::Unknown => {
-            let on = toggle(&ui.unknown_checked, pid);
-            update_check_visual(check, vbox, on);
-            update_bulk_strip(ui);
-        }
-    }
+    button.upcast()
 }
 
 fn toggle(set: &RefCell<HashSet<i64>>, pid: i64) -> bool {
@@ -744,9 +831,7 @@ fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
     }
 }
 
-fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Option<String>) {
-    // (path, bbox) — the crop region is part of the identity (see thumb_cache).
-    let key = (rep_path.clone(), bbox.clone());
+fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
     if let Some(tex) = ui.thumb_cache.borrow_mut().get(&key) {
         pic.set_paintable(Some(&tex));
         return;
@@ -754,8 +839,9 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, rep_path: String, bbox: Opti
     let rx = ui
         .engine
         .borrow()
-        .request_thumbnail_with(rep_path, move |bytes| {
-            cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX)
+        .request_thumbnail_with(key.path.clone(), {
+            let bbox = key.bbox.clone();
+            move |bytes| cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX)
         });
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
@@ -820,8 +906,14 @@ fn schedule_reload_burst(ui: &Rc<Ui>) {
     }
 }
 
-fn send_cmd(ui: &Rc<Ui>, payload: CommandPayload) {
-    let _ = ui.engine.borrow_mut().send(payload);
+fn send_cmd(ui: &Rc<Ui>, payload: CommandPayload) -> bool {
+    match ui.engine.borrow_mut().send(payload) {
+        Ok(()) => true,
+        Err(error) => {
+            set_status(ui, format!("Command could not be sent: {error}"));
+            false
+        }
+    }
 }
 
 fn set_status(ui: &Rc<Ui>, msg: String) {
@@ -832,7 +924,9 @@ fn set_status(ui: &Rc<Ui>, msg: String) {
 // ── Clustering ────────────────────────────────────────────────────────────────
 
 fn start_clustering(ui: &Rc<Ui>) {
-    send_cmd(ui, CommandPayload::RunFaceClustering(Empty {}));
+    if !send_cmd(ui, CommandPayload::RunFaceClustering(Empty {})) {
+        return;
+    }
     ui.clustering.set(true);
     set_status(ui, "Grouping faces into people…".to_string());
     refresh_view(ui);
@@ -995,15 +1089,18 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let dialog = dialog.clone();
         mark_btn.connect_clicked(move |_| {
             skip.set(true);
-            send_cmd(
+            if send_cmd(
                 &ui,
                 CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
                     person_ids: vec![pid],
                 }),
-            );
-            set_status(&ui, "Marked as unknown.".to_string());
-            schedule_reload_burst(&ui);
-            dialog.close();
+            ) {
+                set_status(&ui, "Marked as unknown.".to_string());
+                schedule_reload_burst(&ui);
+                dialog.close();
+            } else {
+                skip.set(false);
+            }
         });
     }
 
@@ -1127,19 +1224,41 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
         let ids2 = ids.clone();
         let dialog2 = dialog.clone();
         row.connect_activated(move |_| {
-            for src in ids2.iter().copied().filter(|s| *s != target_id) {
-                send_cmd(
-                    &ui2,
-                    CommandPayload::MergeClusters(MergeClustersPayload {
-                        source_person_id: src,
-                        destination_person_id: target_id,
-                    }),
-                );
+            if ui2.merge_results_pending.get() > 0 {
+                set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                return;
             }
-            set_status(&ui2, format!("Merging {} clusters into one…", ids2.len()));
-            set_mode(&ui2, Mode::Normal);
-            schedule_reload_burst(&ui2);
-            dialog2.close();
+            let sources: Vec<i64> = ids2
+                .iter()
+                .copied()
+                .filter(|source| *source != target_id)
+                .collect();
+            let sent = sources
+                .iter()
+                .take_while(|source| {
+                    send_cmd(
+                        &ui2,
+                        CommandPayload::MergeClusters(MergeClustersPayload {
+                            source_person_id: **source,
+                            destination_person_id: target_id,
+                        }),
+                    )
+                })
+                .count();
+            ui2.merge_results_pending.set(sent);
+            if sent > 0 {
+                let status = if sent == sources.len() {
+                    format!("Merging {} clusters into one…", ids2.len())
+                } else {
+                    format!(
+                        "Sent {sent} of {} merges; reloading after a connection failure.",
+                        sources.len()
+                    )
+                };
+                set_status(&ui2, status);
+                set_mode(&ui2, Mode::Normal);
+                dialog2.close();
+            }
         });
         listbox.append(&row);
     }
@@ -1238,10 +1357,16 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                 .copied()
                 .filter(|c| c.sim >= VERY_LIKELY)
                 .collect();
-            run_batch_merges(&ui2, &very);
-            set_status(&ui2, format!("Merging {} very-likely pairs…", very.len()));
-            schedule_reload_burst(&ui2);
-            dialog2.close();
+            let (sent, total) = run_batch_merges(&ui2, &very);
+            if sent > 0 {
+                let status = if sent == total {
+                    format!("Merging {sent} very-likely pairs…")
+                } else {
+                    format!("Sent {sent} of {total} merges; waiting for engine results.")
+                };
+                set_status(&ui2, status);
+                dialog2.close();
+            }
         });
     }
     {
@@ -1249,10 +1374,16 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
         let disp = displayable.clone();
         let dialog2 = dialog.clone();
         merge_all.connect_clicked(move |_| {
-            run_batch_merges(&ui2, &disp);
-            set_status(&ui2, format!("Merging {} pairs…", disp.len()));
-            schedule_reload_burst(&ui2);
-            dialog2.close();
+            let (sent, total) = run_batch_merges(&ui2, &disp);
+            if sent > 0 {
+                let status = if sent == total {
+                    format!("Merging {sent} pairs…")
+                } else {
+                    format!("Sent {sent} of {total} merges; waiting for engine results.")
+                };
+                set_status(&ui2, status);
+                dialog2.close();
+            }
         });
     }
 
@@ -1279,19 +1410,30 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
             let (row, merge_btn) = build_suggestion_row(pa, pb, c.sim);
             let ui2 = ui.clone();
             let row_weak = row.downgrade();
-            merge_btn.connect_clicked(move |_| {
-                send_cmd(
+            let button_weak = merge_btn.downgrade();
+            merge_btn.connect_clicked(move |button| {
+                if ui2.merge_results_pending.get() > 0 {
+                    set_status(&ui2, "Wait for the current merge to finish.".to_string());
+                    return;
+                }
+                if send_cmd(
                     &ui2,
                     CommandPayload::MergeClusters(MergeClustersPayload {
                         source_person_id: source_id,
                         destination_person_id: target_id,
                     }),
-                );
-                if let Some(row) = row_weak.upgrade() {
-                    row.set_visible(false);
+                ) {
+                    button.set_sensitive(false);
+                    button.set_label("Merging…");
+                    ui2.merge_results_pending.set(1);
+                    ui2.pending_suggestions
+                        .borrow_mut()
+                        .push_back(PendingSuggestion {
+                            row: row_weak.clone(),
+                            button: button_weak.clone(),
+                        });
+                    set_status(&ui2, "Merging…".to_string());
                 }
-                set_status(&ui2, "Merged.".to_string());
-                schedule_reload_burst(&ui2);
             });
             listbox.append(&row);
         }
@@ -1394,20 +1536,30 @@ fn preferred<'a>(a: &'a PersonRow, b: &'a PersonRow) -> (&'a PersonRow, &'a Pers
     }
 }
 
-fn run_batch_merges(ui: &Rc<Ui>, cands: &[Candidate]) {
+fn run_batch_merges(ui: &Rc<Ui>, cands: &[Candidate]) -> (usize, usize) {
+    if ui.merge_results_pending.get() > 0 {
+        set_status(ui, "Wait for the current merge to finish.".to_string());
+        return (0, cands.len());
+    }
     let plan = {
         let map = ui.person_by_id.borrow();
         plan_batch_merges(cands, &map)
     };
-    for (source, destination) in plan {
-        send_cmd(
-            ui,
-            CommandPayload::MergeClusters(MergeClustersPayload {
-                source_person_id: source,
-                destination_person_id: destination,
-            }),
-        );
-    }
+    let total = plan.len();
+    let sent = plan
+        .into_iter()
+        .take_while(|(source, destination)| {
+            send_cmd(
+                ui,
+                CommandPayload::MergeClusters(MergeClustersPayload {
+                    source_person_id: *source,
+                    destination_person_id: *destination,
+                }),
+            )
+        })
+        .count();
+    ui.merge_results_pending.set(sent);
+    (sent, total)
 }
 
 /// Union-find over candidate pairs so chained suggestions (A↔B, B↔C) collapse
@@ -1491,23 +1643,32 @@ fn read_snapshot() -> anyhow::Result<Snapshot> {
     }
     let conn = fileid_engine::db::open_read(&db_path)?;
     let total_faces: i64 = conn
-        .query_row("SELECT COUNT(*) FROM face_prints", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.failed = 0",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
 
     let sql = "\
         SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
-               COALESCE(p.is_unknown, 0), COALESCE(p.file_count, 0), \
-               (SELECT COUNT(*) FROM face_prints fp WHERE fp.person_id = p.id), \
-               f.path_text, rf.bbox \
+               COALESCE(p.is_unknown, 0), \
+               (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
+               (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
+               f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
         FROM persons p \
-        LEFT JOIN face_prints rf \
-          ON rf.id = COALESCE(p.representative_face_id, \
-               (SELECT fp2.id FROM face_prints fp2 WHERE fp2.person_id = p.id ORDER BY fp2.id LIMIT 1)) \
-        LEFT JOIN files f ON f.id = rf.file_id \
+        LEFT JOIN face_prints rf ON rf.id = ( \
+            SELECT fp2.id FROM face_prints fp2 \
+            JOIN files af2 ON af2.id = fp2.file_id \
+            WHERE fp2.person_id = p.id AND af2.failed = 0 \
+            ORDER BY CASE WHEN fp2.id = p.representative_face_id THEN 0 ELSE 1 END, fp2.id \
+            LIMIT 1) \
+        LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
+        WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
         ORDER BY \
           CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
                COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
-          p.file_count DESC, p.id ASC";
+          active_file_count DESC, p.id ASC";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt
         .query_map([], map_person)?
@@ -1532,6 +1693,10 @@ fn map_person(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
         face_count: row.get(9)?,
         rep_path: row.get(10)?,
         rep_bbox: row.get(11)?,
+        rep_size_bytes: row.get(12)?,
+        rep_modified: row.get(13)?,
+        rep_file_ref: row.get(14)?,
+        rep_content_hash: row.get(15)?,
     })
 }
 
@@ -1567,10 +1732,13 @@ fn read_candidates() -> anyhow::Result<Vec<Candidate>> {
     let conn = fileid_engine::db::open_read(&db_path)?;
     let mut stmt = conn.prepare(
         "SELECT person_id, arcface_embedding FROM face_prints \
-         WHERE person_id IS NOT NULL AND LENGTH(arcface_embedding) > 0",
+         WHERE person_id IS NOT NULL AND LENGTH(arcface_embedding) > 0 \
+         ORDER BY person_id LIMIT ?1",
     )?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?
+        .query_map(rusqlite::params![SUGGESTION_FACE_ROW_CAP as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<(i64, Vec<u8>)>>>()?;
     Ok(compute_candidates(rows))
 }
@@ -1578,42 +1746,34 @@ fn read_candidates() -> anyhow::Result<Vec<Candidate>> {
 /// Per-cluster centroid cosine over ArcFace/SFace embeddings, keeping pairs in
 /// the borderline band [0.45, 0.65]. A direct port of macOS `ClusterSuggestions`.
 fn compute_candidates(rows: Vec<(i64, Vec<u8>)>) -> Vec<Candidate> {
-    let decoded: Vec<(i64, Vec<f32>)> = rows
-        .into_iter()
-        .filter_map(|(pid, b)| {
-            let v = blob_to_f32(&b);
-            if v.is_empty() {
-                None
-            } else {
-                Some((pid, v))
-            }
-        })
-        .collect();
-    let Some(dim) = decoded.first().map(|(_, v)| v.len()) else {
-        return Vec::new();
-    };
-    if dim == 0 {
-        return Vec::new();
-    }
-
-    let mut by_person: HashMap<i64, Vec<Vec<f32>>> = HashMap::new();
-    for (pid, v) in decoded {
-        if v.len() == dim {
-            by_person.entry(pid).or_default().push(v);
+    let mut dimension = None;
+    let mut by_person: HashMap<i64, Vec<f32>> = HashMap::new();
+    for (person_id, bytes) in rows.into_iter().take(SUGGESTION_FACE_ROW_CAP) {
+        let embedding = blob_to_f32(&bytes);
+        if embedding.is_empty() {
+            continue;
         }
+        let dim = *dimension.get_or_insert(embedding.len());
+        if embedding.len() != dim {
+            continue;
+        }
+        if let Some(sum) = by_person.get_mut(&person_id) {
+            for (total, value) in sum.iter_mut().zip(embedding) {
+                *total += value;
+            }
+        } else if by_person.len() < SUGGESTION_PERSON_CAP {
+            by_person.insert(person_id, embedding);
+        }
+    }
+    if dimension.is_none() {
+        return Vec::new();
     }
     if by_person.len() < 2 {
         return Vec::new();
     }
 
     let mut centroids: Vec<(i64, Vec<f32>)> = Vec::with_capacity(by_person.len());
-    for (pid, vecs) in by_person {
-        let mut sum = vec![0f32; dim];
-        for v in &vecs {
-            for i in 0..dim {
-                sum[i] += v[i];
-            }
-        }
+    for (pid, mut sum) in by_person {
         let mut norm = 0f32;
         for x in &sum {
             norm += x * x;
@@ -1641,6 +1801,7 @@ fn compute_candidates(rows: Vec<(i64, Vec<u8>)>) -> Vec<Candidate> {
             .partial_cmp(&x.sim)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    pairs.truncate(SUGGESTION_RESULT_CAP);
     pairs
 }
 

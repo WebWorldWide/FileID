@@ -11,14 +11,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender as Sender;
 
 use anyhow::Result;
 use rusqlite::params;
 
 use fileid_engine::pipeline::discovery::FileKind;
 use fileid_engine::pipeline::restructure::{self, FileForClassify};
-use fileid_engine::util::content_hash::{group_exact_duplicates, ExactDuplicateCandidate};
+use fileid_engine::util::content_hash::{group_exact_duplicates_until, ExactDuplicateCandidate};
 
 /// Max rows pulled into any one list — keeps the snapshot bounded on huge
 /// libraries while staying well past what fits on screen.
@@ -28,6 +29,7 @@ const DUP_MEMBER_CAP: usize = 100;
 const DUP_CANDIDATE_CAP: usize = 5_000;
 const DUP_READ_BUDGET_BYTES: i64 = 64 * 1024 * 1024 * 1024;
 pub(crate) const PLAN_CAP: usize = 3_000;
+static ACTIVE_DUPE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct FileRow {
@@ -100,7 +102,12 @@ pub struct Snapshot {
 
 /// Messages streamed from the loader thread to the UI thread.
 pub enum LoadMsg {
+    Versioned {
+        generation: u64,
+        message: Box<LoadMsg>,
+    },
     Status(String),
+    ScanPartial(String),
     /// Structured AI-model install progress, parsed from the CLI's porcelain
     /// `PROGRESS\t{percent}\t{label}` line (see [`crate::models`]): `percent` is
     /// the 0–100 overall figure, `label` a short human string like
@@ -117,14 +124,30 @@ pub enum LoadMsg {
     Error(String),
 }
 
+pub(crate) fn begin_generation(generation: u64) {
+    ACTIVE_DUPE_GENERATION.fetch_max(generation, Ordering::AcqRel);
+}
+
+pub(crate) fn send_versioned(
+    tx: &Sender<LoadMsg>,
+    generation: u64,
+    message: LoadMsg,
+) -> Result<(), std::sync::mpsc::SendError<LoadMsg>> {
+    tx.send(LoadMsg::Versioned {
+        generation,
+        message: Box::new(message),
+    })
+}
+
 /// Spawn the loader on a worker thread. Non-blocking; the UI keeps drawing.
-pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>) {
+pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>, generation: u64) {
     std::thread::spawn(move || {
-        let _ = tx.send(LoadMsg::Status(format!(
-            "Opening {}…",
-            short(&db.to_string_lossy())
-        )));
-        match load(&db, &query, &tx) {
+        let _ = send_versioned(
+            &tx,
+            generation,
+            LoadMsg::Status(format!("Opening {}…", short(&db.to_string_lossy()))),
+        );
+        match load(&db, &query, &tx, generation) {
             Ok(snap) => {
                 let file_count = if snap.files_truncated {
                     format!("{}+", snap.files.len())
@@ -136,23 +159,33 @@ pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>) {
                 } else {
                     format!("{} planned moves", snap.plan.len())
                 };
-                let _ = tx.send(LoadMsg::Status(format!(
-                    "Loaded {} files · {} people · {}",
-                    file_count,
-                    snap.people.len(),
-                    plan_count
-                )));
-                let _ = tx.send(LoadMsg::Done(Box::new(snap)));
-                run_deferred_dupes(&db, &tx);
+                let _ = send_versioned(
+                    &tx,
+                    generation,
+                    LoadMsg::Status(format!(
+                        "Loaded {} files · {} people · {}",
+                        file_count,
+                        snap.people.len(),
+                        plan_count
+                    )),
+                );
+                let _ = send_versioned(&tx, generation, LoadMsg::Done(Box::new(snap)));
+                run_deferred_dupes(&db, &tx, generation);
             }
             Err(e) => {
-                let _ = tx.send(LoadMsg::Error(format!("load failed: {e}")));
+                let _ =
+                    send_versioned(&tx, generation, LoadMsg::Error(format!("load failed: {e}")));
             }
         }
     });
 }
 
-pub(crate) fn load(db: &Path, query: &str, tx: &Sender<LoadMsg>) -> Result<Snapshot> {
+pub(crate) fn load(
+    db: &Path,
+    query: &str,
+    tx: &Sender<LoadMsg>,
+    generation: u64,
+) -> Result<Snapshot> {
     let query = query.trim().to_string();
     if !db.exists() {
         return Ok(Snapshot {
@@ -163,20 +196,31 @@ pub(crate) fn load(db: &Path, query: &str, tx: &Sender<LoadMsg>) -> Result<Snaps
     }
     let conn = fileid_engine::db::open_read(db)?;
 
-    let _ = tx.send(LoadMsg::Status("Reading files…".into()));
+    let _ = send_versioned(tx, generation, LoadMsg::Status("Reading files…".into()));
     let (files, files_truncated) = load_files(&conn, &query)?;
-    let total_files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+    let total_files: i64 =
+        conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |r| {
+            r.get(0)
+        })?;
 
-    let _ = tx.send(LoadMsg::Status("Reading tags…".into()));
+    let _ = send_versioned(tx, generation, LoadMsg::Status("Reading tags…".into()));
     let file_ids: Vec<i64> = files.iter().map(|f| f.id).collect();
     let tags = load_tags(&conn, &file_ids)?;
     let snippets = load_snippets(&conn, &file_ids)?;
-    let total_tags: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?;
+    let total_tags: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tags t JOIN files f ON f.id = t.file_id WHERE f.failed = 0",
+        [],
+        |r| r.get(0),
+    )?;
 
-    let _ = tx.send(LoadMsg::Status("Reading people…".into()));
+    let _ = send_versioned(tx, generation, LoadMsg::Status("Reading people…".into()));
     let people = load_people(&conn)?;
 
-    let _ = tx.send(LoadMsg::Status("Computing restructure plan…".into()));
+    let _ = send_versioned(
+        tx,
+        generation,
+        LoadMsg::Status("Computing restructure plan…".into()),
+    );
     let (plan, plan_truncated, plan_candidate_count) = compute_plan(&conn)?;
 
     // Duplicate verification is DEFERRED to run_deferred_dupes / LoadMsg::Dupes:
@@ -206,20 +250,32 @@ pub(crate) fn load(db: &Path, query: &str, tx: &Sender<LoadMsg>) -> Result<Snaps
 /// Run the bounded live duplicate verification AFTER the snapshot has painted
 /// and deliver it as [`LoadMsg::Dupes`]. Every caller that sends `Done` from a
 /// [`load`] result must follow with this, or the Cleanup tab stays pending.
-pub(crate) fn run_deferred_dupes(db: &Path, tx: &Sender<LoadMsg>) {
-    if !db.exists() {
-        let _ = tx.send(LoadMsg::Dupes(Box::default()));
+pub(crate) fn run_deferred_dupes(db: &Path, tx: &Sender<LoadMsg>, generation: u64) {
+    begin_generation(generation);
+    if ACTIVE_DUPE_GENERATION.load(Ordering::Acquire) != generation {
         return;
     }
-    let _ = tx.send(LoadMsg::Status("Verifying duplicates…".into()));
+    if !db.exists() {
+        let _ = send_versioned(tx, generation, LoadMsg::Dupes(Box::default()));
+        return;
+    }
+    let _ = send_versioned(
+        tx,
+        generation,
+        LoadMsg::Status("Verifying duplicates…".into()),
+    );
+    let cancelled = || ACTIVE_DUPE_GENERATION.load(Ordering::Acquire) != generation;
     let report = fileid_engine::db::open_read(db).and_then(|conn| {
-        let (dupes, dupes_truncated, dupe_candidate_count) = load_dupes(&conn)?;
+        let (dupes, dupes_truncated, dupe_candidate_count) = load_dupes_until(&conn, cancelled)?;
         Ok(DupeReport {
             dupes,
             dupes_truncated,
             dupe_candidate_count,
         })
     });
+    if cancelled() {
+        return;
+    }
     match report {
         Ok(report) => {
             let dupe_count = if report.dupes_truncated {
@@ -227,18 +283,22 @@ pub(crate) fn run_deferred_dupes(db: &Path, tx: &Sender<LoadMsg>) {
             } else {
                 format!("{} duplicate groups", report.dupes.len())
             };
-            let _ = tx.send(LoadMsg::Dupes(Box::new(report)));
-            let _ = tx.send(LoadMsg::Status(format!(
-                "Duplicates verified · {dupe_count}"
-            )));
+            let _ = send_versioned(
+                tx,
+                generation,
+                LoadMsg::Status(format!("Duplicates verified · {dupe_count}")),
+            );
+            let _ = send_versioned(tx, generation, LoadMsg::Dupes(Box::new(report)));
         }
         Err(e) => {
             // Deliver an empty report so the Cleanup tab leaves its pending
             // state, then surface the failure on the status row.
-            let _ = tx.send(LoadMsg::Dupes(Box::default()));
-            let _ = tx.send(LoadMsg::Error(format!(
-                "duplicate verification failed: {e}"
-            )));
+            let _ = send_versioned(tx, generation, LoadMsg::Dupes(Box::default()));
+            let _ = send_versioned(
+                tx,
+                generation,
+                LoadMsg::Error(format!("duplicate verification failed: {e}")),
+            );
         }
     }
 }
@@ -253,7 +313,7 @@ fn load_files(conn: &rusqlite::Connection, query: &str) -> Result<(Vec<FileRow>,
 
     let mut stmt = conn.prepare(
         "SELECT id, path_text, kind, extension, size_bytes, modified_at, has_text, has_faces \
-         FROM files ORDER BY scanned_at DESC, id DESC LIMIT ?1",
+         FROM files WHERE failed = 0 ORDER BY scanned_at DESC, id DESC LIMIT ?1",
     )?;
     let mut rows: Vec<FileRow> = stmt
         .query_map(params![(ROW_CAP + 1) as i64], file_row)?
@@ -289,8 +349,10 @@ fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Result
         if ids.len() >= cap {
             break;
         }
-        let sql =
-            format!("SELECT rowid FROM {table} WHERE {table} MATCH ?1 ORDER BY rank LIMIT ?2");
+        let sql = format!(
+            "SELECT {table}.rowid FROM {table} JOIN files f ON f.id = {table}.rowid \
+             WHERE {table} MATCH ?1 AND f.failed = 0 ORDER BY rank LIMIT ?2"
+        );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![fts, cap as i64], |r| r.get::<_, i64>(0))?;
         for row in rows {
@@ -313,7 +375,7 @@ fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Result
         let like = format!("%{escaped}%");
         let mut stmt = conn.prepare(
             "SELECT id FROM files \
-             WHERE lower(COALESCE(path_search, path_text)) LIKE ?1 ESCAPE '\\' \
+             WHERE failed = 0 AND lower(COALESCE(path_search, path_text)) LIKE ?1 ESCAPE '\\' \
              ORDER BY scanned_at DESC, id DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![like, cap as i64], |r| r.get::<_, i64>(0))?;
@@ -338,7 +400,7 @@ fn load_file_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<FileRo
             .join(",");
         let sql = format!(
             "SELECT id, path_text, kind, extension, size_bytes, modified_at, has_text, has_faces \
-             FROM files WHERE id IN ({placeholders})"
+             FROM files WHERE failed = 0 AND id IN ({placeholders})"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), file_row)?;
@@ -404,9 +466,15 @@ fn load_snippets(conn: &rusqlite::Connection, file_ids: &[i64]) -> Result<HashMa
 
 fn load_people(conn: &rusqlite::Connection) -> Result<Vec<PersonRow>> {
     let mut stmt = conn.prepare(
-        "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, p.file_count, \
-            (SELECT COUNT(*) FROM face_prints fp WHERE fp.person_id = p.id) AS faces \
-         FROM persons p ORDER BY faces DESC, p.id ASC LIMIT ?1",
+        "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, \
+            (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0) AS files, \
+            (SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0) AS faces \
+         FROM persons p WHERE EXISTS ( \
+             SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0 \
+         ) ORDER BY faces DESC, p.id ASC LIMIT ?1",
     )?;
     let rows = stmt
         .query_map(params![ROW_CAP as i64], |r| {
@@ -450,27 +518,35 @@ fn display_name(
     }
 }
 
+#[cfg(test)]
 fn load_dupes(conn: &rusqlite::Connection) -> Result<(Vec<DupGroup>, bool, i64)> {
+    load_dupes_until(conn, || false)
+}
+
+fn load_dupes_until(
+    conn: &rusqlite::Connection,
+    should_cancel: impl Fn() -> bool,
+) -> Result<(Vec<DupGroup>, bool, i64)> {
     let candidate_stats: (i64, i64) = conn.query_row(
         "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
              GROUP BY size_bytes HAVING COUNT(*) > 1 \
          ) \
          SELECT COUNT(*), COALESCE(SUM(MAX(f.size_bytes, 0)), 0) FROM files f \
          JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.content_hash IS NOT NULL",
+         WHERE f.failed = 0 AND f.content_hash IS NOT NULL",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let candidate_count = candidate_stats.0;
     let mut stmt = conn.prepare(
         "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE content_hash IS NOT NULL \
+             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
              GROUP BY size_bytes HAVING COUNT(*) > 1 \
          ) \
          SELECT f.id, f.path_text, f.size_bytes \
          FROM files f JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.content_hash IS NOT NULL \
+         WHERE f.failed = 0 AND f.content_hash IS NOT NULL \
          ORDER BY f.size_bytes, f.path_text, f.id LIMIT ?1",
     )?;
     let queried = stmt
@@ -492,7 +568,7 @@ fn load_dupes(conn: &rusqlite::Connection) -> Result<(Vec<DupGroup>, bool, i64)>
         selected_bytes += bytes;
         candidates.push(candidate);
     }
-    let grouping = group_exact_duplicates(candidates);
+    let grouping = group_exact_duplicates_until(candidates, should_cancel);
     let skipped = grouping.skipped;
     let mut groups: Vec<DupGroup> = grouping
         .groups
@@ -534,7 +610,7 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
             f.location_lat, f.location_lon, f.has_text, \
             (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id \
              WHERE fp.file_id = f.id LIMIT 1) AS person_name \
-         FROM files f ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?1",
+         FROM files f WHERE f.failed = 0 ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?1",
     )?;
     let files: Vec<FileForClassify> = stmt
         .query_map(params![PLAN_CAP as i64], |r| {
@@ -567,7 +643,9 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
 }
 
 fn plan_root_and_count(conn: &rusqlite::Connection) -> Result<(PathBuf, i64)> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |row| {
+        row.get(0)
+    })?;
     if count == 0 {
         return Ok((
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -578,12 +656,12 @@ fn plan_root_and_count(conn: &rusqlite::Connection) -> Result<(PathBuf, i64)> {
     // and last members; comparing path components of those indexed extremes is
     // therefore exact without transferring every catalog path into the TUI.
     let first: String = conn.query_row(
-        "SELECT path_text FROM files ORDER BY path_text ASC LIMIT 1",
+        "SELECT path_text FROM files WHERE failed = 0 ORDER BY path_text ASC LIMIT 1",
         [],
         |row| row.get(0),
     )?;
     let last: String = conn.query_row(
-        "SELECT path_text FROM files ORDER BY path_text DESC LIMIT 1",
+        "SELECT path_text FROM files WHERE failed = 0 ORDER BY path_text DESC LIMIT 1",
         [],
         |row| row.get(0),
     )?;
@@ -726,6 +804,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_rows_are_hidden_from_library_search_and_planning() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let active = insert_file(&conn, "/library/active.txt", 2.0);
+        let missing = insert_file(&conn, "/library/missing.txt", 1.0);
+        conn.execute(
+            "UPDATE files SET failed = 1, error_message = 'missing' WHERE id = ?1",
+            params![missing],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO doc_text(file_id, text) VALUES (?1, 'hidden needle')",
+            params![missing],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO persons (id, name, file_count, created_at) VALUES \
+             (10, 'Visible', 99, 0), (20, 'Hidden', 99, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES \
+             (?1, 10, X'00', '0,0,1,1'), (?1, 10, X'00', '0,0,1,1'), \
+             (?2, 10, X'00', '0,0,1,1'), (?2, 20, X'00', '0,0,1,1')",
+            params![active, missing],
+        )
+        .unwrap();
+
+        let (files, _) = load_files(&conn, "").unwrap();
+        assert_eq!(
+            files.iter().map(|file| file.id).collect::<Vec<_>>(),
+            vec![active]
+        );
+        let (matches, _) = load_files(&conn, "needle").unwrap();
+        assert!(matches.is_empty());
+        let (_, count) = plan_root_and_count(&conn).unwrap();
+        assert_eq!(count, 1);
+        let people = load_people(&conn).unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].id, 10);
+        assert_eq!(people[0].files, 1);
+        assert_eq!(people[0].faces, 2);
+    }
+
+    #[test]
     fn required_query_failure_propagates_from_load() {
         let path = std::env::temp_dir().join(format!(
             "fileid-tui-load-error-{}-{}.sqlite",
@@ -740,8 +864,8 @@ mod tests {
         conn.execute_batch("DROP TABLE persons;").unwrap();
         drop(conn);
 
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let error = load(&path, "", &tx)
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1_024);
+        let error = load(&path, "", &tx, 1)
             .err()
             .expect("missing table must fail load");
         assert!(error.to_string().contains("no such table"));
@@ -900,18 +1024,24 @@ mod tests {
             }
         }
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        let snap = load(&db_path, "", &tx).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1_024);
+        let snap = load(&db_path, "", &tx, 1).unwrap();
         assert!(
             snap.dupes_pending,
             "snapshot must paint in the pending state"
         );
         assert!(snap.dupes.is_empty(), "no dupes before the deferred pass");
 
-        run_deferred_dupes(&db_path, &tx);
+        run_deferred_dupes(&db_path, &tx, 1);
         let report = loop {
             match rx.try_recv().expect("deferred pass must send messages") {
-                LoadMsg::Dupes(report) => break report,
+                LoadMsg::Versioned {
+                    generation: 1,
+                    message,
+                } => match *message {
+                    LoadMsg::Dupes(report) => break report,
+                    _ => continue,
+                },
                 _ => continue,
             }
         };

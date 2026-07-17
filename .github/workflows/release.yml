@@ -31,7 +31,32 @@ permissions:
   contents: read
 
 jobs:
+  dependency-policy:
+    name: Release dependency advisory gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Rust 1.90
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: '1.90'
+      - name: Cache cargo-audit
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-${{ runner.os }}-${{ runner.arch }}
+      - name: Install pinned cargo-audit
+        run: command -v cargo-audit >/dev/null || cargo install --locked cargo-audit --version 0.22.2
+      - name: Audit every shipped Rust lockfile
+        run: |
+          cargo audit --file platforms/windows/src/engine/Cargo.lock
+          cargo audit --file platforms/cli/Cargo.lock
+          cargo audit --file platforms/tui/Cargo.lock
+          cargo audit --file platforms/linux/Cargo.lock
+
   tools-release:
+    needs: dependency-policy
     name: Native engine + CLI + TUI — ${{ matrix.label }}
     strategy:
       fail-fast: false

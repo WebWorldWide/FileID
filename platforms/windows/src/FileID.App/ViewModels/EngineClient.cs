@@ -121,6 +121,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // much later gets mis-read as user-initiated and never respawns. Only honor
     // the flag if the exit follows the request within ExpectingExitWindow.
     private long _expectingExitAtTicks;
+    private int _restartAfterExpectedExit;
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
@@ -426,6 +427,28 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task StartAsync()
     {
+        if (!_ui.HasThreadAccess)
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_ui.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await StartAsync();
+                    completion.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }))
+            {
+                throw new InvalidOperationException("The UI dispatcher rejected the engine start request.");
+            }
+            await completion.Task.ConfigureAwait(false);
+            return;
+        }
+
         if (_process is { HasExited: false })
         {
             // Engine is already running. Don't touch _isStarting — another
@@ -914,8 +937,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
                 if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
                 {
-                    State = LifecycleState.Crashed; // "stopped" UI; user can manually start
+                    State = LifecycleState.Crashed;
                     CrashReason = string.Empty;
+                    if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
+                    {
+                        _ = StartAfterLateExpectedExitAsync();
+                    }
                     return;
                 }
                 // Stale flag: a shutdown was requested long ago but the engine
@@ -975,6 +1002,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 }
             }));
         });
+    }
+
+    private async Task StartAfterLateExpectedExitAsync()
+    {
+        try
+        {
+            await StartAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Error("EngineClient: late expected-exit restart failed: " + ex.Message);
+        }
     }
 
     private void Cleanup()

@@ -255,6 +255,7 @@ internal sealed partial class EngineClient
         // user-initiated exit — no auto-respawn, engine stays dead. Now
         // we set the flag only AFTER SendCommandAsync succeeds, and clear
         // it if SendCommandAsync throws.
+        Interlocked.Exchange(ref _restartAfterExpectedExit, 0);
         Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
         Interlocked.Exchange(ref _expectingExit, 1);
         try
@@ -269,12 +270,12 @@ internal sealed partial class EngineClient
     }
 
     /// <summary>Send ShutdownCommand and wait for the engine process to
-    /// actually exit (HasExited == true). Returns when the process is
-    /// gone or after <paramref name="timeout"/> elapses (engine wedged —
-    /// caller decides whether to proceed or surface an error). Used by
-    /// RestartAsync and by the in-app wipe flow, which both need the
-    /// SQLite file handle released before continuing.</summary>
-    public async Task StopAndWaitForExitAsync(TimeSpan timeout, CancellationToken ct = default)
+    /// actually exit (HasExited == true). Returns false on timeout so callers
+    /// cannot mistake a live engine for a safely stopped one.</summary>
+    public async Task<bool> StopAndWaitForExitAsync(
+        TimeSpan timeout,
+        CancellationToken ct = default,
+        bool restartAfterLateExit = false)
     {
         try
         {
@@ -289,14 +290,25 @@ internal sealed partial class EngineClient
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < timeout && !ct.IsCancellationRequested)
         {
-            if (_process is null || _process.HasExited)
+            var process = _process;
+            if ((process is null || process.HasExited) && Volatile.Read(ref _isStarting) == 0)
             {
-                DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited after {sw.ElapsedMilliseconds}ms.");
-                return;
+                DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited and no start is in flight after {sw.ElapsedMilliseconds}ms.");
+                return true;
             }
             await Task.Delay(100, ct).ConfigureAwait(false);
         }
-        DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process still alive.");
+        ct.ThrowIfCancellationRequested();
+        Interlocked.Exchange(ref _restartAfterExpectedExit, restartAfterLateExit ? 1 : 0);
+        if (restartAfterLateExit && (_process is null || _process.HasExited))
+        {
+            if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
+            {
+                await StartAfterLateExpectedExitAsync().ConfigureAwait(false);
+            }
+        }
+        DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process or startup is still active.");
+        return false;
     }
 
     /// <summary>Cleanly stop the engine and respawn it. Used after a
@@ -310,7 +322,11 @@ internal sealed partial class EngineClient
     public async Task RestartAsync(CancellationToken ct = default)
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
-        await StopAndWaitForExitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        if (!await StopAndWaitForExitAsync(
+                TimeSpan.FromSeconds(10), ct, restartAfterLateExit: true).ConfigureAwait(false))
+        {
+            throw new TimeoutException("The existing engine did not stop; restart was aborted.");
+        }
 
         // Force a fresh spawn. StartAsync is idempotent if a process is
         // already running, but here we explicitly want a new one. If the

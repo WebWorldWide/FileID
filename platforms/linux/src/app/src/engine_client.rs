@@ -68,15 +68,13 @@ pub enum EngineEvent {
     RestructurePlan(fileid_engine::ipc::RestructurePlan),
     /// Result of `applyRestructure` (applied / failed counts, privilege error).
     RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
+    BulkActionResult(fileid_engine::ipc::BulkActionResult),
 }
 
 /// A file row read from the DB. The app-side mirror of macOS `FileRow` /
 /// Windows `FileRow`, populated from the engine's `files` table.
 #[derive(Debug, Clone)]
 pub struct FileRow {
-    /// DB row id — kept for parity with the macOS/Windows `FileRow` even though
-    /// the GTK app currently keys off `path`.
-    #[allow(dead_code)]
     pub id: i64,
     pub path: String,
     pub name: String,
@@ -85,6 +83,8 @@ pub struct FileRow {
     pub extension: String,
     pub created_at: Option<f64>,
     pub modified_at: Option<f64>,
+    pub file_ref: Option<i64>,
+    pub content_hash: Option<Vec<u8>>,
     pub has_faces: bool,
     pub has_text: bool,
     pub proposed_name: Option<String>,
@@ -102,6 +102,10 @@ pub struct QuerySpec {
 const RESPAWN_CAP: u32 = 5;
 const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
+const RAW_EVENT_CAP: usize = 8;
+const SUBSCRIBER_EVENT_CAP: usize = 4;
+const MAX_ENGINE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ENGINE_LOG_BYTES: usize = 1024 * 1024;
 
 // ─── Engine client ───────────────────────────────────────────────────────────
 
@@ -124,7 +128,7 @@ pub struct EngineClient {
 
 impl EngineClient {
     pub fn new() -> Self {
-        let (raw_tx, raw_rx) = async_channel::unbounded::<EngineEvent>();
+        let (raw_tx, raw_rx) = async_channel::bounded::<EngineEvent>(RAW_EVENT_CAP);
         Self {
             child: None,
             stdin: None,
@@ -143,11 +147,27 @@ impl EngineClient {
         self.models_busy
     }
 
+    pub fn shutdown(&mut self) {
+        if self.shutting_down.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.models_busy = false;
+        self.subscribers.clear();
+        self.thumb_tx.take();
+        self.stdin.take();
+        if let Some(mut child) = self.child.take() {
+            thread::spawn(move || {
+                let _ = child.kill();
+                let _ = child.wait();
+            });
+        }
+    }
+
     /// Register a UI subscriber. Each call returns a fresh receiver that will
     /// see every event from now on. Call before or after `start` — late
     /// subscribers still receive future events.
     pub fn subscribe(&mut self) -> Receiver<EngineEvent> {
-        let (tx, rx) = async_channel::unbounded::<EngineEvent>();
+        let (tx, rx) = async_channel::bounded::<EngineEvent>(SUBSCRIBER_EVENT_CAP);
         self.subscribers.push(tx);
         rx
     }
@@ -174,40 +194,41 @@ impl EngineClient {
 
         // Fan-out pump on the GTK main context: raw → all subscribers, and
         // drive respawn on Exited.
-        let this_pump = this.clone();
+        let this_pump = std::rc::Rc::downgrade(this);
         glib::MainContext::default().spawn_local(async move {
             while let Ok(ev) = raw_rx.recv().await {
+                let Some(client) = this_pump.upgrade() else {
+                    break;
+                };
                 match &ev {
                     EngineEvent::Progress(_)
                     | EngineEvent::BatchLanded(_)
                     | EngineEvent::DeepAnalyzeStarting(_) => {
-                        this_pump.borrow_mut().models_busy = true;
+                        client.borrow_mut().models_busy = true;
                     }
                     EngineEvent::ScanComplete(_)
                     | EngineEvent::DeepAnalyzeComplete(_)
                     | EngineEvent::Exited => {
-                        this_pump.borrow_mut().models_busy = false;
+                        client.borrow_mut().models_busy = false;
                     }
                     _ => {}
                 }
-                // Snapshot subscribers WITHOUT holding the RefCell borrow across
-                // the await below (a held borrow + await = a latent panic).
-                let subs: Vec<Sender<EngineEvent>> = this_pump.borrow().subscribers.clone();
+                let subs: Vec<Sender<EngineEvent>> = client.borrow().subscribers.clone();
+                drop(client);
                 for sub in &subs {
                     let _ = sub.send(ev.clone()).await;
                 }
+                let Some(client) = this_pump.upgrade() else {
+                    break;
+                };
                 if let EngineEvent::Ready = ev {
-                    // A confirmed healthy (re)start clears the crash budget, so the
-                    // cap means "5 consecutive failed respawns", not "5 for the
-                    // whole session" — otherwise five crashes hours apart, each
-                    // recovered, would permanently give up on the engine.
-                    this_pump.borrow_mut().respawns = 0;
+                    client.borrow_mut().respawns = 0;
                 }
                 if let EngineEvent::Exited = ev {
-                    let shutting = this_pump.borrow().shutting_down.load(Ordering::Relaxed);
+                    let shutting = client.borrow().shutting_down.load(Ordering::Relaxed);
                     if !shutting {
-                        retire_exited_child(&this_pump);
-                        schedule_respawn(&this_pump);
+                        retire_exited_child(&client);
+                        schedule_respawn(&client);
                     }
                 }
             }
@@ -297,13 +318,7 @@ impl EngineClient {
 
 impl Drop for EngineClient {
     fn drop(&mut self) {
-        self.shutting_down.store(true, Ordering::Relaxed);
-        self.thumb_tx.take();
-        self.stdin.take(); // EOF → engine exits cleanly
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.shutdown();
     }
 }
 
@@ -386,8 +401,15 @@ fn schedule_respawn(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
         return;
     }
     let delay = std::time::Duration::from_millis(400 * n as u64);
-    let this2 = this.clone();
-    glib::timeout_add_local_once(delay, move || spawn_process(&this2));
+    let weak = std::rc::Rc::downgrade(this);
+    glib::timeout_add_local_once(delay, move || {
+        if let Some(client) = weak.upgrade() {
+            let shutting = client.borrow().shutting_down.load(Ordering::Relaxed);
+            if !shutting {
+                spawn_process(&client);
+            }
+        }
+    });
 }
 
 /// Locate the engine binary. Search order mirrors the scaffold:
@@ -424,16 +446,77 @@ fn locate_engine_binary() -> Result<PathBuf> {
     anyhow::bail!("set FILEID_ENGINE or place the engine beside the app binary")
 }
 
-/// Reader thread: parse NDJSON `IpcEvent`s into `EngineEvent`s. Tolerant — a
-/// line that doesn't parse is ignored (the engine also emits human log lines).
+enum BoundedLine {
+    Eof,
+    Line,
+    Oversize,
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<BoundedLine> {
+    buffer.clear();
+    let mut draining = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(if draining {
+                BoundedLine::Oversize
+            } else if buffer.is_empty() {
+                BoundedLine::Eof
+            } else {
+                BoundedLine::Line
+            });
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index);
+        if draining || buffer.len().saturating_add(take) > max_bytes {
+            draining = true;
+        } else {
+            buffer.extend_from_slice(&available[..take]);
+        }
+        let consumed = take + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            if draining {
+                buffer.clear();
+                return Ok(BoundedLine::Oversize);
+            }
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+            return Ok(BoundedLine::Line);
+        }
+    }
+}
+
+/// Reader thread: parse bounded NDJSON `IpcEvent`s into `EngineEvent`s.
 fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
+    let mut reader = BufReader::new(stdout);
+    let mut frame = Vec::with_capacity(8 * 1024);
+    loop {
+        match read_bounded_line(&mut reader, &mut frame, MAX_ENGINE_FRAME_BYTES) {
+            Ok(BoundedLine::Eof) | Err(_) => break,
+            Ok(BoundedLine::Oversize) => {
+                if tx
+                    .send_blocking(EngineEvent::Error(format!(
+                        "engine response exceeded the {} MiB safety limit and was discarded",
+                        MAX_ENGINE_FRAME_BYTES / (1024 * 1024)
+                    )))
+                    .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+            Ok(BoundedLine::Line) => {}
+        }
+        if frame.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(event) = serde_json::from_str::<IpcEvent>(&line) else {
+        let Ok(event) = serde_json::from_slice::<IpcEvent>(&frame) else {
             continue;
         };
         let mapped = match event.payload {
@@ -463,6 +546,7 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
             EventPayload::RestructureApplyResult(w) => {
                 Some(EngineEvent::RestructureApplyResult(w.inner))
             }
+            EventPayload::BulkActionResult(w) => Some(EngineEvent::BulkActionResult(w.inner)),
             _ => None,
         };
         if let Some(ev) = mapped {
@@ -471,23 +555,31 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
             }
         }
     }
-    // stdout closed → engine exited.
     let _ = tx.send_blocking(EngineEvent::Exited);
 }
 
-/// Drain the engine's stderr to the local debug log. Never transmits.
+/// Drain bounded engine stderr lines to the local debug log. Never transmits.
 fn drain_stderr(stderr: std::process::ChildStderr) {
-    let reader = BufReader::new(stderr);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        tracing::debug!(target: "engine_stderr", "{line}");
+    let mut reader = BufReader::new(stderr);
+    let mut frame = Vec::with_capacity(4 * 1024);
+    loop {
+        match read_bounded_line(&mut reader, &mut frame, MAX_ENGINE_LOG_BYTES) {
+            Ok(BoundedLine::Eof) | Err(_) => break,
+            Ok(BoundedLine::Oversize) => {
+                tracing::warn!(target: "engine_stderr", "oversized engine log line discarded");
+            }
+            Ok(BoundedLine::Line) => {
+                let line = String::from_utf8_lossy(&frame);
+                tracing::debug!(target: "engine_stderr", "{line}");
+            }
+        }
     }
 }
 
 // ─── DB reads (mirror of macOS/Windows ReadStore) ────────────────────────────
 
 const SELECT_COLS: &str = "id, path_text, size_bytes, created_at, modified_at, kind, extension, \
-    has_faces, has_text, vlm_proposed_name, vlm_description";
+    has_faces, has_text, vlm_proposed_name, vlm_description, file_ref, content_hash";
 
 fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
     let db_path = fileid_engine::paths::db_path()?;
@@ -555,6 +647,8 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         has_text: row.get::<_, i64>(8)? != 0,
         proposed_name: row.get(9)?,
         description: row.get(10)?,
+        file_ref: row.get(11)?,
+        content_hash: row.get(12)?,
     })
 }
 
@@ -703,6 +797,39 @@ mod tests {
             },
             rx,
         )
+    }
+
+    #[test]
+    fn engine_frame_reader_rejects_oversize_and_resynchronizes() {
+        let input = b"123456\nok\n";
+        let mut reader = std::io::Cursor::new(input);
+        let mut frame = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, &mut frame, 4).unwrap(),
+            BoundedLine::Oversize
+        ));
+        assert!(matches!(
+            read_bounded_line(&mut reader, &mut frame, 4).unwrap(),
+            BoundedLine::Line
+        ));
+        assert_eq!(frame, b"ok");
+    }
+
+    #[test]
+    fn engine_frame_reader_bounds_unterminated_input() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; 128]);
+        let mut frame = Vec::new();
+        assert!(matches!(
+            read_bounded_line(&mut reader, &mut frame, 16).unwrap(),
+            BoundedLine::Oversize
+        ));
+        assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn engine_event_channels_are_bounded() {
+        assert!(RAW_EVENT_CAP > 0 && RAW_EVENT_CAP <= 8);
+        assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);
     }
 
     #[test]

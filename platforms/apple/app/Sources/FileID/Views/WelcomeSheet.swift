@@ -327,6 +327,7 @@ struct WelcomeSheet: View {
             vlmLastError = selectedVLMInstallBlocker ?? "This model cannot be installed safely on this Mac."
             return
         }
+        guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
         resetVLMTracking()
         vlmRequested = true
         let started = Date()

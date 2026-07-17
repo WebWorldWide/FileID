@@ -6,11 +6,13 @@ on:
     paths:
       - 'platforms/windows/**'
       - 'shared/ipc-schema/**'
+      - 'shared/models/**'
       - '.github/workflows/windows-engine.yml'
   pull_request:
     paths:
       - 'platforms/windows/**'
       - 'shared/ipc-schema/**'
+      - 'shared/models/**'
       - '.github/workflows/windows-engine.yml'
   workflow_dispatch:
 

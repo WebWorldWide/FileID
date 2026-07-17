@@ -47,26 +47,7 @@ impl Person {
 pub fn run(ctx: &Ctx) -> Result<()> {
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
-
-    let mut stmt = conn.prepare(
-        "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, p.file_count, \
-            (SELECT COUNT(*) FROM face_prints fp WHERE fp.person_id = p.id) AS faces \
-         FROM persons p ORDER BY faces DESC, p.id ASC",
-    )?;
-    let people: Vec<Person> = stmt
-        .query_map(params![], |r| {
-            Ok(Person {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                first: r.get(2)?,
-                last: r.get(3)?,
-                is_unknown: r.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
-                file_count: r.get(5)?,
-                faces: r.get(6)?,
-            })
-        })?
-        .filter_map(Result::ok)
-        .collect();
+    let people = load_people(&conn)?;
 
     if ctx.json {
         let arr: Vec<serde_json::Value> = people
@@ -115,4 +96,70 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn load_people(conn: &rusqlite::Connection) -> Result<Vec<Person>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, \
+            (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp \
+             JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0) AS files, \
+            (SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0) AS faces \
+         FROM persons p WHERE EXISTS ( \
+             SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
+             WHERE fp.person_id = p.id AND f.failed = 0 \
+         ) ORDER BY faces DESC, p.id ASC",
+    )?;
+    let people = stmt
+        .query_map(params![], |r| {
+            Ok(Person {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                first: r.get(2)?,
+                last: r.get(3)?,
+                is_unknown: r.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0,
+                file_count: r.get(5)?,
+                faces: r.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(people)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn people_counts_only_active_files_and_hides_inactive_clusters() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES \
+             (1, '/active.jpg', 1, 1, 0, 'image', 'jpg', 0), \
+             (2, '/missing.jpg', 2, 1, 0, 'image', 'jpg', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO persons (id, name, file_count, created_at) VALUES \
+             (10, 'Visible', 99, 0), (20, 'Hidden', 99, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO face_prints (file_id, person_id, print_data, bbox) VALUES \
+             (1, 10, X'00', '0,0,1,1'), (1, 10, X'00', '0,0,1,1'), \
+             (2, 10, X'00', '0,0,1,1'), (2, 20, X'00', '0,0,1,1')",
+            [],
+        )
+        .unwrap();
+
+        let people = load_people(&conn).unwrap();
+        assert_eq!(people.len(), 1);
+        assert_eq!(people[0].id, 10);
+        assert_eq!(people[0].file_count, 1);
+        assert_eq!(people[0].faces, 2);
+    }
 }

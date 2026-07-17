@@ -59,9 +59,9 @@ Likely first errors to iterate on:
    commercial-clean achieved.** Build-iterate spots: the ORT
    `ORTSessionOptions`/`appendCoreMLExecutionProvider` API surface, the ViT-B/32
    input/output tensor names, and that `CLIPTokenizer` emits the same
-   BOS/EOS-wrapped tokens as the Windows `clip_tokenizer`. Also update/remove the
-   now-superseded offline scripts (`scripts/install_clip_models.sh`,
-   `scripts/build_clip_text_encoder.py`).
+   BOS/EOS-wrapped tokens as the Windows `clip_tokenizer`. The superseded,
+   unpinned offline CLIP installer and obsolete CoreML conversion script were
+   removed; installs now use only the verified in-app path.
 
 3. **RAM++ primary tagger.** New `RamPlusService.swift` mirroring
    `ArcFaceService`'s ORT pattern: load `ram_plus.onnx` (384×384, ImageNet

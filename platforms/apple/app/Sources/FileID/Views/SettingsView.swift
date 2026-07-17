@@ -228,6 +228,12 @@ struct CLIPSemanticSearchCard: View {
     @State private var installer = CLIPModelInstaller.shared
     @State private var confirmUninstall = false
 
+    private var downloadSizeLabel: String {
+        ByteCountFormatter.string(
+            fromByteCount: CLIPModelInstaller.approxDownloadBytes,
+            countStyle: .file)
+    }
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
@@ -267,15 +273,17 @@ struct CLIPSemanticSearchCard: View {
             titleVisibility: .visible
         ) {
             Button("Remove", role: .destructive) {
-                installer.uninstall()
-                // Drop the in-memory text encoder too — otherwise semantic
-                // search keeps running against the model we just deleted until
-                // the next app launch, with no fallback. (F-C4-017)
-                CLIPTextEncoder.shared.unload()
+                Task {
+                    await installer.uninstall()
+                    // Drop the in-memory text encoder too — otherwise semantic
+                    // search keeps running against the model we just deleted until
+                    // the next app launch, with no fallback. (F-C4-017)
+                    CLIPTextEncoder.shared.unload()
+                }
             }
             Button("Keep", role: .cancel) {}
         } message: {
-            Text("Frees ~350 MB. Semantic search will revert to keyword search until you reinstall.")
+            Text("Frees approximately \(downloadSizeLabel). Semantic search will revert to keyword search until you reinstall.")
         }
     }
 
@@ -290,7 +298,7 @@ struct CLIPSemanticSearchCard: View {
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(reason).font(.caption2).foregroundStyle(.secondary)
-                    Text("~210 MB download from huggingface.co (Apple's MobileCLIP repo + OpenAI's BPE vocabulary).")
+                    Text("Approximately \(downloadSizeLabel) from huggingface.co (Xenova CLIP ViT-B/32 + OpenAI BPE vocabulary).")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 Spacer()

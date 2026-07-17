@@ -8,4 +8,6 @@ pub(crate) mod hmac;
 pub(crate) mod hnsw_index;
 pub(crate) mod keywords;
 pub(crate) mod path_safety;
+#[allow(unused_imports)]
+pub use path_safety::rename_no_replace;
 pub(crate) mod zip;

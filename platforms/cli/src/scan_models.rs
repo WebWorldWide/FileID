@@ -389,6 +389,9 @@ fn drive_scan(
                     ctx.bold(&format!("fileid dedupe --similar{db_hint}")),
                 );
             }
+            if failed > 0 {
+                return Err(crate::scan::PartialScan { failed }.into());
+            }
             Ok(())
         }
         ScanOutcome::Error { kind, message } => {

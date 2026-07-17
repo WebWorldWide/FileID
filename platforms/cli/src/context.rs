@@ -196,9 +196,11 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
     use rusqlite::{params, OptionalExtension};
     if let Ok(id) = target.parse::<i64>() {
         if let Ok(Some(id)) = conn
-            .query_row("SELECT id FROM files WHERE id = ?1", params![id], |r| {
-                r.get::<_, i64>(0)
-            })
+            .query_row(
+                "SELECT id FROM files WHERE id = ?1 AND failed = 0",
+                params![id],
+                |r| r.get::<_, i64>(0),
+            )
             .optional()
         {
             return Some(id);
@@ -210,7 +212,7 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
     for candidate in [canon.as_str(), target] {
         if let Ok(Some(id)) = conn
             .query_row(
-                "SELECT id FROM files WHERE path_text = ?1",
+                "SELECT id FROM files WHERE path_text = ?1 AND failed = 0",
                 params![candidate],
                 |r| r.get::<_, i64>(0),
             )
@@ -226,7 +228,7 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
     let backslash_like = format!("%\\\\{basename}");
     conn.query_row(
         "SELECT id FROM files \
-         WHERE path_text LIKE ?1 ESCAPE '\\' OR path_text LIKE ?2 ESCAPE '\\' \
+         WHERE failed = 0 AND (path_text LIKE ?1 ESCAPE '\\' OR path_text LIKE ?2 ESCAPE '\\') \
          ORDER BY path_text LIMIT 1",
         params![slash_like, backslash_like],
         |r| r.get::<_, i64>(0),
@@ -310,7 +312,9 @@ mod tests {
 
     fn db_with(rows: &[(i64, &str)]) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL);")
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL, failed INTEGER NOT NULL DEFAULT 0);",
+        )
             .unwrap();
         for (id, p) in rows {
             conn.execute(

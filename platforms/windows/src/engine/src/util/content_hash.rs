@@ -52,6 +52,14 @@ pub struct ExactDuplicateGrouping {
 }
 
 pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
+    exact_file_sha256_until(path, expected_size, || false)
+}
+
+fn exact_file_sha256_until(
+    path: &Path,
+    expected_size: u64,
+    should_cancel: impl Fn() -> bool,
+) -> std::io::Result<[u8; 32]> {
     let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
     let before = file.metadata()?;
     if !before.is_file() || before.len() != expected_size {
@@ -63,6 +71,12 @@ pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8
     let mut sha = sha2::Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
+        if should_cancel() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "exact hashing cancelled",
+            ));
+        }
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -84,15 +98,26 @@ pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8
 pub fn group_exact_duplicates(
     candidates: Vec<ExactDuplicateCandidate>,
 ) -> ExactDuplicateGrouping {
+    group_exact_duplicates_until(candidates, || false)
+}
+
+pub fn group_exact_duplicates_until(
+    candidates: Vec<ExactDuplicateCandidate>,
+    should_cancel: impl Fn() -> bool,
+) -> ExactDuplicateGrouping {
     let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
         BTreeMap::new();
     let mut skipped = 0;
     for candidate in candidates {
+        if should_cancel() {
+            skipped += 1;
+            continue;
+        }
         let Ok(size) = u64::try_from(candidate.indexed_size) else {
             skipped += 1;
             continue;
         };
-        match exact_file_sha256(&candidate.path, size) {
+        match exact_file_sha256_until(&candidate.path, size, &should_cancel) {
             Ok(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
             Err(_) => skipped += 1,
         }

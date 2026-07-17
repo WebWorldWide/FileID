@@ -72,9 +72,10 @@
           ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
           ORT_PREFER_DYNAMIC_LINK = "1";
 
-          # The app's behavioural tests need a display + models; keep the
-          # sandboxed build to a compile + the model-free unit tests only.
-          doCheck = false;
+          # GTK interaction tests need a display, but the shared engine's
+          # model-free library suite is safe inside the sandbox.
+          doCheck = true;
+          cargoTestFlags = [ "-p" "fileid-engine" "--lib" ];
 
           postInstall = ''
             install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop \

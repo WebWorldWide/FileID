@@ -2602,14 +2602,14 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
-    "url": "https://static.crates.io/crates/quinn-proto/quinn-proto-0.11.14.crate",
-    "sha256": "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098",
-    "dest": "cargo/vendor/quinn-proto-0.11.14"
+    "url": "https://static.crates.io/crates/quinn-proto/quinn-proto-0.11.15.crate",
+    "sha256": "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e",
+    "dest": "cargo/vendor/quinn-proto-0.11.15"
   },
   {
     "type": "inline",
-    "contents": "{\"package\":\"434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098\",\"files\":{}}",
-    "dest": "cargo/vendor/quinn-proto-0.11.14",
+    "contents": "{\"package\":\"4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e\",\"files\":{}}",
+    "dest": "cargo/vendor/quinn-proto-0.11.15",
     "dest-filename": ".cargo-checksum.json"
   },
   {

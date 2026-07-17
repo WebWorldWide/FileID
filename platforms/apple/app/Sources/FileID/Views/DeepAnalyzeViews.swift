@@ -462,7 +462,7 @@ struct DeepAnalyzeView: View {
 
     /// Additively write each file's tags as Finder tags. Returns the number of
     /// files that ended up modified. Runs on a detached task (FS writes).
-    private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
+    nonisolated private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
         var changed = 0
         for item in items where !item.tags.isEmpty {
             if (try? TagWriter.addTags(item.tags, at: item.url)) != nil { changed += 1 }
@@ -592,6 +592,7 @@ struct DeepAnalyzeView: View {
                     .font(.callout)
                 HStack(spacing: 10) {
                     Button {
+                        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
                         engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
                                               skipExisting: skipExisting)
                     } label: {
@@ -669,6 +670,7 @@ struct DeepAnalyzeView: View {
                         .foregroundStyle(.tertiary)
 
                     Button {
+                        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
                         engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
                                               skipExisting: skipExisting)
                     } label: {
@@ -838,6 +840,7 @@ struct DeepAnalyzeButton: View {
         let fits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         Button {
             guard fits else { return }
+            guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
             engine.deepAnalyzeFile(fileID: file.id, modelKind: settings.activeKind.rawValue)
         } label: {
             Label(

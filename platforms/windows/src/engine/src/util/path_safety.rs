@@ -318,6 +318,91 @@ pub fn safe_filename_component(raw: &str) -> String {
     out
 }
 
+#[cfg(windows)]
+#[allow(dead_code)]
+pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
+
+    let source = to_extended_length(source);
+    let destination = to_extended_length(destination);
+    let source_wide: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVE_FILE_FLAGS(0),
+        )
+        .map_err(std::io::Error::other)
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn c_path(path: &Path, label: &str) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{label} path contains NUL"),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = c_path(source, "source")?;
+    let destination = c_path(destination, "destination")?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let source = c_path(source, "source")?;
+    let destination = c_path(destination, "destination")?;
+    let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+#[allow(dead_code)]
+pub fn rename_no_replace(_source: &Path, _destination: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this platform",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +467,28 @@ mod tests {
         // All-illegal collapses to placeholders, never empty.
         assert_eq!(safe_filename_component("///"), "___");
         assert_eq!(safe_filename_component(""), "_");
+    }
+
+    #[test]
+    fn no_replace_rename_preserves_an_occupied_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-no-replace-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&destination, b"destination").unwrap();
+        assert!(rename_no_replace(&source, &destination).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"source");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"destination");
+        std::fs::remove_file(&destination).unwrap();
+        rename_no_replace(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"source");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

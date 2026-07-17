@@ -6,11 +6,13 @@ on:
     paths:
       - 'platforms/apple/**'
       - 'shared/ipc-schema/**'
+      - 'shared/models/**'
       - '.github/workflows/macos.yml'
   pull_request:
     paths:
       - 'platforms/apple/**'
       - 'shared/ipc-schema/**'
+      - 'shared/models/**'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
 

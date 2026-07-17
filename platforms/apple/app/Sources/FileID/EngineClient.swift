@@ -820,9 +820,9 @@ public final class EngineClient {
 
     // MARK: - Commands
 
-    /// Returns false when the command never left the app (engine down
-    /// during the respawn window, or encode failure) so callers can
-    /// avoid arming state that only an engine event would clear.
+    /// Returns false when the command could not be queued (engine down or
+    /// encode failure). A later pipe-write failure terminates the captured
+    /// engine generation so its normal exit path clears caller state.
     @discardableResult
     public func send(_ payload: IPCCommand.Payload) -> Bool {
         guard let pipe = stdinPipe else { return false }
@@ -855,6 +855,7 @@ public final class EngineClient {
                 try writeHandle.write(contentsOf: data)
             } catch {
                 FileHandle.standardError.write(Data("EngineClient send failed: \(error)\n".utf8))
+                procBox.withLock { $0?.terminate() }
             }
             done.withLock { $0 = true }
         }
@@ -884,7 +885,8 @@ public final class EngineClient {
         // not a bookmark). Round-tripping through bookmarkData →
         // resolvingBookmarkData yields the canonical scoped path the sandbox
         // actually grants; outside a sandbox it's just rootURL.path.
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let client = self
+        Task.detached(priority: .userInitiated) {
             let resolvedPath: String
             do {
                 let bookmark = try rootURL.bookmarkData(
@@ -909,9 +911,9 @@ public final class EngineClient {
                 // Begin the App-Nap token only if the command actually left the
                 // app; a dropped send (engine down) would otherwise leave the
                 // token held with no scan and no terminal event to release it.
-                if self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
-                                         rescan: false, excludedPaths: nil)) == true {
-                    self?.beginScanActivity()
+                if client.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
+                                          rescan: false, excludedPaths: nil)) {
+                    client.beginScanActivity()
                 }
             }
         }
@@ -1007,6 +1009,7 @@ public final class EngineClient {
     }
 
     public func deepAnalyzeFile(fileID: Int64, modelKind: String) {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
         guard send(.deepAnalyzeFile(fileID: fileID, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
@@ -1016,6 +1019,7 @@ public final class EngineClient {
     }
 
     public func deepAnalyzeFolder(prefix: String, modelKind: String) {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
         guard send(.deepAnalyzeFolder(pathPrefix: prefix, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
@@ -1025,6 +1029,7 @@ public final class EngineClient {
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
         guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
@@ -1082,8 +1087,10 @@ public final class EngineClient {
     /// engine emits `modelDownloadProgress` events identical to the
     /// in-Deep-Analyze flow; bind to `engine.modelDownloadProgress`
     /// for live progress.
-    public func prewarmModel(_ modelKind: String) {
-        send(.prewarmModel(modelKind: modelKind))
+    @discardableResult
+    public func prewarmModel(_ modelKind: String) -> Bool {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return false }
+        return send(.prewarmModel(modelKind: modelKind))
     }
 
     /// Cancel a running prewarm. Lands at the next Task.checkCancellation

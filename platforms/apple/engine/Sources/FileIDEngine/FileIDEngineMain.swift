@@ -168,6 +168,21 @@ struct FileIDEngineMain {
         Darwin._exit(0)
     }
 
+    private static func requireLicenseAcceptance(
+        for kind: AIModelKind,
+        sink: IPCSink
+    ) async -> Bool {
+        guard ModelLicenseAcceptance.isAccepted(for: kind) else {
+            await sink.emit(.error(EngineError(
+                kind: "model_license_not_accepted",
+                message: "Open FileID and accept the \(kind.licenseName) before downloading or using \(kind.displayName).",
+                modelKind: kind.rawValue
+            )))
+            return false
+        }
+        return true
+    }
+
     /// Per-command dispatcher. `startScan` runs the scan in a detached task so
     /// the command loop stays responsive to subsequent pause/cancel commands.
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
@@ -217,7 +232,7 @@ struct FileIDEngineMain {
             ) {
                 let task = Task.detached(priority: .userInitiated) {
                     await runScan(rootPath: rootPath, displayPath: displayPath,
-                                  rescan: rescan, epoch: epoch,
+                                  rescan: rescan ?? false, epoch: epoch,
                                   excludedPaths: excludedPaths,
                                   coordinator: coordinator, sink: sink,
                                   database: database)
@@ -285,6 +300,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
             // Duplicate-command parity with the Windows engine: a second
             // deep-analyze while one is queued/running is rejected, not
             // silently queued (the app disables its buttons in-flight, so
@@ -320,6 +336,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
@@ -347,6 +364,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
@@ -384,6 +402,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
             // Prewarm runs OUTSIDE JobQueue. JobQueue serializes
             // user-facing pipeline jobs (scan, cluster, analyze) that
             // touch the database; a multi-GB model download has no

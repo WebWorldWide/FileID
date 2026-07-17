@@ -12,6 +12,7 @@
 
 mod engine_client;
 mod lavalamp;
+mod model_license;
 mod spring;
 mod tabs;
 mod theme;
@@ -33,7 +34,10 @@ fn main() -> glib::ExitCode {
         .with_target(false)
         .init();
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
 
     // Install the FileID design system (palette CSS + glass classes) and force
     // dark mode, matching the macOS + Windows siblings.
@@ -48,6 +52,7 @@ fn main() -> glib::ExitCode {
         gtk::Window::set_default_icon_name(APP_ID);
     });
     app.connect_activate(window::on_activate);
+    app.connect_open(|app, files, _| window::on_open(app, files));
 
     app.run()
 }
