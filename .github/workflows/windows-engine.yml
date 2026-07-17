@@ -188,6 +188,8 @@ jobs:
         #   XML/XAML namespace identifiers (URN-like; never resolved):
         #     - schemas.microsoft.com         — WinUI XAML namespace tokens
         #     - schemas.openxmlformats.org    — XAML markup-compat tokens
+        #     - ai.google.dev                 — Gemma license terms (browser-opened link, not egress)
+        #     - docs.nvidia.com               — cuDNN/CUDA EULA (browser-opened link, not egress)
         #
         # To add a host: edit this list AND add a rationale entry in
         # shared/docs/DECISIONS.md. Reviewers should reject PRs that
@@ -199,7 +201,9 @@ jobs:
             "developer.download.nvidia.com",
             "developer.nvidia.com",
             "schemas.microsoft.com",
-            "schemas.openxmlformats.org"
+            "schemas.openxmlformats.org",
+            "ai.google.dev",
+            "docs.nvidia.com"
           )
           $sources = Get-ChildItem -Path platforms/windows/src -Recurse -File `
             -Include *.rs,*.cs,*.xaml,*.xaml.cs |
