@@ -1,8 +1,14 @@
 # NEXT — resume here
 
-## STATUS 2026-07-17 — Windows prod-readiness audit: no new blockers; 5 hardening fixes in the working tree (needs branch + PR + CI)
+## STATUS 2026-07-17 (late) — Windows prod-audit fixes LANDED (PRs #130 + #131); v0.1.1 refreshed again + assets verified; full app audit clean
 
-A deep audit of `platforms/windows` (installer, CI workflows, data-safety, Windows FS semantics, downloader, EngineClient transport; `cargo clippy -D warnings` + all ~450 engine tests green on macOS) found **no new blockers** — the six release gates in the 2026-07-12 section below remain the real path to prod. Five smaller findings were fixed, **uncommitted**:
+The audit fixes below are **merged** (`506e97c` #130, `f491271` #131 — all CI green) and the **v0.1.1 prerelease was refreshed a second time today**: tag moved to `f491271`, release run 29617526554 green, all 10 assets replaced via API and verified (server-side digest == local SHA-256 for every asset, fresh 23:08Z timestamps, SHA256SUMS.txt consistent, both MSIs provably embedded in the 342 MB bundle by size arithmetic). **Finding 4 below was WRONG and is reverted (#131):** the first tag run hard-failed on ICE38/ICE43/ICE57 — WiX treats a ProgramMenuFolder shortcut component as user-profile data and *requires* the HKCU keypath; the constraint is now documented in Product.wxs so it can't be "re-fixed". Note the ICE-validation gate only runs on tag pipelines — installer changes are not compile-checked by PR CI.
+
+A separate **top-to-bottom audit of the entire WinUI app** (~29k lines: EngineClient full, Commands facade, ModelInstallerService, AppSettings, ReadStore, ThumbnailService, ChangeLog, App/MainWindow, all six tab views incl. every destructive flow, plus structural sweeps for subscription pairing / async-void safety / timers / Process.Start / blocking waits) found **zero new defects** — six candidates all dismissed on context. Bonus: the tracked "Settings CUDA/cuDNN buttons flip to Installed on IPC send" item appears **already fixed** (`WaitForModelSentinelsAsync` gates the flip) — retire it after an on-hardware confirm.
+
+## STATUS 2026-07-17 — Windows prod-readiness audit: no new blockers; 5 hardening fixes (landed via #130/#131, see entry above)
+
+A deep audit of `platforms/windows` (installer, CI workflows, data-safety, Windows FS semantics, downloader, EngineClient transport; `cargo clippy -D warnings` + all ~450 engine tests green on macOS) found **no new blockers** — the six release gates in the 2026-07-12 section below remain the real path to prod. Five smaller findings were fixed (item 4 later reverted by #131 — see the entry above):
 
 1. Deleted the stray `platforms/windows/src/engine/src/main 2.rs` (untracked Finder-duplicate of an older `main.rs`).
 2. `Bundle.wxs`: an x64-only bundle (`-SkipArm64`) now **refuses ARM64 hosts** with a clear message — previously every chain package was skipped by `InstallCondition` on ARM64 and Burn registered a "successful" install with nothing on disk (the v0.0.1 x64-only asset shipped that shape). Release CI builds both MSIs, so this only ever bit dev/x64-only bundles.
