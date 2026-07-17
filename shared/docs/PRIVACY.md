@@ -2,7 +2,7 @@
 
 FileID is on-device software. Your photos, documents, faces, OCR text, EXIF, file paths, and folder structure stay on your machine. This document spells out exactly what FileID *does not* do, so the product proposition is verifiable rather than rhetorical.
 
-It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 3 / .NET 8 app) and macOS (Swift/SwiftUI engine + app). Linux is deferred.
+It applies to all three desktop platforms — Windows (Rust `fileid-engine` + WinUI 3 / .NET 8), macOS (Swift/SwiftUI), and Linux (the shared Rust engine + GTK4/libadwaita).
 
 ## What we don't ship
 
@@ -26,7 +26,7 @@ The shipping contract permits one outbound destination family: **Hugging Face** 
 - **Source URL policy.** CI scans source URLs and separately parses every production Windows `FileEntry`, the initial URL predicate, and redirect policy. During mirror migration, CI permits only the exact six-URL/four-host known-blocker baseline; any addition fails. Signed publication uses the strict Hugging Face-only mode.
 - **Telemetry-string scan (CI gate, release blocker).** CI scans every shipped binary — the engine `.exe`, the app `.exe`, and every bundled `.dll` — for a deny-list of 23 telemetry/crash-SDK strings, in both ASCII and UTF-16. Zero hits required. The identical list runs in all three workflows (`windows-engine.yml`, `windows-app.yml`, `macos.yml`) and in the release script `platforms/windows/build/publish-bundle.ps1`. A build containing a forbidden string cannot ship.
 - **Network capture.** Run FileID with Wireshark / Fiddler / mitmproxy attached. Idle FileID must emit zero packets. Explicit installs emit only their artifact request and TLS handshakes; current development builds may show the six documented off-policy runtime sources and cannot pass the release gate.
-- **Path redaction in logs.** Even local logs redact user file paths before they're written: `redact_path_for_log(...)` (Rust engine), `PathRedactor.Redact(...)` (Windows app), `redactPathForLog(_:)` (macOS). Each keeps only the last one or two path components (`…/Vacation/IMG.jpg`), so the username and folder layout never reach the log. The single exception is FileID's **own** state tree (`%LOCALAPPDATA%\FileID\…` / `~/Library/Application Support/FileID/…`), which passes through verbatim because those paths are structural, useful for debugging, and the passthrough is anchored to the resolved root so no user path can ride along. One residual: `engine-stderr.log` (macOS) captures raw third-party library diagnostics (MLX/Metal/ONNX) rerouted off the IPC wire — those libraries occasionally print paths and are outside our redaction reach; the file is local-only and never leaves the machine, like every other log.
+- **Path redaction in logs.** Even local logs redact paths before they're written: `redact_path_for_log(...)` (Rust engine/Linux), `PathRedactor.Redact(...)` (Windows app), and `redactPathForLog(_:)` (macOS). Each keeps only the last one or two path components (`…/Vacation/IMG.jpg`), including FileID's own model/database paths, so usernames and full folder layouts never reach the log. One residual: `engine-stderr.log` (macOS) captures raw third-party library diagnostics (MLX/Metal/ONNX) rerouted off the IPC wire — those libraries occasionally print paths and are outside our redaction reach; the file is local-only and never leaves the machine, like every other log.
 
 ## Where data lives
 
@@ -34,6 +34,7 @@ The shipping contract permits one outbound destination family: **Hugging Face** 
 |---|---|---|---|---|---|
 | Windows | `%LOCALAPPDATA%\FileID\fileid.sqlite` | `%LOCALAPPDATA%\FileID\logs\` | `%LOCALAPPDATA%\FileID\Models\` | `%LOCALAPPDATA%\FileID\thumbs.cache\` | `%LOCALAPPDATA%\FileID\face_crops\` |
 | macOS | `~/Library/Application Support/FileID/fileid.sqlite` | `~/Library/Application Support/FileID/logs/` | `~/Library/Application Support/FileID/Models/` + `~/Documents/huggingface/models/` | `~/Library/Application Support/FileID/thumbs.cache/` | `~/Library/Application Support/FileID/face_crops/` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/FileID/fileid.sqlite` | `${XDG_DATA_HOME:-~/.local/share}/FileID/logs/` | `${XDG_DATA_HOME:-~/.local/share}/FileID/Models/` | `${XDG_DATA_HOME:-~/.local/share}/FileID/thumbs.cache/` | `${XDG_DATA_HOME:-~/.local/share}/FileID/face_crops/` |
 
 The engine owns the SQLite WAL database (migrations v1–v19, byte-faithful with the macOS GRDB schema). Downloaded VLM weights cache under `%LOCALAPPDATA%\FileID\Models\HuggingFace\` (Windows) / `~/Documents/huggingface/models/` (macOS).
 

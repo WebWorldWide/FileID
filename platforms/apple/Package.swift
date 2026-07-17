@@ -50,18 +50,8 @@ let package = Package(
         // PaliGemma model factory; downloaded weights are cached in
         // `~/Documents/huggingface/models/<repo>/` by MLX itself.
         //
-        // V15.2.1: language mode .v5 + targeted upcoming features. Strict
-        // Swift 6 mode flags reads of Darwin's `mach_task_self_` (a global
-        // var with kernel-immutable semantics) as "shared mutable state".
-        // The accepted Swift 6 workaround patterns (nonisolated(unsafe)
-        // let, withUnsafePointer, etc.) all still require reading the var
-        // somewhere, which the compiler chases recursively. Until Apple
-        // ships a sendable accessor we relax language mode for this
-        // target while keeping the strict-concurrency *style*
-        // commitments (@MainActor on UI surfaces, `actor` for shared
-        // mutable services) intact. CLAUDE.md (apple) talks about
-        // "Swift 6 strict concurrency" as a code-style rule; this change
-        // is to the compiler enforcement mode, not the code style.
+        // Production targets compile in Swift 6 mode; concurrency diagnostics
+        // are release-blocking rather than deferred to code review.
         .executableTarget(
             name: "FileIDEngine",
             dependencies: [
@@ -73,19 +63,13 @@ let package = Package(
                 .product(name: "onnxruntime",          package: "onnxruntime-swift-package-manager")
             ],
             path: "engine/Sources/FileIDEngine",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
         // SwiftUI app. Spawns FileIDEngine via Process API.
         // GRDB is read-only here — the app opens a DatabaseQueue (not
         // Pool) for snapshot-style reads. The engine is the only writer.
-        //
-        // V15.2.1: language mode .v5 mirrors FileIDEngine. AppKit types
-        // (NSImage) aren't Sendable, and the legacy Task<NSImage?>
-        // patterns in ThumbnailService / LibraryView would require a
-        // larger refactor to satisfy Swift 6 strict concurrency. Code
-        // style (@MainActor on UI surfaces, actor for shared mutable
-        // services) stays per CLAUDE.md.
+
         .executableTarget(
             name: "FileID",
             dependencies: [
@@ -98,7 +82,7 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             path: "app/Sources/FileID",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
         .testTarget(
@@ -114,6 +98,12 @@ let package = Package(
             name: "EngineTests",
             dependencies: ["FileIDEngine"],
             path: "Tests/EngineTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "FileIDAppTests",
+            dependencies: ["FileID"],
+            path: "Tests/FileIDAppTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         )
     ]

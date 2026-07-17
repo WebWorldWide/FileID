@@ -28,6 +28,14 @@ public sealed class SentinelProbeTests : IDisposable
     private void Touch(string name) =>
         File.WriteAllText(Path.Combine(_dir, name), string.Empty);
 
+    private void CreateSized(string relative, long length)
+    {
+        var path = Path.Combine(_dir, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        stream.SetLength(length);
+    }
+
     [Fact]
     public void FlatSentinel_ReadsInstalled()
     {
@@ -67,6 +75,62 @@ public sealed class SentinelProbeTests : IDisposable
     {
         Touch("arcface_xl-0011223344556677.installed");
         Assert.False(SentinelProbe.InstalledIn(_dir, "arcface"));
+    }
+
+    [Fact]
+    public void RuntimeArtifacts_RejectZeroByteOrTruncatedFiles()
+    {
+        var runtime = Path.Combine(_dir, "llama.cpp");
+        Directory.CreateDirectory(runtime);
+        File.WriteAllBytes(Path.Combine(runtime, "llama-server.exe"), new byte[20_000]);
+        File.WriteAllBytes(Path.Combine(runtime, "llama-mtmd-cli.exe"), Array.Empty<byte>());
+        File.WriteAllBytes(Path.Combine(runtime, "mtmd.dll"), new byte[20_000]);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_x64"));
+
+        File.WriteAllBytes(Path.Combine(runtime, "llama-mtmd-cli.exe"), new byte[20_000]);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_x64"));
+    }
+
+    [Fact]
+    public void MobileClip_UsesCanonicalRegistryPath()
+    {
+        CreateSized(Path.Combine("mobileclip", "mobileclip_s2_image.onnx"), 1_000_000);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "mobileclip_s2"));
+    }
+
+    [Fact]
+    public void RamPlus_RequiresThresholdSidecar()
+    {
+        CreateSized(Path.Combine("ram_plus", "ram_plus.onnx"), 1_000_000);
+        CreateSized(Path.Combine("ram_plus", "ram_plus_tags.txt"), 1_000);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "ram_plus"));
+        CreateSized(Path.Combine("ram_plus", "ram_plus_thresholds.txt"), 1_000);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "ram_plus"));
+    }
+
+    [Fact]
+    public void CudaRuntime_RequiresMultimodalLibrary()
+    {
+        CreateSized(Path.Combine("llama.cpp-cuda", "llama-server.exe"), 20_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "llama-mtmd-cli.exe"), 20_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "cudart64_12.dll"), 1_000_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "cublas64_12.dll"), 1_000_000);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
+        CreateSized(Path.Combine("llama.cpp-cuda", "mtmd.dll"), 20_000);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
+    }
+
+    [Fact]
+    public void Florence_RequiresEveryRegisteredArtifact()
+    {
+        CreateSized(Path.Combine("florence2", "vision_encoder.onnx"), 1_000_000);
+        CreateSized(Path.Combine("florence2", "embed_tokens.onnx"), 1_000_000);
+        CreateSized(Path.Combine("florence2", "encoder_model.onnx"), 1_000_000);
+        CreateSized(Path.Combine("florence2", "decoder_model_merged.onnx"), 1_000_000);
+        CreateSized(Path.Combine("florence2", "tokenizer.json"), 1_000);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "florence2_base"));
+        CreateSized(Path.Combine("florence2", "config.json"), 1_000);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "florence2_base"));
     }
 
     [Fact]

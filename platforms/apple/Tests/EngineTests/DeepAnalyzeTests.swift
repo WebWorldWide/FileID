@@ -10,6 +10,7 @@
 // on-device, not here — see the structured result for the skip rationale.
 import Testing
 import Foundation
+import AVFoundation
 import GRDB
 @testable import FileIDEngine
 // Disambiguate from GRDB.Database (both modules export `Database`).
@@ -129,14 +130,67 @@ struct DeepAnalyzePureLogicTests {
         #expect(DeepAnalyze.pixelsExceedDecodeCap(width: 50_000_001, height: 1))
     }
 
+    @Test("video keyframe target is one quarter of duration")
+    func representativeVideoTime() {
+        #expect(abs(DeepAnalyze.representativeVideoTime(durationSeconds: 120).seconds - 30) < 0.001)
+        #expect(abs(DeepAnalyze.representativeVideoTime(durationSeconds: 3).seconds - 0.75) < 0.001)
+        #expect(abs(DeepAnalyze.representativeVideoTime(durationSeconds: nil).seconds - 1) < 0.001)
+        #expect(abs(DeepAnalyze.representativeVideoTime(durationSeconds: .infinity).seconds - 1) < 0.001)
+    }
+
     // F-C3-043 — the HF tree listing must be recursive, or a repo with any
     // subfolder installs incomplete yet writes the verified sentinel.
+    @Test("video duration loading has a wall-clock timeout")
+    func videoDurationTimeout() async {
+        let asset = AVURLAsset(url: URL(fileURLWithPath: "/definitely/missing/video.mp4"))
+        let clock = ContinuousClock()
+        let started = clock.now
+        let duration = await DeepAnalyze.loadVideoDurationSeconds(asset, timeoutSeconds: 0)
+        #expect(duration == nil)
+        #expect(started.duration(to: clock.now) < .seconds(1))
+    }
+
     @Test("treeListURL: listing is recursive")
     func recursiveTreeListing() throws {
         let url = try #require(VLMDownloader.treeListURL(
             repo: "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit", revision: "abc123"))
         #expect(url.query?.contains("recursive=true") == true,
                 "tree listing must be recursive: \(url.absoluteString)")
+    }
+
+    @Test("verified VLM sentinel detects missing and same-size-corrupt files")
+    func verifiedSentinelAttestsInstalledFiles() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileID-VLM-Sentinel-\(UUID().uuidString)")
+        let modelDir = tmp.appendingPathComponent("model")
+        let sentinel = modelDir.appendingPathComponent(".fileid-verified-rev")
+        try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let file = modelDir.appendingPathComponent("config.json")
+        try Data("alpha".utf8).write(to: file)
+        let listed = [VLMRepoFile(path: "config.json", size: 5, sha256: nil)]
+        try await VLMDownloader.writeVerifiedSentinel(
+            sentinel,
+            modelDir: modelDir,
+            revision: "rev",
+            files: listed
+        )
+        #expect(await VLMDownloader.verifiedSentinelIsValid(
+            sentinel, modelDir: modelDir, revision: "rev"
+        ))
+
+        try Data("omega".utf8).write(to: file)
+        let corruptIsValid = await VLMDownloader.verifiedSentinelIsValid(
+            sentinel, modelDir: modelDir, revision: "rev"
+        )
+        #expect(!corruptIsValid)
+
+        try FileManager.default.removeItem(at: file)
+        let missingIsValid = await VLMDownloader.verifiedSentinelIsValid(
+            sentinel, modelDir: modelDir, revision: "rev"
+        )
+        #expect(!missingIsValid)
     }
 
     // F-C3-027 — folder-scope LIKE must escape `_`/`%`.

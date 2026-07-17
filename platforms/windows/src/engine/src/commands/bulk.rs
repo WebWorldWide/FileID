@@ -13,64 +13,11 @@ use crate::pipeline::face_clustering::{MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
-#[cfg(windows)]
-use std::path::Path;
-#[cfg(windows)]
-use windows::core::PCWSTR;
-#[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
-
-/// No-clobber filename rename (same directory, filesystem move). On Windows this
-/// is `MoveFileExW(MOVEFILE_COPY_ALLOWED)` with NO `MOVEFILE_REPLACE_EXISTING`,
-/// so an occupied destination fails the move atomically inside the kernel rather
-/// than being silently overwritten — closing the existence-check→rename TOCTOU.
-/// Both operands carry the `\\?\` extended-length prefix (the engine .exe has no
-/// longPathAware manifest); mirrors restructure_apply.rs::move_file (B3).
-#[cfg(windows)]
-fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    let src_ext = crate::util::path_safety::to_extended_length(src);
-    let dst_ext = crate::util::path_safety::to_extended_length(dst);
-    let src_w: Vec<u16> = src_ext
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let dst_w: Vec<u16> = dst_ext
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(src_w.as_ptr()),
-            PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_COPY_ALLOWED,
-        )
-        .map_err(|e| std::io::Error::other(e.to_string()))
-    }
-}
-
-#[cfg(not(windows))]
-fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    // POSIX rename(2) ATOMICALLY REPLACES an existing destination — the opposite
-    // of the Windows MoveFileExW path (which drops MOVEFILE_REPLACE_EXISTING). So
-    // the "no-clobber" contract this function's name promises must be enforced
-    // here ourselves: a rename onto an occupied name would otherwise silently
-    // destroy the file already there. symlink_metadata (no traversal) treats a
-    // pre-existing file, directory, or broken symlink at `dst` as occupied —
-    // mirrors restructure_apply::move_file's guard. A surviving collision means
-    // an unexpected race, so fail safe rather than overwrite.
-    if dst.symlink_metadata().is_ok() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("destination already exists: {}", dst.display()),
-        ));
-    }
-    std::fs::rename(
-        crate::util::path_safety::to_extended_length(src),
-        crate::util::path_safety::to_extended_length(dst),
-    )
+fn no_clobber_rename(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<()> {
+    crate::util::rename_no_replace(src, dst)
 }
 
 /// C1-012: best-effort durable record of an on-disk rename whose DB row is
@@ -385,12 +332,23 @@ pub(crate) async fn handle_rename_files(
                     crate::pipeline::dbwriter::nfc_path_search(dest_text)
                 ],
             ) {
-                Ok(_) => {
+                Ok(1) => {
                     succeeded += 1;
                     messages.push(BulkActionItem {
                         file_id: Some(*file_id),
                         ok: true,
                         message: Some(dest_text.clone()),
+                    });
+                }
+                Ok(changed) => {
+                    record_rename_recovery(*file_id, src_text, dest_text);
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(*file_id),
+                        ok: false,
+                        message: Some(format!(
+                            "renamed on disk but DB update affected {changed} rows (expected 1)"
+                        )),
                     });
                 }
                 Err(err) => {
@@ -430,6 +388,34 @@ pub(crate) async fn handle_rename_files(
     .await;
 
     emit_bulk_result(&sink, "renameFiles", result).await;
+}
+
+fn trash_commit_failure_result(
+    batch_id: String,
+    succeeded: u32,
+    failed: u32,
+    mut messages: Vec<BulkActionItem>,
+    error: &str,
+) -> BulkActionResult {
+    for message in messages.iter_mut().filter(|message| message.ok) {
+        message.ok = false;
+        message.message = Some(format!(
+            "moved to Trash, but the catalog commit failed ({error}); use Undo batch {batch_id} to restore"
+        ));
+    }
+    messages.push(BulkActionItem {
+        file_id: None,
+        ok: false,
+        message: Some(format!(
+            "catalog commit failed after Trash; recovery batch: {batch_id}"
+        )),
+    });
+    BulkActionResult {
+        action: format!("trashFiles:{batch_id}"),
+        succeeded: 0,
+        failed: failed.saturating_add(succeeded),
+        messages,
+    }
 }
 
 /// Trash a set of files. Looks up paths from the DB, hands a Vec<PathBuf>
@@ -510,18 +496,41 @@ pub(crate) async fn handle_trash_files(
                 continue;
             }
             if trashed_ok {
-                let _ = tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]);
-                succeeded += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(*fid),
-                    ok: true,
-                    message: Some(path.to_string_lossy().to_string()),
-                });
                 log_items.push(TrashLogItem {
                     file_id: *fid,
                     original_path: path.to_string_lossy().to_string(),
                     recycle_bin_id: None,
                 });
+                match tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]) {
+                    Ok(1) => {
+                        succeeded += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(*fid),
+                            ok: true,
+                            message: Some(path.to_string_lossy().to_string()),
+                        });
+                    }
+                    Ok(changed) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(*fid),
+                            ok: false,
+                            message: Some(format!(
+                                "moved to Trash, but the catalog update affected {changed} rows (expected 1); use Undo to restore"
+                            )),
+                        });
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(*fid),
+                            ok: false,
+                            message: Some(format!(
+                                "moved to Trash, but the catalog update failed ({error}); use Undo to restore"
+                            )),
+                        });
+                    }
+                }
             } else {
                 failed += 1;
                 messages.push(BulkActionItem {
@@ -557,7 +566,20 @@ pub(crate) async fn handle_trash_files(
                 );
             }
         }
-        tx.commit()?;
+        if let Err(error) = tx.commit() {
+            tracing::error!(
+                error = %error,
+                batch_id = %batch_id,
+                "trash catalog commit failed after journal append; surfacing recoverable batch"
+            );
+            return Ok(trash_commit_failure_result(
+                batch_id,
+                succeeded,
+                failed,
+                messages,
+                &error.to_string(),
+            ));
+        }
 
         // Tag the BulkActionResult.action with the batch id so the app can
         // store it on the UndoStack entry without an extra IPC.
@@ -1194,6 +1216,30 @@ mod tests {
         assert_eq!(second["file_id"], 2);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trash_commit_failure_preserves_recovery_batch_and_reports_failure() {
+        let result = trash_commit_failure_result(
+            "batch-123".into(),
+            1,
+            0,
+            vec![BulkActionItem {
+                file_id: Some(7),
+                ok: true,
+                message: Some("old path".into()),
+            }],
+            "disk full",
+        );
+        assert_eq!(result.action, "trashFiles:batch-123");
+        assert_eq!(result.succeeded, 0);
+        assert_eq!(result.failed, 1);
+        assert!(result.messages.iter().all(|message| !message.ok));
+        assert!(result
+            .messages
+            .iter()
+            .filter_map(|message| message.message.as_deref())
+            .any(|message| message.contains("Undo batch batch-123")));
     }
 
     // C1-012: a second write appends rather than truncating (NDJSON growth).

@@ -690,7 +690,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     let personID: Int64
     let personName: String
     let store: ReadStore
-    let onMerged: (Int) -> Void
+    let onMerged: @MainActor @Sendable (Int) -> Void
 
     func body(content: Content) -> some View {
         if enabled {
@@ -709,7 +709,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
                     Task.detached(priority: .userInitiated) {
                         let n = storeRef.mergePersons(target: targetID,
                                                       sources: [sourceID]) ?? 0
-                        await MainActor.run { completion(n) }
+                        await completion(n)
                     }
                     return true
                 } isTargeted: { _ in }
@@ -1262,7 +1262,7 @@ private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
     let store: ReadStore
     let fileIDs: [Int64]
-    let onMoved: (_ count: Int, _ targetName: String) -> Void
+    let onMoved: @MainActor @Sendable (_ count: Int, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
 
@@ -1304,7 +1304,7 @@ private struct MovePhotosTargetPicker: View {
                                     toPersonID: targetID,
                                     fileIDs: ids
                                 )
-                                await MainActor.run { completion(moved, targetName) }
+                                await completion(moved, targetName)
                             }
                         } label: {
                             PersonCard(person: p, store: store)

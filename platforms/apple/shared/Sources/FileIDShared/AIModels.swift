@@ -86,11 +86,23 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         }
     }
 
+    public var licensePolicyKey: String {
+        switch self {
+        case .qwen2VL7B, .qwen3VL4B, .mistralSmall32: return "Apache-2.0"
+        case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
+        }
+    }
+
     public var licenseName: String {
         switch self {
         case .qwen2VL7B, .qwen3VL4B, .mistralSmall32: return "Apache License 2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
         }
+    }
+
+    public var licenseTermsURL: URL? {
+        guard licensePolicyKey == "Gemma" else { return nil }
+        return URL(string: "https://ai.google.dev/gemma/terms")
     }
 
     /// Top three picks for a given RAM tier, ranked best-first.

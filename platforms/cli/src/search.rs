@@ -87,9 +87,9 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
     // we re-sort by source tier for display so content matches lead.
     let mut hits: BTreeMap<i64, Hit> = BTreeMap::new();
 
-    collect_fts(&conn, "doc_fts", &fts_expr, limit, "content", &mut hits);
-    collect_fts(&conn, "ocr_fts", &fts_expr, limit, "ocr", &mut hits);
-    collect_filename(&conn, raw, limit, &mut hits);
+    collect_fts(&conn, "doc_fts", &fts_expr, limit, "content", &mut hits)?;
+    collect_fts(&conn, "ocr_fts", &fts_expr, limit, "ocr", &mut hits)?;
+    collect_filename(&conn, raw, limit, &mut hits)?;
 
     let mut rows: Vec<Hit> = hits.into_values().collect();
     rows.sort_by_key(|h| (source_rank(h.source), h.ordinal, h.id));
@@ -151,16 +151,14 @@ fn collect_fts(
     limit: usize,
     source: &'static str,
     out: &mut BTreeMap<i64, Hit>,
-) {
+) -> Result<()> {
     let sql = format!(
         "SELECT f.id, f.path_text, f.kind, f.size_bytes, \
          snippet({table}, 0, '', '', '…', 10) \
          FROM {table} JOIN files f ON f.id = {table}.rowid \
-         WHERE {table} MATCH ?1 ORDER BY rank LIMIT ?2"
+         WHERE {table} MATCH ?1 AND f.failed = 0 ORDER BY rank LIMIT ?2"
     );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return;
-    };
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![expr, limit as i64], |r| {
         Ok(Hit {
             id: r.get(0)?,
@@ -171,15 +169,13 @@ fn collect_fts(
             snippet: r.get::<_, Option<String>>(4)?,
             ordinal: 0,
         })
-    });
-    if let Ok(rows) = rows {
-        // Rows arrive in `ORDER BY rank` (best first) — record the position so the
-        // id-keyed dedup + final sort preserve FTS relevance within this tier.
-        for (i, mut h) in rows.flatten().enumerate() {
-            h.ordinal = i;
-            out.entry(h.id).or_insert(h);
-        }
+    })?;
+    for (i, row) in rows.enumerate() {
+        let mut hit = row?;
+        hit.ordinal = i;
+        out.entry(hit.id).or_insert(hit);
     }
+    Ok(())
 }
 
 fn collect_filename(
@@ -187,14 +183,12 @@ fn collect_filename(
     raw: &str,
     limit: usize,
     out: &mut BTreeMap<i64, Hit>,
-) {
+) -> Result<()> {
     let like = format!("%{}%", raw.to_lowercase());
-    let Ok(mut stmt) = conn.prepare(
+    let mut stmt = conn.prepare(
         "SELECT id, path_text, kind, size_bytes FROM files \
-         WHERE lower(path_text) LIKE ?1 LIMIT ?2",
-    ) else {
-        return;
-    };
+         WHERE failed = 0 AND lower(path_text) LIKE ?1 LIMIT ?2",
+    )?;
     let rows = stmt.query_map(params![like, limit as i64], |r| {
         Ok(Hit {
             id: r.get(0)?,
@@ -205,15 +199,13 @@ fn collect_filename(
             snippet: None,
             ordinal: 0,
         })
-    });
-    if let Ok(rows) = rows {
-        // Filename LIKE has no relevance rank — keep query (rowid) order as the
-        // tier's natural order (this is the lowest-priority tier anyway).
-        for (i, mut h) in rows.flatten().enumerate() {
-            h.ordinal = i;
-            out.entry(h.id).or_insert(h);
-        }
+    })?;
+    for (i, row) in rows.enumerate() {
+        let mut hit = row?;
+        hit.ordinal = i;
+        out.entry(hit.id).or_insert(hit);
     }
+    Ok(())
 }
 
 fn source_rank(source: &str) -> u8 {
@@ -262,7 +254,12 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
         // Distinguish "no embeddings at all" (model-free library) from "this
         // particular file wasn't embedded".
         let total: i64 = conn
-            .query_row("SELECT COUNT(*) FROM clip_embeddings", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id = e.file_id \
+                 WHERE f.failed = 0",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         let (kind, msg) = if total == 0 {
             (
@@ -292,7 +289,7 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path_text, f.kind, f.size_bytes, e.embedding \
          FROM clip_embeddings e JOIN files f ON f.id = e.file_id \
-         WHERE e.file_id <> ?1",
+         WHERE e.file_id <> ?1 AND f.failed = 0",
     )?;
     let rows = stmt.query_map(params![seed_id], |r| {
         Ok((
@@ -304,7 +301,8 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
         ))
     })?;
     let mut top = BinaryHeap::with_capacity(limit.saturating_add(1));
-    for (id, path, kind, size, blob) in rows.flatten() {
+    for row in rows {
+        let (id, path, kind, size, blob) = row?;
         let v = decode_embedding(&blob);
         let n = norm(&v);
         if v.len() != seed_vec.len() || n == 0.0 {
@@ -418,6 +416,14 @@ fn absent(ctx: &Ctx, kind: &str, msg: &str, seed_id: Option<i64>) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_search_tables_are_reported_as_errors() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut hits = BTreeMap::new();
+        assert!(collect_filename(&connection, "x", 10, &mut hits).is_err());
+        assert!(collect_fts(&connection, "doc_fts", "x", 10, "content", &mut hits).is_err());
+    }
 
     #[test]
     fn top_k_similarity_memory_is_bounded_and_ordered() {

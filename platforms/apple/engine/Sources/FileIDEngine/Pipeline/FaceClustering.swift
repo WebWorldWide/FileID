@@ -180,10 +180,13 @@ public enum FaceClustering {
             // releases instead of the UI hanging "clustering…". (hardening)
             if FaceEmbedderKind.installedKinds().isEmpty {
                 JSONLog.shared.warn(ev: "face_cluster_skipped_no_model",
-                                    error: "ArcFace model not installed; cannot cluster.")
+                                    error: "SFace model not installed; cannot cluster.")
+                let bytes = ModelManifest.artifacts
+                    .first { $0.id == "sface_embedder" }?.approxBytes ?? 0
+                let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
                 await sink.emit(.error(EngineError(
                     kind: "face_cluster_no_model",
-                    message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install ArcFace iResNet50 (166 MB) or MobileFace (13 MB)."
+                    message: "Face-recognition model not installed. Open Settings → AI Models — face recognition to install SFace (\(size))."
                 )))
             } else {
                 // A model IS on disk but load() couldn't bind it (execution

@@ -6,7 +6,8 @@
 //! `pipeline::audio_decode` produces; the transcript becomes the file's descriptive name.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -74,7 +75,7 @@ impl WhisperRunner {
     /// thread forever — the caller then falls back to metadata naming. Mirrors the
     /// kill-on-stall discipline of the VLM subprocess (`vlm::caption`). stdout is drained
     /// on a reader thread so a chatty child never fills the pipe and blocks.
-    pub fn transcribe(&self, model: &Path, wav: &Path) -> Result<String> {
+    pub fn transcribe(&self, model: &Path, wav: &Path, cancel: &AtomicBool) -> Result<String> {
         use std::io::Read;
         let mut child = Command::new(&self.binary)
             .arg("-m")
@@ -96,36 +97,48 @@ impl WhisperRunner {
             let _ = stdout.read_to_string(&mut s);
             s
         });
-        let deadline = std::time::Instant::now() + TRANSCRIBE_TIMEOUT;
-        loop {
-            // try_wait() can itself fail with a rare OS error; on that path we
-            // must still reap the child + drain the reader, or the whisper-cli
-            // process is orphaned. Every other engine child uses kill_on_drop;
-            // this sync spawn predates that, so each exit path reaps explicitly.
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let text = reader.join().unwrap_or_default();
-                    if !status.success() {
-                        bail!("whisper-cli exited with status {}", status);
-                    }
-                    return Ok(collapse_transcript(&text));
+        let text = wait_for_transcript(child, reader, cancel, TRANSCRIBE_TIMEOUT)?;
+        Ok(collapse_transcript(&text))
+    }
+}
+
+fn wait_for_transcript(
+    mut child: Child,
+    reader: std::thread::JoinHandle<String>,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            bail!("cancelled");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let text = reader.join().unwrap_or_default();
+                if !status.success() {
+                    bail!("whisper-cli exited with status {}", status);
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err(e).context("whisper-cli try_wait");
-                }
+                return Ok(text);
             }
-            if std::time::Instant::now() >= deadline {
+            Ok(None) => {}
+            Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
-                bail!("whisper-cli timed out after {:?}", TRANSCRIBE_TIMEOUT);
+                return Err(error).context("whisper-cli try_wait");
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            bail!("whisper-cli timed out after {:?}", timeout);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -150,6 +163,46 @@ pub(crate) fn collapse_transcript(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_kills_and_reaps_child() {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("models::whisper::tests::whisper_test_child")
+            .arg("--nocapture")
+            .env("FILEID_WHISPER_TEST_CHILD", "1")
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let reader = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut text = String::new();
+            let _ = stdout.read_to_string(&mut text);
+            text
+        });
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            cancel_for_thread.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let error = wait_for_transcript(child, reader, &cancel, Duration::from_secs(30))
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn whisper_test_child() {
+        if std::env::var("FILEID_WHISPER_TEST_CHILD").as_deref() != Ok("1") {
+            return;
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
 
     #[test]
     fn collapse_transcript_joins_and_collapses_whitespace() {

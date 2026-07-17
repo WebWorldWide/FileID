@@ -286,16 +286,30 @@ public enum DeepAnalyzeRunner {
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
             var result: DeepAnalyze.AnalysisResult
             if kind == .audio {
-                result = await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                }
             } else {
                 // Pull face cluster names (if any) to inject into the prompt.
                 let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
-                result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
+                result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyze.shared.analyze(
+                        imageURL: url,
+                        faceNames: faceNames,
+                        onToken: onToken
+                    )
+                }
                 // A 3D model the OS couldn't render (no QuickLook generator) or the VLM
                 // couldn't caption → its embedded-name metadata, so it still gets a name.
                 if kind == .model, Self.isAnalysisFailure(result.description) {
-                    result = await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                    result = await DeepAnalyze.shared.runCancellableAnalysis {
+                        await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                    }
                 }
+            }
+            if await DeepAnalyze.shared.isCancelled() {
+                cancelled = true
+                break
             }
             let isFailure = Self.isAnalysisFailure(result.description)
             if isFailure {

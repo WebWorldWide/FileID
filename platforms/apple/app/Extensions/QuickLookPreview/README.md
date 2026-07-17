@@ -4,7 +4,7 @@ When the user presses Space on a JPEG/PNG/HEIC in Finder, this extension takes o
 
 ## Status
 
-**Source-complete; build target not wired into SwiftPM.**
+**Unshipped prototype — not present in FileID.app or any release artifact.**
 
 SwiftPM cannot build app extensions (`.appex` bundles). Apple requires extensions to be built via an Xcode project with a separate target. The source in this folder is ready to drop into an Xcode target as soon as you've got an Apple Developer account and have generated `FileID.xcodeproj`.
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/**"
+      - "shared/scripts/test_check_model_license_policy.py"
       - "**/*.sh"
       - "platforms/windows/src/engine/src/models/registry.rs"
       - "platforms/windows/src/engine/src/downloader.rs"
@@ -20,6 +21,8 @@ on:
       - "shared/scripts/setup-dev.sh"
       - "shared/scripts/requirements-ramplus.txt"
       - "shared/scripts/check_current_docs.py"
+      - "shared/scripts/check_model_license_policy.py"
+      - "shared/models/**"
       - "README.md"
       - "packaging/**/*.md"
       - "packaging/flatpak/io.github.fileid.FileID.yaml"
@@ -29,6 +32,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      - "shared/scripts/test_check_model_license_policy.py"
       - "**/*.sh"
       - "platforms/windows/src/engine/src/models/registry.rs"
       - "platforms/windows/src/engine/src/downloader.rs"
@@ -44,6 +48,8 @@ on:
       - "shared/scripts/setup-dev.sh"
       - "shared/scripts/requirements-ramplus.txt"
       - "shared/scripts/check_current_docs.py"
+      - "shared/scripts/check_model_license_policy.py"
+      - "shared/models/**"
       - "README.md"
       - "packaging/**/*.md"
       - "packaging/flatpak/io.github.fileid.FileID.yaml"
@@ -78,3 +84,7 @@ jobs:
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
+      - name: Test model license policy
+        run: python shared/scripts/test_check_model_license_policy.py
+      - name: Enforce reviewed model license policy
+        run: python shared/scripts/check_model_license_policy.py

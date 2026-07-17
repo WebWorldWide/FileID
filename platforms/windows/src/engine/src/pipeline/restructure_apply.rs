@@ -549,35 +549,27 @@ impl RestructureApply {
                     if !self.use_symlinks {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
-                        if let Err(err) = update_path_in_db(&self.db_conn, m.file_id, &final_dest) {
-                            // B5: the file is already relocated; do NOT silently
-                            // swallow. Record it durably for recovery and log at
-                            // error. (It also self-heals on the next scan via
-                            // rename-heal on the NTFS file_ref.)
-                            tracing::error!(
-                                ?err,
-                                file_id = m.file_id,
-                                dst = %crate::platform::redact_path_for_log(&final_dest),
-                                "[RESTRUCTURE] moved on disk but DB path update failed; recorded for recovery"
-                            );
-                            record_path_update_failure(m.file_id, &m.source, &final_dest);
-                        }
-                        // Move the on-disk tags sidecar to follow the file (#27).
-                        // Real-move branch only — symlink mode leaves the source
-                        // (and its sidecar) in place. Best-effort; uses
-                        // final_dest since collisions uniquify the name.
+                        let db_updated = match update_path_in_db(&self.db_conn, m.file_id, &final_dest) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                tracing::error!(
+                                    ?err,
+                                    file_id = m.file_id,
+                                    dst = %crate::platform::redact_path_for_log(&final_dest),
+                                    "[RESTRUCTURE] moved on disk but DB path update failed; recorded for recovery"
+                                );
+                                record_path_update_failure(m.file_id, &m.source, &final_dest);
+                                false
+                            }
+                        };
                         crate::shell::tags::move_sidecar(
                             std::path::Path::new(&m.source),
                             &final_dest,
                         );
-                        // The inverse entry was already written AND synced
-                        // before this move executed (write-ahead above).
-                        // Same forward-only gate as the journal: this move was
-                        // approved by the user, so credit it to the feedback
-                        // memory. Recorded for every real forward move
-                        // independently of journal state, so an undo journal
-                        // that failed to open doesn't also silently disable
-                        // learning. (record_undo=false on an undo run.)
+                        if !db_updated {
+                            failed += 1;
+                            continue;
+                        }
                         if record_undo {
                             applied_pairs.push((m.source.clone(), final_dest.clone()));
                             if applied_pairs.len() >= APPLY_PROGRESS_INTERVAL {
@@ -853,26 +845,34 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
         std::fs::create_dir_all(parent)
             .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
     }
-    // symlink_metadata does not follow links, so a pre-existing file, directory,
-    // or (broken) symlink at `dst` all count as occupied and block the move.
-    if dst.symlink_metadata().is_ok() {
-        return Err(ApplyError::Other(anyhow::anyhow!(
-            "destination already exists: {}",
-            dst.display()
-        )));
-    }
-    match std::fs::rename(src_path, dst) {
+    match crate::util::rename_no_replace(src_path, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // dst is verified-absent above, so copy creates a fresh file; only
-            // unlink the original once the copy is durable.
-            std::fs::copy(src_path, dst)
+        Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            let mut source = std::fs::File::open(src_path)
                 .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
-            std::fs::remove_file(src_path)
+            let permissions = source
+                .metadata()
+                .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?
+                .permissions();
+            let mut destination = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dst)
                 .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+            let copied = std::io::copy(&mut source, &mut destination)
+                .and_then(|_| std::fs::set_permissions(dst, permissions))
+                .and_then(|_| destination.sync_all());
+            if let Err(error) = copied {
+                let _ = std::fs::remove_file(dst);
+                return Err(ApplyError::Other(anyhow::Error::msg(error.to_string())));
+            }
+            if let Err(error) = std::fs::remove_file(src_path) {
+                let _ = std::fs::remove_file(dst);
+                return Err(ApplyError::Other(anyhow::Error::msg(error.to_string())));
+            }
             Ok(())
         }
-        Err(e) => Err(ApplyError::Other(anyhow::Error::msg(e.to_string()))),
+        Err(error) => Err(ApplyError::Other(anyhow::Error::msg(error.to_string()))),
     }
 }
 
@@ -914,9 +914,13 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     // its user tags/person assignments. OR ABORT raises instead, and the caller's
     // record_path_update_failure recovery arm reconciles it on the next scan.
     // (audit 2026-07: rename-heal ON CONFLICT REPLACE sibling)
-    conn.prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
+    let changed = conn
+        .prepare_cached("UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
         .execute(params![path_text, path_hash, file_id, path_search])
         .context("DB UPDATE files.path_text")?;
+    if changed != 1 {
+        anyhow::bail!("DB UPDATE files.path_text affected {changed} rows (expected 1)");
+    }
     Ok(())
 }
 
@@ -1294,6 +1298,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tag, 1, "the live row's user tag must not be FK-cascade-deleted");
+    }
+
+    #[test]
+    fn update_path_in_db_rejects_a_disappeared_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let error = update_path_in_db(&db, 404, Path::new("C:/lib/moved.jpg")).unwrap_err();
+        assert!(error.to_string().contains("affected 0 rows"));
+    }
+
+    #[test]
+    fn apply_reports_db_path_update_failure_and_keeps_undo() {
+        let root = undo_fixture_root("db-update-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.jpg");
+        let destination = root.join("Sorted").join("source.jpg");
+        std::fs::write(&source, b"source").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &source.to_string_lossy());
+        insert_file_row(&conn, 2, &destination.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        let result = apply
+            .apply(&[move_fixture(
+                1,
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+            )])
+            .unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert!(!source.exists(), "the filesystem move already completed");
+        assert!(destination.exists());
+        assert!(journal.exists(), "the recovery boundary must remain available");
+        let stored_path: String = db
+            .lock()
+            .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored_path, source.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

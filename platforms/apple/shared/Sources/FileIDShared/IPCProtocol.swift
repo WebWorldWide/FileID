@@ -22,7 +22,7 @@ public struct IPCCommand: Codable, Sendable {
         /// (folders to prune from the walk). Mirrors the schema's StartScan
         /// shape byte-for-byte — the app resolves the security-scoped bookmark
         /// to a path before sending.
-        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool, excludedPaths: [String]?)
+        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
         case pauseScan
         case resumeScan
         case cancelScan

@@ -187,7 +187,9 @@ jobs:
             "developer.download.nvidia.com",
             "developer.nvidia.com",
             "schemas.microsoft.com",
-            "schemas.openxmlformats.org"
+            "schemas.openxmlformats.org",
+            "ai.google.dev",
+            "docs.nvidia.com"
           )
           $sources = Get-ChildItem -Path src -Recurse -File `
             -Include *.cs,*.xaml,*.xaml.cs |

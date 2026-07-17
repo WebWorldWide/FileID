@@ -137,8 +137,8 @@ public actor IPCSink {
     /// performs ONE blocking write outside the actor's hot path. Even if the
     /// parent is glacial, only this one task waits — emit() never does.
     private func drainLoop() async {
-        while await !self.isDoneDraining() {
-            let batch = await self.takeBatch()
+        while !self.isDoneDraining() {
+            let batch = self.takeBatch()
             if batch.isEmpty {
                 // Wait for emit() to wake us. Cap with a 250 ms timeout so
                 // we periodically re-check `closed` (and don't strand on a

@@ -292,11 +292,11 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     // when multiple bin entries share one original path (C1-003).
     let joined = wanted_paths.join(RB_PATH_SEP);
     let script = RESTORE_BATCH_SCRIPT;
-    // SEC: pin -ExecutionPolicy Bypass so the script runs even when group
-    // policy locks the user-default policy. Script is internal (not user-
-    // supplied); the path list crosses via an env var so there's no string-
-    // interpolation surface.
-    let status = std::process::Command::new("powershell.exe")
+    let Some(powershell) = system_powershell_path() else {
+        tracing::warn!("could not resolve the trusted system PowerShell path");
+        return;
+    };
+    let child = std::process::Command::new(powershell)
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -306,19 +306,62 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
             script,
         ])
         .env("FILEID_RB_PATHS", &joined)
-        .status();
-    match status {
-        Ok(status) if !status.success() => {
-            tracing::warn!(code = ?status.code(), "powershell batch restore exited non-zero");
+        .stdin(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!(%error, "powershell batch restore failed to spawn");
+            return;
         }
-        Ok(_) => {}
-        // A failed spawn (e.g. an env value Command rejects) must NOT pass
-        // silently — it means none of the batch was pulled from the Recycle
-        // Bin, so the caller reports every item as unrecoverable. (C1-018)
-        Err(e) => {
-            tracing::warn!(error = %e, "powershell batch restore failed to spawn");
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                tracing::warn!(code = ?status.code(), "powershell batch restore exited non-zero");
+                break;
+            }
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("powershell batch restore timed out and was terminated");
+                break;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!(%error, "waiting for powershell batch restore failed");
+                break;
+            }
         }
     }
+}
+
+#[cfg(windows)]
+fn system_powershell_path() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+
+    let mut buffer = vec![0u16; 32_768];
+    // The OS supplies the System32 path; unlike PATH/SystemRoot lookup this
+    // cannot be redirected to a same-user executable.
+    let length = unsafe {
+        windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut buffer))
+    } as usize;
+    if length == 0 || length >= buffer.len() {
+        return None;
+    }
+    let system_dir = std::ffi::OsString::from_wide(&buffer[..length]);
+    Some(
+        std::path::PathBuf::from(system_dir)
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe"),
+    )
 }
 
 /// Linux: restore from the freedesktop home trash (the real parity of the

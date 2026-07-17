@@ -152,8 +152,8 @@ enum Command {
         /// Group near-duplicates by perceptual-hash Hamming distance.
         #[arg(long)]
         similar: bool,
-        /// Near-dup Hamming threshold (bits).
-        #[arg(long, default_value_t = 8)]
+        /// Near-dup Hamming threshold (bits, 0–16).
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(0..=16))]
         threshold: u32,
         /// Remove duplicates (keep one per group). Destructive — see `--delete`.
         #[arg(long)]

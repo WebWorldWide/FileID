@@ -18,30 +18,238 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use fileid_engine::pipeline::discovery::FileKind;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension as _};
 use walkdir::WalkDir;
 
 use crate::context::{canonical_path_text, print_json, stable_path_hash, Ctx};
 
 const TEXT_CAP_BYTES: u64 = 4 * 1024 * 1024;
+const DB_BATCH_SIZE: usize = 500;
 
 const UPSERT_SQL: &str = "\
-INSERT INTO files (path_text, path_hash, size_bytes, created_at, modified_at, scanned_at, kind, extension, has_text)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+INSERT INTO files (
+    path_text, path_hash, size_bytes, created_at, modified_at, scanned_at,
+    kind, extension, has_text, file_ref
+)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
 ON CONFLICT(path_text) DO UPDATE SET
-    path_hash   = excluded.path_hash,
-    size_bytes  = excluded.size_bytes,
-    created_at  = COALESCE(excluded.created_at, files.created_at),
-    modified_at = excluded.modified_at,
-    scanned_at  = excluded.scanned_at,
-    kind        = excluded.kind,
-    extension   = excluded.extension,
-    has_text    = CASE
-                    WHEN ?10 = 1 THEN excluded.has_text
-                    WHEN ?9 = 1 THEN 1
-                    ELSE files.has_text
-                  END
+    path_hash    = excluded.path_hash,
+    size_bytes   = excluded.size_bytes,
+    created_at   = COALESCE(excluded.created_at, files.created_at),
+    modified_at  = excluded.modified_at,
+    scanned_at   = excluded.scanned_at,
+    kind         = excluded.kind,
+    extension    = excluded.extension,
+    file_ref     = excluded.file_ref,
+    failed       = 0,
+    error_message = NULL,
+    has_text     = CASE
+                     WHEN ?11 = 1 THEN excluded.has_text
+                     WHEN ?9 = 1 THEN 1
+                     ELSE files.has_text
+                   END
 RETURNING id";
+
+enum ScanRecord {
+    Seen {
+        path_text: String,
+        file_ref: Option<u64>,
+    },
+    Changed {
+        path_text: String,
+        path_hash: i64,
+        size: u64,
+        created: Option<f64>,
+        modified: f64,
+        kind: &'static str,
+        extension: String,
+        authoritative_text: bool,
+        text: Option<String>,
+        file_ref: Option<u64>,
+        invalidate_derived: bool,
+    },
+}
+
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    for index in (0..bytes.len()).rev() {
+        if bytes[index] != u8::MAX {
+            bytes[index] += 1;
+            bytes.truncate(index + 1);
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
+}
+
+fn mark_existing_row_failed(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    message: &str,
+) -> Result<usize> {
+    let path_text = canonical_path_text(path);
+    conn.execute(
+        "UPDATE files SET failed = 1, error_message = ?2 WHERE path_text = ?1",
+        params![path_text, message],
+    )
+    .context("mark unreadable existing file as failed")
+}
+
+fn soft_hide_missing_rows(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    scan_marker: f64,
+) -> Result<u64> {
+    let mut lower = canonical_path_text(root)
+        .trim_end_matches(['/', '\\'])
+        .to_string();
+    lower.push(std::path::MAIN_SEPARATOR);
+    let Some(upper) = prefix_upper_bound(&lower) else {
+        return Ok(0);
+    };
+    let changed = conn
+        .execute(
+            "UPDATE files SET failed = 1, \
+             error_message = 'File is no longer present under the completed scan root.' \
+             WHERE path_text >= ?1 AND path_text < ?2 AND failed = 0 AND scanned_at != ?3",
+            params![lower, upper, scan_marker],
+        )
+        .context("mark missing files after completed scan")?;
+    Ok(changed as u64)
+}
+
+fn commit_batch(
+    conn: &mut rusqlite::Connection,
+    batch: &mut Vec<ScanRecord>,
+    scan_marker: f64,
+) -> Result<(u64, u64)> {
+    if batch.is_empty() {
+        return Ok((0, 0));
+    }
+    let tx = conn.transaction().context("begin scan batch")?;
+    let mut indexed = 0;
+    let mut text_indexed = 0;
+    {
+        let mut mark_seen = tx
+            .prepare(
+                "UPDATE files SET scanned_at = ?1, file_ref = ?2, failed = 0, error_message = NULL \
+                 WHERE path_text = ?3",
+            )
+            .context("prepare unchanged-row update")?;
+        let mut upsert = tx.prepare(UPSERT_SQL).context("prepare files upsert")?;
+        let mut del_doc = tx
+            .prepare("DELETE FROM doc_text WHERE file_id = ?1")
+            .context("prepare doc_text delete")?;
+        let mut ins_doc = tx
+            .prepare("INSERT INTO doc_text (file_id, text) VALUES (?1, ?2)")
+            .context("prepare doc_text insert")?;
+        let mut invalidate_file = tx
+            .prepare(
+                "UPDATE files SET phash = NULL, aesthetic = NULL, has_faces = 0, \
+                 has_text = ?2, camera_model = NULL, location_lat = NULL, location_lon = NULL, \
+                 content_hash = NULL, vlm_description = NULL, vlm_proposed_name = NULL, \
+                 vlm_model = NULL, vlm_analyzed_at = NULL, text_stage_done = 0 WHERE id = ?1",
+            )
+            .context("prepare derived-metadata invalidation")?;
+        let mut delete_auto_tags = tx
+            .prepare("DELETE FROM tags WHERE file_id = ?1 AND source = 'auto'")
+            .context("prepare auto-tag invalidation")?;
+        let mut delete_faces = tx
+            .prepare("DELETE FROM face_prints WHERE file_id = ?1")
+            .context("prepare face invalidation")?;
+        let mut delete_ocr = tx
+            .prepare("DELETE FROM ocr_text WHERE file_id = ?1")
+            .context("prepare OCR invalidation")?;
+        let mut delete_clip = tx
+            .prepare("DELETE FROM clip_embeddings WHERE file_id = ?1")
+            .context("prepare CLIP invalidation")?;
+        let mut delete_text_embedding = tx
+            .prepare("DELETE FROM text_embeddings WHERE file_id = ?1")
+            .context("prepare text-embedding invalidation")?;
+
+        for record in batch.drain(..) {
+            match record {
+                ScanRecord::Seen {
+                    path_text,
+                    file_ref,
+                } => {
+                    mark_seen
+                        .execute(params![
+                            scan_marker,
+                            file_ref.map(|value| value as i64),
+                            path_text
+                        ])
+                        .context("mark unchanged file as seen")?;
+                }
+                ScanRecord::Changed {
+                    path_text,
+                    path_hash,
+                    size,
+                    created,
+                    modified,
+                    kind,
+                    extension,
+                    authoritative_text,
+                    text,
+                    file_ref,
+                    invalidate_derived,
+                } => {
+                    let file_id: i64 = upsert
+                        .query_row(
+                            params![
+                                path_text,
+                                path_hash,
+                                size as i64,
+                                created,
+                                modified,
+                                scan_marker,
+                                kind,
+                                extension,
+                                i64::from(text.is_some()),
+                                file_ref.map(|value| value as i64),
+                                i64::from(authoritative_text)
+                            ],
+                            |row| row.get(0),
+                        )
+                        .context("upsert scanned file")?;
+                    if invalidate_derived {
+                        invalidate_file
+                            .execute(params![file_id, i64::from(text.is_some())])
+                            .context("invalidate stale derived file metadata")?;
+                        // Only automatic tags are cleared on re-index — never
+                        // user-authored ones — even when the file's identity
+                        // (inode) changed at the same path (a replacement). This
+                        // mirrors the engine reference (dbwriter deletes only
+                        // source='auto'); an atomic-save editor that rewrites a
+                        // file to a new inode must not silently wipe the user's
+                        // manual tags.
+                        delete_auto_tags
+                            .execute(params![file_id])
+                            .context("clear stale automatic tags")?;
+                        delete_faces.execute(params![file_id])?;
+                        delete_ocr.execute(params![file_id])?;
+                        delete_clip.execute(params![file_id])?;
+                        delete_text_embedding.execute(params![file_id])?;
+                    }
+                    if authoritative_text || invalidate_derived {
+                        del_doc
+                            .execute(params![file_id])
+                            .context("clear prior document text")?;
+                    }
+                    if let Some(text) = text {
+                        ins_doc
+                            .execute(params![file_id, text])
+                            .context("insert document text")?;
+                        text_indexed += 1;
+                    }
+                    indexed += 1;
+                }
+            }
+        }
+    }
+    tx.commit().context("commit scan batch")?;
+    Ok((indexed, text_indexed))
+}
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let root_abs = std::fs::canonicalize(root)
@@ -69,138 +277,200 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let mut failed: u64 = 0;
     let mut warnings = Vec::new();
 
-    let tx = conn.transaction().context("begin scan transaction")?;
-    {
-        let mut sel = tx
-            .prepare("SELECT scanned_at, size_bytes, modified_at FROM files WHERE path_text = ?1")
-            .context("prepare existing-row probe")?;
-        let mut upsert = tx.prepare(UPSERT_SQL).context("prepare files upsert")?;
-        let mut del_doc = tx
-            .prepare("DELETE FROM doc_text WHERE file_id = ?1")
-            .context("prepare doc_text delete")?;
-        let mut ins_doc = tx
-            .prepare("INSERT INTO doc_text (file_id, text) VALUES (?1, ?2)")
-            .context("prepare doc_text insert")?;
+    let mut batch = Vec::with_capacity(DB_BATCH_SIZE);
+    let mut sel = conn
+        .prepare(
+            "SELECT scanned_at, size_bytes, modified_at, file_ref \
+             FROM files WHERE path_text = ?1",
+        )
+        .context("prepare existing-row probe")?;
 
-        for entry in WalkDir::new(&root_abs).follow_links(false) {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    failed += 1;
-                    if warnings.len() < 5 {
-                        warnings.push(format!("walk: {error}"));
-                    }
-                    continue;
+    for entry in WalkDir::new(&root_abs).follow_links(false) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                failed += 1;
+                if let Some(path) = error.path() {
+                    mark_existing_row_failed(
+                        &conn,
+                        path,
+                        "Model-free scan could not observe this file.",
+                    )?;
                 }
-            };
-            if !entry.file_type().is_file() {
+                if warnings.len() < 5 {
+                    warnings.push(format!("walk: {error}"));
+                }
                 continue;
             }
-            let path = entry.path();
-            let meta = match std::fs::metadata(path) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    failed += 1;
-                    if warnings.len() < 5 {
-                        warnings.push(format!("metadata {}: {error}", path.display()));
-                    }
-                    continue;
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let meta = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failed += 1;
+                mark_existing_row_failed(
+                    &conn,
+                    path,
+                    "Model-free scan could not read current file metadata.",
+                )?;
+                if warnings.len() < 5 {
+                    warnings.push(format!("metadata {}: {error}", path.display()));
                 }
-            };
-            let size = meta.len();
-            if size == 0 {
-                continue; // engine parity: zero-byte files carry no content
+                continue;
             }
-            discovered += 1;
-
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let kind = FileKind::from_extension(&ext);
-            let path_text = canonical_path_text(path);
-            let path_hash = stable_path_hash(&path_text);
-            let modified = system_time_to_unix(meta.modified().ok());
-            let created = system_time_to_unix(meta.created().ok());
-
-            if !rescan {
-                let prior: Option<(f64, i64, f64)> = sel
-                    .query_row(params![path_text], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .ok();
-                if let (Some((scanned_at, prior_size, prior_modified)), Some(current_modified)) =
-                    (prior, modified)
-                {
-                    if scanned_at >= current_modified
-                        && prior_size == size as i64
-                        && (prior_modified - current_modified).abs() < f64::EPSILON
-                    {
-                        skipped += 1;
-                        continue;
-                    }
-                }
+        };
+        let size = meta.len();
+        if size == 0 {
+            // A present-but-empty file isn't catalogued (no content to
+            // hash/embed) — parity with the engine, which marks zero-byte files
+            // "seen" but never records them. Recording it as seen keeps any
+            // existing row's scanned_at current so the post-scan missing-rows
+            // sweep can't hide a file that is actually on disk (a no-op for a
+            // brand-new empty file, which has no row to update).
+            batch.push(ScanRecord::Seen {
+                path_text: canonical_path_text(path),
+                file_ref: fileid_engine::platform::file_ref(path),
+            });
+            // Respect the same batch-flush bound as the main path so a tree of
+            // mostly-empty files can't grow the batch without limit.
+            if batch.len() >= DB_BATCH_SIZE {
+                drop(sel);
+                let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+                indexed += batch_indexed;
+                text_indexed += batch_text_indexed;
+                sel = conn
+                    .prepare(
+                        "SELECT scanned_at, size_bytes, modified_at, file_ref \
+                         FROM files WHERE path_text = ?1",
+                    )
+                    .context("re-prepare existing-row probe")?;
             }
+            continue;
+        }
+        discovered += 1;
 
-            let authoritative_text = is_plaintext_ext(&ext);
-            let text = match extract_plaintext(&ext, size, path) {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let kind = FileKind::from_extension(&extension);
+        let path_text = canonical_path_text(path);
+        let path_hash = stable_path_hash(&path_text);
+        let modified = system_time_to_unix(meta.modified().ok());
+        let created = system_time_to_unix(meta.created().ok());
+        let file_ref = fileid_engine::platform::file_ref(path);
+
+        let prior: Option<(f64, i64, Option<f64>, Option<i64>)> = sel
+            .query_row(params![path_text], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .optional()
+            .context("query existing file identity")?;
+        let current_ref = file_ref.map(|value| value as i64);
+        let metadata_matches = prior.as_ref().is_some_and(
+            |(_, prior_size, prior_modified, prior_ref)| {
+                let identity_matches = match (*prior_ref, current_ref) {
+                    (Some(prior), Some(current)) => prior == current,
+                    _ => true,
+                };
+                *prior_size == size as i64
+                    && matches!((prior_modified, modified), (Some(prior), Some(current)) if (*prior - current).abs() < f64::EPSILON)
+                    && identity_matches
+            },
+        );
+        let unchanged = !rescan
+            && prior.as_ref().is_some_and(|(scanned_at, _, _, prior_ref)| {
+                metadata_matches
+                    && modified.is_some_and(|current| *scanned_at >= current)
+                    && *prior_ref == current_ref
+            });
+        let invalidate_derived = prior.is_some() && !metadata_matches;
+
+        if unchanged {
+            skipped += 1;
+            batch.push(ScanRecord::Seen {
+                path_text,
+                file_ref,
+            });
+        } else {
+            let authoritative_text = is_plaintext_ext(&extension);
+            let text = match extract_plaintext(&extension, size, path) {
                 Ok(text) => text,
                 Err(error) => {
                     failed += 1;
+                    if prior.is_some() {
+                        conn.execute(
+                            "UPDATE files SET failed = 1, error_message = ?2 WHERE path_text = ?1",
+                            params![
+                                path_text,
+                                "Model-free scan could not read current file content."
+                            ],
+                        )
+                        .context("mark unreadable existing file content as failed")?;
+                    }
                     if warnings.len() < 5 {
                         warnings.push(error.to_string());
                     }
                     continue;
                 }
             };
-            let has_text = i64::from(text.is_some());
+            batch.push(ScanRecord::Changed {
+                path_text,
+                path_hash,
+                size,
+                created,
+                modified: modified.unwrap_or(now),
+                kind: kind.as_str(),
+                extension,
+                authoritative_text,
+                text,
+                file_ref,
+                invalidate_derived,
+            });
+        }
 
-            let file_id: i64 = upsert
-                .query_row(
-                    params![
-                        path_text,
-                        path_hash,
-                        size as i64,
-                        created,
-                        modified.unwrap_or(now),
-                        now,
-                        kind.as_str(),
-                        ext,
-                        has_text,
-                        i64::from(authoritative_text)
-                    ],
-                    |r| r.get(0),
+        if batch.len() >= DB_BATCH_SIZE {
+            drop(sel);
+            let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+            indexed += batch_indexed;
+            text_indexed += batch_text_indexed;
+            sel = conn
+                .prepare(
+                    "SELECT scanned_at, size_bytes, modified_at, file_ref \
+                     FROM files WHERE path_text = ?1",
                 )
-                .with_context(|| format!("upsert file row for {}", path.display()))?;
+                .context("re-prepare existing-row probe")?;
+        }
 
-            del_doc.execute(params![file_id]).ok();
-            if let Some(t) = text {
-                ins_doc
-                    .execute(params![file_id, t])
-                    .with_context(|| format!("doc_text insert for {}", path.display()))?;
-                text_indexed += 1;
-            }
-            indexed += 1;
-
-            if live && indexed.is_multiple_of(32) {
-                let mut err = std::io::stderr();
-                let _ = write!(
-                    err,
-                    "\r  {} {indexed} indexed · {text_indexed} text · {skipped} unchanged\x1b[K",
-                    ctx.dim("scanning…")
-                );
-                let _ = err.flush();
-            } else if !live && !ctx.quiet && !ctx.json && indexed.is_multiple_of(2000) {
-                ctx.progress(&format!("  indexed {indexed} files…"));
-            }
+        let processed = indexed + skipped + batch.len() as u64;
+        if live && processed.is_multiple_of(32) {
+            let mut err = std::io::stderr();
+            let _ = write!(
+                err,
+                "\r  {} {indexed} indexed · {text_indexed} text · {skipped} unchanged\x1b[K",
+                ctx.dim("scanning…")
+            );
+            let _ = err.flush();
+        } else if !live && !ctx.quiet && !ctx.json && processed.is_multiple_of(2000) {
+            ctx.progress(&format!("  processed {processed} files…"));
         }
     }
+    drop(sel);
+    let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+    indexed += batch_indexed;
+    text_indexed += batch_text_indexed;
+    if failed == 0 {
+        soft_hide_missing_rows(&conn, &root_abs, now)?;
+    }
+
     if live {
         let _ = write!(std::io::stderr(), "\r\x1b[K");
         let _ = std::io::stderr().flush();
     }
-    tx.commit().context("commit scan transaction")?;
 
     let elapsed = started.elapsed();
     if ctx.json {
@@ -338,6 +608,280 @@ fn is_plaintext_ext(ext: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    type DerivedState = (
+        i64,
+        Option<i64>,
+        Option<Vec<u8>>,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    );
+
+    fn test_layout(name: &str) -> (PathBuf, PathBuf, Ctx) {
+        let temp = std::env::temp_dir().join(format!(
+            "fileid-cli-scan-{name}-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let root = temp.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let db = temp.join("fileid.sqlite");
+        let ctx = Ctx {
+            json: true,
+            quiet: true,
+            color: false,
+            color_allowed: false,
+            db: db.clone(),
+            db_explicit: true,
+        };
+        (temp, root, ctx)
+    }
+
+    #[test]
+    fn replacement_with_same_metadata_is_not_skipped_when_identity_changes() {
+        let (temp, root, ctx) = test_layout("identity");
+        let path = root.join("same.txt");
+        std::fs::write(&path, "old!").unwrap();
+        run(&ctx, &root, false).unwrap();
+
+        let old_ref = fileid_engine::platform::file_ref(&path).unwrap();
+        std::fs::rename(&path, temp.join("held.txt")).unwrap();
+        std::fs::write(&path, "new!").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let modified = system_time_to_unix(meta.modified().ok()).unwrap();
+        {
+            let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+            conn.execute(
+                "UPDATE files SET size_bytes = ?1, modified_at = ?2, scanned_at = ?3, file_ref = ?4, \
+                 failed = 1, error_message = 'missing', phash = 123, has_faces = 1, \
+                 content_hash = x'0102', vlm_description = 'old caption' WHERE path_text = ?5",
+                params![
+                    meta.len() as i64,
+                    modified,
+                    modified + 100.0,
+                    old_ref as i64,
+                    canonical_path_text(&path)
+                ],
+            )
+            .unwrap();
+            let file_id: i64 = conn
+                .query_row(
+                    "SELECT id FROM files WHERE path_text = ?1",
+                    params![canonical_path_text(&path)],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO tags(file_id, tag, source) VALUES (?1, 'old-auto', 'auto'), (?1, 'old-user', 'user')",
+                params![file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO persons(name, file_count, created_at) VALUES ('Old person', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO face_prints(file_id, person_id, print_data, bbox) VALUES (?1, 1, x'00', '0,0,1,1')",
+                params![file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ocr_text(file_id, text) VALUES (?1, 'old OCR')",
+                params![file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO clip_embeddings(file_id, embedding, model) VALUES (?1, x'00', 'old')",
+                params![file_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO text_embeddings(file_id, embedding, model) VALUES (?1, x'00', 'old')",
+                params![file_id],
+            )
+            .unwrap();
+        }
+
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let (new_ref, text): (i64, String) = conn
+            .query_row(
+                "SELECT f.file_ref, d.text FROM files f \
+                 JOIN doc_text d ON d.file_id = f.id WHERE f.path_text = ?1",
+                params![canonical_path_text(&path)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_ne!(new_ref, old_ref as i64);
+        assert_eq!(text, "new!");
+        let state: DerivedState = conn
+            .query_row(
+                "SELECT failed, phash, content_hash, vlm_description, \
+                 (SELECT COUNT(*) FROM tags WHERE file_id = files.id), \
+                 (SELECT COUNT(*) FROM face_prints WHERE file_id = files.id), \
+                 (SELECT COUNT(*) FROM ocr_text WHERE file_id = files.id), \
+                 (SELECT COUNT(*) FROM clip_embeddings WHERE file_id = files.id), \
+                 (SELECT COUNT(*) FROM text_embeddings WHERE file_id = files.id) \
+                 FROM files WHERE path_text = ?1",
+                params![canonical_path_text(&path)],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                    ))
+                },
+            )
+            .unwrap();
+        // One tag survives (the user tag); only the auto tag is cleared. A
+        // replacement (inode change) must never wipe user-authored tags —
+        // parity with the engine, which deletes only source='auto' on re-index.
+        assert_eq!(state, (0, None, None, None, 1, 0, 0, 0, 0));
+        let surviving: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT t.tag, t.source FROM tags t \
+                     JOIN files f ON f.id = t.file_id WHERE f.path_text = ?1 ORDER BY t.tag",
+                )
+                .unwrap();
+            stmt.query_map(params![canonical_path_text(&path)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(
+            surviving,
+            vec![("old-user".to_string(), "user".to_string())]
+        );
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn completed_rescan_soft_hides_disappeared_rows() {
+        let (temp, root, ctx) = test_layout("missing");
+        let kept = root.join("kept.txt");
+        let removed = root.join("removed.txt");
+        std::fs::write(&kept, "kept").unwrap();
+        std::fs::write(&removed, "removed").unwrap();
+        let removed_key = canonical_path_text(&removed);
+        run(&ctx, &root, false).unwrap();
+        std::fs::remove_file(&removed).unwrap();
+        run(&ctx, &root, false).unwrap();
+
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let missing: i64 = conn
+            .query_row(
+                "SELECT failed FROM files WHERE path_text = ?1",
+                params![removed_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active: i64 = conn
+            .query_row(
+                "SELECT failed FROM files WHERE path_text = ?1",
+                params![canonical_path_text(&kept)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((missing, active), (1, 0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unchanged_successful_observation_rehabilitates_failed_row() {
+        let (temp, root, ctx) = test_layout("rehabilitate");
+        let path = root.join("file.txt");
+        std::fs::write(&path, "text").unwrap();
+        run(&ctx, &root, false).unwrap();
+        {
+            let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+            conn.execute(
+                "UPDATE files SET failed = 1, error_message = 'missing' WHERE path_text = ?1",
+                params![canonical_path_text(&path)],
+            )
+            .unwrap();
+        }
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let state: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT failed, error_message FROM files WHERE path_text = ?1",
+                params![canonical_path_text(&path)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (0, None));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn scan_commits_every_record_across_batch_boundaries() {
+        let (temp, root, ctx) = test_layout("batches");
+        for index in 0..=DB_BATCH_SIZE {
+            std::fs::write(root.join(format!("{index}.txt")), "text").unwrap();
+        }
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, (DB_BATCH_SIZE + 1) as i64);
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_existing_file_is_soft_hidden_without_erasing_prior_text() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (temp, root, ctx) = test_layout("unreadable-existing");
+        let path = root.join("report.txt");
+        std::fs::write(&path, "secret-old").unwrap();
+        run(&ctx, &root, false).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let scan = run(&ctx, &root, true);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(scan.is_err());
+
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let (failed, text): (i64, String) = conn
+            .query_row(
+                "SELECT files.failed, doc_text.text FROM files \
+                 JOIN doc_text ON doc_text.file_id = files.id WHERE files.path_text = ?1",
+                params![canonical_path_text(&path)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failed, 1);
+        assert_eq!(text, "secret-old");
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 
     #[test]
     fn plaintext_read_failure_is_not_silently_treated_as_empty_text() {

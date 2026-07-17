@@ -229,20 +229,28 @@ enum DeepAnalyzeNaming {
         // for silence-only files, unsupported codecs, or brief recordings — without a
         // timeout the withCheckedContinuation parks forever, stalling all subsequent
         // Deep Analyze work on the same serial queue.
+        let recognizerBox = SpeechRecognizerBox(recognizer)
         return await withTaskGroup(of: String?.self) { group in
             group.addTask {
+                let recognizer = recognizerBox.value
                 let request = SFSpeechURLRecognitionRequest(url: url)
                 request.requiresOnDeviceRecognition = true
                 request.shouldReportPartialResults = false
-                let once = OnceFlag()
-                return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-                    recognizer.recognitionTask(with: request) { result, error in
-                        if let result, result.isFinal {
-                            if once.claim() { cont.resume(returning: result.bestTranscription.formattedString) }
-                        } else if error != nil {
-                            if once.claim() { cont.resume(returning: nil) }
+                let state = SpeechRecognitionState()
+                return await withTaskCancellationHandler {
+                    await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+                        state.install(cont)
+                        let task = recognizer.recognitionTask(with: request) { result, error in
+                            if let result, result.isFinal {
+                                state.finish(result.bestTranscription.formattedString)
+                            } else if error != nil {
+                                state.finish(nil)
+                            }
                         }
+                        state.install(task)
                     }
+                } onCancel: {
+                    state.finish(nil)
                 }
             }
             group.addTask {
@@ -302,29 +310,92 @@ enum DeepAnalyzeNaming {
     /// Run SoundAnalysis' built-in classifier over the file and return the highest-
     /// confidence class identifier seen across the clip (≥ a minimum confidence), or nil.
     private static func dominantSoundIdentifier(url: URL) async -> String? {
-        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-            // SNAudioFileAnalyzer.analyze() is synchronous (delivers results to the
-            // observer on the calling thread), so run it off the executor.
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let analyzer = try? SNAudioFileAnalyzer(url: url),
-                      let request = try? SNClassifySoundRequest(classifierIdentifier: .version1) else {
-                    cont.resume(returning: nil)
-                    return
-                }
-                let observer = SoundObserver()
-                guard (try? analyzer.add(request, withObserver: observer)) != nil else {
-                    cont.resume(returning: nil)
-                    return
-                }
-                analyzer.analyze()
-                // Require real confidence so a file is never named off a weak guess.
-                if let best = observer.best, best.confidence >= 0.45 {
-                    cont.resume(returning: best.label)
-                } else {
-                    cont.resume(returning: nil)
+        let state = SoundAnalysisState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard state.install(continuation) else { return }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let analyzer = try? SNAudioFileAnalyzer(url: url),
+                          let request = try? SNClassifySoundRequest(classifierIdentifier: .version1),
+                          state.attach(analyzer) else {
+                        state.finish(nil)
+                        return
+                    }
+                    let observer = SoundObserver()
+                    guard (try? analyzer.add(request, withObserver: observer)) != nil else {
+                        state.finish(nil)
+                        return
+                    }
+                    analyzer.analyze()
+                    if let best = observer.best, best.confidence >= 0.45 {
+                        state.finish(best.label)
+                    } else {
+                        state.finish(nil)
+                    }
                 }
             }
+        } onCancel: {
+            state.cancel()
         }
+    }
+}
+
+private final class SoundAnalysisState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var analyzer: SNAudioFileAnalyzer?
+    private var finished = false
+
+    func install(_ continuation: CheckedContinuation<String?, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else {
+            continuation.resume(returning: nil)
+            return false
+        }
+        self.continuation = continuation
+        return true
+    }
+
+    func attach(_ analyzer: SNAudioFileAnalyzer) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else {
+            analyzer.cancelAnalysis()
+            return false
+        }
+        self.analyzer = analyzer
+        return true
+    }
+
+    func finish(_ value: String?) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        analyzer = nil
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let analyzer = analyzer
+        self.analyzer = nil
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        analyzer?.cancelAnalysis()
+        continuation?.resume(returning: nil)
     }
 }
 
@@ -342,14 +413,52 @@ private final class SoundObserver: NSObject, SNResultsObserving, @unchecked Send
     }
 }
 
-/// One-shot guard so the recognition continuation is resumed at most once.
-private final class OnceFlag: @unchecked Sendable {
+private final class SpeechRecognizerBox: @unchecked Sendable {
+    let value: SFSpeechRecognizer
+    init(_ value: SFSpeechRecognizer) { self.value = value }
+}
+
+private final class SpeechRecognitionState: @unchecked Sendable {
     private let lock = NSLock()
-    private var fired = false
-    func claim() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if fired { return false }
-        fired = true
-        return true
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var task: SFSpeechRecognitionTask?
+    private var finished = false
+
+    func install(_ continuation: CheckedContinuation<String?, Never>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(returning: nil)
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func install(_ task: SFSpeechRecognitionTask) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        self.task = task
+        lock.unlock()
+    }
+
+    func finish(_ result: String?) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let continuation = continuation
+        self.continuation = nil
+        let task = task
+        self.task = nil
+        lock.unlock()
+        task?.cancel()
+        continuation?.resume(returning: result)
     }
 }

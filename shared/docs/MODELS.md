@@ -1,12 +1,14 @@
 # Models — canonical registry
 
-FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. **Every artifact is SHA256-pinned in `engine/src/models/registry.rs`** — the canonical hash is the `oid sha256:` from each HuggingFace LFS pointer (or the sha256 of the GitHub/NVIDIA release asset); the engine downloader verifies the downloaded bytes against the pin before use, and a CI gate (`windows-engine.yml`) fails the build on any unpinned (`sha256: None`) entry. No telemetry on the download.
+FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. Every artifact is SHA256-pinned in `shared/models/manifest.json`; the Windows registry and macOS `ModelManifest.swift` are compiled mirrors checked by CI. Platform downloaders verify bytes before atomic promotion, and CI rejects unpinned artifacts. No telemetry on the download.
 
-This file is the cross-platform source of truth for what FileID asks for and where it lives. Per-platform installers (`platforms/apple/scripts/install_clip_models.sh`, `platforms/windows/build/install-models.ps1`, future Linux equivalent) read this list.
+This file documents the cross-platform model contract. Production installs run only through each app's verified in-app downloader; obsolete direct-download shell installers were removed so there is no unpinned alternate path.
 
 ## Licensing posture — commercial-clean (Apache-2.0 project)
 
-As of the 2026-05 commercial-clean pass, **every weight FileID downloads by default is permissively licensed (Apache-2.0 / MIT)** — no non-commercial weights in the core feature set. This keeps the project (Apache-2.0, see root `LICENSE`) free to be open-sourced *and* commercialized later without a weight-licensing blocker. The non-commercial InsightFace face stack (ArcFace + SCRFD) and the research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. The one conditional model, Gemma-3-4B, is commercially usable under Google's Gemma Terms and stays an opt-in, user-initiated download (its terms surface in the install flow).
+The core weight stack is permissively licensed (Apache-2.0 / MIT), and no non-commercial weights are allowed. The non-commercial InsightFace face stack (ArcFace + SCRFD) and research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. Gemma models remain available under Google's separate Gemma Terms, and optional NVIDIA cuDNN/CUDA runtime archives remain under NVIDIA's vendor terms. Before the first such download, FileID presents the applicable full-terms link and a default-cancel **I Accept and Download** decision; acceptance is recorded locally and versioned by the policy review date.
+
+`shared/models/manifest.json` is the machine-enforced license registry as well as the artifact registry. `licensePolicies`, `artifactLicenses`, and `vlmRepoLicenses` must cover every downloadable entry. `shared/scripts/check_model_license_policy.py` rejects missing/unknown mappings, malformed license URLs/review dates, or a restricted policy incorrectly marked as not requiring terms acceptance. Any new model or runtime requires a reviewed manifest policy before CI permits it.
 
 > **Both Windows and macOS are on the commercial-clean stack (updated 2026-07).** The macOS Swift swap (RAM++ tagger, ViT-B/32, SFace 128-d) has **landed on `main` and is wired as primary** — verified statically in `shared/docs/MACOS_AUDIT_2026-07.md`. The *(lockstep pending)* markers on macOS cells below now mean **on-hardware embedding-parity verification is pending**, NOT that the Swift swap is unapplied. Cross-platform DB round-trips (esp. 128-d face prints) work once both engines have run on real hardware with the new models; until the macOS on-hardware parity check is done, treat face DBs as platform-local as a precaution.
 
@@ -135,7 +137,7 @@ All default/recommended VLMs are commercial-clean (Apache-2.0). Gemma-3-4B is op
 | **Gemma 3 4B (vision)** | ~3 GB | ~8 GB | Lighter / weak-box fallback | Gemma Terms (opt-in) | [google/gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it) GGUF |
 | **Mistral-Small-3.2 24B** | ~14.3 GB | ~20 GB | Max-quality captioner | Apache-2.0 | [bartowski/Mistral-Small-3.2 GGUF](https://huggingface.co/bartowski) + mmproj |
 
-(Exact pinned commits + SHA256s live in the platform-specific installer scripts, so the doc isn't a SHA copy-pasta target.)
+(Exact artifact SHA-256s and repository revisions live in `shared/models/manifest.json`; platform conformance tests lock their runtime tables to that canonical file.)
 
 ### macOS lineup (MLX)
 
