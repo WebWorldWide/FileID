@@ -92,7 +92,7 @@ memmap2 = "0.9"
 # PDF rendering — PDF previews route through the C# side's Windows.Data.Pdf
 # (bundled in Windows 10+). pdfium-render is gated behind the `pdf-analyze`
 # feature for engine-side rasterization (Deep Analyze input).
-pdfium-render = { version = "0.8", optional = true }
+pdfium-render = { version = "0.9", optional = true }
 
 # Lock-free queues for the hottest hot paths if benchmarks justify it.
 crossbeam-channel = "0.5"
