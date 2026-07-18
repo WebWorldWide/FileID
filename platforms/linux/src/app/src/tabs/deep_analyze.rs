@@ -141,6 +141,12 @@ fn vlm_fits(
     free >= fileid_engine::downloader::required_install_free_bytes(bytes as u64)
 }
 
+/// Display name of the machine-sized VLM recommendation (used by the Welcome
+/// sheet's "optional later" pointer).
+pub fn recommended_vlm_display() -> &'static str {
+    vlm_by_key(host_recommended_vlm_kind()).display
+}
+
 fn host_recommended_vlm_kind() -> &'static str {
     let total = fileid_engine::platform::physical_memory_gb();
     let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
@@ -359,8 +365,13 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         }
     ));
 
-    // Initial fill.
+    // Initial fill + a fresh read on every tab switch (startup reads can race
+    // the engine's DB open; renames/analyzes finish while other tabs are up).
     refresh(&ui);
+    {
+        let ui = ui.clone();
+        scroller.connect_map(move |_| refresh(&ui));
+    }
 
     scroller.upcast()
 }

@@ -267,13 +267,15 @@ impl EngineClient {
     }
 
     /// Run a Library query off the main loop. Returns a oneshot receiver the
-    /// caller awaits via `spawn_local`. Each query opens a fresh read-only
-    /// connection (cheap, WAL-safe, and tolerant of the DB not existing yet).
-    pub fn query_files(&self, spec: QuerySpec) -> Receiver<Vec<FileRow>> {
-        let (tx, rx) = async_channel::bounded::<Vec<FileRow>>(1);
+    /// caller awaits via `spawn_local`; the payload is `(rows, total_matches)`
+    /// so the UI can say "showing N of M" when the LIMIT truncates. Each query
+    /// opens a fresh read-only connection (cheap, WAL-safe, and tolerant of
+    /// the DB not existing yet).
+    pub fn query_files(&self, spec: QuerySpec) -> Receiver<(Vec<FileRow>, i64)> {
+        let (tx, rx) = async_channel::bounded::<(Vec<FileRow>, i64)>(1);
         thread::spawn(move || {
-            let rows = run_query(&spec).unwrap_or_default();
-            let _ = tx.send_blocking(rows);
+            let result = run_query(&spec).unwrap_or_default();
+            let _ = tx.send_blocking(result);
         });
         rx
     }
@@ -286,6 +288,17 @@ impl EngineClient {
         self.request_thumbnail_with(path, move |bytes| decode_scaled(bytes, max_px))
     }
 
+    /// Video keyframe thumbnail via the engine's Linux ffmpeg shell (~25% seek,
+    /// best-effort). Runs entirely on the thumbnail worker pool; `None` (icon
+    /// placeholder) when ffmpeg is absent or the file has no decodable frame.
+    pub fn request_video_thumbnail(
+        &self,
+        path: String,
+        max_px: i32,
+    ) -> Receiver<Option<DecodedImage>> {
+        self.enqueue_thumb_work(ThumbWork::VideoKeyframe { path, max_px })
+    }
+
     pub fn request_thumbnail_with<F>(
         &self,
         path: String,
@@ -294,12 +307,15 @@ impl EngineClient {
     where
         F: FnOnce(Vec<u8>) -> Option<DecodedImage> + Send + 'static,
     {
-        let (reply, rx) = async_channel::bounded::<Option<DecodedImage>>(1);
-        let job = ThumbJob {
+        self.enqueue_thumb_work(ThumbWork::DecodeFile {
             path,
             decoder: Box::new(decoder),
-            reply,
-        };
+        })
+    }
+
+    fn enqueue_thumb_work(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
+        let (reply, rx) = async_channel::bounded::<Option<DecodedImage>>(1);
+        let job = ThumbJob { work, reply };
         match &self.thumb_tx {
             Some(sender) => match sender.try_send(job) {
                 Ok(()) => {}
@@ -581,10 +597,20 @@ fn drain_stderr(stderr: std::process::ChildStderr) {
 const SELECT_COLS: &str = "id, path_text, size_bytes, created_at, modified_at, kind, extension, \
     has_faces, has_text, vlm_proposed_name, vlm_description, file_ref, content_hash";
 
-fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
+const QUERY_FILTER: &str = "f.failed = 0 \
+           AND ( :has_search = 0 \
+                 OR COALESCE(f.path_search, f.path_text) LIKE :like ESCAPE '\\' \
+                 OR EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.tag LIKE :like ESCAPE '\\') \
+                 OR ( :has_fts = 1 AND ( \
+                        f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH :fts) \
+                        OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH :fts) \
+                    ) ) ) \
+           AND ( :kind IS NULL OR f.kind = :kind )";
+
+fn run_query(spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
     let db_path = fileid_engine::paths::db_path()?;
     if !db_path.exists() {
-        return Ok(Vec::new()); // no scan yet
+        return Ok((Vec::new(), 0)); // no scan yet
     }
     let conn = fileid_engine::db::open_read(&db_path)?;
 
@@ -597,18 +623,11 @@ fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
 
     let sql = format!(
         "SELECT {cols} FROM files f \
-         WHERE f.failed = 0 \
-           AND ( :has_search = 0 \
-                 OR COALESCE(f.path_search, f.path_text) LIKE :like ESCAPE '\\' \
-                 OR EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.tag LIKE :like ESCAPE '\\') \
-                 OR ( :has_fts = 1 AND ( \
-                        f.id IN (SELECT rowid FROM ocr_fts WHERE ocr_fts MATCH :fts) \
-                        OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH :fts) \
-                    ) ) ) \
-           AND ( :kind IS NULL OR f.kind = :kind ) \
+         WHERE {filter} \
          ORDER BY f.scanned_at DESC, f.id DESC \
          LIMIT :limit",
-        cols = SELECT_COLS
+        cols = SELECT_COLS,
+        filter = QUERY_FILTER,
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -625,7 +644,26 @@ fn run_query(spec: &QuerySpec) -> Result<Vec<FileRow>> {
             map_row,
         )?
         .collect::<rusqlite::Result<Vec<FileRow>>>()?;
-    Ok(rows)
+
+    // Exact total only when the preview filled the LIMIT — the common
+    // small-library reload skips the second scan entirely.
+    let total = if (rows.len() as i64) < limit {
+        rows.len() as i64
+    } else {
+        let count_sql = format!("SELECT COUNT(*) FROM files f WHERE {QUERY_FILTER}");
+        let mut count_stmt = conn.prepare(&count_sql)?;
+        count_stmt.query_row(
+            rusqlite::named_params! {
+                ":has_search": has_search as i64,
+                ":like": like,
+                ":has_fts": has_fts as i64,
+                ":fts": fts,
+                ":kind": spec.kind,
+            },
+            |row| row.get::<_, i64>(0),
+        )?
+    };
+    Ok((rows, total))
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
@@ -685,9 +723,18 @@ fn fts_match(s: &str) -> String {
 
 type ThumbnailDecoder = Box<dyn FnOnce(Vec<u8>) -> Option<DecodedImage> + Send + 'static>;
 
+enum ThumbWork {
+    /// Read the file (size-capped) and run the caller's decoder on its bytes.
+    DecodeFile {
+        path: String,
+        decoder: ThumbnailDecoder,
+    },
+    /// Extract a video keyframe via the engine's ffmpeg shell and scale it.
+    VideoKeyframe { path: String, max_px: i32 },
+}
+
 struct ThumbJob {
-    path: String,
-    decoder: ThumbnailDecoder,
+    work: ThumbWork,
     reply: Sender<Option<DecodedImage>>,
 }
 
@@ -697,9 +744,45 @@ const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
 
 fn thumbnail_worker(rx: Receiver<ThumbJob>) {
     while let Ok(job) = rx.recv_blocking() {
-        let decoded = read_capped(&job.path).and_then(job.decoder);
+        let decoded = match job.work {
+            ThumbWork::DecodeFile { path, decoder } => read_capped(&path).and_then(decoder),
+            ThumbWork::VideoKeyframe { path, max_px } => video_keyframe_scaled(&path, max_px),
+        };
         let _ = job.reply.send_blocking(decoded);
     }
+}
+
+/// Decode a ~25%-seek keyframe (engine `shell::video`, ffmpeg CLI, best-effort)
+/// into a pixbuf and scale its longest edge down to `max_px`.
+fn video_keyframe_scaled(path: &str, max_px: i32) -> Option<DecodedImage> {
+    let frame = fileid_engine::shell::video::keyframe_25pct(std::path::Path::new(path)).ok()?;
+    let width = i32::try_from(frame.width).ok().filter(|w| *w > 0)?;
+    let height = i32::try_from(frame.height).ok().filter(|h| *h > 0)?;
+    if frame.rgb.len() < (width as usize) * (height as usize) * 3 {
+        return None;
+    }
+    let bytes = glib::Bytes::from_owned(frame.rgb);
+    let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_bytes(
+        &bytes,
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        false,
+        8,
+        width,
+        height,
+        width * 3,
+    );
+    let longest = width.max(height);
+    let scaled = if longest > max_px && max_px > 0 {
+        let scale = f64::from(max_px) / f64::from(longest);
+        pixbuf.scale_simple(
+            ((f64::from(width) * scale).round() as i32).max(1),
+            ((f64::from(height) * scale).round() as i32).max(1),
+            gtk::gdk_pixbuf::InterpType::Bilinear,
+        )?
+    } else {
+        pixbuf
+    };
+    Some(DecodedImage::from_pixbuf(&scaled))
 }
 
 fn read_capped(path: &str) -> Option<Vec<u8>> {
@@ -791,8 +874,10 @@ mod tests {
         let (reply, rx) = async_channel::bounded(1);
         (
             ThumbJob {
-                path,
-                decoder: Box::new(|_| None),
+                work: ThumbWork::DecodeFile {
+                    path,
+                    decoder: Box::new(|_| None),
+                },
                 reply,
             },
             rx,
@@ -875,14 +960,16 @@ mod tests {
             replies.push(rx);
             sender
                 .send_blocking(ThumbJob {
-                    path: path.to_string_lossy().into_owned(),
-                    decoder: Box::new(move |_| {
-                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(now, Ordering::SeqCst);
-                        thread::sleep(Duration::from_millis(10));
-                        active.fetch_sub(1, Ordering::SeqCst);
-                        None
-                    }),
+                    work: ThumbWork::DecodeFile {
+                        path: path.to_string_lossy().into_owned(),
+                        decoder: Box::new(move |_| {
+                            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(now, Ordering::SeqCst);
+                            thread::sleep(Duration::from_millis(10));
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            None
+                        }),
+                    },
                     reply,
                 })
                 .unwrap();

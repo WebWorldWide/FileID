@@ -301,6 +301,14 @@ spinner { color: @fileid_gold; }
 }
 
 .tile-caption { color: alpha(#FFFFFF, 0.55); font-size: 9pt; }
+
+/* Centered ▶ badge over video tile keyframes. */
+.video-play-badge {
+    color: #FFFFFF;
+    background-color: alpha(#000000, 0.45);
+    border-radius: 99px;
+    padding: 8px;
+}
 "#;
 
 /// Install the brand CSS into the default display and force dark mode.

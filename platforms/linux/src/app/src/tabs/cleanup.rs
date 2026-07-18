@@ -364,8 +364,13 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         });
     }
 
-    // Initial fill.
+    // Initial fill + a fresh read on every tab switch (the startup read can
+    // race the engine's DB open; deletes/scans done elsewhere must show here).
     this.reload();
+    {
+        let this = this.clone();
+        root.connect_map(move |_| this.reload());
+    }
     this.update_global_summary();
 
     root.upcast()
@@ -478,7 +483,8 @@ impl Cleanup {
             self.empty_page.set_title("Similar comparison not run");
             self.empty_page.set_description(Some(warning));
         } else if has_skipped_only {
-            self.empty_page.set_icon_name(Some("emblem-ok-symbolic"));
+            self.empty_page
+                .set_icon_name(Some("object-select-symbolic"));
             self.empty_page.set_title("All duplicate groups skipped");
             self.empty_page
                 .set_description(Some("You've hidden every group from this view."));
@@ -504,7 +510,8 @@ impl Cleanup {
             ));
         } else {
             self.empty_page.set_child(None::<&gtk::Box>);
-            self.empty_page.set_icon_name(Some("emblem-ok-symbolic"));
+            self.empty_page
+                .set_icon_name(Some("object-select-symbolic"));
             if mode_similar {
                 self.empty_page
                     .set_title("No visually similar images found");
@@ -791,12 +798,18 @@ impl Cleanup {
         }
         outer.append(&meta);
 
-        // Thumbnail (images decode client-side; everything else gets an icon).
-        if member.kind == "image" {
-            let rx = self
-                .engine
-                .borrow()
-                .request_scaled_thumbnail(member.path.clone(), TILE_THUMB_PX);
+        // Thumbnail (images decode client-side, videos get an ffmpeg keyframe;
+        // everything else gets an icon).
+        if member.kind == "image" || member.kind == "video" {
+            let rx = if member.kind == "video" {
+                self.engine
+                    .borrow()
+                    .request_video_thumbnail(member.path.clone(), TILE_THUMB_PX)
+            } else {
+                self.engine
+                    .borrow()
+                    .request_scaled_thumbnail(member.path.clone(), TILE_THUMB_PX)
+            };
             let pic_weak = pic.downgrade();
             glib::MainContext::default().spawn_local(async move {
                 let Ok(Some(decoded)) = rx.recv().await else {
