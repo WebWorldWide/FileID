@@ -505,6 +505,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     reload(&ui);
     refresh_view(&ui);
+    // Re-read whenever the tab becomes visible: the startup read can race the
+    // engine's own DB open (transient BUSY → empty snapshot), and clustering
+    // finished on another tab must show up on switch — not only on scan events.
+    {
+        let ui = ui.clone();
+        root.connect_map(move |_| reload(&ui));
+    }
     root.upcast()
 }
 
@@ -515,7 +522,7 @@ fn refresh_view(ui: &Rc<Ui>) {
         let persons = ui.persons.borrow();
         (
             !persons.is_empty(),
-            count_line(&persons, ui.total_faces.get()),
+            count_line(&persons, ui.total_faces.get(), ui.clustering.get()),
             persons.len(),
         )
     };
@@ -562,14 +569,18 @@ fn refresh_view(ui: &Rc<Ui>) {
     }
 }
 
-fn count_line(persons: &[PersonRow], total_faces: i64) -> String {
+fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> String {
     let p = persons.len();
     let unnamed = persons.iter().filter(|x| !x.has_any_name()).count();
     if p == 0 && total_faces == 0 {
         return String::new();
     }
     if p == 0 {
-        return format!("{total_faces} faces · clustering…");
+        return if clustering {
+            format!("{total_faces} faces · clustering…")
+        } else {
+            format!("{total_faces} faces · not grouped yet")
+        };
     }
     if unnamed > 0 {
         format!("{p} people · {unnamed} still unnamed")
@@ -703,7 +714,7 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
     overlay.set_child(Some(&pic));
     let check = gtk::Image::builder()
         .icon_name(if checked {
-            "emblem-ok-symbolic"
+            "object-select-symbolic"
         } else {
             "checkbox-symbolic"
         })
@@ -818,7 +829,7 @@ fn toggle(set: &RefCell<HashSet<i64>>, pid: i64) -> bool {
 
 fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
     check.set_icon_name(Some(if on {
-        "emblem-ok-symbolic"
+        "object-select-symbolic"
     } else {
         "checkbox-symbolic"
     }));
@@ -894,6 +905,10 @@ fn reload(ui: &Rc<Ui>) {
 
         if ui.clustering.get() && !ui.persons.borrow().is_empty() {
             ui.clustering.set(false);
+            // Replace the "Grouping faces…" status the moment results land —
+            // leaving it up reads as a hung operation.
+            let n = ui.persons.borrow().len();
+            set_status(&ui, format!("Grouped into {n} people."));
         }
         refresh_view(&ui);
     });
@@ -1610,7 +1625,12 @@ fn uf_find(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
 fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     let (tx, rx) = async_channel::bounded::<Snapshot>(1);
     std::thread::spawn(move || {
-        let snap = read_snapshot().unwrap_or_default();
+        let snap = read_snapshot().unwrap_or_else(|error| {
+            // A read failure must be loud: swallowing it renders the tab as
+            // "no people yet" even when the DB is full of faces.
+            tracing::warn!(target: "people", %error, "person snapshot read failed");
+            Snapshot::default()
+        });
         let _ = tx.send_blocking(snap);
     });
     rx
@@ -1634,6 +1654,32 @@ fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<(i64, String
     rx
 }
 
+// The representative face: the persisted pick when it is still active, else
+// the lowest-id active face. Two correlated WHERE-clause lookups — SQLite
+// rejects an outer reference (`p.representative_face_id`) inside a scalar
+// subquery's ORDER BY with "no such column", which silently emptied the whole
+// People tab (the error was swallowed into a default snapshot).
+const PERSON_SNAPSHOT_SQL: &str = "\
+    SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
+           COALESCE(p.is_unknown, 0), \
+           (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
+           (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
+           f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
+    FROM persons p \
+    LEFT JOIN face_prints rf ON rf.id = COALESCE( \
+        (SELECT fp1.id FROM face_prints fp1 \
+         JOIN files af1 ON af1.id = fp1.file_id \
+         WHERE fp1.id = p.representative_face_id AND fp1.person_id = p.id AND af1.failed = 0), \
+        (SELECT MIN(fp2.id) FROM face_prints fp2 \
+         JOIN files af2 ON af2.id = fp2.file_id \
+         WHERE fp2.person_id = p.id AND af2.failed = 0)) \
+    LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
+    WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
+    ORDER BY \
+      CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
+           COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
+      active_file_count DESC, p.id ASC";
+
 fn read_snapshot() -> anyhow::Result<Snapshot> {
     let Ok(db_path) = fileid_engine::paths::db_path() else {
         return Ok(Snapshot::default());
@@ -1650,26 +1696,7 @@ fn read_snapshot() -> anyhow::Result<Snapshot> {
         )
         .unwrap_or(0);
 
-    let sql = "\
-        SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
-               COALESCE(p.is_unknown, 0), \
-               (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
-               (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
-               f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
-        FROM persons p \
-        LEFT JOIN face_prints rf ON rf.id = ( \
-            SELECT fp2.id FROM face_prints fp2 \
-            JOIN files af2 ON af2.id = fp2.file_id \
-            WHERE fp2.person_id = p.id AND af2.failed = 0 \
-            ORDER BY CASE WHEN fp2.id = p.representative_face_id THEN 0 ELSE 1 END, fp2.id \
-            LIMIT 1) \
-        LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
-        WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
-        ORDER BY \
-          CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
-               COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
-          active_file_count DESC, p.id ASC";
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(PERSON_SNAPSHOT_SQL)?;
     let rows = stmt
         .query_map([], map_person)?
         .collect::<rusqlite::Result<Vec<PersonRow>>>()?;
@@ -1928,6 +1955,16 @@ fn sim_markup(s: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::BoundedLru;
+
+    // PR #106 shipped a snapshot query SQLite can't prepare (outer reference
+    // inside a scalar subquery's ORDER BY) and the swallowed error blanked the
+    // whole tab. Preparing against the real migrated schema catches any drift.
+    #[test]
+    fn person_snapshot_sql_prepares_against_current_schema() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.prepare(super::PERSON_SNAPSHOT_SQL).unwrap();
+    }
 
     #[test]
     fn people_thumbnail_cache_never_exceeds_capacity() {

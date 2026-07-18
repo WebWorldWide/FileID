@@ -77,9 +77,17 @@ pub fn build() -> gtk::DrawingArea {
         }
     });
 
-    // Drive ~display-refresh via the frame clock; only ticks while mapped.
-    area.add_tick_callback(|area, _clock| {
-        area.queue_draw();
+    // Drive off the frame clock (only ticks while mapped), capped at ~30 fps:
+    // the blobs drift too slowly for 60+ fps to be visible, and the full-window
+    // Cairo repaint is real CPU on software renderers (WSLg/llvmpipe measured
+    // >1.5 cores at display rate — half of that is pure waste).
+    let last_draw = std::cell::Cell::new(0i64);
+    area.add_tick_callback(move |area, clock| {
+        let now = clock.frame_time();
+        if now - last_draw.get() >= 33_000 {
+            last_draw.set(now);
+            area.queue_draw();
+        }
         glib::ControlFlow::Continue
     });
 

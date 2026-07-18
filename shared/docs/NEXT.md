@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## STATUS 2026-07-17 (night) — Linux GUI production pass on branch `linux-gui-polish` (verified live under WSLg on Adlon data); needs PR + CI
+
+The Linux GTK app got a full production pass (STATE top): the **#106-shipped People-tab blanking bug** (invalid correlated-ORDER-BY SQL, error swallowed) is fixed with a schema-backed regression test, plus a first-run Welcome sheet, cross-platform `app-settings.json` persistence (folder/tab/sidebar/welcome), video keyframe thumbnails + ▶ badges (Library/Cleanup/preview), Library empty states + honest counts, sidebar Stop-scan + progress bar, reload-on-tab-switch for all data tabs, a LavaLamp 30 fps cap, and the pruned-icon fix. All verified in the running app against a real 958-file Adlon scan. Next:
+
+1. **Land it:** PR `linux-gui-polish` → main; confirm the linux workflow green (clippy 1.90 + tests were run in WSL; CI is the same toolchain).
+2. **Linux follow-ups (small):** in-preview **video playback** wants `gtk::Video`/GStreamer — runtime-dep decision needed (DECISIONS entry before adding); the deferred `model_license.rs` `gtk::Dialog` → `adw::AlertDialog` migration (item 2 of the 07-16 entry) still stands; WSLg couldn't exercise search **typing** (xdotool keys never reach GTK4 here) — worth one keystroke pass on real Linux hardware.
+3. On-hardware (real Linux box, eventually): GPU rendering sanity (WSLg was llvmpipe), Flatpak/AppImage behavioral re-verify at the next release cut.
+
 ## STATUS 2026-07-17 (late) — Windows prod-audit fixes LANDED (PRs #130 + #131); v0.1.1 refreshed again + assets verified; full app audit clean
 
 The audit fixes below are **merged** (`506e97c` #130, `f491271` #131 — all CI green) and the **v0.1.1 prerelease was refreshed a second time today**: tag moved to `f491271`, release run 29617526554 green, all 10 assets replaced via API and verified (server-side digest == local SHA-256 for every asset, fresh 23:08Z timestamps, SHA256SUMS.txt consistent, both MSIs provably embedded in the 342 MB bundle by size arithmetic). **Finding 4 below was WRONG and is reverted (#131):** the first tag run hard-failed on ICE38/ICE43/ICE57 — WiX treats a ProgramMenuFolder shortcut component as user-profile data and *requires* the HKCU keypath; the constraint is now documented in Product.wxs so it can't be "re-fixed". Note the ICE-validation gate only runs on tag pipelines — installer changes are not compile-checked by PR CI.

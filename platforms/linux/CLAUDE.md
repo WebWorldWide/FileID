@@ -22,6 +22,11 @@ platforms/linux/
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs             # entrypoint: adw::Application + theme install
+│           ├── app_settings.rs     # shared app-settings.json persistence
+│           │                       #   (lastFolderPath/activeTab/sidebar/welcome)
+│           ├── welcome.rs          # first-run Welcome sheet: core-model install
+│           │                       #   checklist + machine-sized VLM recommendation
+│           ├── model_license.rs    # restricted-model license acceptance gate
 │           ├── theme.rs            # design system: brand CSS (gold palette),
 │           │                       #   .glass-card / .pill / .gold-button, force-dark
 │           ├── lavalamp.rs         # LavaLampBackground — Cairo blob background
@@ -78,10 +83,11 @@ engine headlessly on Linux, including full-ML `scan --models`.
   SQLite WAL DB via `fileid_engine::db::open_read` + `paths::db_path`, exactly
   like macOS/Windows `ReadStore`. Search = filename/tag `LIKE` + OCR `ocr_fts`
   MATCH. Needs `rusqlite` (already transitive via the engine; see DECISIONS).
-- **Thumbnails**: a worker thread reads raw image bytes off the main loop; the
-  Library decodes + scales them into a `gdk::Texture` on the main thread
-  (GdkPixbuf isn't `Send`). Non-images get a themed icon. Video thumbnails
-  (engine `generateVideoThumbnail`) are a follow-up.
+- **Thumbnails**: a worker pool decodes off the main loop — images from raw
+  bytes, videos via the engine crate's in-process ffmpeg keyframe shell
+  (`shell::video::keyframe_25pct`, best-effort → icon when ffmpeg is absent).
+  Video tiles wear a centered ▶ badge; the preview dialog shows the keyframe
+  too. Other kinds get a themed icon.
 - **Library tab** (`tabs/library.rs`): debounced `gtk::SearchEntry`, gold kind
   pills, a virtualized `gtk::GridView` + `SignalListItemFactory` over a
   `gio::ListStore` of `BoxedAnyObject(FileRow)` with lazy per-tile thumbnails

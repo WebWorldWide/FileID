@@ -4023,3 +4023,46 @@ pure UI churn — a bar repainting 4×/s is visually identical), and
 `SeedDeepVlmFromSentinels` re-points `SelectedVlmModelKind` at whatever VLM is
 actually on disk when the persisted pick has no weights (invariant: Settings
 never names uninstalled weights unless the user explicitly chose them).
+
+## 2026-07-17 — Linux app persists its state INTO the shared app-settings.json (not its own file)
+
+The GTK app's new persistence (lastFolderPath/Display, activeTab, sidebarVisible,
+welcomeSheetSeen) writes to `paths::app_settings_path()` — the same
+`app-settings.json` the Windows app owns — using the same camelCase keys, atomic
+temp+rename writes, and read-modify-write that preserves every unknown key.
+Alternative considered: a Linux-only `app_state.json` (no cross-writer risk),
+rejected because a synced/shared FileID data dir would then hold two divergent
+state files, and the engine already reads this file cross-platform
+(`gpuExecutionProviderOverride`). The unknown-key-preserving merge is the
+load-bearing part: the Linux writer must never drop Windows-schema fields.
+
+## 2026-07-17 — Data tabs reload on connect_map, not only on scan events
+
+Every DB-reading tab (Library/People/Cleanup/Deep Analyze) re-reads when its
+widget maps (= tab switch). Two real failure modes motivated this: (a) the
+startup read can race the freshly spawned engine's exclusive DB open/migration
+window and silently default to an empty snapshot — which is also what made the
+#106 People SQL bug invisible; (b) work finished while another tab is visible
+(clustering, renames, trashes) only surfaced on the next scan event. A per-map
+read is one cheap query against a WAL read connection. The alternative — a
+`Ready`-event reload — covers (a) but not (b) and was dropped for redundancy.
+
+## 2026-07-17 — LavaLamp frame-clock throttled to ~30 fps on Linux
+
+The Cairo LavaLamp repaints the full window every frame-clock tick; on software
+renderers (WSLg/llvmpipe, VMs, old iGPUs) that measured >1.5 cores at display
+rate. The blobs drift at 0.1–0.23 rad/s, so 30 fps is visually identical; the
+tick callback now skips queue_draw until 33 ms have elapsed. macOS/Windows keep
+their compositor-driven cadence (GPU-composited, effectively free there).
+
+## 2026-07-17 — Video thumbnails decode in-process via the engine crate's ffmpeg shell
+
+Library/Cleanup/preview video keyframes call
+`fileid_engine::shell::video::keyframe_25pct` directly on the app's thumbnail
+worker pool (the app links the engine crate in-process for DB reads already) and
+convert the returned packed-RGB frame to a GdkPixbuf. Alternatives: a new
+`generateVideoThumbnail` IPC round-trip to the engine process (more moving
+parts, same ffmpeg subprocess underneath) or GStreamer (new runtime dep, needs a
+DECISIONS entry of its own — still the right answer later for in-preview
+*playback*, but not for a static keyframe). Best-effort contract preserved:
+ffmpeg absent → icon placeholder, never an error.

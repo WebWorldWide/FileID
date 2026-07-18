@@ -75,8 +75,10 @@ fn apply_folder(
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
     folder_label.set_text(&display);
+    folder_label.set_tooltip_text(Some(&path.to_string_lossy()));
     selected_folder.replace(Some(path.to_string_lossy().into_owned()));
     start_button.set_sensitive(true);
+    crate::app_settings::remember_folder(path);
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -165,7 +167,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     sidebar.append(&folder_label);
 
     // NAVIGATE section — the six nav rows
-    sidebar.append(&section_heading("LIBRARY"));
+    sidebar.append(&section_heading("NAVIGATE"));
     let nav_defs = [
         ("library", "Library", "view-grid-symbolic"),
         ("people", "People", "system-users-symbolic"),
@@ -196,6 +198,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
             nav_buttons,
             move |_| {
                 stack.set_visible_child_name(name);
+                crate::app_settings::remember_active_tab(name);
                 for (j, b) in nav_buttons.borrow().iter().enumerate() {
                     if j == i {
                         b.add_css_class("active");
@@ -207,6 +210,21 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         ));
         nav_buttons.borrow_mut().push(row.clone());
         sidebar.append(&row);
+    }
+
+    // Restore the persisted active tab (matches Windows `activeTab` / the macOS
+    // RawValue persistence) — unknown values keep the Library default.
+    if let Some(tab) = crate::app_settings::active_tab() {
+        if let Some(active_index) = nav_defs.iter().position(|(name, _, _)| *name == tab) {
+            stack.set_visible_child_name(&tab);
+            for (j, b) in nav_buttons.borrow().iter().enumerate() {
+                if j == active_index {
+                    b.add_css_class("active");
+                } else {
+                    b.remove_css_class("active");
+                }
+            }
+        }
     }
 
     // Flexible spacer pushes scan controls to the bottom.
@@ -234,6 +252,16 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .build();
     sidebar.append(&status_label);
 
+    // Slim gold scan-progress bar under the status line (visible only while a
+    // scan runs — mirrors the Windows sidebar pipeline progress).
+    let scan_progress = gtk::ProgressBar::builder()
+        .visible(false)
+        .margin_start(10)
+        .margin_end(10)
+        .margin_top(6)
+        .build();
+    sidebar.append(&scan_progress);
+
     // ── Header (thin, transparent — window controls + wordmark) ──────────────
     let header = adw::HeaderBar::builder()
         .css_classes(["fileid-headerbar"])
@@ -251,7 +279,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .min_sidebar_width(230.0)
         .max_sidebar_width(300.0)
         .sidebar_width_fraction(0.24)
-        .show_sidebar(true)
+        .show_sidebar(crate::app_settings::sidebar_visible())
         .build();
     split.set_sidebar(Some(&sidebar));
     split.set_content(Some(&stack));
@@ -266,7 +294,9 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         #[weak]
         split,
         move |_| {
-            split.set_show_sidebar(!split.shows_sidebar());
+            let show = !split.shows_sidebar();
+            split.set_show_sidebar(show);
+            crate::app_settings::remember_sidebar_visible(show);
         }
     ));
     header.pack_start(&sidebar_toggle);
@@ -303,7 +333,9 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
 
     // ── Folder pick → enable scan ────────────────────────────────────────────
     let selected_folder: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    if let Some(path) = initial_folder {
+    // Restore the last-picked folder (skipped when a folder was passed on the
+    // command line) — mirrors Windows `lastFolderPath` + macOS `@AppStorage`.
+    if let Some(path) = initial_folder.or_else(crate::app_settings::last_folder) {
         apply_folder(&path, &folder_label, &start_btn, &selected_folder);
     }
     ACTIVE_WINDOW.with_borrow_mut(|active| {
@@ -347,14 +379,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
                     move |result| {
                         if let Ok(file) = result {
                             if let Some(path) = file.path() {
-                                let display = path
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                                folder_label.set_text(&display);
-                                *selected_folder.borrow_mut() =
-                                    Some(path.to_string_lossy().into_owned());
-                                start_btn.set_sensitive(true);
+                                apply_folder(&path, &folder_label, &start_btn, &selected_folder);
                             }
                         }
                     }
@@ -363,39 +388,99 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         }
     ));
 
-    // ── Start scan → engine ──────────────────────────────────────────────────
+    // ── Start / Stop scan → engine ───────────────────────────────────────────
+    // One button, two states: idle → `startScan`; scanning → `cancelScan`
+    // (the same affordance the macOS sidebar has — without it a long scan can
+    // only be abandoned by quitting the app).
+    let scanning = Rc::new(std::cell::Cell::new(false));
+    let set_scan_ui = {
+        let start_btn = start_btn.clone();
+        let scanning = scanning.clone();
+        Rc::new(move |now_scanning: bool| {
+            scanning.set(now_scanning);
+            if now_scanning {
+                start_btn.set_label("Stop scan");
+                start_btn.remove_css_class("gold-button");
+                start_btn.add_css_class("destructive-action");
+            } else {
+                start_btn.set_label("Start scan");
+                start_btn.remove_css_class("destructive-action");
+                start_btn.add_css_class("gold-button");
+            }
+        })
+    };
     start_btn.connect_clicked(clone!(
         #[strong]
         engine,
         #[strong]
         selected_folder,
+        #[strong]
+        scanning,
+        #[strong]
+        set_scan_ui,
         #[weak]
         status_label,
         move |_| {
+            if scanning.get() {
+                use fileid_engine::ipc::{CommandPayload, Empty};
+                match engine
+                    .borrow_mut()
+                    .send(CommandPayload::CancelScan(Empty {}))
+                {
+                    Ok(()) => status_label.set_label("Stopping scan…"),
+                    Err(err) => status_label.set_label(&format!("Engine: {err}")),
+                }
+                return;
+            }
             let Some(folder) = selected_folder.borrow().clone() else {
                 return;
             };
             match engine.borrow_mut().start_scan(&folder, false) {
-                Ok(()) => status_label.set_label("Engine: scanning…"),
+                Ok(()) => {
+                    status_label.set_label("Engine: scanning…");
+                    set_scan_ui(true);
+                }
                 Err(err) => status_label.set_label(&format!("scan failed: {err}")),
             }
         }
     ));
 
-    // ── Engine status → sidebar status line ──────────────────────────────────
+    // ── Engine status → sidebar status line + progress bar ───────────────────
     let status_rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
         #[weak]
         status_label,
+        #[weak]
+        scan_progress,
+        #[strong]
+        set_scan_ui,
         async move {
             while let Ok(ev) = status_rx.recv().await {
                 let text = match ev {
                     EngineEvent::Spawning => "Engine: starting…".to_string(),
                     EngineEvent::Ready => "Engine: ready".to_string(),
-                    EngineEvent::Progress(p) => format!("Scanning… {} / {}", p.processed, p.total),
-                    EngineEvent::BatchLanded(n) => format!("Scanning… {n} files"),
-                    EngineEvent::ScanComplete(n) => format!("Scan complete — {n} files"),
-                    EngineEvent::Error(m) => format!("Engine: {m}"),
+                    EngineEvent::Progress(p) => {
+                        set_scan_ui(true);
+                        if p.total > 0 {
+                            scan_progress.set_fraction(p.processed as f64 / p.total as f64);
+                            scan_progress.set_visible(true);
+                        }
+                        format!("Scanning… {} / {}", p.processed, p.total)
+                    }
+                    EngineEvent::BatchLanded(n) => {
+                        set_scan_ui(true);
+                        format!("Scanning… {n} files")
+                    }
+                    EngineEvent::ScanComplete(n) => {
+                        set_scan_ui(false);
+                        scan_progress.set_visible(false);
+                        format!("Scan complete — {n} files")
+                    }
+                    EngineEvent::Error(m) => {
+                        set_scan_ui(false);
+                        scan_progress.set_visible(false);
+                        format!("Engine: {m}")
+                    }
                     // Model-download failures were split out of Error; without
                     // this arm a failed download vanishes from the sidebar
                     // (only the Settings/Deep Analyze cards would notice).
@@ -405,7 +490,11 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
                     } => {
                         format!("Model {model_kind}: {message}")
                     }
-                    EngineEvent::Exited => "Engine: restarting…".to_string(),
+                    EngineEvent::Exited => {
+                        set_scan_ui(false);
+                        scan_progress.set_visible(false);
+                        "Engine: restarting…".to_string()
+                    }
                     _ => continue,
                 };
                 status_label.set_label(&text);
@@ -417,6 +506,13 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     EngineClient::start(&engine);
 
     window.present();
+
+    // First-launch onboarding: core-model install checklist + the machine-sized
+    // Deep Analyze recommendation (mirrors the Windows/macOS Welcome sheet;
+    // re-shows while any core model is missing).
+    if crate::welcome::should_show() && std::env::var("FILEID_SELF_SHOT").is_err() {
+        crate::welcome::present(&window, engine.clone());
+    }
 
     // Dev-only self-capture: render the window to a PNG so the UI can be
     // inspected on compositors that expose no screenshot API (e.g. cosmic-comp

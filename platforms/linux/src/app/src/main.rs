@@ -10,12 +10,14 @@
 // crate allows this lint for the same reason.
 #![allow(clippy::type_complexity)]
 
+mod app_settings;
 mod engine_client;
 mod lavalamp;
 mod model_license;
 mod spring;
 mod tabs;
 mod theme;
+mod welcome;
 mod window;
 
 use adw::prelude::*;
