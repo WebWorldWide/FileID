@@ -1452,8 +1452,15 @@ pub mod trash {
             let expected = crate::platform::file_identity(&original);
             trash_into(&original, &trash).unwrap();
             let trash_file = trash.join("files/file.bin");
-            std::fs::remove_file(&trash_file).unwrap();
-            std::fs::write(&trash_file, b"substitute").unwrap();
+            // Substitute the trashed file with different content under a
+            // GUARANTEED-distinct identity. Allocating the replacement beside the
+            // still-present original and renaming it into place prevents an
+            // inode-reusing filesystem (tmpfs on CI, unlike ext4 under WSL) from
+            // handing the replacement the freed original's inode, which would make
+            // the (dev, inode) identity spuriously match and defeat the check.
+            let substitute = trash.join("files/file.bin.substitute");
+            std::fs::write(&substitute, b"substitute").unwrap();
+            std::fs::rename(&substitute, &trash_file).unwrap();
             let root = std::fs::canonicalize(&source_dir).unwrap();
             let target = RestoreTarget::prepare(&original, &[root]).unwrap();
 

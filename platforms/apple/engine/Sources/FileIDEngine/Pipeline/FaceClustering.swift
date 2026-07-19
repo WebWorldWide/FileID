@@ -721,7 +721,12 @@ public enum FaceClustering {
         }
         let stats: PersistStats
         do {
-            stats = try await database.pool.write { db -> PersistStats in
+            // Capture the fully-built Phase-0 pool arrays immutably: the
+            // pool.write closure is @Sendable, and Swift 6 rejects referencing
+            // the outer `var` bindings from concurrently-executing code. Both
+            // are read-only here and arrays are copy-on-write, so this is a
+            // reference bump, not a deep copy.
+            stats = try await database.pool.write { [denseToFaceID, vecsByDense] db -> PersistStats in
                 // RE-READ the identity snapshot HERE — under the persist lock,
                 // inside the transaction, BEFORE the DELETE below — not from the
                 // PHASE-0 capture. Re-clustering drops + re-creates persons on
