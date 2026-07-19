@@ -122,7 +122,10 @@ struct IPCSchemaConformanceTests {
                 return "2026-01-01T00:00:00Z"
             }
             if let pattern = schema["pattern"] as? String {
-                for candidate in ["applyTags", "renameFiles", "trashFiles"]
+                // The last candidate is a 64-char hex string for the exact-cleanup
+                // sha256Hex / keeperSha256Hex fields (^[0-9a-fA-F]{64}$); the action
+                // discriminators cover the bulk-action patterns.
+                for candidate in ["applyTags", "renameFiles", "trashFiles", String(repeating: "0", count: 64)]
                 where try string(candidate, matches: pattern) {
                     return candidate
                 }

@@ -154,7 +154,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/windows/src/engine/src/models/vlm.rs": "895c8deb75027e2b6b8d29d1f74f70a1ff7fbc6b8636e4aaac8c6c11dd8d63a4",
     "platforms/windows/src/engine/src/models/whisper.rs": "e1d70beb88cd4fd2c4a796fde4a0653cd3653c85f636242364094f193bd404b4",
     "platforms/windows/src/engine/src/platform.rs": "87977d1a96aaa260685e5a37224083b968c33c1476f3e4f0244368ca188ee064",
-    "platforms/windows/src/engine/src/shell/mod.rs": "33a4cee3fd49f8823c40872ccbe96681b86e14e3119fcef76f8bc60129dbbc79",
+    "platforms/windows/src/engine/src/shell/mod.rs": "27cdf3ea0265ff207c63e3d95c13cae89664e7ab367adfc89e34a6fc00e80c78",
     "platforms/windows/src/FileID.App/Program.cs": "5b21dbe44f38977e0bab05e856f6c8c866d33efab138188e9c5c0f17252b68d0",
     "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "86a417b049bc8234a2c55b5f6a7e9c0a65287af619e0d6817e0db748d90d90f7",
