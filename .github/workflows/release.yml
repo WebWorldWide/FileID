@@ -265,7 +265,7 @@ jobs:
 
       - name: Download signed/non-Windows CLI/TUI bundles
         if: steps.mode.outputs.publish == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: tools-*
           merge-multiple: true
@@ -330,7 +330,7 @@ jobs:
       contents: write
     steps:
       - name: Download release-ready assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: FileID-release-ready-${{ github.run_id }}
           path: release-assets
