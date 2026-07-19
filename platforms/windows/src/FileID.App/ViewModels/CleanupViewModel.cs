@@ -1,11 +1,9 @@
 ﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
 //
-// Groups files by exact `content_hash` (BLAKE3 for files <=16 MB, else a
-// head+tail+size composite; migration v8) so each group is byte-for-byte
-// identical, not merely visually similar. An identical size_bytes is required
-// too as a cheap guard. Each group lets the user mark one keeper and trash the
-// others (engine `trashFiles` IPC command, parallel IFileOperation::DeleteItem
-// with FOF_ALLOWUNDO).
+// Uses persisted `content_hash` only to find candidate groups. The current
+// engine stores full SHA-256 through 16 MiB and a sampled SHA-256 identity above
+// that size, so Exact deletion independently full-hashes the selected keeper and
+// victims before sending keeper-bound proof to the engine.
 
 using System;
 using System.Collections.Generic;
@@ -21,8 +19,8 @@ using Microsoft.UI.Dispatching;
 
 namespace FileID.ViewModels;
 
-/// <summary>Cleanup tab mode (macOS parity). Exact = byte-identical copies by
-/// content_hash (default); Similar = visually near-identical images grouped by
+/// <summary>Cleanup tab mode (macOS parity). Exact = persisted-hash candidates
+/// that require live full-byte proof before mutation; Similar = visually near-identical images grouped by
 /// dHash Hamming distance.</summary>
 internal enum CleanupMode { Exact, Similar }
 
@@ -74,8 +72,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         private set { if (_errorMessage != value) { _errorMessage = value; OnPropertyChanged(); } }
     }
 
-    // Cleanup has two modes (macOS parity): Exact groups byte-identical copies by
-    // content_hash (default, unchanged behavior); Similar groups visually
+    // Cleanup has two modes (macOS parity): Exact shows content-hash candidate
+    // groups whose selected files are live-verified before Trash; Similar groups visually
     // near-identical images by dHash Hamming distance (resizes / re-encodes /
     // crops / light edits). The view sets Mode, then calls RefreshAsync to reload.
     private CleanupMode _mode = CleanupMode.Exact;
@@ -148,9 +146,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         else _ui.TryEnqueue(() => { if (!_disposed) action(); });
     }
 
-    /// <summary>Files larger than this use a head+tail+size COMPOSITE
-    /// content_hash in the engine, not a full BLAKE3 — so matching hashes are
-    /// "likely", not byte-verified. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
+    /// <summary>Files larger than this use sampled SHA-256 content identity in
+    /// the engine, not a full digest. Mirror of the engine's FULL_HASH_MAX_BYTES.</summary>
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
     private const int MaxGroups = 200;
     private const int MaxVisibleMembers = 5_000;
@@ -561,8 +558,8 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
 
 internal sealed class DuplicateGroup : INotifyPropertyChanged
 {
-    /// <summary>The shared content hash (BLAKE3 / composite, hex) of every
-    /// member — the group's identity. Bound as the keeper RadioButton's Tag.</summary>
+    /// <summary>The persisted full or sampled content identity shared by the
+    /// candidate group. Bound as the keeper RadioButton's Tag.</summary>
     public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int TotalMemberCount { get; init; }
@@ -570,7 +567,7 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     public bool IsTruncated => MemberCount > Members.Count;
 
     /// <summary>True when members exceed the engine's full-hash threshold, so
-    /// the shared content_hash is a head+tail+size composite — "likely", not
+    /// the shared content_hash is sampled SHA-256 — "likely", not
     /// byte-verified duplicates. Drives the cautious caption (#3).</summary>
     public bool IsApproximate { get; init; }
 
@@ -614,7 +611,7 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
             }
             else
             {
-                // Approximate (>16 MB composite-hash) groups are NOT byte-verified —
+                // Approximate (>16 MB sampled-hash) groups are NOT byte-verified —
                 // present them as "likely duplicates — verify before deleting" so the
                 // caption never makes a false byte-for-byte guarantee (#3).
                 label = IsApproximate

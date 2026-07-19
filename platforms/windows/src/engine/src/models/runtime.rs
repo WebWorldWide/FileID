@@ -204,6 +204,13 @@ fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
 /// error chain to know it should cancel the scan rather than skip the file.
 pub const GPU_DEVICE_REMOVED_MARKER: &str = "[FILEID_GPU_DEVICE_REMOVED]";
 
+pub fn ensure_gpu_inference_alive() -> anyhow::Result<()> {
+    if crate::coordinator::process_gpu_device_removed() {
+        anyhow::bail!(GPU_DEVICE_REMOVED_MARKER);
+    }
+    Ok(())
+}
+
 /// Detects whether an error carries the marker added by the model
 /// wrappers when they classify a session.run failure as device-removed.
 /// Cheap substring check on the formatted error chain.
@@ -218,6 +225,7 @@ pub fn error_has_device_removed_marker(err: &anyhow::Error) -> bool {
 /// non-fatal failures the pipeline can skip).
 pub fn classify_inference_error(err: anyhow::Error) -> anyhow::Error {
     if is_device_removed_error(&err) {
+        crate::coordinator::latch_process_gpu_device_removed();
         err.context(GPU_DEVICE_REMOVED_MARKER)
     } else {
         err
@@ -421,6 +429,7 @@ pub fn commit_chain_session(
     onnx_path: &Path,
 ) -> anyhow::Result<(ort::session::Session, String)> {
     use anyhow::Context;
+    ensure_gpu_inference_alive()?;
     let probe = RuntimeProbe::shared();
     let chain = priority_chain(probe.vendor);
     let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
@@ -431,12 +440,14 @@ pub fn commit_chain_session(
     if !providers.is_empty() {
         builder = builder
             .with_execution_providers(providers)
-            .with_context(|| format!("register execution providers ({label})"))?;
+            .with_context(|| format!("register execution providers ({label})"))
+            .map_err(classify_inference_error)?;
     }
     tracing::info!(model = label, chain = ?chain_labels, "EP priority chain registered");
     let session = builder
         .commit_from_file(onnx_path)
-        .with_context(|| format!("ORT session commit ({label})"))?;
+        .with_context(|| format!("ORT session commit ({label})"))
+        .map_err(classify_inference_error)?;
     let input_name = session
         .inputs
         .first()
@@ -873,5 +884,35 @@ mod tests {
             let chain = priority_chain(vendor);
             assert_chain_terminates_at_cpu_with_directml(vendor, &chain);
         }
+    }
+
+    #[test]
+    fn device_removed_classification_latches_only_in_an_isolated_process() {
+        const CHILD: &str = "FILEID_GPU_LATCH_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(!crate::coordinator::process_gpu_device_removed());
+            let ordinary = classify_inference_error(anyhow::anyhow!("ordinary model error"));
+            assert!(!error_has_device_removed_marker(&ordinary));
+            assert!(!crate::coordinator::process_gpu_device_removed());
+
+            let removed = classify_inference_error(
+                anyhow::anyhow!("DXGI_ERROR_DEVICE_REMOVED 0x887A0005")
+                    .context("ORT session commit (test model)"),
+            );
+            assert!(error_has_device_removed_marker(&removed));
+            assert!(crate::coordinator::process_gpu_device_removed());
+            let blocked = ensure_gpu_inference_alive().expect_err("GPU work must stay blocked");
+            assert!(error_has_device_removed_marker(&blocked));
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("models::runtime::tests::device_removed_classification_latches_only_in_an_isolated_process")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .status()
+            .expect("launch isolated GPU-latch test");
+        assert!(status.success());
     }
 }

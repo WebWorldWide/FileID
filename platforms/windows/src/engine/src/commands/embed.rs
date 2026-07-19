@@ -4,7 +4,7 @@
 //! uniformly regardless of source.
 
 use crate::ipc::{
-    self, sink::Sink, ClipTextEmbedding, EventPayload, IpcEvent, Wrap,
+    self, sink::Sink, ClipTextEmbedding, EngineError, EventPayload, IpcEvent, Wrap,
 };
 
 /// Pull the stored CLIP image embedding for a file_id from `clip_embeddings`
@@ -115,10 +115,11 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
     let query = payload.query.clone();
     let query_id = payload.query_id.clone();
 
-    // CLIP is disabled (scene_vocab::ENABLE_CLIP) — emit an empty embedding so
-    // the search box falls back to FTS5 (over VLM tags + filenames + OCR)
-    // without a 5 s timeout. No model load.
-    if !crate::models::scene_vocab::ENABLE_CLIP {
+    // CLIP disabled or a previously reported GPU reset: emit an empty embedding
+    // so search falls back to FTS5 without a timeout or another model submission.
+    if !crate::models::scene_vocab::ENABLE_CLIP
+        || crate::coordinator::process_gpu_device_removed()
+    {
         sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
             ClipTextEmbedding {
                 query_id,
@@ -131,6 +132,9 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
     }
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<f32>> {
+        if crate::coordinator::process_gpu_device_removed() {
+            anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
+        }
         use std::sync::OnceLock;
         static TEXT_MODEL: OnceLock<
             parking_lot::Mutex<Option<crate::models::clip_text::ClipText>>,
@@ -166,6 +170,9 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             *guard = Some(loaded?);
         }
         let model = guard.as_mut().expect("just set");
+        if crate::coordinator::process_gpu_device_removed() {
+            anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
+        }
         model.embed(&payload.query)
     })
     .await;
@@ -189,6 +196,15 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             // "install CLIP" nudge, if wanted, belongs on the search-box-local
             // channel, not the global engine-status error.
             tracing::warn!(?err, "CLIP text embed failed");
+            if crate::models::runtime::error_has_device_removed_marker(&err) {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "gpu_device_removed".into(),
+                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+                    path: None,
+                    model_kind: Some("mobileclip_text".into()),
+                }))))
+                .await;
+            }
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(
                 ClipTextEmbedding {
                     query_id,

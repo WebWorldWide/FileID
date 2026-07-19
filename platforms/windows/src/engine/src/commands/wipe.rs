@@ -16,6 +16,7 @@ pub(crate) async fn handle_wipe_library(
     sink: Sink,
     db: Arc<Mutex<Connection>>,
     scan_state: Arc<Mutex<Option<crate::coordinator::ScanCoordinator>>>,
+    scan_cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: Arc<std::sync::atomic::AtomicBool>,
@@ -23,6 +24,7 @@ pub(crate) async fn handle_wipe_library(
     restructure_active: Arc<std::sync::atomic::AtomicBool>,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
+    scan_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
     if let Some(coord) = scan_state.lock().clone() {
         coord.request_cancel();
     }

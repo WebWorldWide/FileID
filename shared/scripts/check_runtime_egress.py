@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -70,6 +73,152 @@ let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
 });
 """
 
+EXCLUDED_SOURCE_PARTS = {
+    "target", "obj", ".build", "deriveddata", "tests", "test", "benches", "examples", "scripts"
+}
+RAW_NETWORK_FILES = {
+    "platforms/windows/src/engine/src/downloader.rs",
+    "platforms/windows/src/engine/src/models/vlm_server.rs",
+    "platforms/windows/src/engine/src/commands/prewarm.rs",
+    "platforms/windows/src/engine/src/main.rs",
+    "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
+    "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
+    "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift",
+    "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift",
+    "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift",
+    "platforms/apple/app/Sources/FileID/EngineClient.swift",
+    "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
+    "platforms/cli/src/runtime.rs",
+    "platforms/cli/src/scan_models.rs",
+    "platforms/linux/src/app/src/engine_client.rs",
+    "platforms/linux/src/app/src/tabs/settings.rs",
+    "platforms/tui/src/models.rs",
+    "platforms/tui/src/scan.rs",
+    "platforms/windows/src/engine/src/commands/trash.rs",
+    "platforms/windows/src/engine/src/models/vlm.rs",
+    "platforms/windows/src/engine/src/models/whisper.rs",
+    "platforms/windows/src/engine/src/platform.rs",
+    "platforms/windows/src/engine/src/shell/mod.rs",
+    "platforms/windows/src/FileID.App/Program.cs",
+    "platforms/windows/src/FileID.App/Services/SafeOpen.cs",
+    "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs",
+    "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs",
+    "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs",
+    "platforms/windows/src/FileID.App/App.xaml.cs",
+    "platforms/windows/src/FileID.App/MainWindow.xaml.cs",
+    "platforms/windows/src/FileID.App/Services/FolderPickerService.cs",
+    "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs",
+    "platforms/windows/src/engine/src/models/runtime.rs",
+    "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
+    "platforms/windows/src/engine/src/pipeline/doc_extract.rs",
+    "platforms/windows/src/engine/src/pipeline/restructure_apply.rs",
+    "platforms/windows/src/engine/src/shell/heic.rs",
+    "platforms/windows/src/engine/src/shell/ocr.rs",
+    "platforms/windows/src/engine/src/shell/reveal.rs",
+    "platforms/windows/src/engine/src/shell/tags.rs",
+    "platforms/windows/src/engine/src/shell/thumbnail.rs",
+    "platforms/windows/src/engine/src/shell/trash.rs",
+    "platforms/windows/src/engine/src/shell/video.rs",
+    "platforms/windows/src/engine/src/util/content_hash.rs",
+    "platforms/windows/src/engine/src/util/path_safety.rs",
+}
+REVIEWED_NETWORK_SOURCE_SHA256 = {
+    "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "42e7b56992f5beef2516e006aec47b2469e327d40f2b4cc37829f253e1237f10",
+    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "06026bc89caf4293c328182807ccce81ed8004dda0e1e07e11ee42beac33079b",
+    "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "b6c180c884d90833ad0188eb61a1f4ea7907c6ff10f081c61e89752ceb0bf786",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "649ae891f303751261aef7834a4a5353b0c96810018470580f6681cefef26822",
+    "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
+    "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": "bc9643b70b9bb104e13a04f0c9584c4675fef75e521abb7bd79915c0b45badc8",
+    "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "29cc2a712ec257b3f488f039a2afb3f6128a0a6acd03e9fc859b83d84a72ab8a",
+    "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
+    "platforms/windows/src/engine/src/commands/prewarm.rs": "1f253fd6a04ca7785b4704456a1b4be64ab8da75463ea51d730a53ea4c0d4401",
+    "platforms/windows/src/engine/src/downloader.rs": "a3533060920f874dbc328e745edcacf58208ee9c56756834627aea56c98a08c9",
+    "platforms/windows/src/engine/src/main.rs": "7918b7376eefbdb20d8cb464fc51b5d01cefc89a9cbdf875cd30c6467fdac45f",
+    "platforms/windows/src/engine/src/models/vlm_server.rs": "c47e1be5f0b777727dc122b0c13f425cd04106bc3edc8aa1e6009ef67ed733ff",
+    "platforms/apple/app/Sources/FileID/EngineClient.swift": "c7f7ffaf1bf0b7dfda3f1949d3de526cb642e9b0ee951f8c93d4667485245373",
+    "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "19360d2659d6fe8da52c6118d388881fcdf64343eba3c3b9a235fb762211f15b",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "02e754fcfe0311ab3e1a891c7006c12b6855761e2237be5a799852cb28c9bb00",
+    "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
+    "platforms/cli/src/scan_models.rs": "ccafc75d481d8420b11ffd167a8d35a28b69c0331065a96d5b575fdf3831e26b",
+    "platforms/linux/src/app/src/engine_client.rs": "d3b7ef0c742575b4805702e0eb5213cc524c9a25303ecfe732a3e74bb1d9191d",
+    "platforms/linux/src/app/src/tabs/settings.rs": "870c194195e24d232985cbabbf5b8240c2b3cc9a995aa086e3e8e4f370834f25",
+    "platforms/tui/src/models.rs": "9b3b8b7eaa7fa95eebea74c9e414836d464cfaa5debb6094adab79447922d402",
+    "platforms/tui/src/scan.rs": "4cc3540a5a81f1cf1f1e6e74b422d8dc26a72fb9b7fa8b5c059dc660a9bd34d7",
+    "platforms/windows/src/engine/src/commands/trash.rs": "5168a7ceafe565caa89b5dee6b04aa15895265ca3216cb1a92c57bf38b526015",
+    "platforms/windows/src/engine/src/models/vlm.rs": "895c8deb75027e2b6b8d29d1f74f70a1ff7fbc6b8636e4aaac8c6c11dd8d63a4",
+    "platforms/windows/src/engine/src/models/whisper.rs": "e1d70beb88cd4fd2c4a796fde4a0653cd3653c85f636242364094f193bd404b4",
+    "platforms/windows/src/engine/src/platform.rs": "87977d1a96aaa260685e5a37224083b968c33c1476f3e4f0244368ca188ee064",
+    "platforms/windows/src/engine/src/shell/mod.rs": "27cdf3ea0265ff207c63e3d95c13cae89664e7ab367adfc89e34a6fc00e80c78",
+    "platforms/windows/src/FileID.App/Program.cs": "5b21dbe44f38977e0bab05e856f6c8c866d33efab138188e9c5c0f17252b68d0",
+    "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
+    "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "86a417b049bc8234a2c55b5f6a7e9c0a65287af619e0d6817e0db748d90d90f7",
+    "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "e7fa8d5b898c25a8c691a5a246cbc3257cfaa4f9d75b4d06afd06849bcf660b8",
+    "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "48b38c07bdbdc6ddfddbd54da674f0fdff926e1f3c3eda89889c36b5726e4cec",
+    "platforms/windows/src/FileID.App/App.xaml.cs": "4b5a9c0362071943362ac085e302a39196be22918b3459df97204b235184e381",
+    "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "548b0b2215f4bde535323dd109f8da7bce5c8d4ed7be9bfaca243407425861b1",
+    "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "288109b87c67f9789e989cd15a60fc6bb317b4b6eb154bcddbaa5ff52618d828",
+    "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
+    "platforms/windows/src/engine/src/models/runtime.rs": "98b97e26779de99ce090e0b9035184347d93994190b34a9c5866e07558a07567",
+    "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "aa2c4e8cfaa4754832bf54ba2a41b68bfed0ec34904db512c64b0051f340509c",
+    "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "c552c10256b48748bbf923e0a153aa886e5c1305ff06dfd02d358e0d4a86248e",
+    "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "2d775b21bc8d02ecd35e24c0821bb051691547baf30fc534d12880e237385ce4",
+    "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
+    "platforms/windows/src/engine/src/shell/ocr.rs": "0f00992631b59d6bc1840490172c3346b0588752aa8d8fc66fa94e85ac8b27a7",
+    "platforms/windows/src/engine/src/shell/reveal.rs": "99fffa994961644a9695812f9388599f233742ff85105c107e6a76dafa30591b",
+    "platforms/windows/src/engine/src/shell/tags.rs": "e4afc1cc50dac59aeb3e3866f083db0beb6fe8725df372cf9d849e825f2dfd70",
+    "platforms/windows/src/engine/src/shell/thumbnail.rs": "8fa7977553d16e5cbc09ea4ae0dd1ad8867232d4f361d9425fa884cdd4674dac",
+    "platforms/windows/src/engine/src/shell/trash.rs": "46864e2622b9883d793f77afb826b2297b4c6fec1b8e618dc80cf34e2f9865e8",
+    "platforms/windows/src/engine/src/shell/video.rs": "94907552cb1ea608277b7f184c9189b52dfdb3b291c0f3f8213a0d9db4608034",
+    "platforms/windows/src/engine/src/util/content_hash.rs": "2f1b1f5ed6384cfb3a8f1946f22b0a71332ac0c5b0ac4691805f81acff90b37a",
+    "platforms/windows/src/engine/src/util/path_safety.rs": "0fdacad791b817b7e95727dd9a66e7f8a9eb82c5eae26d70530cba83521d0c0d",
+}
+SAFE_NETWORK_CALLER_FILES = {
+    "platforms/windows/src/engine/src/downloader.rs",
+    "platforms/windows/src/engine/src/commands/prewarm.rs",
+    "platforms/cli/src/runtime.rs",
+    "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
+    "platforms/apple/app/Sources/FileID/Services/ArcFaceModelInstaller.swift",
+    "platforms/apple/app/Sources/FileID/Services/BGEModelInstaller.swift",
+    "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
+    "platforms/apple/app/Sources/FileID/Services/RamPlusModelInstaller.swift",
+}
+RAW_NETWORK_PATTERNS = {
+    ".rs": re.compile(
+        r"\b(?:reqwest\b|std::net::(?:Tcp|Udp)|tokio::net::(?:Tcp|Udp)|"
+        r"TcpStream|TcpListener|UdpSocket|ClientWebSocket|"
+        r"(?:std|tokio)::process::Command|Command::new|posix_spawn|"
+        r"libc::(?:fork|vfork|exec[A-Za-z0-9_]*|system|socket|connect|sendto|getaddrinfo)|"
+        r"extern\b|libloading|dlopen|dlsym|windows::Win32::|ort::init_from|"
+        r"Pdfium::bind_to_[A-Za-z0-9_]*)"
+    ),
+    ".swift": re.compile(
+        r"\b(?:URLSession|URLRequest|URLSessionTask|NW[A-Z][A-Za-z0-9_]*|"
+        r"CFSocket[A-Za-z0-9_]*|CFStream[A-Za-z0-9_]*|CFHost[A-Za-z0-9_]*|"
+        r"CFNet[A-Za-z0-9_]*|CFHTTP[A-Za-z0-9_]*|CFReadStream[A-Za-z0-9_]*|"
+        r"CFWriteStream[A-Za-z0-9_]*|URLSessionWebSocketTask|Process|NSTask|"
+        r"posix_spawn[A-Za-z0-9_]*|fork|exec[lvpe]*|dlopen|dlsym)\b|"
+        r"(?<![A-Za-z0-9_.])system\s*\(|(?:Darwin|Glibc)\.system\s*\(|"
+        r"\b[A-Z][A-Za-z0-9_.]*(?:\.init)?\s*\(\s*contentsOf\s*:"
+    ),
+    ".cs": re.compile(
+        r"\b(?:HttpClient|HttpRequestMessage|WebClient|WebRequest|TcpClient|"
+        r"TcpListener|UdpClient|ClientWebSocket|System\.Net\.Sockets|"
+        r"Windows\.Networking|Process|ProcessStartInfo|DllImport|LibraryImport|NativeLibrary)\b"
+    ),
+}
+SAFE_NETWORK_SINK_PATTERNS = {
+    ".rs": re.compile(r"\b(?:download_file_blocking|download_simple|download_parallel)\s*\("),
+    ".swift": re.compile(r"\b(?:streamingDownload|parallelStreamingDownload)\s*\("),
+    ".cs": re.compile(r"$^"),
+}
+
 
 def _approved(host: str | None) -> bool:
     if host is None:
@@ -88,6 +237,421 @@ def _without_comments(text: str) -> str:
 
 def _normalized(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _mask_comments_and_strings(text: str) -> str:
+    output = list(text)
+    index = 0
+    block_depth = 0
+    while index < len(text):
+        if block_depth:
+            if text.startswith("/*", index):
+                output[index:index + 2] = "  "
+                block_depth += 1
+                index += 2
+            elif text.startswith("*/", index):
+                output[index:index + 2] = "  "
+                block_depth -= 1
+                index += 2
+            else:
+                if text[index] != "\n":
+                    output[index] = " "
+                index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            if end < 0:
+                end = len(text)
+            for offset in range(index, end):
+                output[offset] = " "
+            index = end
+            continue
+        if text.startswith("/*", index):
+            output[index:index + 2] = "  "
+            block_depth = 1
+            index += 2
+            continue
+        raw = re.match(r"(?:br|r)(#*)\"", text[index:])
+        if raw:
+            delimiter = '"' + raw.group(1)
+            end = text.find(delimiter, index + raw.end())
+            end = len(text) if end < 0 else end + len(delimiter)
+            for offset in range(index, end):
+                if text[offset] != "\n":
+                    output[offset] = " "
+            index = end
+            continue
+        character = re.match(r"'(?:\\(?:.|u\{[0-9A-Fa-f_]+\})|[^\\'\n])'", text[index:])
+        if character:
+            end = index + character.end()
+            for offset in range(index, end):
+                output[offset] = " "
+            index = end
+            continue
+        swift_extended = re.match(r"(#+)\"", text[index:])
+        if swift_extended:
+            delimiter = '"' + swift_extended.group(1)
+            end = text.find(delimiter, index + swift_extended.end())
+            end = len(text) if end < 0 else end + len(delimiter)
+            for offset in range(index, end):
+                if text[offset] != "\n":
+                    output[offset] = " "
+            index = end
+            continue
+        if text.startswith('"""', index):
+            end = text.find('"""', index + 3)
+            end = len(text) if end < 0 else end + 3
+            for offset in range(index, end):
+                if text[offset] != "\n":
+                    output[offset] = " "
+            index = end
+            continue
+        if text[index] == '"' or text.startswith('@"', index):
+            start = index
+            if text.startswith('@"', index):
+                index += 2
+                while index < len(text):
+                    if text.startswith('""', index):
+                        index += 2
+                    elif text[index] == '"':
+                        index += 1
+                        break
+                    else:
+                        index += 1
+            else:
+                index += 1
+                escaped = False
+                while index < len(text):
+                    char = text[index]
+                    index += 1
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        break
+            for offset in range(start, index):
+                if text[offset] != "\n":
+                    output[offset] = " "
+            continue
+        index += 1
+    return "".join(output)
+
+
+def _without_rust_test_code(text: str) -> str:
+    output = list(text)
+    structure = _mask_comments_and_strings(text)
+    cursor = 0
+    while True:
+        marker = structure.find("#[cfg(test)]", cursor)
+        if marker < 0:
+            break
+        opening = structure.find("{", marker)
+        semicolon = structure.find(";", marker)
+        if opening < 0 or 0 <= semicolon < opening:
+            end = semicolon + 1 if semicolon >= 0 else marker + len("#[cfg(test)]")
+        else:
+            depth = 0
+            end = len(structure)
+            for index in range(opening, len(structure)):
+                if structure[index] == "{":
+                    depth += 1
+                elif structure[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = index + 1
+                        break
+        for index in range(marker, end):
+            if output[index] != "\n":
+                output[index] = " "
+        cursor = end
+    return "".join(output)
+
+
+def _source_code(path: Path, text: str) -> str:
+    if path.suffix.lower() == ".rs":
+        text = _without_rust_test_code(text)
+    return _mask_comments_and_strings(text)
+
+
+def _swift_url_loader_sites(code: str) -> int:
+    loader_types = {"Data", "NSData", "String", "NSString"}
+    aliases = [
+        (alias, target.rsplit(".", 1)[-1])
+        for alias, target in re.findall(
+            r"\btypealias\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+            r"([A-Za-z_][A-Za-z0-9_.]*)\b",
+            code,
+        )
+    ]
+    changed = True
+    while changed:
+        changed = False
+        for alias, target in aliases:
+            if target in loader_types and alias not in loader_types:
+                loader_types.add(alias)
+                changed = True
+    return sum(
+        len(re.findall(rf"\b{re.escape(loader)}(?:\.init)?\s*\(\s*contentsOf\s*:", code))
+        for loader in loader_types
+    )
+
+
+def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
+    platforms = root / "platforms"
+    if not platforms.is_dir():
+        return [], ["platforms: production source tree is missing"]
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "platforms"],
+            check=True,
+            capture_output=True,
+        )
+        candidates = [root / os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw]
+    except (OSError, subprocess.CalledProcessError):
+        candidates = list(platforms.rglob("*"))
+    files = []
+    for path in candidates:
+        if not path.is_file() or path.suffix.lower() not in RAW_NETWORK_PATTERNS:
+            continue
+        relative_parts = path.relative_to(root).parts
+        if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts):
+            continue
+        files.append(path)
+    return sorted(set(files)), []
+
+
+def _rust_external_transport_violations(root: Path) -> list[str]:
+    path = root / "platforms/windows/src/engine/src/downloader.rs"
+    if not path.is_file():
+        return [f"{path}: reviewed external transport is missing"]
+    code = _source_code(path, path.read_text(encoding="utf-8"))
+    request_sites = re.findall(
+        r"(?:\b[A-Za-z_][A-Za-z0-9_]*\s*\.|\breqwest::Client::)\s*"
+        r"(?:get|head|post|request|put|delete|patch|execute)\s*\(",
+        code,
+    )
+    if code.count("reqwest::Client::builder") != 2 \
+            or "reqwest::Client::new" in code \
+            or "reqwest::ClientBuilder" in code \
+            or len(request_sites) != 4:
+        return [f"{path}: raw client/request inventory differs from the reviewed transport"]
+    return []
+
+
+def _swift_transport_violations(root: Path) -> list[str]:
+    failures: list[str] = []
+    streaming_path = root / "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift"
+    pinning_path = root / "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift"
+    vlm_path = root / "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift"
+    if not all(path.is_file() for path in (streaming_path, pinning_path, vlm_path)):
+        return ["Apple reviewed network transport files are missing"]
+    streaming_text = streaming_path.read_text(encoding="utf-8")
+    streaming = _without_comments(streaming_text)
+    streaming_code = _mask_comments_and_strings(streaming_text)
+    expected_inventory = {
+        r"URLSession\s*\(": 3,
+        r"URLRequest\s*\(": 2,
+        r"\.downloadTask\s*\(": 2,
+        r"\.data\s*\(": 1,
+    }
+    if re.search(r"\.(?:dataTask|uploadTask|streamTask|webSocketTask|bytes)\s*\(", streaming_code) \
+            or "URLSession.shared" in streaming_code or any(
+                len(re.findall(pattern, streaming_code)) != count
+                for pattern, count in expected_inventory.items()
+            ):
+        failures.append(f"{streaming_path}: raw session/request inventory changed")
+    guard = "guard TLSPinning.allowsExternalRequest(to: remote) else"
+    for marker in ("public func streamingDownload", "public func parallelStreamingDownload"):
+        function = _braced_expression(streaming, marker)
+        if function is None:
+            failures.append(f"{streaming_path}: {marker} not found")
+            continue
+        if function.count(guard) != 1 or function.index(guard) > function.index("URLSession"):
+            failures.append(f"{streaming_path}: {marker} must reject the initial URL before session creation")
+
+    pinning_text = pinning_path.read_text(encoding="utf-8")
+    pinning = _without_comments(pinning_text)
+    pinning_code = _mask_comments_and_strings(pinning_text)
+    if re.search(
+        r"URLSession\s*\(|URLSession\.shared|URLRequest\s*\(|"
+        r"\.(?:dataTask|downloadTask|uploadTask|streamTask|webSocketTask|data|bytes)\s*\(",
+        pinning_code,
+    ):
+        failures.append(f"{pinning_path}: policy module must not construct sessions or requests")
+    host_match = re.search(
+        r"public static let externalDownloadHosts:\s*\[String\]\s*=\s*\[(.*?)\]",
+        pinning,
+        re.DOTALL,
+    )
+    hosts = set(STRING_RE.findall(host_match.group(1))) if host_match else set()
+    expected_hosts = {"huggingface.co", "*.huggingface.co", "*.hf.co"}
+    if hosts != expected_hosts:
+        failures.append(f"{pinning_path}: external transport hosts must be exactly {sorted(expected_hosts)}")
+    redirect = _braced_expression(pinning, "public static func allowsRedirect")
+    if redirect is None or "allowsExternalRequest(to: url)" not in redirect:
+        failures.append(f"{pinning_path}: redirects must reuse the initial external URL policy")
+    delegate_redirect = _braced_expression(pinning, "willPerformHTTPRedirection")
+    if delegate_redirect is None or not all(
+        value in delegate_redirect
+        for value in ("TLSPinning.maxRedirects", "TLSPinning.allowsRedirect(to: request.url)")
+    ):
+        failures.append(f"{pinning_path}: tree-listing delegate lacks reviewed redirect enforcement")
+
+    vlm_text = vlm_path.read_text(encoding="utf-8")
+    vlm = _without_comments(vlm_text)
+    vlm_code = _mask_comments_and_strings(vlm_text)
+    if re.search(r"\.(?:dataTask|downloadTask|uploadTask|streamTask|webSocketTask|bytes)\s*\(", vlm_code) \
+            or "URLSession.shared" in vlm_code \
+            or len(re.findall(r"URLSession\s*\(", vlm_code)) != 1 \
+            or len(re.findall(r"URLRequest\s*\(", vlm_code)) != 1 \
+            or len(re.findall(r"\.data\s*\(", vlm_code)) != 1 \
+            or _swift_url_loader_sites(vlm_code) != 1:
+        failures.append(f"{vlm_path}: raw tree-listing request inventory changed")
+    listing = _braced_expression(vlm, "private func listRepoFiles")
+    vlm_guard = "guard TLSPinning.allowsExternalRequest(to: url) else"
+    if listing is None or vlm_guard not in listing or listing.index(vlm_guard) > listing.index("URLSession"):
+        failures.append(f"{vlm_path}: tree listing must reject its initial URL before session creation")
+    if listing is None or "pinDelegate.redirectRejected" not in listing:
+        failures.append(f"{vlm_path}: tree listing must surface blocked redirects")
+    return failures
+
+
+def _rust_loopback_violations(root: Path) -> list[str]:
+    path = root / "platforms/windows/src/engine/src/models/vlm_server.rs"
+    if not path.is_file():
+        return [f"{path}: reviewed loopback transport is missing"]
+    raw_text = path.read_text(encoding="utf-8")
+    text = _without_comments(raw_text)
+    code = _source_code(path, raw_text)
+    request_sites = re.findall(
+        r"(?:\b[A-Za-z_][A-Za-z0-9_]*\s*\.|\breqwest::Client::)\s*"
+        r"(?:get|head|post|request|put|delete|patch|execute)\s*\(",
+        code,
+    )
+    if code.count("reqwest::Client::builder") != 1 \
+            or "reqwest::Client::new" in code \
+            or code.count("reqwest::ClientBuilder") != 1 \
+            or len(request_sites) != 2:
+        return [f"{path}: loopback raw client/request inventory changed"]
+    required = (
+        '.arg("--host")',
+        '.arg("127.0.0.1")',
+        'format!("http://127.0.0.1:{port}")',
+        'std::net::TcpListener::bind("127.0.0.1:0")',
+    )
+    normalized = _normalized(text)
+    wrapper = _braced_expression(code, "fn build_loopback_client()")
+    builder = _braced_expression(code, "fn build_loopback_client_with")
+    reviewed_builder = (
+        "builder.no_proxy().redirect(reqwest::redirect::Policy::none())"
+        ".timeout(Duration::from_secs(300)).build()"
+    )
+    wrapper_compact = re.sub(r"\s+", "", wrapper or "")
+    builder_compact = re.sub(r"\s+", "", builder or "")
+    contract_changed = any(_normalized(value) not in normalized for value in required) \
+        or "build_loopback_client_with(reqwest::Client::builder())" not in wrapper_compact \
+        or reviewed_builder not in builder_compact \
+        or builder_compact.count(".no_proxy()") != 1 \
+        or builder_compact.count(".redirect(reqwest::redirect::Policy::none())") != 1
+    return [f"{path}: loopback transport differs from the reviewed no-proxy contract"] \
+        if contract_changed else []
+
+
+def source_boundary_violations(root: Path) -> list[str]:
+    root = root.resolve()
+    sources, failures = _production_sources(root)
+    for relative, expected_digest in REVIEWED_NETWORK_SOURCE_SHA256.items():
+        path = root / relative
+        if not path.is_file():
+            failures.append(f"{relative}: reviewed network-capable source is missing")
+            continue
+        normalized = path.read_bytes().replace(b"\r\n", b"\n")
+        if hashlib.sha256(normalized).hexdigest() != expected_digest:
+            failures.append(f"{relative}: reviewed network-capable source digest changed")
+    for path in sources:
+        relative = path.relative_to(root).as_posix()
+        if relative in REVIEWED_NETWORK_SOURCE_SHA256:
+            continue
+        text = path.read_text(encoding="utf-8")
+        raw_pattern = RAW_NETWORK_PATTERNS[path.suffix.lower()]
+        sink_pattern = SAFE_NETWORK_SINK_PATTERNS[path.suffix.lower()]
+        if not raw_pattern.search(text) \
+                and not sink_pattern.search(text) \
+                and not (path.suffix.lower() == ".swift" and "contentsOf" in text):
+            continue
+        code = _source_code(path, text)
+        raw_network_present = raw_pattern.search(code) is not None
+        if path.suffix.lower() == ".swift" and _swift_url_loader_sites(code) > 0:
+            raw_network_present = True
+        if raw_network_present and relative not in RAW_NETWORK_FILES:
+            failures.append(f"{relative}: raw network API is outside a reviewed transport module")
+        if sink_pattern.search(code) and relative not in SAFE_NETWORK_CALLER_FILES:
+            failures.append(f"{relative}: network download sink is outside the reviewed caller inventory")
+    local_data_inventory = {
+        "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": 1,
+        "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
+        "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": 2,
+        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 1,
+        "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
+        "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
+    }
+    for relative, expected_count in local_data_inventory.items():
+        path = root / relative
+        if not path.is_file():
+            failures.append(f"{relative}: reviewed local Foundation URL-loader file is missing")
+            continue
+        code = _mask_comments_and_strings(path.read_text(encoding="utf-8"))
+        other_raw = re.search(
+            r"\b(?:URLSession|URLRequest|URLSessionTask|NWConnection|NWListener|CFSocket|CFStream)\b",
+            code,
+        )
+        if _swift_url_loader_sites(code) != expected_count or other_raw:
+            failures.append(f"{relative}: local Foundation URL-loader inventory changed")
+    failures.extend(_rust_external_transport_violations(root))
+    failures.extend(_swift_transport_violations(root))
+    failures.extend(_rust_loopback_violations(root))
+    for relative in (
+        "platforms/windows/src/engine/src/commands/prewarm.rs",
+        "platforms/windows/src/engine/src/main.rs",
+    ):
+        plumbing_path = root / relative
+        if not plumbing_path.is_file():
+            continue
+        plumbing = _source_code(plumbing_path, plumbing_path.read_text(encoding="utf-8"))
+        if re.search(
+            r"reqwest::(?:Client::(?:builder|new|get|head|post|request|put|delete|patch|execute)|ClientBuilder)|\.\s*(?:get|head|post|request|put|delete|patch|execute)\s*\(",
+            plumbing,
+        ):
+            failures.append(
+                f"{plumbing_path}: HTTP client plumbing may call reviewed downloader entry points only"
+            )
+    return failures
+
+
+def policy_source_wiring_violations(policy_workflow: Path) -> list[str]:
+    text = policy_workflow.read_text(encoding="utf-8")
+    failures: list[str] = []
+    trigger = text.partition("permissions:")[0]
+    expected_trigger = (
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "  pull_request:\n"
+        "  workflow_dispatch:\n"
+    )
+    if expected_trigger not in trigger \
+            or any(key in trigger for key in ("paths:", "paths-ignore:", "branches-ignore:")):
+        failures.append(f"{policy_workflow}: repository policy must run unconditionally on push and pull_request")
+    if re.search(r"(?m)^\s+(?:if|continue-on-error|defaults|shell)\s*:", text):
+        failures.append(
+            f"{policy_workflow}: policy jobs and enforcement steps must not be conditional or failure-masking"
+        )
+    test_step = "        run: python shared/scripts/test_check_runtime_egress.py\n"
+    blocker_step = "        run: python shared/scripts/check_runtime_egress.py --known-blockers\n"
+    if text.count(test_step) != 1 or text.count(blocker_step) != 1:
+        failures.append(f"{policy_workflow}: runtime egress tests and known-blocker audit must each run once")
+    return failures
 
 
 def _braced_expression(text: str, marker: str, suffix: str = "") -> str | None:
@@ -127,30 +691,57 @@ def _braced_expression(text: str, marker: str, suffix: str = "") -> str | None:
     return None
 
 
+def _braced_expression_structural(
+    text: str, marker: str, suffix: str = "", start_at: int = 0
+) -> tuple[str | None, int]:
+    structure = _mask_comments_and_strings(text)
+    start = structure.find(marker, start_at)
+    if start < 0:
+        return None, start_at
+    opening = structure.find("{", start + len(marker))
+    if opening < 0:
+        return None, start + len(marker)
+    depth = 0
+    for index in range(opening, len(structure)):
+        if structure[index] == "{":
+            depth += 1
+        elif structure[index] == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                if suffix:
+                    suffix_index = structure.find(suffix, end)
+                    if suffix_index < 0:
+                        return None, end
+                    end = suffix_index + len(suffix)
+                return text[start:end], end
+    return None, len(text)
+
+
 def _file_entry_blocks(text: str) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     blocks: list[str] = []
+    structure = _mask_comments_and_strings(text)
     cursor = 0
     pattern = re.compile(r"\b(?:FileEntry|ModelFile)\s*\{")
-    while match := pattern.search(text, cursor):
-        prefix = text[max(0, match.start() - 12):match.start()]
+    while match := pattern.search(structure, cursor):
+        prefix = structure[max(0, match.start() - 12):match.start()]
         cursor = match.end()
         if re.search(r"struct\s+$", prefix):
             continue
-        marker = "ModelFile" if text[match.start():].startswith("ModelFile") else "FileEntry"
-        block = _braced_expression(text[match.start():], marker)
+        marker = "ModelFile" if structure[match.start():].startswith("ModelFile") else "FileEntry"
+        block, cursor = _braced_expression_structural(text, marker, start_at=match.start())
         if block is None:
             failures.append("unterminated FileEntry construction")
             continue
         blocks.append(block)
-        cursor = match.start() + len(block)
     return blocks, failures
 
 
 def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[str]]:
     failures: list[str] = []
     registry_text = _without_comments(
-        registry.read_text(encoding="utf-8").split("#[cfg(test)]", 1)[0]
+        _without_rust_test_code(registry.read_text(encoding="utf-8"))
     )
     urls: set[str] = set()
     blocks, block_failures = _file_entry_blocks(registry_text)
@@ -167,19 +758,21 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
         failures.append(f"{registry}: no production FileEntry URL constructions found")
 
     downloader_text = _without_comments(downloader.read_text(encoding="utf-8"))
-    allowlists = list(ALLOWLIST_RE.finditer(downloader_text))
+    downloader_structure = _mask_comments_and_strings(downloader_text)
+    allowlists = list(ALLOWLIST_RE.finditer(downloader_structure))
     hosts: set[str] = set()
     if len(allowlists) != 1:
         failures.append(
             f"{downloader}: expected exactly one ALLOWED_DOWNLOAD_HOSTS definition; found {len(allowlists)}"
         )
     else:
-        hosts = set(STRING_RE.findall(allowlists[0].group(1)))
+        match = allowlists[0]
+        hosts = set(STRING_RE.findall(downloader_text[match.start(1):match.end(1)]))
 
-    predicate = _braced_expression(downloader_text, "fn download_url_allowed")
+    predicate, _ = _braced_expression_structural(downloader_text, "fn download_url_allowed")
     if predicate is None or _normalized(predicate) != _normalized(EXPECTED_INITIAL_PREDICATE):
         failures.append(f"{downloader}: initial URL predicate differs from the reviewed fail-closed contract")
-    redirect = _braced_expression(
+    redirect, _ = _braced_expression_structural(
         downloader_text, "let redirect_policy = reqwest::redirect::Policy::custom", suffix=");"
     )
     if redirect is None or _normalized(redirect) != _normalized(EXPECTED_REDIRECT_POLICY):
@@ -191,7 +784,9 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
         ("download_simple", "client.get(&request.url)"),
         ("download_parallel", "client.head(&request.url)"),
     ):
-        function = _braced_expression(downloader_text, f"pub async fn {function_name}")
+        function, _ = _braced_expression_structural(
+            downloader_text, f"pub async fn {function_name}"
+        )
         if function is None:
             failures.append(f"{downloader}: {function_name} entry point not found")
             continue
@@ -204,7 +799,7 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
             continue
         if first_request in function and function.index("if !download_url_allowed(&request.url)") > function.index(first_request):
             failures.append(f"{downloader}: {function_name} performs network I/O before URL rejection")
-    guard_count = downloader_text.count("if !download_url_allowed(&request.url)")
+    guard_count = downloader_structure.count("if !download_url_allowed(&request.url)")
     if guard_count != 2:
         failures.append(f"{downloader}: initial URL guard must appear only in both download entry points")
     return failures, urls, hosts
@@ -246,9 +841,11 @@ def release_wiring_violations(release_workflow: Path) -> list[str]:
         "        if: steps.mode.outputs.publish == 'true'\n"
         "        shell: pwsh\n"
         "        run: python ../../shared/scripts/check_runtime_egress.py\n"
+        "\n"
+        "      - name: Download signed/non-Windows CLI/TUI bundles\n"
     )
-    if text.count(step) != 1:
-        return [f"{release_workflow}: exact output-gated runtime egress step is missing or duplicated"]
+    if text.count(step) != 1 or re.search(r"(?m)^\s+continue-on-error\s*:", text):
+        return [f"{release_workflow}: exact blocking output-gated runtime egress step is missing or duplicated"]
     if text.index(step) > text.index("      - name: Stage release-ready assets"):
         return [f"{release_workflow}: runtime egress gate must run before release asset staging"]
     return []
@@ -257,6 +854,7 @@ def release_wiring_violations(release_workflow: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     root = Path(__file__).resolve().parents[2]
+    parser.add_argument("--root", type=Path, default=root)
     parser.add_argument(
         "--registry", type=Path,
         default=root / "platforms" / "windows" / "src" / "engine" / "src" / "models" / "registry.rs",
@@ -270,12 +868,18 @@ def main() -> int:
         default=root / ".github" / "workflows" / "release.yml",
     )
     parser.add_argument(
+        "--policy-workflow", type=Path,
+        default=root / ".github" / "workflows" / "policy.yml",
+    )
+    parser.add_argument(
         "--known-blockers", action="store_true",
         help="CI audit mode: permit only the exact reviewed off-policy baseline while mirrors are pending",
     )
     args = parser.parse_args()
     check = known_blocker_violations if args.known_blockers else violations
     failures = check(args.registry, args.downloader)
+    failures.extend(source_boundary_violations(args.root))
+    failures.extend(policy_source_wiring_violations(args.policy_workflow))
     failures.extend(release_wiring_violations(args.release_workflow))
     if failures:
         print("Runtime egress release gate failed:")

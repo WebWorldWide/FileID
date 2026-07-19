@@ -7,12 +7,16 @@ on:
       - 'packaging/**'
       - 'platforms/linux/**'
       - 'platforms/windows/src/engine/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/packaging.yml'
   pull_request:
     paths:
       - 'packaging/**'
       - 'platforms/linux/**'
       - 'platforms/windows/src/engine/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/packaging.yml'
   workflow_dispatch:
 
@@ -64,6 +68,13 @@ jobs:
             --repo=repo \
             build-dir \
             packaging/flatpak/io.github.fileid.FileID.yaml
+
+      - name: Privacy scan exact Flatpak payload
+        run: |
+          set -euo pipefail
+          python3 shared/scripts/check_binary_privacy.py \
+            build-dir/files/bin/fileid-linux \
+            build-dir/files/bin/FileIDEngine
 
       - name: Bundle the .flatpak
         run: |

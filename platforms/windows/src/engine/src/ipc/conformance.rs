@@ -14,7 +14,7 @@ use super::{
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
     DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload,
     EmbedImageQueryPayload, EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload,
-    FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
+    ExactTrashIdentity, FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
     HardwareInfo, HardwareReprobed, IpcCommand, IpcEvent, JobCategory, LibraryWiped, LogLevel,
     LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload, MergeClustersPayload,
     MergeSuggestion, MergeSuggestions, ModelDownloadProgress, PlanRestructurePayload,
@@ -346,7 +346,18 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::RenameFiles(RenameFilesPayload {
             renames: vec![RenameEntry { file_id: 1, new_name: "Renamed.jpg".into() }],
         }),
-        CommandPayload::TrashFiles(TrashFilesPayload { file_ids: vec![1, 2, 3] }),
+        CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![1],
+            exact_identities: Some(vec![ExactTrashIdentity {
+                file_id: 1,
+                path: "/library/duplicate.jpg".into(),
+                size_bytes: 4,
+                sha256_hex: "ab".repeat(32),
+                keeper_path: "/library/keeper.jpg".into(),
+                keeper_size_bytes: 4,
+                keeper_sha256_hex: "ab".repeat(32),
+            }]),
+        }),
         CommandPayload::MergeClusters(MergeClustersPayload {
             source_person_id: 1,
             destination_person_id: 2,
@@ -606,6 +617,31 @@ fn every_event_exemplar_matches_schema_shape() {
     }
 }
 
+#[test]
+fn mark_persons_different_bulk_result_matches_schema() {
+    let root = load_schema();
+    let event = IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
+        BulkActionResult {
+            action: "markPersonsDifferent".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![BulkActionItem {
+                file_id: None,
+                ok: true,
+                message: None,
+            }],
+        },
+    )));
+    let value = serde_json::to_value(event).expect("encode markPersonsDifferent result");
+    assert_conforms(&root, &root["$defs"]["IPCEvent"], &value, "IPCEvent");
+    assert_payload_conforms(
+        &root,
+        "EventPayload",
+        &value["payload"],
+        "bulkActionResult",
+    );
+}
+
 /// Negative self-test: the checker must reject the exact L1 drift class
 /// (`fileId` instead of `fileID`), or this suite guards nothing.
 #[test]
@@ -622,6 +658,15 @@ fn checker_rejects_missing_required_key() {
     let root = load_schema();
     let bad = serde_json::json!({ "deepAnalyzeFile": { "fileID": 42 } });
     assert_payload_conforms(&root, "CommandPayload", &bad, "deepAnalyzeFile");
+}
+
+#[test]
+fn every_command_exemplar_passes_semantic_normalization() {
+    for mut payload in command_exemplars() {
+        let tag = command_tag(&payload);
+        crate::ipc::normalize_and_validate_command(&mut payload)
+            .unwrap_or_else(|error| panic!("command exemplar {tag} is semantically invalid: {error}"));
+    }
 }
 
 #[test]

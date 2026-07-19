@@ -91,7 +91,7 @@ struct IPCProtocolTests {
             .applyTags(fileIDs: [1, 2, 3], tags: ["beach", "summer"], mode: "add"),
             .renameFiles(renames: renames),
             .purgeExcluded(excludedPaths: ["/Users/x/Pictures/.cache"]),
-            .trashFiles(fileIDs: [10, 11]),
+            .trashFiles(fileIDs: [10, 11], exactIdentities: nil),
             .mergeClusters(sourcePersonID: 4, destinationPersonID: 7),
             .embedTextQuery(query: "dog at the beach", queryID: "q-1"),
             .renamePerson(personID: 1, title: "Dr.", firstName: "Adam",

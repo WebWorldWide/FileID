@@ -97,11 +97,20 @@ fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&s
     legacy.unwrap_or("").trim().to_string()
 }
 
-/// Terminal `DeepAnalyzeComplete` for an early-failure path that ran before any
-/// file was processed (missing runner / target-query error). Always sent so the
-/// UI clears its "Loading…/Preparing…" card instead of stranding forever (#6).
-/// `cancelled` reports the ACTUAL cooperative cancel flag — a load/query
-/// failure is not a user cancel. (audit F-A2)
+async fn send_cancelled_complete(sink: &Sink, model_kind: &str) {
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed: 0,
+            failed: 0,
+            total_seconds: 0.0,
+            model_kind: model_kind.to_string(),
+            cancelled: true,
+        },
+    ))))
+    .await;
+}
+
+/// Terminal response for setup failures before any file is processed.
 async fn send_early_failure_complete(sink: &Sink, model_kind: &str, cancel: &AtomicBool) {
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
         DeepAnalyzeComplete {
@@ -115,12 +124,64 @@ async fn send_early_failure_complete(sink: &Sink, model_kind: &str, cancel: &Ato
     .await;
 }
 
+pub(crate) async fn send_gpu_failure_complete(
+    sink: &Sink,
+    model_kind: &str,
+    processed: u64,
+    failed: u64,
+    total_seconds: f64,
+) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "gpu_device_removed".into(),
+        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+        path: None,
+        model_kind: Some(model_kind.to_string()),
+    }))))
+    .await;
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed,
+            failed,
+            total_seconds,
+            model_kind: model_kind.to_string(),
+            cancelled: false,
+        },
+    ))))
+    .await;
+}
+
+struct GpuCancelBridge(tokio::task::JoinHandle<()>);
+
+impl GpuCancelBridge {
+    fn start(cancel: Arc<AtomicBool>) -> Self {
+        Self(tokio::spawn(async move {
+            crate::coordinator::wait_for_process_gpu_device_removed().await;
+            cancel.store(true, Ordering::Release);
+        }))
+    }
+}
+
+impl Drop for GpuCancelBridge {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(crate) async fn handle_deep_analyze_file(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
     payload: ipc::DeepAnalyzeFilePayload,
     cancel: Arc<AtomicBool>,
 ) {
+    if cancel.load(Ordering::Acquire) {
+        send_cancelled_complete(&sink, &payload.model_kind).await;
+        return;
+    }
+    if crate::coordinator::process_gpu_device_removed() {
+        send_gpu_failure_complete(&sink, &payload.model_kind, 0, 1, 0.0).await;
+        return;
+    }
+    let _gpu_cancel = GpuCancelBridge::start(cancel.clone());
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeStarting(Wrap::new(
         DeepAnalyzeStarting {
             model_kind: payload.model_kind.clone(),
@@ -133,6 +194,10 @@ pub(crate) async fn handle_deep_analyze_file(
     let runner = match crate::models::vlm::VlmRunner::find() {
         Ok(r) => r,
         Err(err) => {
+            if crate::coordinator::process_gpu_device_removed() {
+                send_gpu_failure_complete(&sink, &payload.model_kind, 0, 1, 0.0).await;
+                return;
+            }
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "llama_cpp_missing".into(),
                 message: format!("{err}"),
@@ -230,6 +295,19 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
         }
         Err(err) => {
+            if crate::coordinator::process_gpu_device_removed()
+                || crate::models::runtime::error_has_device_removed_marker(&err)
+            {
+                send_gpu_failure_complete(
+                    &sink,
+                    &model_kind,
+                    0,
+                    1,
+                    started_at.elapsed().as_secs_f64(),
+                )
+                .await;
+                return;
+            }
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "deep_analyze_failed".into(),
                 message: format!("{err}"),
@@ -265,6 +343,10 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
+    if cancel.load(Ordering::Acquire) {
+        send_cancelled_complete(&sink, &payload.model_kind).await;
+        return;
+    }
     // P16: sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
@@ -297,6 +379,10 @@ pub(crate) async fn handle_deep_analyze_all(
     payload: ipc::DeepAnalyzeAllPayload,
     cancel: Arc<AtomicBool>,
 ) {
+    if cancel.load(Ordering::Acquire) {
+        send_cancelled_complete(&sink, &payload.model_kind).await;
+        return;
+    }
     let ids = match collect_file_ids(
         &db,
         &format!("WHERE {}", deep_analyze_target_filter()),
@@ -387,6 +473,12 @@ async fn run_deep_analyze_batch(
     tags_only: bool,
     propose_renames: bool,
 ) {
+    if crate::coordinator::process_gpu_device_removed() {
+        send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
+        return;
+    }
+    let _gpu_cancel = GpuCancelBridge::start(cancel.clone());
+
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
     // caption + tags + rename (the manual Deep Analyze pass).
     let mode = if tags_only {
@@ -410,6 +502,10 @@ async fn run_deep_analyze_batch(
     // handler doesn't clear DeepAnalyze* state, so erroring after Starting would
     // strand the UI on a "Loading model…" banner.
     let weights = crate::models::vlm::find_weights(model_kind);
+    if crate::coordinator::process_gpu_device_removed() {
+        send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
+        return;
+    }
     if weights.is_none() {
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "vlm_model_missing".into(),
@@ -494,6 +590,10 @@ async fn run_deep_analyze_batch(
     };
 
     let total = file_ids.len() as u64;
+    if crate::coordinator::process_gpu_device_removed() {
+        send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
+        return;
+    }
     if cancel.load(Ordering::Relaxed) {
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
             DeepAnalyzeComplete {
@@ -524,6 +624,11 @@ async fn run_deep_analyze_batch(
     // instead of failing every file in the loop, then clear the UI's
     // DeepAnalyze* state (Starting was already sent above).
     if server.is_none() && runner.is_none() {
+        if crate::coordinator::process_gpu_device_removed() {
+            send_gpu_failure_complete(&sink, model_kind, 0, 1, started_at.elapsed().as_secs_f64())
+                .await;
+            return;
+        }
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "llama_cpp_missing".into(),
             message: "The llama.cpp runtime isn't usable for image analysis (no working \
@@ -549,6 +654,17 @@ async fn run_deep_analyze_batch(
     }
 
     for (idx, file_id) in file_ids.iter().copied().enumerate() {
+        if crate::coordinator::process_gpu_device_removed() {
+            send_gpu_failure_complete(
+                &sink,
+                model_kind,
+                processed,
+                failed.saturating_add(1),
+                started_at.elapsed().as_secs_f64(),
+            )
+            .await;
+            return;
+        }
         if cancel.load(Ordering::Relaxed) {
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                 DeepAnalyzeComplete {
@@ -716,6 +832,19 @@ async fn run_deep_analyze_batch(
                 .await;
             }
             Err(err) => {
+                if crate::coordinator::process_gpu_device_removed()
+                    || crate::models::runtime::error_has_device_removed_marker(&err)
+                {
+                    send_gpu_failure_complete(
+                        &sink,
+                        model_kind,
+                        processed,
+                        failed.saturating_add(1),
+                        started_at.elapsed().as_secs_f64(),
+                    )
+                    .await;
+                    return;
+                }
                 if cancel.load(Ordering::Relaxed) {
                     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
                         DeepAnalyzeComplete {
@@ -761,6 +890,17 @@ async fn run_deep_analyze_batch(
         }
     }
 
+    if crate::coordinator::process_gpu_device_removed() {
+        send_gpu_failure_complete(
+            &sink,
+            model_kind,
+            processed,
+            failed.saturating_add(1),
+            started_at.elapsed().as_secs_f64(),
+        )
+        .await;
+        return;
+    }
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
         DeepAnalyzeComplete {
             processed,
@@ -775,8 +915,9 @@ async fn run_deep_analyze_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::append_caption_chunk;
+    use super::{append_caption_chunk, GpuCancelBridge};
     use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     fn run_caption_chunks(chunks: &[&str]) -> String {
@@ -805,6 +946,94 @@ mod tests {
     fn caption_chunks_join_with_single_space() {
         let out = run_caption_chunks(&["A", "dog", "sits", "on", "a", "couch"]);
         assert_eq!(out, "A dog sits on a couch");
+    }
+
+    #[tokio::test]
+    async fn process_gpu_failure_cancels_an_active_deep_analyze_job_in_an_isolated_process() {
+        const CHILD: &str = "FILEID_DEEP_GPU_CANCEL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let _bridge = GpuCancelBridge::start(cancel.clone());
+            assert!(crate::coordinator::latch_process_gpu_device_removed());
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !cancel.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("GPU failure must cancel the active Deep Analyze job");
+            return;
+        }
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("commands::deep_analyze::tests::process_gpu_failure_cancels_an_active_deep_analyze_job_in_an_isolated_process")
+            .arg("--exact")
+            .env(CHILD, "1")
+            .status()
+            .expect("launch isolated Deep Analyze GPU-cancel test");
+        assert!(status.success());
+    }
+
+    #[tokio::test]
+    async fn preset_cancel_is_terminal_before_any_deep_analyze_lifecycle_event() {
+        let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(2);
+        super::handle_deep_analyze_file(
+            sink,
+            db.clone(),
+            crate::ipc::DeepAnalyzeFilePayload {
+                file_id: 1,
+                model_kind: "gemma3_4b".into(),
+            },
+            cancel.clone(),
+        )
+        .await;
+        assert_cancelled_only(&mut events).await;
+
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(2);
+        super::handle_deep_analyze_folder(
+            sink,
+            db.clone(),
+            crate::ipc::DeepAnalyzeFolderPayload {
+                path_prefix: "C:\\queued".into(),
+                model_kind: "gemma3_4b".into(),
+            },
+            cancel.clone(),
+        )
+        .await;
+        assert_cancelled_only(&mut events).await;
+
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(2);
+        super::handle_deep_analyze_all(
+            sink,
+            db,
+            crate::ipc::DeepAnalyzeAllPayload {
+                model_kind: "gemma3_4b".into(),
+                skip_existing: false,
+                tags_only: false,
+                propose_renames: true,
+            },
+            cancel,
+        )
+        .await;
+        assert_cancelled_only(&mut events).await;
+    }
+
+    async fn assert_cancelled_only(
+        events: &mut tokio::sync::mpsc::Receiver<crate::ipc::IpcEvent>,
+    ) {
+        let event = events.recv().await.expect("Deep Analyze cancelled completion");
+        match event.payload {
+            crate::ipc::EventPayload::DeepAnalyzeComplete(complete) => {
+                assert!(complete.inner.cancelled);
+                assert_eq!(complete.inner.processed, 0);
+                assert_eq!(complete.inner.failed, 0);
+            }
+            other => panic!("expected only DeepAnalyzeComplete, got {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

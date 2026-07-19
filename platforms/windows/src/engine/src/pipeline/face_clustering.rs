@@ -18,7 +18,7 @@
 //      emits `FaceClusteringResult`. `face_verifications` is only READ here
 //      (same_person = 0, to block auto-merge of user-confirmed splits).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Lower bound for surfacing MERGE suggestions in the People tab. A 0.32 floor
 /// flooded the sheet with anchor pairs deep in impostor territory — empirically
@@ -269,6 +269,221 @@ fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)
     edges
 }
 
+#[cfg(test)]
+pub fn partition_protected_clusters<S1, S2>(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    bucket_owner_by_face: &HashMap<i64, i64, S1>,
+    different_pairs: &HashSet<(i64, i64), S2>,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
+where
+    S1: std::hash::BuildHasher,
+    S2: std::hash::BuildHasher,
+{
+    partition_protected_clusters_excluding(
+        faces,
+        assignments,
+        bucket_owner_by_face,
+        different_pairs,
+        &HashSet::new(),
+    )
+}
+
+pub fn partition_protected_clusters_excluding<S1, S2, S3>(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    bucket_owner_by_face: &HashMap<i64, i64, S1>,
+    different_pairs: &HashSet<(i64, i64), S2>,
+    excluded_face_ids: &HashSet<i64, S3>,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
+where
+    S1: std::hash::BuildHasher,
+    S2: std::hash::BuildHasher,
+    S3: std::hash::BuildHasher,
+{
+    let mut raw_groups: BTreeMap<i32, BTreeSet<i64>> = BTreeMap::new();
+    for assignment in assignments {
+        raw_groups
+            .entry(assignment.cluster_id)
+            .or_default()
+            .insert(assignment.face_id);
+    }
+
+    let mut owner_groups: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+    for (&face_id, &owner_id) in bucket_owner_by_face {
+        if !excluded_face_ids.contains(&face_id) {
+            owner_groups.entry(owner_id).or_default().insert(face_id);
+        }
+    }
+    let ownerless_endpoints: BTreeSet<i64> = different_pairs
+        .iter()
+        .flat_map(|&(a, b)| [a, b])
+        .filter(|face_id| {
+            !bucket_owner_by_face.contains_key(face_id) && !excluded_face_ids.contains(face_id)
+        })
+        .collect();
+    let mut singleton_endpoints_by_owner: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
+    for &(a, b) in different_pairs {
+        if let (Some(owner_a), Some(owner_b)) = (
+            bucket_owner_by_face.get(&a),
+            bucket_owner_by_face.get(&b),
+        ) {
+            if owner_a == owner_b {
+                singleton_endpoints_by_owner
+                    .entry(*owner_a)
+                    .or_default()
+                    .extend([a, b]);
+            }
+        }
+    }
+
+    for members in raw_groups.values_mut() {
+        members.retain(|face_id| {
+            !excluded_face_ids.contains(face_id)
+                && !bucket_owner_by_face.contains_key(face_id)
+                && !ownerless_endpoints.contains(face_id)
+        });
+    }
+
+    let mut buckets: Vec<Vec<i64>> = Vec::new();
+    for (&owner_id, members) in &owner_groups {
+        let singleton_endpoints = singleton_endpoints_by_owner
+            .get(&owner_id)
+            .cloned()
+            .unwrap_or_default();
+        let remainder: Vec<i64> = members
+            .iter()
+            .copied()
+            .filter(|face_id| !singleton_endpoints.contains(face_id))
+            .collect();
+        if !remainder.is_empty() {
+            buckets.push(remainder);
+        }
+        for face_id in singleton_endpoints {
+            buckets.push(vec![face_id]);
+        }
+    }
+    for face_id in ownerless_endpoints {
+        buckets.push(vec![face_id]);
+    }
+    for members in raw_groups.into_values() {
+        if !members.is_empty() {
+            buckets.push(members.into_iter().collect());
+        }
+    }
+
+    let quality: HashMap<i64, f32> = faces.iter().map(|face| (face.face_id, face.quality)).collect();
+    let mut new_assignments = Vec::new();
+    let mut new_anchors = Vec::new();
+    for (index, mut members) in buckets.into_iter().enumerate() {
+        members.sort_unstable();
+        members.dedup();
+        if members.is_empty() {
+            continue;
+        }
+        let cluster_id = i32::try_from(index + 1).expect("protected cluster count exceeds i32");
+        let anchor_face_id = members
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                let qa = quality.get(a).copied().unwrap_or(f32::NEG_INFINITY);
+                let qb = quality.get(b).copied().unwrap_or(f32::NEG_INFINITY);
+                qa.total_cmp(&qb).then_with(|| b.cmp(a))
+            })
+            .unwrap_or(members[0]);
+        new_assignments.extend(members.iter().map(|&face_id| ClusterAssignment {
+            face_id,
+            cluster_id,
+        }));
+        new_anchors.push(ClusterAnchor {
+            cluster_id,
+            anchor_face_id,
+            member_count: members.len() as u32,
+        });
+    }
+    (new_assignments, new_anchors)
+}
+
+pub fn protected_owner_by_cluster<S1, S2>(
+    identity_owner_by_face: &HashMap<i64, i64, S1>,
+    cluster_of: &HashMap<i64, i32, S2>,
+) -> Result<HashMap<i32, i64>, String>
+where
+    S1: std::hash::BuildHasher,
+    S2: std::hash::BuildHasher,
+{
+    let mut owner_by_cluster = HashMap::new();
+    for (&face_id, &owner_id) in identity_owner_by_face {
+        let Some(&cluster_id) = cluster_of.get(&face_id) else {
+            continue;
+        };
+        if let Some(existing) = owner_by_cluster.insert(cluster_id, owner_id) {
+            if existing != owner_id {
+                return Err(format!(
+                    "cluster {cluster_id} contains distinct protected identities"
+                ));
+            }
+        }
+    }
+    Ok(owner_by_cluster)
+}
+
+pub fn validate_protected_clusters<S1, S2>(
+    assignments: &[ClusterAssignment],
+    identity_owner_by_face: &HashMap<i64, i64, S1>,
+    different_pairs: &HashSet<(i64, i64), S2>,
+) -> Result<(), String>
+where
+    S1: std::hash::BuildHasher,
+    S2: std::hash::BuildHasher,
+{
+    let cluster_of: HashMap<i64, i32> = assignments
+        .iter()
+        .map(|assignment| (assignment.face_id, assignment.cluster_id))
+        .collect();
+    let mut owner_of_cluster: HashMap<i32, i64> = HashMap::new();
+    for (&face_id, &owner_id) in identity_owner_by_face {
+        let Some(&cluster_id) = cluster_of.get(&face_id) else {
+            return Err(format!("protected face {face_id} is missing from the final partition"));
+        };
+        if let Some(existing) = owner_of_cluster.insert(cluster_id, owner_id) {
+            if existing != owner_id {
+                return Err(format!(
+                    "cluster {cluster_id} contains distinct protected identities"
+                ));
+            }
+        }
+    }
+    for &(a, b) in different_pairs {
+        let (Some(&ca), Some(&cb)) = (cluster_of.get(&a), cluster_of.get(&b)) else {
+            return Err("a different-people verdict endpoint is missing from the final partition".into());
+        };
+        if ca == cb {
+            return Err(format!(
+                "cluster {ca} contains a user-confirmed different-people pair"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn protected_cluster_ids<S>(
+    assignments: &[ClusterAssignment],
+    protected_faces: &HashSet<i64, S>,
+) -> HashSet<i32>
+where
+    S: std::hash::BuildHasher,
+{
+    assignments
+        .iter()
+        .filter_map(|assignment| {
+            protected_faces
+                .contains(&assignment.face_id)
+                .then_some(assignment.cluster_id)
+        })
+        .collect()
+}
+
 /// Conservatively fold near-certain duplicate clusters that the over-split-safe
 /// 3-pass clusterer left fragmented, using denoised per-cluster CENTROIDS.
 ///
@@ -284,6 +499,7 @@ fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)
 ///
 /// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op: the inputs pass through
 /// unchanged, preserving the pure over-split behavior.
+#[cfg(test)]
 pub fn consolidate<S: std::hash::BuildHasher>(
     faces: &[FaceRow],
     assignments: Vec<ClusterAssignment>,
@@ -291,6 +507,28 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     blocked: &std::collections::HashSet<(i32, i32), S>,
     threshold: f32,
 ) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
+    consolidate_with_protected_owners(
+        faces,
+        assignments,
+        anchors,
+        blocked,
+        &HashMap::new(),
+        threshold,
+    )
+}
+
+pub fn consolidate_with_protected_owners<S1, S2>(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    anchors: Vec<ClusterAnchor>,
+    blocked: &HashSet<(i32, i32), S1>,
+    protected_owner_by_cluster: &HashMap<i32, i64, S2>,
+    threshold: f32,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
+where
+    S1: std::hash::BuildHasher,
+    S2: std::hash::BuildHasher,
+{
     // `>= 1.0` (not `> 1.0`): automerge_threshold() clamps to [0.70, 1.0], so the
     // documented "set FILEID_FACE_AUTOMERGE_COS=1.0 to disable" must hit this
     // no-op path. With a strict `>` the disable value still ran the full O(C²)
@@ -350,12 +588,22 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     // Strongest merges first so canonical assignment is stable + greedy-optimal.
     edges.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    let blocked_idx: Vec<(usize, usize)> = blocked
-        .iter()
-        .filter_map(|&(a, b)| Some((*idx_of.get(&a)?, *idx_of.get(&b)?)))
-        .collect();
+    let mut blocked_neighbors = vec![HashSet::new(); cids.len()];
+    for &(cluster_a, cluster_b) in blocked {
+        let (Some(&a), Some(&b)) = (idx_of.get(&cluster_a), idx_of.get(&cluster_b)) else {
+            continue;
+        };
+        blocked_neighbors[a].insert(b);
+        blocked_neighbors[b].insert(a);
+    }
 
     let mut parent: Vec<usize> = (0..cids.len()).collect();
+    let mut component_size = vec![1usize; cids.len()];
+    let mut forbidden = blocked_neighbors;
+    let mut protected_owner: Vec<Option<i64>> = cids
+        .iter()
+        .map(|cluster_id| protected_owner_by_cluster.get(cluster_id).copied())
+        .collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x {
             parent[x] = parent[parent[x]]; // path halving
@@ -370,16 +618,37 @@ pub fn consolidate<S: std::hash::BuildHasher>(
         if ri == rj {
             continue;
         }
-        // Reject if merging ri,rj would put a "different people" pair together.
-        let conflict = blocked_idx.iter().any(|&(a, b)| {
-            let ra = find(&mut parent, a);
-            let rb = find(&mut parent, b);
-            (ra == ri && rb == rj) || (ra == rj && rb == ri)
-        });
-        if conflict {
+        let explicit_conflict = forbidden[ri].contains(&rj) || forbidden[rj].contains(&ri);
+        let owner_conflict = matches!(
+            (protected_owner[ri], protected_owner[rj]),
+            (Some(a), Some(b)) if a != b
+        );
+        if explicit_conflict || owner_conflict {
             continue;
         }
-        parent[ri] = rj;
+        // Keep the component with the larger forbidden set as the root. Every
+        // explicit edge then moves only when it belongs to the smaller set.
+        let (keep, drop) = match forbidden[ri].len().cmp(&forbidden[rj].len()) {
+            std::cmp::Ordering::Greater => (ri, rj),
+            std::cmp::Ordering::Less => (rj, ri),
+            std::cmp::Ordering::Equal if component_size[ri] >= component_size[rj] => (ri, rj),
+            std::cmp::Ordering::Equal => (rj, ri),
+        };
+        parent[drop] = keep;
+        component_size[keep] += component_size[drop];
+        protected_owner[keep] = protected_owner[keep].or(protected_owner[drop]);
+        let moved = std::mem::take(&mut forbidden[drop]);
+        for neighbor in moved {
+            let neighbor_root = find(&mut parent, neighbor);
+            if neighbor_root == keep {
+                continue;
+            }
+            forbidden[neighbor_root].remove(&drop);
+            forbidden[neighbor_root].insert(keep);
+            forbidden[keep].insert(neighbor_root);
+        }
+        forbidden[keep].remove(&drop);
+        forbidden[keep].remove(&keep);
         any_merge = true;
     }
     if !any_merge {
@@ -437,6 +706,11 @@ pub fn consolidate<S: std::hash::BuildHasher>(
             })
         })
         .collect();
+    new_anchors.extend(
+        anchor_by_cid
+            .into_iter()
+            .filter_map(|(cid, anchor)| (!remap.contains_key(&cid)).then_some(anchor)),
+    );
     new_anchors.sort_by_key(|a| a.cluster_id);
     (new_assignments, new_anchors)
 }
@@ -512,6 +786,7 @@ pub fn solo_quality_floor() -> f32 {
 /// dropping 127 junk micro-clusters with zero identity merges. `solo_quality_floor
 /// <= 0` is a no-op (every cluster kept). Mirrors `FaceClustering.swift`'s
 /// `suppressLowQualityClusters`.
+#[cfg(test)]
 pub fn suppress_low_quality_micro_clusters(
     faces: &[FaceRow],
     assignments: Vec<ClusterAssignment>,
@@ -519,6 +794,27 @@ pub fn suppress_low_quality_micro_clusters(
     min_cluster_size: u32,
     solo_quality_floor: f32,
 ) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
+    suppress_low_quality_micro_clusters_with_keep(
+        faces,
+        assignments,
+        anchors,
+        min_cluster_size,
+        solo_quality_floor,
+        &HashSet::new(),
+    )
+}
+
+pub fn suppress_low_quality_micro_clusters_with_keep<S>(
+    faces: &[FaceRow],
+    assignments: Vec<ClusterAssignment>,
+    anchors: Vec<ClusterAnchor>,
+    min_cluster_size: u32,
+    solo_quality_floor: f32,
+    always_keep: &HashSet<i32, S>,
+) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
+where
+    S: std::hash::BuildHasher,
+{
     if solo_quality_floor <= 0.0 {
         return (assignments, anchors);
     }
@@ -540,7 +836,8 @@ pub fn suppress_low_quality_micro_clusters(
         }
     }
     let keep = |cid: i32| -> bool {
-        size.get(&cid).copied().unwrap_or(0) >= min_cluster_size
+        always_keep.contains(&cid)
+            || size.get(&cid).copied().unwrap_or(0) >= min_cluster_size
             || max_q.get(&cid).copied().unwrap_or(f32::NEG_INFINITY) >= solo_quality_floor
     };
     let new_assignments: Vec<ClusterAssignment> =
@@ -563,6 +860,7 @@ pub fn suppress_low_quality_micro_clusters(
 /// would otherwise leave a stale name in the guard and could unblock a
 /// wrong-cluster auto-merge. (audit C1-023) Same-named fragments and
 /// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
+#[cfg(test)]
 pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     face_name: &HashMap<i64, String, S>,
     cluster_of: &HashMap<i64, i32, S>,
@@ -596,54 +894,6 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
             if cluster_name[i].1 != cluster_name[j].1 {
                 let (a, b) = (cluster_name[i].0, cluster_name[j].0);
                 blocked.insert(if a < b { (a, b) } else { (b, a) });
-            }
-        }
-    }
-    blocked
-}
-
-/// Block auto-merge of a user-marked UNKNOWN cluster into a DIFFERENT person's
-/// cluster. mark-as-unknown nulls the name (bulk.rs), so `name_blocked_pairs`
-/// can't see it and `consolidate()` would otherwise fold the unknown cluster
-/// into a named/other person — reversing the user's verdict and, when the
-/// unknown owner wins the persist vote, overwriting a user-assigned name with
-/// NULL. (audit R3-03)
-///
-/// `face_owner` maps each carried-forward face to its prior person id;
-/// `unknown_persons` is the set of prior person ids with is_unknown=1. Each
-/// fresh cluster is assigned its majority prior PERSON id (ties → lowest id,
-/// matching the persist vote). Any pair of clusters whose majority owners
-/// differ is blocked when EITHER owner is unknown. Same-prior-person fragments
-/// (incl. two fragments of one unknown person) are never blocked, and untouched
-/// auto-clustered persons (name=NULL, is_unknown=0) are absent from `face_owner`,
-/// so normal over-split consolidation is unaffected.
-pub fn unknown_blocked_pairs<S: std::hash::BuildHasher>(
-    face_owner: &HashMap<i64, i64, S>,
-    unknown_persons: &std::collections::HashSet<i64, S>,
-    cluster_of: &HashMap<i64, i32, S>,
-) -> std::collections::HashSet<(i32, i32)> {
-    let mut owner_votes: HashMap<i32, HashMap<i64, u32>> = HashMap::new();
-    for (fid, &pid) in face_owner {
-        if let Some(&cid) = cluster_of.get(fid) {
-            *owner_votes.entry(cid).or_default().entry(pid).or_insert(0) += 1;
-        }
-    }
-    let cluster_owner: Vec<(i32, i64)> = owner_votes
-        .into_iter()
-        .filter_map(|(cid, votes)| {
-            votes
-                .into_iter()
-                .max_by(|(pa, ca), (pb, cb)| ca.cmp(cb).then_with(|| pb.cmp(pa)))
-                .map(|(pid, _)| (cid, pid))
-        })
-        .collect();
-    let mut blocked = std::collections::HashSet::new();
-    for i in 0..cluster_owner.len() {
-        for j in (i + 1)..cluster_owner.len() {
-            let (ci, pi) = cluster_owner[i];
-            let (cj, pj) = cluster_owner[j];
-            if pi != pj && (unknown_persons.contains(&pi) || unknown_persons.contains(&pj)) {
-                blocked.insert(if ci < cj { (ci, cj) } else { (cj, ci) });
             }
         }
     }
@@ -894,6 +1144,171 @@ mod tests {
     }
 
     #[test]
+    fn preserved_faces_are_removed_from_the_rebuild_plan() {
+        let faces = vec![
+            row(1, 1, vec![1.0, 0.0, 0.0], 0.1),
+            row(2, 2, vec![1.0, 0.0, 0.0], 0.1),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 1 },
+        ];
+        let (assignments, anchors) = partition_protected_clusters_excluding(
+            &faces,
+            assignments,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::from([1]),
+        );
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].face_id, 2);
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].anchor_face_id, 2);
+    }
+
+    #[test]
+    fn protected_named_bridge_is_split_and_stays_transitively_safe() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.8),
+            row(3, 3, v.clone(), 0.7),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 1 },
+            ClusterAssignment { face_id: 3, cluster_id: 1 },
+        ];
+        let owner_by_face: HashMap<i64, i64> = [(1, 10), (3, 20)].into_iter().collect();
+        let different = HashSet::new();
+        let (assignments, anchors) =
+            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
+        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
+
+        let cluster_of: HashMap<i64, i32> = assignments
+            .iter()
+            .map(|assignment| (assignment.face_id, assignment.cluster_id))
+            .collect();
+        let protected_owners = protected_owner_by_cluster(&owner_by_face, &cluster_of).unwrap();
+        let (assignments, anchors) = consolidate_with_protected_owners(
+            &faces,
+            assignments,
+            anchors,
+            &HashSet::new(),
+            &protected_owners,
+            0.85,
+        );
+        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
+        assert_eq!(anchors.len(), 2, "the bridge may join one identity, never both");
+        let cid = |face_id| {
+            assignments
+                .iter()
+                .find(|assignment| assignment.face_id == face_id)
+                .unwrap()
+                .cluster_id
+        };
+        assert_ne!(cid(1), cid(3));
+    }
+
+    #[test]
+    fn protected_explicit_bridge_is_split_before_consolidation() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![
+            row(1, 1, v.clone(), 0.9),
+            row(2, 2, v.clone(), 0.8),
+            row(3, 3, v.clone(), 0.7),
+        ];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 4 },
+            ClusterAssignment { face_id: 2, cluster_id: 4 },
+            ClusterAssignment { face_id: 3, cluster_id: 4 },
+        ];
+        let owner_by_face = HashMap::new();
+        let different: HashSet<(i64, i64)> = [(1, 3)].into_iter().collect();
+        let (assignments, anchors) =
+            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
+        let cluster_of: HashMap<i64, i32> = assignments
+            .iter()
+            .map(|assignment| (assignment.face_id, assignment.cluster_id))
+            .collect();
+        let mut blocked = HashSet::new();
+        let (a, b) = (cluster_of[&1], cluster_of[&3]);
+        blocked.insert(if a < b { (a, b) } else { (b, a) });
+        let (assignments, _) = consolidate(&faces, assignments, anchors, &blocked, 0.85);
+        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
+    }
+
+    #[test]
+    fn protected_missing_face_survives_consolidation_and_suppression() {
+        let v = unit(&[1.0, 0.0, 0.0]);
+        let faces = vec![row(1, 1, v.clone(), 0.05), row(2, 2, v.clone(), 0.05)];
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 2, cluster_id: 2 },
+        ];
+        let owner_by_face: HashMap<i64, i64> = [(9, 90)].into_iter().collect();
+        let different = HashSet::new();
+        let (assignments, anchors) =
+            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
+        let (assignments, anchors) =
+            consolidate(&faces, assignments, anchors, &HashSet::new(), 0.85);
+        let protected_faces: HashSet<i64> = owner_by_face.keys().copied().collect();
+        let keep = protected_cluster_ids(&assignments, &protected_faces);
+        let (assignments, anchors) = suppress_low_quality_micro_clusters_with_keep(
+            &faces,
+            assignments,
+            anchors,
+            3,
+            0.40,
+            &keep,
+        );
+        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
+        assert!(assignments.iter().any(|assignment| assignment.face_id == 9));
+        assert!(anchors.iter().any(|anchor| anchor.anchor_face_id == 9));
+    }
+
+    #[test]
+    fn protected_validator_rejects_unsafe_persistence_partition() {
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 7 },
+            ClusterAssignment { face_id: 2, cluster_id: 7 },
+        ];
+        let owners: HashMap<i64, i64> = [(1, 10), (2, 20)].into_iter().collect();
+        let different: HashSet<(i64, i64)> = [(1, 2)].into_iter().collect();
+        assert!(validate_protected_clusters(&assignments, &owners, &different).is_err());
+    }
+
+    #[test]
+    fn preserved_verdict_endpoint_is_prefiltered_before_validate() {
+        // Regression (blocker): a different-people verdict whose endpoint face is
+        // owned by a PRESERVED identity is dropped from the clustering pool, so
+        // that face is absent from the final partition. The command must
+        // pre-filter any verdict pair touching an excluded face before building
+        // the blocked set or validating; without that filter the absent endpoint
+        // fails the whole clustering run every time, permanently breaking the
+        // People tab (clustering re-fires after every scan).
+        let assignments = vec![
+            ClusterAssignment { face_id: 10, cluster_id: 1 },
+            ClusterAssignment { face_id: 20, cluster_id: 2 },
+        ];
+        let owner_by_face: HashMap<i64, i64> = [(10, 100), (20, 200)].into_iter().collect();
+        // Face 99 belongs to a preserved owner and left the pool; the verdict
+        // 10≠99 still references it.
+        let raw_pairs: HashSet<(i64, i64)> = [(10, 99)].into_iter().collect();
+        // Unfiltered: the absent endpoint 99 makes validation fail closed.
+        assert!(validate_protected_clusters(&assignments, &owner_by_face, &raw_pairs).is_err());
+        // The command drops pairs touching excluded faces; the preserved owner is
+        // kept separate wholesale, so the constraint is already satisfied.
+        let excluded: HashSet<i64> = [99].into_iter().collect();
+        let active: HashSet<(i64, i64)> = raw_pairs
+            .into_iter()
+            .filter(|&(a, b)| !excluded.contains(&a) && !excluded.contains(&b))
+            .collect();
+        assert!(active.is_empty());
+        validate_protected_clusters(&assignments, &owner_by_face, &active).unwrap();
+    }
+
+    #[test]
     fn consolidate_merges_near_identical_clusters() {
         let v = unit(&[1.0, 0.0, 0.0]);
         // Cluster 1 (2 faces) + cluster 2 (3 faces), both centered on the same
@@ -971,6 +1386,40 @@ mod tests {
         assert_eq!(an.len(), 2, "one merge allowed, the blocked pair kept apart");
         let cid = |face: i64| a.iter().find(|x| x.face_id == face).unwrap().cluster_id;
         assert_ne!(cid(1), cid(2), "blocked pair never co-located, even transitively");
+    }
+
+    #[test]
+    fn forbidden_reverse_edge_follows_a_dropped_root() {
+        let v1 = unit(&[1.0, 0.0, 0.0]);
+        let v2 = unit(&[0.999, 0.01, 0.0]);
+        let v3 = unit(&[0.0, 1.0, 0.0]);
+        let v4 = unit(&[0.98, 0.2, 0.0]);
+        let faces = vec![
+            row(1, 1, v1.clone(), 0.9),
+            row(2, 2, v2.clone(), 0.9),
+            row(3, 3, v3.clone(), 0.9),
+            row(4, 4, v4.clone(), 0.9),
+        ];
+        let assignments = (1..=4)
+            .map(|id| ClusterAssignment { face_id: id, cluster_id: id as i32 })
+            .collect();
+        let anchors = vec![
+            anchor(1, 1, v1, 1),
+            anchor(2, 2, v2, 1),
+            anchor(3, 3, v3, 1),
+            anchor(4, 4, v4, 1),
+        ];
+        let blocked = HashSet::from([(1, 3), (2, 4)]);
+        let (assignments, _) = consolidate(&faces, assignments, anchors, &blocked, 0.95);
+        let cid = |face: i64| {
+            assignments
+                .iter()
+                .find(|assignment| assignment.face_id == face)
+                .unwrap()
+                .cluster_id
+        };
+        assert_eq!(cid(1), cid(2), "the strongest allowed edge merges first");
+        assert_ne!(cid(2), cid(4), "the dropped root's verdict follows its survivor");
     }
 
     #[test]

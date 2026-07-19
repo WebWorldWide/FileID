@@ -31,7 +31,8 @@ use gtk::glib;
 
 use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload, RenamePersonPayload,
+    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
+    RenamePersonPayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -207,6 +208,151 @@ struct PendingSuggestion {
     button: glib::WeakRef<gtk::Button>,
 }
 
+#[derive(Debug, Default)]
+struct FaceClusteringLifecycle {
+    engine_ready: bool,
+    next_generation: u64,
+    active_generation: Option<u64>,
+}
+
+impl FaceClusteringLifecycle {
+    fn new(engine_ready: bool) -> Self {
+        Self {
+            engine_ready,
+            ..Self::default()
+        }
+    }
+
+    fn begin(&mut self) -> Result<u64, &'static str> {
+        if !self.engine_ready {
+            return Err("The engine is still starting.");
+        }
+        if self.active_generation.is_some() {
+            return Err("Face grouping is already in progress.");
+        }
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        self.active_generation = Some(self.next_generation);
+        Ok(self.next_generation)
+    }
+
+    fn finish_active(&mut self) -> Option<u64> {
+        self.active_generation.take()
+    }
+
+    fn finish_if(&mut self, generation: u64) -> bool {
+        if self.active_generation == Some(generation) {
+            self.active_generation = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn on_ready(&mut self) {
+        self.engine_ready = true;
+    }
+
+    fn on_unavailable(&mut self) -> Option<u64> {
+        self.engine_ready = false;
+        self.finish_active()
+    }
+
+    fn is_active(&self) -> bool {
+        self.active_generation.is_some()
+    }
+
+    fn can_start(&self) -> bool {
+        self.engine_ready && !self.is_active()
+    }
+}
+
+#[derive(Default)]
+struct PersonActionGate {
+    active: RefCell<HashSet<&'static str>>,
+}
+
+impl PersonActionGate {
+    fn begin(&self, action: &'static str) -> bool {
+        self.active.borrow_mut().insert(action)
+    }
+
+    fn finish(&self, action: &'static str) {
+        self.active.borrow_mut().remove(action);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PersonDialogOperation {
+    #[default]
+    Idle,
+    Renaming,
+    MarkingUnknown,
+    Complete,
+}
+
+#[derive(Default)]
+struct PersonDialogLifecycle {
+    operation: Cell<PersonDialogOperation>,
+}
+
+impl PersonDialogLifecycle {
+    fn begin(&self, operation: PersonDialogOperation) -> bool {
+        if self.operation.get() != PersonDialogOperation::Idle {
+            return false;
+        }
+        self.operation.set(operation);
+        true
+    }
+
+    fn reset(&self) {
+        self.operation.set(PersonDialogOperation::Idle);
+    }
+
+    fn complete(&self) {
+        self.operation.set(PersonDialogOperation::Complete);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RenameTerminal {
+    Ignore,
+    Success,
+    Failure,
+}
+
+fn classify_person_terminal(
+    result: &BulkActionResult,
+    action: &str,
+    person_id: i64,
+) -> RenameTerminal {
+    if result.action != action {
+        return RenameTerminal::Ignore;
+    }
+    let ids: Vec<i64> = result
+        .messages
+        .iter()
+        .filter_map(|item| item.file_id)
+        .collect();
+    if !ids.is_empty() && !ids.contains(&person_id) {
+        return RenameTerminal::Ignore;
+    }
+    if result.failed == 0
+        && result.succeeded > 0
+        && ids.contains(&person_id)
+        && result.messages.iter().any(|item| item.ok)
+    {
+        RenameTerminal::Success
+    } else if result.failed > 0 && (ids.is_empty() || ids.contains(&person_id)) {
+        RenameTerminal::Failure
+    } else {
+        RenameTerminal::Ignore
+    }
+}
+
+fn classify_rename_terminal(result: &BulkActionResult, person_id: i64) -> RenameTerminal {
+    classify_person_terminal(result, "renamePerson", person_id)
+}
+
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
 
@@ -215,6 +361,7 @@ struct Ui {
     suggestions: RefCell<Vec<Candidate>>,
     pending_suggestions: RefCell<VecDeque<PendingSuggestion>>,
     merge_results_pending: Cell<usize>,
+    person_actions: PersonActionGate,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
     show_hidden: Cell<bool>,
@@ -222,7 +369,7 @@ struct Ui {
     merge_checked: RefCell<HashSet<i64>>,
     unknown_checked: RefCell<HashSet<i64>>,
     reload_gen: Cell<u64>,
-    clustering: Cell<bool>,
+    face_clustering: RefCell<FaceClusteringLifecycle>,
     // Keyed by (representative photo path, face bbox): two people can share a
     // representative photo but crop different faces from it, so the path alone
     // would make the second card reuse the first card's face crop.
@@ -238,6 +385,7 @@ struct Ui {
     grid_scroller: gtk::ScrolledWindow,
     empty_page: adw::StatusPage,
     no_clusters_page: adw::StatusPage,
+    group_button: gtk::Button,
     cluster_spinner: gtk::Spinner,
     footer: gtk::Box,
     footer_label: gtk::Label,
@@ -391,6 +539,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&no_clusters_page);
     root.append(&footer);
 
+    let engine_ready = engine.borrow().is_ready();
     let ui = Rc::new(Ui {
         engine: engine.clone(),
         persons: RefCell::new(Vec::new()),
@@ -398,6 +547,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         suggestions: RefCell::new(Vec::new()),
         pending_suggestions: RefCell::new(VecDeque::new()),
         merge_results_pending: Cell::new(0),
+        person_actions: PersonActionGate::default(),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
         show_hidden: Cell::new(false),
@@ -405,7 +555,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         merge_checked: RefCell::new(HashSet::new()),
         unknown_checked: RefCell::new(HashSet::new()),
         reload_gen: Cell::new(0),
-        clustering: Cell::new(false),
+        face_clustering: RefCell::new(FaceClusteringLifecycle::new(engine_ready)),
         thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_CAP)),
         count_label: count_label.clone(),
         status_label: status_label.clone(),
@@ -417,6 +567,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         grid_scroller: grid_scroller.clone(),
         empty_page: empty_page.clone(),
         no_clusters_page: no_clusters_page.clone(),
+        group_button: group_btn.clone(),
         cluster_spinner: cluster_spinner.clone(),
         footer: footer.clone(),
         footer_label: footer_label.clone(),
@@ -449,6 +600,19 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
                 match ev {
+                    EngineEvent::Spawning => {
+                        if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
+                            set_status(
+                                &ui,
+                                "Grouping stopped because the engine restarted.".to_string(),
+                            );
+                        }
+                        refresh_view(&ui);
+                    }
+                    EngineEvent::Ready => {
+                        ui.face_clustering.borrow_mut().on_ready();
+                        refresh_view(&ui);
+                    }
                     EngineEvent::BatchLanded(_) => {
                         if last.elapsed() >= Duration::from_millis(1200) {
                             last = Instant::now();
@@ -456,6 +620,37 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                     }
                     EngineEvent::ScanComplete(_) => reload(&ui),
+                    EngineEvent::FaceClusteringComplete(result) => {
+                        ui.face_clustering.borrow_mut().finish_active();
+                        set_status(
+                            &ui,
+                            format!(
+                                "Grouped {} faces into {} people.",
+                                result.face_count, result.person_count
+                            ),
+                        );
+                        reload(&ui);
+                    }
+                    EngineEvent::FaceClusteringFailed(message) => {
+                        ui.face_clustering.borrow_mut().finish_active();
+                        set_status(&ui, format!("Grouping failed: {message}"));
+                        refresh_view(&ui);
+                    }
+                    EngineEvent::FaceClusteringBusy(message) => {
+                        if ui.face_clustering.borrow_mut().finish_active().is_some() {
+                            set_status(&ui, format!("Grouping could not start: {message}"));
+                        }
+                        refresh_view(&ui);
+                    }
+                    EngineEvent::Exited => {
+                        if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
+                            set_status(
+                                &ui,
+                                "Grouping stopped because the engine exited.".to_string(),
+                            );
+                        }
+                        refresh_view(&ui);
+                    }
                     EngineEvent::BulkActionResult(result) if result.action == "mergeClusters" => {
                         let outstanding = ui.merge_results_pending.get();
                         if outstanding == 0 {
@@ -505,17 +700,25 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     reload(&ui);
     refresh_view(&ui);
+    // Re-read whenever the tab becomes visible: the startup read can race the
+    // engine's own DB open (transient BUSY → empty snapshot), and clustering
+    // finished on another tab must show up on switch — not only on scan events.
+    {
+        let ui = ui.clone();
+        root.connect_map(move |_| reload(&ui));
+    }
     root.upcast()
 }
 
 // ── View refresh ──────────────────────────────────────────────────────────────
 
 fn refresh_view(ui: &Rc<Ui>) {
+    let clustering = ui.face_clustering.borrow().is_active();
     let (has_persons, count_text, persons_len) = {
         let persons = ui.persons.borrow();
         (
             !persons.is_empty(),
-            count_line(&persons, ui.total_faces.get()),
+            count_line(&persons, ui.total_faces.get(), clustering),
             persons.len(),
         )
     };
@@ -532,7 +735,8 @@ fn refresh_view(ui: &Rc<Ui>) {
         ));
     }
 
-    let clustering = ui.clustering.get();
+    let can_start_clustering = ui.face_clustering.borrow().can_start();
+    ui.group_button.set_sensitive(can_start_clustering);
     ui.cluster_spinner.set_visible(clustering);
     if clustering {
         ui.cluster_spinner.start();
@@ -562,14 +766,18 @@ fn refresh_view(ui: &Rc<Ui>) {
     }
 }
 
-fn count_line(persons: &[PersonRow], total_faces: i64) -> String {
+fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> String {
     let p = persons.len();
     let unnamed = persons.iter().filter(|x| !x.has_any_name()).count();
     if p == 0 && total_faces == 0 {
         return String::new();
     }
     if p == 0 {
-        return format!("{total_faces} faces · clustering…");
+        return if clustering {
+            format!("{total_faces} faces · clustering…")
+        } else {
+            format!("{total_faces} faces · not grouped yet")
+        };
     }
     if unnamed > 0 {
         format!("{p} people · {unnamed} still unnamed")
@@ -648,25 +856,73 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
         }
         Mode::Unknown => {
             let ids: Vec<i64> = ui.unknown_checked.borrow().iter().copied().collect();
-            if !ids.is_empty()
-                && send_cmd(
-                    ui,
-                    CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
-                        person_ids: ids.clone(),
-                    }),
-                )
-            {
+            if ids.is_empty() {
+                return;
+            }
+            if !begin_person_action(ui, "markPersonsAsUnknown") {
                 set_status(
                     ui,
-                    format!(
-                        "Marked {} cluster{} as unknown.",
-                        ids.len(),
-                        plural(ids.len() as i64)
-                    ),
+                    "Another Mark Unknown action is still saving.".to_string(),
                 );
-                set_mode(ui, Mode::Normal);
-                schedule_reload_burst(ui);
+                return;
             }
+            let events = ui.engine.borrow_mut().subscribe();
+            ui.bulk_button.set_sensitive(false);
+            if !send_cmd(
+                ui,
+                CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
+                    person_ids: ids.clone(),
+                }),
+            ) {
+                finish_person_action(ui, "markPersonsAsUnknown");
+                update_bulk_strip(ui);
+                return;
+            }
+            set_status(ui, "Saving…".to_string());
+            let ui = ui.clone();
+            glib::MainContext::default().spawn_local(async move {
+                while let Ok(event) = events.recv().await {
+                    match event {
+                        EngineEvent::BulkActionResult(result)
+                            if result.action == "markPersonsAsUnknown" =>
+                        {
+                            finish_person_action(&ui, "markPersonsAsUnknown");
+                            if result.failed == 0 && result.succeeded > 0 {
+                                set_status(
+                                    &ui,
+                                    format!(
+                                        "Marked {} cluster{} as unknown.",
+                                        result.succeeded,
+                                        plural(result.succeeded as i64)
+                                    ),
+                                );
+                                set_mode(&ui, Mode::Normal);
+                                schedule_reload_burst(&ui);
+                            } else {
+                                let detail = result
+                                    .messages
+                                    .iter()
+                                    .find(|item| !item.ok)
+                                    .and_then(|item| item.message.as_deref())
+                                    .unwrap_or("the engine rejected the change");
+                                set_status(&ui, format!("Couldn't mark as unknown: {detail}"));
+                                update_bulk_strip(&ui);
+                            }
+                            break;
+                        }
+                        EngineEvent::Exited => {
+                            finish_person_action(&ui, "markPersonsAsUnknown");
+                            set_status(
+                                &ui,
+                                "Couldn't mark as unknown: the engine exited.".to_string(),
+                            );
+                            update_bulk_strip(&ui);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
         }
         Mode::Normal => {}
     }
@@ -703,7 +959,7 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
     overlay.set_child(Some(&pic));
     let check = gtk::Image::builder()
         .icon_name(if checked {
-            "emblem-ok-symbolic"
+            "object-select-symbolic"
         } else {
             "checkbox-symbolic"
         })
@@ -818,7 +1074,7 @@ fn toggle(set: &RefCell<HashSet<i64>>, pid: i64) -> bool {
 
 fn update_check_visual(check: &gtk::Image, vbox: &gtk::Box, on: bool) {
     check.set_icon_name(Some(if on {
-        "emblem-ok-symbolic"
+        "object-select-symbolic"
     } else {
         "checkbox-symbolic"
     }));
@@ -892,9 +1148,6 @@ fn reload(ui: &Rc<Ui>) {
         *ui.person_by_id.borrow_mut() = map;
         *ui.persons.borrow_mut() = visible;
 
-        if ui.clustering.get() && !ui.persons.borrow().is_empty() {
-            ui.clustering.set(false);
-        }
         refresh_view(&ui);
     });
 }
@@ -904,6 +1157,14 @@ fn schedule_reload_burst(ui: &Rc<Ui>) {
         let ui = ui.clone();
         glib::timeout_add_local_once(Duration::from_millis(ms), move || reload(&ui));
     }
+}
+
+fn begin_person_action(ui: &Rc<Ui>, action: &'static str) -> bool {
+    ui.person_actions.begin(action)
+}
+
+fn finish_person_action(ui: &Rc<Ui>, action: &'static str) {
+    ui.person_actions.finish(action);
 }
 
 fn send_cmd(ui: &Rc<Ui>, payload: CommandPayload) -> bool {
@@ -924,36 +1185,34 @@ fn set_status(ui: &Rc<Ui>, msg: String) {
 // ── Clustering ────────────────────────────────────────────────────────────────
 
 fn start_clustering(ui: &Rc<Ui>) {
-    if !send_cmd(ui, CommandPayload::RunFaceClustering(Empty {})) {
-        return;
-    }
-    ui.clustering.set(true);
+    let generation = match ui.face_clustering.borrow_mut().begin() {
+        Ok(generation) => generation,
+        Err(message) => {
+            set_status(ui, message.to_string());
+            refresh_view(ui);
+            return;
+        }
+    };
     set_status(ui, "Grouping faces into people…".to_string());
     refresh_view(ui);
-    cluster_poll(ui);
-    // Hard stop so the spinner can't spin forever if no persons ever appear.
-    let ui = ui.clone();
-    glib::timeout_add_local_once(Duration::from_secs(45), move || {
-        if ui.clustering.get() {
-            ui.clustering.set(false);
-            refresh_view(&ui);
-        }
-    });
-}
-
-// The engine doesn't surface a `faceClusteringComplete` event through the
-// current `EngineEvent` set, so we poll the DB while clustering runs; the
-// reload that first sees persons flips `clustering` off (see `reload`).
-fn cluster_poll(ui: &Rc<Ui>) {
-    if !ui.clustering.get() {
-        return;
+    if !send_cmd(ui, CommandPayload::RunFaceClustering(Empty {})) {
+        ui.face_clustering.borrow_mut().finish_if(generation);
+        refresh_view(ui);
     }
-    reload(ui);
-    let ui = ui.clone();
-    glib::timeout_add_local_once(Duration::from_millis(1500), move || cluster_poll(&ui));
 }
 
 // ── Person-detail dialog ──────────────────────────────────────────────────────
+
+fn set_person_dialog_busy(
+    group: &adw::PreferencesGroup,
+    done_button: &gtk::Button,
+    mark_button: &gtk::Button,
+    busy: bool,
+) {
+    group.set_sensitive(!busy);
+    done_button.set_sensitive(!busy);
+    mark_button.set_sensitive(!busy);
+}
 
 fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     let person = match ui.person_by_id.borrow().get(&pid).cloned() {
@@ -1045,13 +1304,15 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     toolbar.set_content(Some(&body));
     dialog.set_child(Some(&toolbar));
 
-    // Mark-unknown clears the name fields engine-side; the skip flag stops the
-    // save-on-close from re-writing whatever's in the (now stale) entries.
-    let skip_save = Rc::new(Cell::new(false));
+    dialog.set_can_close(false);
+    let lifecycle = Rc::new(PersonDialogLifecycle::default());
 
     {
         let ui = ui.clone();
-        let skip = skip_save.clone();
+        let lifecycle = lifecycle.clone();
+        let group = group.clone();
+        let done_btn = done_btn.clone();
+        let mark_btn = mark_btn.clone();
         let (t, f, m, l, s) = (
             title_row.clone(),
             first_row.clone(),
@@ -1059,22 +1320,90 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             last_row.clone(),
             suffix_row.clone(),
         );
-        dialog.connect_closed(move |_| {
-            if skip.get() {
+        dialog.connect_close_attempt(move |dialog| {
+            if !lifecycle.begin(PersonDialogOperation::Renaming) {
                 return;
             }
-            send_cmd(
-                &ui,
-                CommandPayload::RenamePerson(RenamePersonPayload {
-                    person_id: pid,
-                    title: norm(t.text().as_str()),
-                    first_name: norm(f.text().as_str()),
-                    middle_name: norm(m.text().as_str()),
-                    last_name: norm(l.text().as_str()),
-                    suffix: norm(s.text().as_str()),
-                }),
-            );
-            schedule_reload_burst(&ui);
+            if !begin_person_action(&ui, "renamePerson") {
+                lifecycle.reset();
+                set_status(&ui, "Another person rename is still saving.".to_string());
+                return;
+            }
+            let payload = RenamePersonPayload {
+                person_id: pid,
+                title: norm(t.text().as_str()),
+                first_name: norm(f.text().as_str()),
+                middle_name: norm(m.text().as_str()),
+                last_name: norm(l.text().as_str()),
+                suffix: norm(s.text().as_str()),
+            };
+            let events = ui.engine.borrow_mut().subscribe();
+            set_person_dialog_busy(&group, &done_btn, &mark_btn, true);
+            if !send_cmd(&ui, CommandPayload::RenamePerson(payload)) {
+                finish_person_action(&ui, "renamePerson");
+                lifecycle.reset();
+                set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                return;
+            }
+            set_status(&ui, "Saving person…".to_string());
+            let ui = ui.clone();
+            let lifecycle = lifecycle.clone();
+            let dialog = dialog.clone();
+            let group = group.clone();
+            let done_btn = done_btn.clone();
+            let mark_btn = mark_btn.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let mut handled = false;
+                while let Ok(event) = events.recv().await {
+                    match event {
+                        EngineEvent::BulkActionResult(result) => {
+                            match classify_rename_terminal(&result, pid) {
+                                RenameTerminal::Ignore => continue,
+                                RenameTerminal::Success => {
+                                    finish_person_action(&ui, "renamePerson");
+                                    lifecycle.complete();
+                                    set_status(&ui, "Person saved.".to_string());
+                                    schedule_reload_burst(&ui);
+                                    dialog.set_can_close(true);
+                                    dialog.close();
+                                }
+                                RenameTerminal::Failure => {
+                                    finish_person_action(&ui, "renamePerson");
+                                    lifecycle.reset();
+                                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                                    let detail = result
+                                        .messages
+                                        .iter()
+                                        .find(|item| !item.ok)
+                                        .and_then(|item| item.message.as_deref())
+                                        .unwrap_or("the engine rejected the change");
+                                    set_status(&ui, format!("Couldn't save person: {detail}"));
+                                }
+                            }
+                            handled = true;
+                            break;
+                        }
+                        EngineEvent::Exited => {
+                            finish_person_action(&ui, "renamePerson");
+                            lifecycle.reset();
+                            set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                            set_status(&ui, "Couldn't save person: the engine exited.".to_string());
+                            handled = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if !handled {
+                    finish_person_action(&ui, "renamePerson");
+                    lifecycle.reset();
+                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                    set_status(
+                        &ui,
+                        "Couldn't save person: the engine connection closed.".to_string(),
+                    );
+                }
+            });
         });
     }
     {
@@ -1085,22 +1414,99 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     }
     {
         let ui = ui.clone();
-        let skip = skip_save.clone();
+        let lifecycle = lifecycle.clone();
         let dialog = dialog.clone();
-        mark_btn.connect_clicked(move |_| {
-            skip.set(true);
-            if send_cmd(
+        let group = group.clone();
+        let done_btn = done_btn.clone();
+        let mark_btn = mark_btn.clone();
+        mark_btn.clone().connect_clicked(move |_| {
+            if !lifecycle.begin(PersonDialogOperation::MarkingUnknown) {
+                return;
+            }
+            if !begin_person_action(&ui, "markPersonsAsUnknown") {
+                lifecycle.reset();
+                set_status(
+                    &ui,
+                    "Another Mark Unknown action is still saving.".to_string(),
+                );
+                return;
+            }
+            let events = ui.engine.borrow_mut().subscribe();
+            set_person_dialog_busy(&group, &done_btn, &mark_btn, true);
+            if !send_cmd(
                 &ui,
                 CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
                     person_ids: vec![pid],
                 }),
             ) {
-                set_status(&ui, "Marked as unknown.".to_string());
-                schedule_reload_burst(&ui);
-                dialog.close();
-            } else {
-                skip.set(false);
+                finish_person_action(&ui, "markPersonsAsUnknown");
+                lifecycle.reset();
+                set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                return;
             }
+            set_status(&ui, "Saving…".to_string());
+            let ui = ui.clone();
+            let lifecycle = lifecycle.clone();
+            let dialog = dialog.clone();
+            let group = group.clone();
+            let done_btn = done_btn.clone();
+            let mark_btn = mark_btn.clone();
+            glib::MainContext::default().spawn_local(async move {
+                let mut handled = false;
+                while let Ok(event) = events.recv().await {
+                    match event {
+                        EngineEvent::BulkActionResult(result) => {
+                            match classify_person_terminal(&result, "markPersonsAsUnknown", pid) {
+                                RenameTerminal::Ignore => continue,
+                                RenameTerminal::Success => {
+                                    finish_person_action(&ui, "markPersonsAsUnknown");
+                                    lifecycle.complete();
+                                    set_status(&ui, "Marked as unknown.".to_string());
+                                    schedule_reload_burst(&ui);
+                                    dialog.set_can_close(true);
+                                    dialog.close();
+                                }
+                                RenameTerminal::Failure => {
+                                    finish_person_action(&ui, "markPersonsAsUnknown");
+                                    lifecycle.reset();
+                                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                                    let message = result
+                                        .messages
+                                        .iter()
+                                        .find_map(|item| {
+                                            (!item.ok).then_some(item.message.as_deref()).flatten()
+                                        })
+                                        .unwrap_or("The engine did not confirm the change.");
+                                    set_status(&ui, format!("Couldn't mark as unknown: {message}"));
+                                }
+                            }
+                            handled = true;
+                            break;
+                        }
+                        EngineEvent::Exited => {
+                            finish_person_action(&ui, "markPersonsAsUnknown");
+                            lifecycle.reset();
+                            set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                            set_status(
+                                &ui,
+                                "Couldn't mark as unknown: the engine exited.".to_string(),
+                            );
+                            handled = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if !handled {
+                    finish_person_action(&ui, "markPersonsAsUnknown");
+                    lifecycle.reset();
+                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                    set_status(
+                        &ui,
+                        "Couldn't mark as unknown: the engine connection closed.".to_string(),
+                    );
+                }
+            });
         });
     }
 
@@ -1610,7 +2016,12 @@ fn uf_find(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
 fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     let (tx, rx) = async_channel::bounded::<Snapshot>(1);
     std::thread::spawn(move || {
-        let snap = read_snapshot().unwrap_or_default();
+        let snap = read_snapshot().unwrap_or_else(|error| {
+            // A read failure must be loud: swallowing it renders the tab as
+            // "no people yet" even when the DB is full of faces.
+            tracing::warn!(target: "people", %error, "person snapshot read failed");
+            Snapshot::default()
+        });
         let _ = tx.send_blocking(snap);
     });
     rx
@@ -1634,6 +2045,32 @@ fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<(i64, String
     rx
 }
 
+// The representative face: the persisted pick when it is still active, else
+// the lowest-id active face. Two correlated WHERE-clause lookups — SQLite
+// rejects an outer reference (`p.representative_face_id`) inside a scalar
+// subquery's ORDER BY with "no such column", which silently emptied the whole
+// People tab (the error was swallowed into a default snapshot).
+const PERSON_SNAPSHOT_SQL: &str = "\
+    SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
+           COALESCE(p.is_unknown, 0), \
+           (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
+           (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
+           f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
+    FROM persons p \
+    LEFT JOIN face_prints rf ON rf.id = COALESCE( \
+        (SELECT fp1.id FROM face_prints fp1 \
+         JOIN files af1 ON af1.id = fp1.file_id \
+         WHERE fp1.id = p.representative_face_id AND fp1.person_id = p.id AND af1.failed = 0), \
+        (SELECT MIN(fp2.id) FROM face_prints fp2 \
+         JOIN files af2 ON af2.id = fp2.file_id \
+         WHERE fp2.person_id = p.id AND af2.failed = 0)) \
+    LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
+    WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
+    ORDER BY \
+      CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
+           COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
+      active_file_count DESC, p.id ASC";
+
 fn read_snapshot() -> anyhow::Result<Snapshot> {
     let Ok(db_path) = fileid_engine::paths::db_path() else {
         return Ok(Snapshot::default());
@@ -1650,26 +2087,7 @@ fn read_snapshot() -> anyhow::Result<Snapshot> {
         )
         .unwrap_or(0);
 
-    let sql = "\
-        SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
-               COALESCE(p.is_unknown, 0), \
-               (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
-               (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
-               f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
-        FROM persons p \
-        LEFT JOIN face_prints rf ON rf.id = ( \
-            SELECT fp2.id FROM face_prints fp2 \
-            JOIN files af2 ON af2.id = fp2.file_id \
-            WHERE fp2.person_id = p.id AND af2.failed = 0 \
-            ORDER BY CASE WHEN fp2.id = p.representative_face_id THEN 0 ELSE 1 END, fp2.id \
-            LIMIT 1) \
-        LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
-        WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
-        ORDER BY \
-          CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
-               COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
-          active_file_count DESC, p.id ASC";
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(PERSON_SNAPSHOT_SQL)?;
     let rows = stmt
         .query_map([], map_person)?
         .collect::<rusqlite::Result<Vec<PersonRow>>>()?;
@@ -1927,7 +2345,128 @@ fn sim_markup(s: f32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::BoundedLru;
+    use super::{
+        classify_rename_terminal, BoundedLru, FaceClusteringLifecycle, PersonActionGate,
+        PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
+    };
+    use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
+
+    // PR #106 shipped a snapshot query SQLite can't prepare (outer reference
+    // inside a scalar subquery's ORDER BY) and the swallowed error blanked the
+    // whole tab. Preparing against the real migrated schema catches any drift.
+    #[test]
+    fn person_snapshot_sql_prepares_against_current_schema() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        conn.prepare(super::PERSON_SNAPSHOT_SQL).unwrap();
+    }
+
+    #[test]
+    fn person_actions_serialize_by_terminal_action() {
+        let gate = PersonActionGate::default();
+        assert!(gate.begin("renamePerson"));
+        assert!(!gate.begin("renamePerson"));
+        assert!(gate.begin("markPersonsAsUnknown"));
+        gate.finish("renamePerson");
+        assert!(gate.begin("renamePerson"));
+    }
+
+    #[test]
+    fn face_clustering_lifecycle_is_generation_owned_and_terminal_driven() {
+        let mut lifecycle = FaceClusteringLifecycle::new(false);
+        assert_eq!(lifecycle.begin(), Err("The engine is still starting."));
+        lifecycle.on_ready();
+        let first = lifecycle.begin().unwrap();
+        assert!(lifecycle.is_active());
+        assert_eq!(
+            lifecycle.begin(),
+            Err("Face grouping is already in progress.")
+        );
+        assert!(!lifecycle.finish_if(first.wrapping_add(1)));
+        assert!(lifecycle.is_active());
+        assert_eq!(lifecycle.finish_active(), Some(first));
+        let second = lifecycle.begin().unwrap();
+        assert!(second > first);
+        assert_eq!(lifecycle.on_unavailable(), Some(second));
+        assert!(!lifecycle.can_start());
+        lifecycle.on_ready();
+        assert!(lifecycle.can_start());
+        assert!(lifecycle.begin().unwrap() > second);
+    }
+
+    #[test]
+    fn stale_face_send_rollback_cannot_clear_a_later_generation() {
+        let mut lifecycle = FaceClusteringLifecycle::new(true);
+        let first = lifecycle.begin().unwrap();
+        assert!(lifecycle.finish_if(first));
+        let second = lifecycle.begin().unwrap();
+        assert!(!lifecycle.finish_if(first));
+        assert!(lifecycle.is_active());
+        assert!(lifecycle.finish_if(second));
+    }
+
+    #[test]
+    fn face_busy_rejection_releases_the_rejected_attempt() {
+        let mut lifecycle = FaceClusteringLifecycle::new(true);
+        assert!(lifecycle.begin().is_ok());
+        assert!(lifecycle.finish_active().is_some());
+        assert!(lifecycle.can_start());
+    }
+
+    fn bulk_result(
+        action: &str,
+        succeeded: u32,
+        failed: u32,
+        person_id: Option<i64>,
+        ok: bool,
+    ) -> BulkActionResult {
+        BulkActionResult {
+            action: action.into(),
+            succeeded,
+            failed,
+            messages: vec![BulkActionItem {
+                file_id: person_id,
+                ok,
+                message: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn rename_terminal_requires_matching_action_and_person() {
+        assert_eq!(
+            classify_rename_terminal(&bulk_result("applyTags", 1, 0, Some(11), true), 11),
+            RenameTerminal::Ignore
+        );
+        assert_eq!(
+            classify_rename_terminal(&bulk_result("renamePerson", 1, 0, Some(22), true), 11),
+            RenameTerminal::Ignore
+        );
+        assert_eq!(
+            classify_rename_terminal(&bulk_result("renamePerson", 1, 0, Some(11), true), 11),
+            RenameTerminal::Success
+        );
+        assert_eq!(
+            classify_rename_terminal(&bulk_result("renamePerson", 0, 1, None, false), 11),
+            RenameTerminal::Failure
+        );
+        assert_eq!(
+            classify_rename_terminal(&bulk_result("renamePerson", 1, 0, None, true), 11),
+            RenameTerminal::Ignore
+        );
+    }
+
+    #[test]
+    fn dialog_lifecycle_keeps_rejected_or_failed_edits_retryable() {
+        let lifecycle = PersonDialogLifecycle::default();
+        assert!(lifecycle.begin(PersonDialogOperation::Renaming));
+        assert!(!lifecycle.begin(PersonDialogOperation::Renaming));
+        assert!(!lifecycle.begin(PersonDialogOperation::MarkingUnknown));
+        lifecycle.reset();
+        assert!(lifecycle.begin(PersonDialogOperation::Renaming));
+        lifecycle.complete();
+        assert!(!lifecycle.begin(PersonDialogOperation::Renaming));
+    }
 
     #[test]
     fn people_thumbnail_cache_never_exceeds_capacity() {

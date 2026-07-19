@@ -63,8 +63,12 @@ internal sealed class UndoStack : INotifyPropertyChanged
     /// undo entry that calls `reverse(batchId)`. Used by Library +
     /// Cleanup trash buttons + the People merge flows.
     /// </summary>
-    public static void CaptureNextBulkResult(string actionPrefix, string undoLabel,
-        Func<string, Task<bool>> reverse, ChangeKind kind = ChangeKind.Other)
+    public static IDisposable CaptureNextBulkResult(
+        string actionPrefix,
+        string undoLabel,
+        Func<string, Task<bool>> reverse,
+        ChangeKind kind = ChangeKind.Other,
+        TimeSpan? timeout = null)
     {
         var ec = ViewModels.EngineClient.Instance;
 
@@ -97,13 +101,19 @@ internal sealed class UndoStack : INotifyPropertyChanged
         };
         ec.PropertyChanged += once;
 
-        _ = Task.Delay(TimeSpan.FromSeconds(30)).ContinueWith(_ =>
+        void Cancel()
         {
-            // Only detach if we haven't already consumed a reply. This
-            // prevents the timeout from racing the reply handler and
-            // erroneously detaching after a successful Push.
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
             try { ec.PropertyChanged -= once; } catch { /* swallow */ }
-        });
+        }
+        _ = Task.Delay(timeout ?? TimeSpan.FromSeconds(30)).ContinueWith(_ => Cancel());
+        return new CallbackRegistration(Cancel);
+    }
+
+    private sealed class CallbackRegistration(Action cancel) : IDisposable
+    {
+        private Action? _cancel = cancel;
+
+        public void Dispose() => System.Threading.Interlocked.Exchange(ref _cancel, null)?.Invoke();
     }
 }

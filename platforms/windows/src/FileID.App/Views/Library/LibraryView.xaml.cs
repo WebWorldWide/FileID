@@ -134,6 +134,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
                     RequestLibraryRefresh(force: false);
                     break;
+                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeStarting):
                     DispatcherQueue.TryEnqueue(SyncBanners);
@@ -173,8 +174,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Engine throttles Progress events to 4 Hz; once Processed == Total
         // (or DeepAnalyzeComplete arrives, clearing DeepAnalyzeProgress in
         // EngineClient.Apply), the banner collapses.
-        var dap = EngineClient.Instance.DeepAnalyzeProgress;
-        if (dap is not null && dap.Processed < dap.Total)
+        var engine = EngineClient.Instance;
+        var dap = engine.DeepAnalyzeProgress;
+        if (engine.DeepAnalyzeCommandInFlight && dap is null)
+        {
+            DeepAnalyzeBanner.Visibility = Visibility.Visible;
+            DeepAnalyzeBannerText.Text = "Deep Analyze preparing…";
+        }
+        else if (dap is not null && dap.Processed < dap.Total)
         {
             DeepAnalyzeBanner.Visibility = Visibility.Visible;
             var current = string.IsNullOrEmpty(dap.CurrentPath)
@@ -1131,10 +1138,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // subscribe independently for the same result; WaitFor resets
         // LastBulkAction to null first (which CaptureNextBulkResult guards
         // against), so they coexist.
-        Services.UndoStack.CaptureNextBulkResult(
+        IDisposable CaptureUndo() => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
             kind: Services.ChangeKind.Trash,
+            timeout: TimeSpan.FromMinutes(1),
             reverse: async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
@@ -1156,7 +1164,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => EngineClient.Instance.TrashFilesAsync(ids),
-                TimeSpan.FromSeconds(30));
+                TimeSpan.FromSeconds(30),
+                beforeSend: CaptureUndo);
         }
         catch (TimeoutException ex)
         {

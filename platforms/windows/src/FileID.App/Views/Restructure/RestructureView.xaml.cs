@@ -212,11 +212,13 @@ public sealed partial class RestructureView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineLifecycle(); });
                     break;
+                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeProgress):
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
                     break;
                 case nameof(EngineClient.DeepAnalyzeComplete):
                     {
+                        if (EngineClient.Instance.DeepAnalyzeComplete is null) break;
                         // macOS parity: re-plan when Deep Analyze finishes so the
                         // People/<name> buckets reflect newly-captioned files.
                         var folder = AppViewModel.Instance.FolderPath;
@@ -610,7 +612,7 @@ public sealed partial class RestructureView : UserControl
 
     private async Task RefreshDeepAnalyzeHintAsync()
     {
-        if (EngineClient.Instance.DeepAnalyzeProgress != null) return; // running: handled by UpdateDeepAnalyzeBanner
+        if (EngineClient.Instance.DeepAnalyzeCommandInFlight) return;
         int captioned = 0, total = 0;
         try
         {
@@ -622,7 +624,7 @@ public sealed partial class RestructureView : UserControl
         bool show = !_deepAnalyzeHintDismissed
             && total > 0
             && (double)captioned / total < 0.4
-            && EngineClient.Instance.DeepAnalyzeProgress == null;
+            && !EngineClient.Instance.DeepAnalyzeCommandInFlight;
         try
         {
             DeepAnalyzeHintBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
@@ -635,10 +637,13 @@ public sealed partial class RestructureView : UserControl
 
     private void UpdateDeepAnalyzeBanner()
     {
-        if (EngineClient.Instance.DeepAnalyzeProgress != null)
+        var engine = EngineClient.Instance;
+        if (engine.DeepAnalyzeCommandInFlight)
         {
             DeepAnalyzeHintBanner.Visibility = Visibility.Visible;
-            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
+            DeepAnalyzeHintTitle.Text = engine.DeepAnalyzeProgress is null
+                ? "Deep Analyze preparing..."
+                : "Deep Analyze running...";
             DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
             RunDeepAnalyzeButton.IsEnabled = false;
         }
@@ -683,11 +688,17 @@ public sealed partial class RestructureView : UserControl
     private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnRunDeepAnalyzeClicked), async () =>
         {
+            if (EngineClient.Instance.DeepAnalyzeCommandInFlight) return;
             var model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
-            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
-            DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
-            RunDeepAnalyzeButton.IsEnabled = false;
-            await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+            try
+            {
+                await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Restructure Deep Analyze start failed: " + ex.Message);
+                await ShowAlertAsync("Couldn't start Deep Analyze", ex.Message);
+            }
         });
 
     private void OnDismissHintClicked(object sender, RoutedEventArgs e)
@@ -928,19 +939,30 @@ public sealed partial class RestructureView : UserControl
         }
     }
 
-    // A plan/apply that dies engine-side surfaces as EngineClient.LastError with
-    // a restructure kind (restructure.rs: "plan_restructure_failed" /
-    // "plan_restructure_db" / "plan_restructure_store" / "apply_restructure") -
-    // never as a Plan/ApplyResult event. Without handling it the tab freezes on
-    // "Computing plan..." / "Moving N files..." forever.
+    // A plan/apply/undo that dies engine-side surfaces as EngineClient.LastError
+    // with a command-specific restructure kind, never as a Plan/ApplyResult event.
+    // Without handling it the tab can leave its command affordance disabled forever.
     // Only react to restructure kinds (LastError is a shared slot) and de-dupe.
     private void SyncEngineError()
     {
         var err = EngineClient.Instance.LastError;
         if (err is null || ReferenceEquals(err, _lastHandledError)) return;
         bool planError = IsPlanRestructureErrorKind(err.Kind);
-        if (!planError && err.Kind != "apply_restructure") return;
+        bool undoError = err.Kind == "undo_restructure";
+        if (!planError && !undoError && err.Kind != "apply_restructure") return;
         _lastHandledError = err;
+
+        if (undoError)
+        {
+            EngineClient.Instance.UndoRestructureInFlight = false;
+            UndoButton.IsEnabled = EngineClient.Instance.CanUndoRestructure;
+            ApplyStatusText.Text = "Undo didn't complete - try again.";
+            _ = ShowAlertAsync("Couldn't undo changes",
+                string.IsNullOrWhiteSpace(err.Message)
+                    ? "FileID couldn't finish undoing the last reorganization."
+                    : err.Message);
+            return;
+        }
 
         if (!planError) _applyInFlight = false;
         // The apply itself, or the post-apply re-plan, failed - release the

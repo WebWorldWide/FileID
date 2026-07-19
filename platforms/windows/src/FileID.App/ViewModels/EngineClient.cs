@@ -104,6 +104,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // and release the guard instead of staying wedged for the session.
     private int _spawnGeneration;
     public int SpawnGeneration => Volatile.Read(ref _spawnGeneration);
+    private int _gpuDeviceRemovedGeneration = -1;
 
     // BUG-3: respawn debouncing — prevents two-spawn races during the
     // 1s/4s/16s backoff window when the engine flaps quickly.
@@ -116,6 +117,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // architectures, and OnProcessExited fires on whichever thread
     // detects process exit (not always the UI thread).
     private int _expectingExit; // 0 = false, 1 = true
+    private Process? _expectedExitProcess;
     // When _expectingExit was set (UTC ticks). A shutdown request that never
     // produces an exit would otherwise latch the flag forever, so a real crash
     // much later gets mis-read as user-initiated and never respawns. Only honor
@@ -242,6 +244,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         get => _lastError;
         private set => Set(ref _lastError, value);
+    }
+
+    private bool _gpuDeviceRemoved;
+    public bool GpuDeviceRemoved
+    {
+        get => _gpuDeviceRemoved;
+        private set => Set(ref _gpuDeviceRemoved, value);
     }
 
     private EngineError? _lastWarning;
@@ -379,6 +388,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         set => Set(ref _lastLibraryWiped, value);
     }
 
+    private int _deepAnalyzePresentationGeneration = -1;
     private DeepAnalyzeStarting? _deepAnalyzeStarting;
     public DeepAnalyzeStarting? DeepAnalyzeStarting
     {
@@ -475,6 +485,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // body in try/finally so the release is unconditional.
         try
         {
+            if (_process is { HasExited: true })
+            {
+                Cleanup();
+            }
+            ResetProcessBoundScanState();
+
             // Notify singleton services that any cached engine state is now
             // stale and they should re-attach to PropertyChanged. Cheap +
             // idempotent.
@@ -656,7 +672,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
                 _readCts = new CancellationTokenSource();
                 var ct = _readCts.Token;
-                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
+                var generation = SpawnGeneration;
+                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, generation, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
                 // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
@@ -774,7 +791,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
+    private async Task StdoutLoopAsync(StreamReader reader, int generation, CancellationToken ct)
     {
         // Per-loop framing state — a respawn starts a fresh loop with its own
         // buffer, so stale bytes can never carry over or race (#22).
@@ -818,7 +835,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
                     "try restructuring a subfolder.",
                     null)));
-                _ui.TryEnqueue(() => Apply(oversize));
+                _ui.TryEnqueue(() => Apply(oversize, generation));
             }
             if (line is null)
             {
@@ -843,7 +860,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
 
             // Marshal to UI thread before touching observable state.
-            _ui.TryEnqueue(() => Apply(ev));
+            _ui.TryEnqueue(() => Apply(ev, generation));
         }
     }
 
@@ -889,6 +906,32 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    private bool ConsumeExpectedExit(Process? exited)
+    {
+        if (exited is null || !ReferenceEquals(exited, Volatile.Read(ref _expectedExitProcess)))
+        {
+            return false;
+        }
+        if (!ReferenceEquals(
+                Interlocked.CompareExchange(ref _expectedExitProcess, null, exited),
+                exited))
+        {
+            return false;
+        }
+        if (Interlocked.Exchange(ref _expectingExit, 0) != 1)
+        {
+            return false;
+        }
+
+        var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
+        if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
+        {
+            return true;
+        }
+        DebugLog.Warn("EngineClient: stale _expectingExit ignored; treating exit as a crash.");
+        return false;
+    }
+
     private void OnProcessExited(object? sender, EventArgs e)
     {
         // Capture the exit code from the process that ACTUALLY exited (sender),
@@ -900,6 +943,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
         _ui.TryEnqueue(() =>
         {
+            var expectedExit = ConsumeExpectedExit(exited);
             // Ignore a stale exit from a process we've already replaced. In the
             // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
             // process's Exited callback is queued to the UI thread and can run
@@ -928,27 +972,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             try { Services.ModelInstallerService.Instance.Reset(); }
             catch (Exception ex) { DebugLog.Warn("OnProcessExited: ModelInstallerService.Reset threw: " + ex.Message); }
 
-            // BUG-6: user-initiated shutdown shouldn't count as a crash
-            // or trigger the auto-respawn — that would drag the engine
-            // back up after the user explicitly asked it to stop.
-            // Interlocked.Exchange both reads + clears in one atomic op.
-            if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
+            if (expectedExit)
             {
-                var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
-                if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
+                State = LifecycleState.Crashed;
+                CrashReason = string.Empty;
+                if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
                 {
-                    State = LifecycleState.Crashed;
-                    CrashReason = string.Empty;
-                    if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
-                    {
-                        _ = StartAfterLateExpectedExitAsync();
-                    }
-                    return;
+                    _ = StartAfterLateExpectedExitAsync();
                 }
-                // Stale flag: a shutdown was requested long ago but the engine
-                // never exited then. This exit is a real (later) crash — fall
-                // through to the auto-respawn path.
-                DebugLog.Warn("EngineClient: stale _expectingExit ignored; treating exit as a crash.");
+                return;
             }
 
             // Auto-respawn with bounded backoff. The 3-strike window is
@@ -1016,8 +1048,22 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private void ResetProcessBoundScanState()
+    {
+        Phase = ScanPhase.Idle;
+        LastProgress = null;
+        LastBatch = null;
+        LastError = null;
+        IsPaused = false;
+        _scanStartedAt = null;
+        _shownPhaseRank = -1;
+        _lastProgressEmit = DateTime.MinValue;
+        _lastProgressPhase = null;
+    }
+
     private void Cleanup()
     {
+        var retiringGeneration = SpawnGeneration;
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
         _readCts = null;
@@ -1049,6 +1095,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // in-flight job is moot here. (Mirrors macOS handleEngineExit.)
         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0);
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
+        RetireDeepAnalyzeGeneration(retiringGeneration);
+        RetireScanStartGeneration(retiringGeneration);
         // Clear the observable mirror of _faceClusterAutoInFlight too: a crash
         // mid-clustering never emits the FaceClusteringComplete / face_clustering_failed
         // arm that normally flips it false, so without this the Library "finding
@@ -1066,7 +1114,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // DeepAnalyzeStarting clears it again. UI-marshaled like the flags above.
         _ui.TryEnqueue(() =>
         {
-            if (DeepAnalyzeProgress is null && DeepAnalyzeStarting is null) return;
+            if (Volatile.Read(ref _deepAnalyzePresentationGeneration) != retiringGeneration
+                || DeepAnalyzeProgress is null && DeepAnalyzeStarting is null)
+            {
+                return;
+            }
             var prog = DeepAnalyzeProgress;
             var modelKind = prog?.ModelKind ?? DeepAnalyzeStarting?.ModelKind ?? string.Empty;
             DebugLog.Warn("EngineClient: engine exited mid-Deep-Analyze; synthesizing a cancelled DeepAnalyzeComplete so the UI unlatches.");
@@ -1074,6 +1126,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 prog?.Processed ?? 0, 0, 0, modelKind, Cancelled: true);
             DeepAnalyzeProgress = null;
             DeepAnalyzeStarting = null;
+            Interlocked.CompareExchange(ref _deepAnalyzePresentationGeneration, -1, retiringGeneration);
         });
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so the next apply's result would
@@ -1169,8 +1222,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     // ─── Event router ──────────────────────────────────────────────────
 
-    private void Apply(IpcEvent ev)
+    private void Apply(IpcEvent ev, int generation)
     {
+        if (generation != SpawnGeneration)
+        {
+            DebugLog.Debug($"[IPC IN] dropped stale event from generation {generation}; current={SpawnGeneration}");
+            return;
+        }
+
         // per-event diagnostic tracing. See _applySeq comment above
         // for why this exists. Only logs the event TYPE, never the payload
         // (payloads can contain user file paths — those route through
@@ -1209,6 +1268,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
+                        if (GpuDeviceRemoved && _gpuDeviceRemovedGeneration != generation)
+                        {
+                            GpuDeviceRemoved = false;
+                            _gpuDeviceRemovedGeneration = -1;
+                            if (LastError?.Kind == "gpu_device_removed") LastError = null;
+                            if (Phase == ScanPhase.Failed)
+                            {
+                                Phase = null;
+                                _shownPhaseRank = -1;
+                            }
+                        }
                         // C1: re-arm the background auto-installers BEFORE
                         // flipping State to Ready. Their one-shot attempt gate
                         // latches after the first fire; a crash that interrupted
@@ -1237,6 +1307,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _lastReadyAt = DateTime.UtcNow;
                         break;
                     case ProgressEvent p:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Discovery + tagging emit ProgressEvents CONCURRENTLY
                         // during the pipeline overlap (discovery still walking
                         // while tagging workers consume). A late Discovering event
@@ -1269,6 +1340,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Phase = p.Progress.Phase;
                         break;
                     case PhaseChangedEvent pc:
+                        if (pc.Phase != ScanPhase.Idle) ObserveAuthoritativeScanEvent(generation);
                         Phase = pc.Phase;
                         // Authoritative phase boundary — sync the monotonic latch
                         // so a late interleaved ProgressEvent can't pull the
@@ -1294,7 +1366,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // instead DEFERS clustering to a manual re-cluster — the
                         // user explicitly stopped, and auto-firing a clustering
                         // pass on cancel races the engine's own teardown.
-                        if (pc.Phase == ScanPhase.Failed)
+                        if (pc.Phase == ScanPhase.Failed && !GpuDeviceRemoved)
                         {
                             FaceClusteringInFlight = true;
                             _ = AutoTriggerFaceClusteringAsync();
@@ -1313,6 +1385,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastBatch = b.Summary;
                         break;
                     case ScanCompleteEvent sce:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Authoritative final count for the completed-scan summary
                         // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;
@@ -1349,9 +1422,26 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
+                        if (e.Error.Kind == "gpu_device_removed")
+                        {
+                            _gpuDeviceRemovedGeneration = generation;
+                            GpuDeviceRemoved = true;
+                        }
+                        if (e.Error.Kind == "undo_restructure")
+                        {
+                            UndoRestructureInFlight = false;
+                        }
                         if (IsNonFatalWarningKind(e.Error.Kind))
                         {
                             LastWarning = e.Error;
+                            if (e.Error.Kind == "scan_already_running")
+                            {
+                                RejectScanStartCommand(generation);
+                            }
+                            else if (e.Error.Kind == "deep_analyze_already_running")
+                            {
+                                FenceRejectedDeepAnalyzeCommand(generation, e.Error.Message);
+                            }
                             DebugLog.Info($"[IPC IN] engine warning: kind={e.Error.Kind} msg={e.Error.Message}");
                         }
                         else
@@ -1384,6 +1474,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Interlocked.Exchange(ref _faceClusterAutoInFlight, 0); // PAR-111: release the auto gate
                         break;
                     case DeepAnalyzeStartingEvent das:
+                        MarkDeepAnalyzeCommandStarted(generation);
+                        Volatile.Write(ref _deepAnalyzePresentationGeneration, generation);
                         DeepAnalyzeStarting = das.Starting;
                         // Clear the previous run's terminal result. DeepAnalyzeComplete
                         // is otherwise only cleared on the single-file path, so on a
@@ -1401,9 +1493,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         DeepAnalyzeLast = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
+                        MarkDeepAnalyzeCommandStarted(generation);
+                        Volatile.Write(ref _deepAnalyzePresentationGeneration, generation);
                         DeepAnalyzeProgress = dap.Progress;
                         break;
                     case DeepAnalyzeFileDoneEvent dafd:
+                        Volatile.Write(ref _deepAnalyzePresentationGeneration, generation);
                         // Throttle: 2 Hz. Without this, fast VLM runs spam ~50/s.
                         var now = DateTime.UtcNow;
                         if (now - _lastDeepAnalyzeFileDone >= DeepAnalyzeFileDoneThrottle)
@@ -1413,9 +1508,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         }
                         break;
                     case DeepAnalyzeCompleteEvent dac:
-                        DeepAnalyzeComplete = dac.Result;
-                        DeepAnalyzeProgress = null;
-                        DeepAnalyzeStarting = null;
+                        if (!CompleteDeepAnalyzeCommand(generation, dac.Result, () =>
+                            {
+                                Volatile.Write(ref _deepAnalyzePresentationGeneration, generation);
+                                DeepAnalyzeComplete = dac.Result;
+                                DeepAnalyzeProgress = null;
+                                DeepAnalyzeStarting = null;
+                            }))
+                        {
+                            break;
+                        }
                         // A1: a finished/cancelled auto-pass re-arms the gate so
                         // the next scan (or a later VLM-install) can trigger again.
                         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);

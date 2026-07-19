@@ -690,12 +690,17 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
 // volumes the id can collide, so a cross-volume move falls through to the
 // content-hash lookup.
 
-/// 64-bit volume-local file identity for `path`, or `None` if the file can't
-/// be opened (permission, deletion mid-scan, ...). Cheap: just opens with
-/// `FILE_FLAG_BACKUP_SEMANTICS` (works for both files and directories without
-/// triggering OneDrive hydration) and reads the metadata; no content I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileIdentity {
+    pub(crate) volume: u64,
+    pub(crate) file: u64,
+}
+
+/// Volume-qualified file identity for `path`, or `None` if the entry cannot be
+/// opened. Unlike `file_ref`, this is safe to persist as mutation authority
+/// because identical file indexes on different volumes remain distinct.
 #[cfg(windows)]
-pub fn file_ref(path: &Path) -> Option<u64> {
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::CloseHandle;
@@ -731,21 +736,53 @@ pub fn file_ref(path: &Path) -> Option<u64> {
     if result.is_err() {
         return None;
     }
-    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    Some(FileIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
 }
 
 #[cfg(not(windows))]
-pub fn file_ref(path: &Path) -> Option<u64> {
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    // Volume-local file identity = the inode number — the POSIX analog of the
-    // NTFS file index the Windows arm returns (both are volume-local, no volume
-    // id). `symlink_metadata` so a symlink reports its OWN identity, not its
-    // target's; `None` when the file can't be stat'd (deleted mid-scan,
-    // permission). This lets rename/move heal recognize a moved file without a
-    // content rehash, same as Windows. (Inode numbers can be recycled after
-    // delete, exactly like NTFS file indices, so the heal logic's other signals
-    // still apply.)
-    std::fs::symlink_metadata(path).ok().map(|m| m.ino())
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    Some(FileIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().ok()?;
+    Some(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+/// 64-bit volume-local file identity for rename/move heuristics. This legacy DB
+/// value intentionally omits the volume; destructive journals use
+/// [`file_identity`] instead.
+pub fn file_ref(path: &Path) -> Option<u64> {
+    file_identity(path).map(|identity| identity.file)
 }
 
 // ─── Battery / AC power detection ───────────────────────────────────────────

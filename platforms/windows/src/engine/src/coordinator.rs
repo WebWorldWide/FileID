@@ -9,8 +9,57 @@
 // safe from any thread; the workers poll the flags between batches.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Notify;
+
+#[derive(Default)]
+struct GpuFailureLatch {
+    dead: AtomicBool,
+    changed: Notify,
+}
+
+impl GpuFailureLatch {
+    fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::Acquire)
+    }
+
+    fn mark_dead(&self) -> bool {
+        let first = !self.dead.swap(true, Ordering::AcqRel);
+        self.changed.notify_waiters();
+        first
+    }
+
+    async fn wait_dead(&self) {
+        loop {
+            let notified = self.changed.notified();
+            if self.is_dead() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+fn process_gpu_failure_latch() -> Arc<GpuFailureLatch> {
+    static LATCH: OnceLock<Arc<GpuFailureLatch>> = OnceLock::new();
+    LATCH
+        .get_or_init(|| Arc::new(GpuFailureLatch::default()))
+        .clone()
+}
+
+pub(crate) fn process_gpu_device_removed() -> bool {
+    process_gpu_failure_latch().is_dead()
+}
+
+pub(crate) fn latch_process_gpu_device_removed() -> bool {
+    process_gpu_failure_latch().mark_dead()
+}
+
+pub(crate) async fn wait_for_process_gpu_device_removed() {
+    process_gpu_failure_latch().wait_dead().await;
+}
+
+pub(crate) const GPU_DEVICE_REMOVED_MESSAGE: &str = "The active GPU device was removed or reset. FileID stopped GPU work to keep the system responsive. Restart the engine before scanning or running AI features again; if this repeats, switch to the CPU execution provider or reduce model concurrency.";
 
 #[derive(Clone)]
 pub struct ScanCoordinator {
@@ -20,13 +69,8 @@ pub struct ScanCoordinator {
 struct Inner {
     paused: AtomicBool,
     cancelled: AtomicBool,
-    /// Sticky flag set when any worker detects `DXGI_ERROR_DEVICE_REMOVED`
-    /// from ORT/DirectML. Distinct from `cancelled` because the cause is
-    /// fatal (GPU is gone for the rest of the process) and the IPC layer
-    /// emits a different error kind. Workers MUST stop submitting GPU work
-    /// — retrying spams the dead driver and prevents TDR recovery, which
-    /// on a typical machine wedges the desktop until a hard reboot.
-    gpu_dead: AtomicBool,
+    gpu_failure_latch: Arc<GpuFailureLatch>,
+    gpu_dead_observed: AtomicBool,
     /// Workers that hit the pause flag await on this notifier. Resume
     /// `notify_waiters()` wakes everyone at once.
     resume_notify: Notify,
@@ -34,11 +78,16 @@ struct Inner {
 
 impl ScanCoordinator {
     pub fn new() -> Self {
+        Self::with_gpu_failure_latch(process_gpu_failure_latch())
+    }
+
+    fn with_gpu_failure_latch(gpu_failure_latch: Arc<GpuFailureLatch>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 paused: AtomicBool::new(false),
                 cancelled: AtomicBool::new(false),
-                gpu_dead: AtomicBool::new(false),
+                gpu_failure_latch,
+                gpu_dead_observed: AtomicBool::new(false),
                 resume_notify: Notify::new(),
             }),
         }
@@ -47,24 +96,22 @@ impl ScanCoordinator {
     /// Returns true once any worker has marked the GPU as device-removed.
     /// Workers should treat this as a hard stop — no more session.run.
     pub fn is_gpu_dead(&self) -> bool {
-        self.inner.gpu_dead.load(Ordering::Relaxed)
+        self.inner.gpu_failure_latch.is_dead()
     }
 
-    /// Latch the GPU-dead flag and flip `cancelled` so every worker
-    /// checkpoint exits at the next poll. Returns true on the FIRST caller
-    /// so the IPC event fires exactly once across N racing workers.
+    /// Latch process-wide GPU failure and wake this scan's workers. Returns true
+    /// once per coordinator so racing workers emit one diagnostic.
     pub fn mark_gpu_dead(&self) -> bool {
-        let was = self.inner.gpu_dead.swap(true, Ordering::AcqRel);
-        if !was {
-            self.inner.cancelled.store(true, Ordering::Relaxed);
-            self.inner.resume_notify.notify_waiters();
-        }
-        !was
+        self.inner.gpu_failure_latch.mark_dead();
+        let first_for_scan = !self.inner.gpu_dead_observed.swap(true, Ordering::AcqRel);
+        self.inner.cancelled.store(true, Ordering::Release);
+        self.inner.resume_notify.notify_waiters();
+        first_for_scan
     }
 
     /// Cheap, can be polled inside hot loops on the worker thread.
     pub fn is_cancelled(&self) -> bool {
-        self.inner.cancelled.load(Ordering::Relaxed)
+        self.inner.cancelled.load(Ordering::Relaxed) || self.is_gpu_dead()
     }
 
     pub fn is_paused(&self) -> bool {
@@ -104,24 +151,22 @@ impl ScanCoordinator {
         if self.is_cancelled() {
             return Err(());
         }
-        // Register the waiter BEFORE reading `paused`. tokio's
-        // notify_waiters() (used by request_resume/cancel/gpu_dead) wakes only
-        // already-registered waiters and stores NO permit, so a resume that
-        // fired between an is_paused()==true read and a plain notified().await
-        // was lost — the worker parked forever, the Tagging→DBWriter channel
-        // never closed, and the whole scan wedged. enable() inserts this future
-        // into the waiter list up front, so any notify in the race window marks
-        // it notified and the await returns immediately. Mirrors main.rs.
-        let notified = self.inner.resume_notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
+        let resumed = self.inner.resume_notify.notified();
+        let gpu_failed = self.inner.gpu_failure_latch.changed.notified();
+        tokio::pin!(resumed);
+        tokio::pin!(gpu_failed);
+        resumed.as_mut().enable();
+        gpu_failed.as_mut().enable();
         while self.is_paused() {
-            notified.as_mut().await;
-            // Re-arm for the next loop iteration.
-            notified.set(self.inner.resume_notify.notified());
-            notified.as_mut().enable();
             if self.is_cancelled() {
                 return Err(());
+            }
+            tokio::select! {
+                _ = resumed.as_mut() => {
+                    resumed.set(self.inner.resume_notify.notified());
+                    resumed.as_mut().enable();
+                }
+                _ = gpu_failed.as_mut() => return Err(()),
             }
         }
         Ok(())
@@ -131,5 +176,54 @@ impl ScanCoordinator {
 impl Default for ScanCoordinator {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_failure_is_shared_across_scan_coordinators() {
+        let latch = Arc::new(GpuFailureLatch::default());
+        let first = ScanCoordinator::with_gpu_failure_latch(latch.clone());
+        let next = ScanCoordinator::with_gpu_failure_latch(latch);
+
+        assert!(!first.is_gpu_dead());
+        assert!(!next.is_gpu_dead());
+        assert!(first.mark_gpu_dead());
+        assert!(first.is_cancelled());
+        assert!(next.is_gpu_dead());
+        assert!(next.is_cancelled());
+    }
+
+    #[test]
+    fn gpu_failure_diagnostic_is_once_per_scan() {
+        let coordinator =
+            ScanCoordinator::with_gpu_failure_latch(Arc::new(GpuFailureLatch::default()));
+
+        assert!(coordinator.mark_gpu_dead());
+        assert!(!coordinator.mark_gpu_dead());
+    }
+
+    #[tokio::test]
+    async fn shared_gpu_failure_wakes_a_paused_scan() {
+        let latch = Arc::new(GpuFailureLatch::default());
+        let paused = ScanCoordinator::with_gpu_failure_latch(latch.clone());
+        let reporter = ScanCoordinator::with_gpu_failure_latch(latch);
+        paused.request_pause();
+        let waiting = tokio::spawn({
+            let paused = paused.clone();
+            async move { paused.check().await }
+        });
+        tokio::task::yield_now().await;
+
+        reporter.mark_gpu_dead();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("paused worker must wake")
+            .expect("check task must not panic");
+        assert!(outcome.is_err());
     }
 }
