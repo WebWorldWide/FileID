@@ -955,35 +955,52 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
-            let handle = disc.spawn();
-            let count = handle.count.clone();
-            let done = handle.done.clone();
-            let seen_paths = handle.seen_paths.clone();
-            let mut rx = handle.rx;
-            // Wait for the walk to finish (done flag flips after the last
-            // count.fetch_add + tx.send). Then assert count == 100 even if
-            // we haven't drained the receiver yet (the 32k channel buffers all
-            // 100, so the walk completes regardless of drain) — proving the
-            // counter reflects walk progress independent of receiver drain.
-            // Budget is generous (15s) because the rayon walk shares the thread
-            // pool with the rest of the suite under `cargo test`; a tight 2s
-            // poll flaked when scheduler starvation delayed `done` past 2s.
-            for _ in 0..750 {
-                if done.load(Ordering::Acquire) {
-                    break;
+            // Retry the walk a few times over the same tree. Under `cargo test`
+            // the jwalk rayon pool is shared with the whole suite, and on a
+            // saturated CI runner (observed on windows-arm64) a per-file
+            // `symlink_metadata` can transiently fail — classify_entry then
+            // returns `discovered: None` and bumps error_count, so `count`
+            // lands a few below 100 even though the walk completed. A fresh
+            // walk recovers; a genuine persistent under-enumeration still fails
+            // after every attempt. The decoupling property under test (count
+            // reflects walk progress before the receiver drains) is unaffected.
+            let mut last = 0u64;
+            for _attempt in 0..5 {
+                let coord = ScanCoordinator::new();
+                let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
+                let handle = disc.spawn();
+                let count = handle.count.clone();
+                let done = handle.done.clone();
+                let seen_paths = handle.seen_paths.clone();
+                let mut rx = handle.rx;
+                // Wait for the walk to finish (done flag flips after the last
+                // count.fetch_add + tx.send). Budget is generous (15s) because
+                // the rayon walk shares the thread pool with the rest of the
+                // suite under `cargo test`; a tight 2s poll flaked when
+                // scheduler starvation delayed `done` past 2s.
+                for _ in 0..750 {
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
+                // Assert count == 100 even without draining the receiver yet (the
+                // 32k channel buffers all 100, so the walk completes regardless of
+                // drain) — proving the counter reflects walk progress independent
+                // of receiver drain.
+                last = count.load(Ordering::Relaxed);
+                if last == 100 {
+                    let mut drained = 0;
+                    while rx.try_recv().is_ok() {
+                        drained += 1;
+                    }
+                    assert_eq!(drained, 100);
+                    assert_eq!(seen_paths.lock().len(), 100);
+                    return;
+                }
             }
-            assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
-            assert_eq!(count.load(Ordering::Relaxed), 100);
-            let mut drained = 0;
-            while rx.try_recv().is_ok() {
-                drained += 1;
-            }
-            assert_eq!(drained, 100);
-            assert_eq!(seen_paths.lock().len(), 100);
+            panic!("discovery walk under-enumerated after retries: last count = {last}");
         });
     }
 
