@@ -77,7 +77,11 @@ internal static class SentinelProbe
                 && TreeContains("llama.cpp", 20_000, "mtmd.dll"),
             "whisper" => TreeContains("whisper.cpp", 20_000, "main.exe", "whisper-cli.exe")
                 && FilePresent(Path.Combine("whisper", "ggml-base.bin"), 1_000_000),
-            "cudnn_runtime_x64" => TreeContains("cudnn", 1_000_000, "cudnn64_9.dll"),
+            // cudnn64_9.dll is the small cuDNN 9 dispatch shim (~260 KB); the real
+            // ops live in cudnn_ops64_9.dll / cudnn_cnn64_9.dll. A 1 MB floor made
+            // this probe report an installed cuDNN pack as missing (same bug shape
+            // as cudart64_12.dll above).
+            "cudnn_runtime_x64" => TreeContains("cudnn", 100_000, "cudnn64_9.dll"),
             "ort_cuda_x64" => TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime.dll")
                 && TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime_providers_cuda.dll"),
             "ort_openvino_x64" => TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime.dll")
@@ -85,7 +89,13 @@ internal static class SentinelProbe
             "llama_runtime_cuda_x64" => TreeContains("llama.cpp-cuda", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp-cuda", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp-cuda", 20_000, "mtmd.dll")
-                && TreeContains("llama.cpp-cuda", 1_000_000, "cudart64_12.dll")
+                // cudart64_12.dll is CUDA's small runtime shim (~540 KB), NOT a
+                // multi-MB math lib — a 1 MB floor here made SentinelProbe report
+                // the fully-installed CUDA pack as missing, so the app re-dispatched
+                // its prewarm forever (0%→100% "already_installed" spam → the
+                // "installer stopped reporting progress" timeout). Guard against a
+                // truncated/stub file without rejecting the real one.
+                && TreeContains("llama.cpp-cuda", 100_000, "cudart64_12.dll")
                 && TreeContains("llama.cpp-cuda", 1_000_000, "cublas64_12.dll"),
             "bge_text" => FilePresent(Path.Combine("bge_text", "bge_small.onnx"), 1_000_000)
                 && FilePresent(Path.Combine("bge_text", "vocab.txt"), 1_000),

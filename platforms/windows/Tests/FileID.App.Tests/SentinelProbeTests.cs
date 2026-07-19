@@ -113,11 +113,33 @@ public sealed class SentinelProbeTests : IDisposable
     {
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-server.exe"), 20_000);
         CreateSized(Path.Combine("llama.cpp-cuda", "llama-mtmd-cli.exe"), 20_000);
-        CreateSized(Path.Combine("llama.cpp-cuda", "cudart64_12.dll"), 1_000_000);
-        CreateSized(Path.Combine("llama.cpp-cuda", "cublas64_12.dll"), 1_000_000);
+        // Realistic sizes: cudart64_12.dll is CUDA's small runtime shim (~540 KB),
+        // NOT a multi-MB lib. Using 1 MB here (as the old test did) hid the bug
+        // where a 1 MB floor rejected the real, fully-installed pack.
+        CreateSized(Path.Combine("llama.cpp-cuda", "cudart64_12.dll"), 540_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "cublas64_12.dll"), 100_000_000);
         Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
         CreateSized(Path.Combine("llama.cpp-cuda", "mtmd.dll"), 20_000);
         Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
+    }
+
+    [Fact]
+    public void SmallCudaDispatchShims_AreRecognizedInstalled()
+    {
+        // Regression: cudart64_12.dll (~540 KB) and cudnn64_9.dll (~260 KB) are
+        // small dispatch shims. A 1 MB size floor made SentinelProbe report a
+        // fully-installed CUDA/cuDNN pack as missing, so the app re-dispatched
+        // the prewarm forever and eventually surfaced "installer stopped
+        // reporting progress".
+        CreateSized(Path.Combine("llama.cpp-cuda", "llama-server.exe"), 20_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "llama-mtmd-cli.exe"), 20_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "mtmd.dll"), 20_000);
+        CreateSized(Path.Combine("llama.cpp-cuda", "cudart64_12.dll"), 553_984);
+        CreateSized(Path.Combine("llama.cpp-cuda", "cublas64_12.dll"), 100_033_536);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "llama_runtime_cuda_x64"));
+
+        CreateSized(Path.Combine("cudnn", "bin", "cudnn64_9.dll"), 265_784);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "cudnn_runtime_x64"));
     }
 
     [Fact]
