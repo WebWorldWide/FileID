@@ -471,11 +471,23 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
                         set_scan_ui(true);
                         format!("Scanning… {n} files")
                     }
+                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Failed) => {
+                        set_scan_ui(false);
+                        scan_progress.set_visible(false);
+                        "Scan failed".to_string()
+                    }
+                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Cancelled) => {
+                        set_scan_ui(false);
+                        scan_progress.set_visible(false);
+                        "Scan cancelled".to_string()
+                    }
+                    EngineEvent::PhaseChanged(_) => continue,
                     EngineEvent::ScanComplete(n) => {
                         set_scan_ui(false);
                         scan_progress.set_visible(false);
                         format!("Scan complete — {n} files")
                     }
+                    EngineEvent::ScanWarning(m) => format!("Scanning: {m}"),
                     EngineEvent::Error(m) => {
                         set_scan_ui(false);
                         scan_progress.set_visible(false);

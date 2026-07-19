@@ -1,5 +1,158 @@
 # NEXT — resume here
 
+## STATUS 2026-07-19 — Linux People lifecycle and edit retention are source-closed
+
+Linux face grouping is now terminal-driven and generation-owned; timer/DB false terminals are removed, readiness/overlap/busy/exit state is explicit, and the shared engine releases its single-flight guard before terminal publication without permitting overlapping persistence. Person-detail rename and Mark Unknown keep the dialog and edits live until a matching terminal succeeds, preserving retry after gate contention or failure. Native WSL GTK fmt/clippy and 38/38 tests plus focused Windows/WSL engine ordering tests pass; final reviewers are clean.
+
+Resume in this order:
+
+1. **Bound raw child-process failure:** classify and latch raw llama.cpp CUDA/DXGI device-removal text, then thread cancellation/deadlines through ffprobe/ffmpeg/libheif kill+reap paths with silent-child regressions.
+2. **Finish macOS/docs/restructure truth:** surface auto-merge cap skips, correct stale SFace/SHIP claims, and separate concrete restructure-v1 defects from roadmap phases. Keep numeric calibration/native Swift behavior external until measured.
+3. **Reconcile the remaining actionable ledger and run whole-diff closure rounds.** Correct broad checklist state only from the authoritative ledger; do not convert native Mac, graphical UI/package, signing, mirror, or hardware gates into local claims.
+4. **Execute the final fresh-shell monitor command and preserve its complete environment/artifacts.** Iteration 30 is a changed-scope gate, not repository completion. Require hosted CI after landing.
+
+Evidence: `.ralph/baseline/iteration30-{face-engine-windows,face-engine-wsl,linux-people-wsl,policy}.log` and final reviews under `.pi-subagents/artifacts/outputs/{41f6dc15,881c1474}/`.
+
+## STATUS 2026-07-19 — Binary privacy and Windows lifecycle ownership are source-closed
+
+The shared binary scanner now enforces ASCII, UTF-16LE, and UTF-16BE markers across every current shipping/native packaging path, including prerequisites and direct DMG/Linux dist producers. WinUI scan optimism and Deep Analyze File/Folder/All ownership are generation/attempt-bound through send, busy/uncertain recovery, terminal presentation, and teardown. Windows Release/app/IPC/format gates, dual-host policy suites, a 518-binary shipping scan, and final adversarial reviews pass.
+
+Resume in this order:
+
+1. **Close Linux lifecycle/edit truth:** make face-clustering watchdog behavior generation-scoped and nonauthoritative, and prevent a second People rename edit from being discarded while serialization is occupied.
+2. **Bound raw child-process failure:** classify/latch raw llama.cpp CUDA/DXGI device-removal text and thread cancellation/deadlines through ffprobe/ffmpeg/libheif kill+reap paths, with silent-child regressions.
+3. **Finish macOS/docs/restructure truth:** surface auto-merge cap skips, correct stale face/SHIP claims, and separate concrete restructure-v1 defects from roadmap phases. Keep numeric calibration/native Swift behavior external until measured.
+4. **Run the remaining whole-diff review/fix rounds and the final fresh-shell monitor gate.** Iteration 29 is a changed-scope gate, not repository completion. Preserve external mirror/signing/native-platform blockers and require hosted CI after landing.
+
+Evidence: `.ralph/baseline/iteration29-{policy-windows,policy-wsl,windows-lifecycle,binary-shipping-windows,strict-egress-blocker}.log` and final reviews under `.pi-subagents/artifacts/outputs/{27e25be9,da24e8a6}/`.
+
+## STATUS 2026-07-19 — Bootstrap and runtime capability enforcement are source-closed
+
+All tracked/unignored shell and package-bootstrap sources are exact-digest reviewed, tracked symlinks are forbidden, and repository policy runs on every PR/main push. Production Rust/Swift/C# source discovery now fail-closes new raw network, synchronous URL-loader, process-spawn, native FFI, and dynamic-loader capability sites; every current reviewed capability module is whole-file digest bound. Initial/redirect host policy and VLM loopback no-proxy/no-redirect behavior are covered. Windows and WSL each pass 55 policy regressions plus focused Rust transport gates. Strict publication still fails exactly on the six approved external mirror blockers.
+
+Resume in this order:
+
+1. **Finish binary privacy enforcement:** add UTF-16LE/BE marker scanning and fixtures to `check_binary_privacy.py`, then confirm every shipped native payload workflow uses the shared checker consistently.
+2. **Close lifecycle/resource truth:** generation-own Windows Deep Analyze waiters and optimistic controls, rollback failed scan sends, replace Linux's authoritative face timer and rename edit loss, latch raw VLM device-removal errors, and enforce codec cancellation/deadline kill+reap.
+3. **Finish docs/macOS/restructure truth:** correct SHIP and face comments, surface macOS auto-merge cap skips, and separate concrete restructure v1 fixes from roadmap work. Safe macOS bulk batching still requires write-ahead recovery and native measurement.
+4. **Repeat whole-diff review/fix rounds, then execute the final repository-wide monitor command.** The iteration-28 command is a changed-scope gate, not completion. Land only after source closure and hosted CI.
+
+Evidence: `.ralph/baseline/iteration28-{policy,vlm}-{windows,wsl}.log`, `.ralph/baseline/iteration28-strict-egress-blocker.log`, and final focused reviews under `.pi-subagents/artifacts/outputs/{80450000,df303426}/`.
+
+## STATUS 2026-07-19 — Protected face clustering is source-closed
+
+Rust and macOS now partition named/Unknown and explicit-different anchors before suppression or persistence, preserve protected rows outside the eligible pool, maintain sparse transitive forbidden constraints, cap verdict work, and validate the live persistence plan before destructive SQL. Windows full engine passes 526 library/536 binary tests and WSL passes 516/525. Final changed-scope reviews are clean; native Swift compilation/tests remain external.
+
+Resume in this order:
+
+1. **Finish release-enforcement boundaries:** detect downloaded shell `source`/`.` execution, enforce production network API/module boundaries beyond URL registries, and add UTF-16LE/BE binary-privacy markers. Keep strict release egress blocked on the approved mirrors.
+2. **Close lifecycle/resource truth:** generation-own Windows Deep Analyze waiters and optimistic controls, rollback failed scan sends, replace Linux's authoritative face timer and rename edit loss, latch raw VLM device-removal errors, and enforce codec cancellation/deadline kill+reap.
+3. **Finish docs/macOS/restructure truth:** correct SHIP and face comments, surface macOS auto-merge cap skips, and separate concrete restructure v1 fixes from roadmap work. Safe macOS bulk batching still requires write-ahead recovery and native measurement.
+4. **Repeat whole-diff review/fix rounds, then execute the final repository-wide monitor command.** The iteration-27 command is a changed-scope gate, not completion. Land only after source closure and hosted CI.
+
+Evidence: `.ralph/baseline/iteration27-engine-{windows,wsl}.log` and final reviews under `.pi-subagents/artifacts/outputs/{14c9d24a,574be8db}/`.
+
+## STATUS 2026-07-19 — Windows Exact proof and action-pin enforcement are closed
+
+Windows Exact Cleanup now builds bounded live keeper-bound full-file proof, sends complete `exactIdentities`, and retains both keeper and claimed-victim handle authority through the Trash backend. Bulk timeout ownership keeps late Undo safe without hanging overlapping callers. The action-pin checker now fail-closes unsupported YAML and requires immutable commits/digests for actions, reusable workflows, Docker actions, and job/service containers. Windows/WSL full engine, Release x64, 280 app tests, 48 IPC tests, and final adversarial closure pass with iteration-26 evidence.
+
+Resume in this order:
+
+1. **Protect face identities before raw clustering/persistence:** prevent Rust and macOS bridge chains from fusing distinct named people or explicit `same_person=0` constraints. Add transitive raw-cluster and persistence regressions before tuning any numeric threshold.
+2. **Finish release-enforcement boundaries:** detect downloaded shell `source`/`.` execution, enforce production network API/module boundaries beyond URL registries, and add UTF-16LE/BE binary-privacy markers. Keep strict release egress blocked on the approved mirrors.
+3. **Close lifecycle/resource truth:** generation-own Windows Deep Analyze waiters and optimistic controls, rollback failed scan sends, replace Linux's authoritative face timer and rename edit loss, latch raw VLM device-removal errors, and enforce codec cancellation/deadline kill+reap.
+4. **Finish docs/macOS/restructure truth:** correct SHIP and face comments, surface macOS auto-merge cap skips, and separate concrete restructure v1 fixes from roadmap work. Safe macOS bulk batching still requires write-ahead recovery and native measurement.
+5. **Repeat whole-diff review/fix rounds, then execute the final repository-wide monitor command.** The recorded iteration-26 command is a changed-scope gate, not completion. Land only after source closure and hosted CI.
+
+Evidence: `.ralph/baseline/iteration26-{engine-windows,engine-wsl,windows-app,policy}.log` and final review artifacts under `.pi-subagents/artifacts/outputs/{64f08baf,af5739ae}/`.
+
+## STATUS 2026-07-19 — First whole-diff round found a concrete closure queue
+
+The accepted ledger is now authoritative: stale iteration-14 labels are separated into fixed/source-closed, actionable source, roadmap, and external-only classes. The first six-way whole-branch review found and closed unequal exact victim/keeper proof, rename/hash/rename-back ABA, and stale Linux destructive preflight callbacks. Windows/WSL full engine and native WSL GTK gates pass with iteration-25 evidence.
+
+Resume in this order:
+
+1. **Close the highest-risk source findings:** wire bounded live full-byte keeper-bound evidence into Windows Exact Cleanup, then prevent raw face clustering/persistence from fusing distinct named or explicit-different identities on Rust and macOS. Preserve generic Trash compatibility and add bridge-chain identity regressions.
+2. **Harden release enforcement:** make Action-pin parsing structural and Docker-digest-aware; detect downloaded shell `source`/`.` execution; enforce the production network API boundary beyond registry literals; add UTF-16 privacy scanning. Use adversarial negative fixtures before claiming the policy is fail closed.
+3. **Close lifecycle/resource truth:** generation-own Windows Deep Analyze waiters and optimistic controls, rollback failed scan sends, remove Linux's authoritative-lifecycle-overriding face timer and rename edit loss, latch raw VLM device-removal errors, and add codec cancellation/deadline kill+reap.
+4. **Finish current docs/macOS truth:** correct SHIP and face-calibration comments, surface auto-merge cap skips, and keep safe macOS bulk batching behind a write-ahead design. Keep numeric calibration and all native Mac behavior external until measured.
+5. **Repeat whole-diff review/fix rounds, then run one final fresh-shell monitor command.** The iteration-25 command in the Ralph task is a changed-scope gate, not the repository-wide completion gate. Land only after source closure and require hosted CI green.
+
+Evidence: `.ralph/baseline/iteration25-exact-engine-{windows,wsl}.log`, `.ralph/baseline/iteration25-linux-cleanup.log`, and review artifacts under `.pi-subagents/artifacts/outputs/{b504797e,e1a9ce2a,ae0f3f22}/`.
+
+## STATUS 2026-07-19 — Zero-byte parity is closed; begin whole-audit reconciliation
+
+Engine and model-free CLI now share deliberate dormant-row semantics for indexed files truncated to zero. New empty files stay unindexed; exact-path existing rows preserve ID/user tags but become inactive with complete content-derived cleanup; changed/replaced observations are partial and never authorize missing reconciliation; same-path restoration always reprocesses. Windows/WSL full engine and CLI gates pass, and final independent closure found no blocker/high/medium issue.
+
+Resume in this order:
+
+1. **Reconcile the parent ledger and broad checklist:** confirm every accepted source finding is fixed, explicitly external, or still actionable. Correct stale broad labels without converting macOS, graphical UI, safe TDR/codec RSS, signing, or Hugging Face mirror gates into local claims.
+2. **Run whole-diff adversarial rounds:** review the large unstaged branch as one unit, fix any concrete findings, then repeat until the final rounds are clean. Pay special attention to cross-iteration interactions and untracked/new files.
+3. **Establish the final external-monitor gate:** create one exact fresh-shell command covering all locally runnable platform/policy suites, preserve every required artifact, record environment/caches, and rerun it from the current worktree before any completion claim.
+4. **Reduce landing risk:** only after source closure, commit the reviewed branch, merge deliberately, and require all active GitHub workflows green.
+
+Evidence: `.ralph/baseline/iteration24-zero-{engine,cli}-{windows,wsl}.log` and `.pi-subagents/artifacts/outputs/a5c2cd34/.ralph/subagents/iteration24-zero-final-clean.md`.
+
+## STATUS 2026-07-18 — Current command terminal inventory closed; implement deliberate zero-byte parity
+
+Current Windows/Linux command consumers no longer have a known blocker/high/medium terminal gap. Scan/Deep Analyze rejection is active-owner-safe, Deep Analyze variants share one process reservation, all bulk-shaped failure paths terminate with truthful counts, Windows awaits mutation/suggestion outcomes, and Linux forwards/serializes/prunes its scan/face/person event paths. Windows Release/app 272/272, IPC 48/48, native WSL GTK 32/32, focused Rust/clippy, and final adversarial closure pass.
+
+Resume in this order:
+
+1. **Implement engine/CLI zero-byte parity:** a non-empty indexed file truncated to zero currently remains `failed=0` with stale size, FTS text, auto/VLM tags, faces, embeddings, hashes, and captions. Use the reviewed dormant-row semantic: new zero files remain unindexed; an exact-path existing row is revalidated and atomically made inactive while preserving its ID and user tags, clearing every content-derived child/FTS/crop; same-path non-empty restoration must always reprocess even if metadata matches. Mirror engine and CLI with lifecycle/TOCTOU/partial-scan/batch regressions. Design: `.pi-subagents/artifacts/outputs/5ba8fe95/.ralph/subagents/iteration23-zero-byte-design.md`.
+2. **Reconcile broad audit closure:** review remaining parent-accepted findings and external-only gates, then run independent whole-diff rounds and the exact external-monitor final command. Do not convert Mac, graphical UI, safe TDR/codec RSS, signing, or Hugging Face mirror gates into local claims.
+3. **Reduce landing risk:** after source closure, review the large unstaged branch as one unit before commit/merge and require all platform CI green.
+
+Evidence: `.ralph/baseline/iteration23-terminal-{windows,wsl}.log` and `.pi-subagents/artifacts/outputs/46ab5aaf/.ralph/subagents/iteration23-terminal-final-closure.md`.
+
+## STATUS 2026-07-18 — Concrete terminal/UI latches and Linux Cleanup error truth are fixed; resume parity inventory
+
+Fresh full Windows and WSL engine regressions now cover the completed Trash/Undo work. Awaited `mergeClusters` rejection returns a failed bulk result; restructure plan/apply/undo admission failures use command-specific terminal errors, retries cannot be value-deduplicated, and undo errors clear global state even if the view is unloaded. Linux Cleanup preserves its last verified groups/selection and displays DB/worker refresh failures instead of claiming the library is empty. Focused final reviews are clean.
+
+Resume in this order:
+
+1. **Finish the remaining terminal inventory:** trace non-restructure, non-merge mutation/model commands from send/optimistic state through semantic-limit, DB-unavailable, paused-scan, busy, panic, and worker-failure paths. Add a terminal event only where a client actually awaits or latches state; avoid speculative IPC variants.
+2. **Deliberate engine/CLI zero-byte parity:** truncated-to-empty files remain seen but preserve stale indexed metadata. Change both together only with replacement/rescan tests and truthful UI behavior.
+3. **Reconcile broad audit closure:** address remaining parent-accepted source findings, then run final adversarial rounds and the preserved monitor-rerunnable full verification command. Keep native Mac, graphical UI, safe TDR/codec RSS, signing, and Hugging Face mirror work as explicit external gates.
+
+Evidence: `.ralph/baseline/iteration22-{engine-windows,engine-wsl,terminal-app,linux-cleanup}.log` and `.pi-subagents/artifacts/outputs/19e772bb/.ralph/subagents/iteration22-{terminal-parity,linux-cleanup}-followup.md`.
+
+## STATUS 2026-07-18 — Identity-bound Trash/Undo closed locally; resume terminal/error parity on branch `whole-codebase-audit-iteration15`
+
+Windows and Linux destructive identity boundaries now fail closed end to end. Windows catalog deletion requires a signed, durable physical `$R` receipt whose volume/file identity matches the claimed object; restore refreshes stale locators, reconciles catalog identity before success, and removes `$I` only after commit. Linux rejects identity-changing EXDEV and binds same-filesystem mutation/restore to expected identities and no-replace handles. Focused Windows/WSL gates and real Recycle Bin integration pass.
+
+Resume in this order:
+
+1. **Finish command-specific terminal parity:** audit generic `library_busy`/admission/worker-failure paths for restructure, face clustering, scan, model operations, and other mutations. Every accepted/rejected request must emit the terminal shape its UI awaits, not only a generic Error.
+2. **Surface Linux Cleanup read failures:** DB open/prepare/query/row failures still collapse to an empty result. Preserve the last good groups and display an explicit refresh failure rather than “Nothing to clean up yet.”
+3. **Deliberate engine/CLI zero-byte parity:** truncated-to-empty files currently remain seen but preserve stale indexed metadata. Change both together only with replacement/rescan tests and truthful UI behavior.
+4. **External gates remain:** native codec RSS/throughput, safe TDR, Mac compilation/runtime, signed publication, and Hugging Face mirrors.
+
+Evidence: `.ralph/baseline/iteration21-windows-trash-receipt*.log`, `.ralph/baseline/iteration20-trash-input-{windows,wsl}.log`, and focused review artifacts under `.pi-subagents/artifacts/outputs/648110ee/` and `bbd13397/`.
+
+## STATUS 2026-07-18 — Identity-bound Trash and Linux byte-exact Cleanup implemented; restore closure pending on branch `whole-codebase-audit-iteration15`
+
+The core destructive proof is implemented. Shared Rust Trash journals intent before mutation, atomically claims each indexed file to a unique sibling, revalidates the claimed identity, and conditionally deletes only the unchanged DB row. Linux Exact Cleanup no longer treats persisted/sampled hashes as equality proof: all active same-size rows are bounded and full-SHA-grouped off the GTK thread with coalesced cancellation and explicit partial disclosure. Deletion requires an unselected keeper and sends complete keeper/victim SHA evidence through the approved optional canonical IPC extension; the engine rehashes both after the victim's atomic claim. Trash/Restore admission rejection and bulk-worker panic paths terminate with typed bulk results. Full Windows/WSL engine, native WSL GTK, Windows app/IPC, format, and policy/schema gates pass under `.ralph/baseline/iteration18-*`.
+
+Final authorized-root review found two actionable recovery gaps, so iteration 18 is not closed. Resume in this order:
+
+1. **Bind restore to the authorized destination (high):** containment is checked before a potentially long backend restore, then later path-based operations use the original string. A containing directory replaced by a symlink/junction can redirect Linux restore or the claimed-file fallback outside the root that was authorized. Make the final move destination-relative to a verified no-follow parent handle where supported, or fail closed without moving if that binding cannot be proven; add Linux symlink and Windows junction/reparse regressions where practical.
+2. **Prove recovered identity before success (medium):** a destination appearing after the initial occupancy snapshot currently makes no-replace fallback fail, but existence-only reconciliation reports success and indexes the new occupant while the real item remains in Trash/under its claim. Record/retain enough identity evidence to distinguish the recovered object, treat late occupancy as conflict, and never clean the recovery record on false success.
+3. **Finish command-specific terminal parity:** Trash and Restore now terminate on paused/invalid/DB-unavailable rejection, and every bulk worker panic emits `BulkActionResult`. Extend equivalent typed terminal responses to restructure, face clustering, scan, and other mutation callers where generic `library_busy` Error is still the only response.
+4. **Surface Linux Cleanup read failures:** DB open/prepare/query/row failures still collapse to an empty `LoadResult`; preserve the last good groups and show an explicit refresh failure instead of "Nothing to clean up yet."
+5. **Deliberate zero-byte parity:** engine and CLI intentionally mark a truncated-to-empty file seen but retain stale indexed metadata. Change both together if zero-byte files should be catalogued, with replacement/rescan regressions.
+6. **External gates:** measure native WinRT HEIC/Media Foundation RSS and exclusive-fallback throughput; safely validate one real TDR/restart; compile/test the optional Swift IPC mirror and existing macOS work on a Mac; continue signing/mirror gates. Dynamic RAM++ batching requires the external commercial-clean model export, not a source-only fix.
+
+## STATUS 2026-07-18 — Ordered wipe barrier and queued-scan cancellation verified on branch `whole-codebase-audit-iteration15`
+
+The GPU/resource passes remain complete. The command-queue audit found the real wipe gap was FIFO loss: periodic mutex timeouts requeued an accepted mutation behind a later wipe. One registered pinned waiter now survives status checks; scan admission/cancellation is reserved before gate waiting; pre-cancelled scan/Deep Analyze exits before setup; and scan-state RAII covers preflight/model-load panics. The broad “wipe lacks Deep Analyze interlock” and “restructure apply/undo lacks single-flight” claims were stale—the shared gate and apply/undo atomic already existed. Windows and WSL fmt/clippy/full engine suites pass. Resume in this order:
+
+1. **Fix stale-ID Trash identity (high):** shared Rust `trashFiles` currently resolves an ID to `path_text` and can trash a different file that replaced the indexed object. Snapshot persisted identity and revalidate immediately before every OS Trash call; mixed batches must retain/report mismatches without invoking the backend.
+2. **Make Linux Exact Cleanup byte-exact (high):** files above 16 MiB currently group and mass-select by sampled `content_hash`. Use bounded live full-file SHA-256 verification with honest partial disclosure and immediate keeper/victim revalidation before Trash. Reuse the engine's existing sampled-collision fixture and exact-digest helpers; do not add dependencies.
+3. **Finish typed terminal responses (medium):** paused-scan `library_busy` drops generic queued operations with only `Error`; emit the appropriate terminal shape for Deep Analyze, restructure, face clustering, scan, and bulk callers. Also make bulk `spawn_blocking` JoinError emit a failed `BulkActionResult` instead of logging only.
+4. **Deliberate zero-byte parity:** engine and CLI intentionally mark a truncated-to-empty file seen but retain stale indexed metadata. Change both together if zero-byte files should be catalogued, with replacement/rescan regressions.
+5. **External gates:** measure native WinRT HEIC/Media Foundation RSS and exclusive-fallback throughput; safely validate one real TDR/restart; continue Mac compile/recalibration and signing/mirror gates. Dynamic RAM++ batching requires the external commercial-clean model export, not a source-only fix.
+
 ## STATUS 2026-07-17 (night) — Linux GUI production pass on branch `linux-gui-polish` (verified live under WSLg on Adlon data); needs PR + CI
 
 The Linux GTK app got a full production pass (STATE top): the **#106-shipped People-tab blanking bug** (invalid correlated-ORDER-BY SQL, error swallowed) is fixed with a schema-backed regression test, plus a first-run Welcome sheet, cross-platform `app-settings.json` persistence (folder/tab/sidebar/welcome), video keyframe thumbnails + ▶ badges (Library/Cleanup/preview), Library empty states + honest counts, sidebar Stop-scan + progress bar, reload-on-tab-switch for all data tabs, a LavaLamp 30 fps cap, and the pruned-icon fix. All verified in the running app against a real 958-file Adlon scan. Next:

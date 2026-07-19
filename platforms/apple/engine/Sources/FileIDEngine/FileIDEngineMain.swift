@@ -643,7 +643,15 @@ struct FileIDEngineMain {
         case .renameFiles(let renames):
             guard let database else { await emitDbUnavailable(sink, action: "renameFiles"); return }
             await sink.emit(.bulkActionResult(await renameFiles(database: database, renames: renames)))
-        case .trashFiles(let fileIDs):
+        case .trashFiles(let fileIDs, let exactIdentities):
+            guard exactIdentities == nil else {
+                await sink.emit(.bulkActionResult(BulkActionResult(
+                    action: "trashFiles", succeeded: 0, failed: fileIDs.count,
+                    messages: fileIDs.map {
+                        item($0, ok: false, "Exact Trash evidence is not accepted by the macOS engine; use the native Cleanup flow.")
+                    })))
+                return
+            }
             guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
             await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
         case .mergeClusters(let sourcePersonID, let destinationPersonID):

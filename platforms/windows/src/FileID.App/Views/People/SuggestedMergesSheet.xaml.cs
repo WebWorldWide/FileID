@@ -178,11 +178,19 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // suppressing the pair across re-clustering.
         try
         {
-            await EngineClient.Instance.MarkPersonsDifferentAsync(
-                vm.SourcePersonId,
-                vm.DestinationPersonId,
-                vm.SourceAnchorFaceId,
-                vm.DestinationAnchorFaceId);
+            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "markPersonsDifferent",
+                () => EngineClient.Instance.MarkPersonsDifferentAsync(
+                    vm.SourcePersonId,
+                    vm.DestinationPersonId,
+                    vm.SourceAnchorFaceId,
+                    vm.DestinationAnchorFaceId),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
+            {
+                StatusText.Text = $"Couldn't save: {FirstFailureMessage(r) ?? "the engine did not confirm the verdict."}";
+                return;
+            }
             vm.IsResolved = true;
             StatusText.Text = $"Marked #{vm.SourcePersonId} ↔ #{vm.DestinationPersonId} as different people.";
         }

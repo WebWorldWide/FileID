@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use fileid_engine::ipc::{
-    CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanProgress, StartScanPayload,
+    CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanPhase, ScanProgress, StartScanPayload,
 };
 
 // ─── Public event surface ────────────────────────────────────────────────────
@@ -42,11 +42,13 @@ pub enum EngineEvent {
     Spawning,
     Ready,
     Progress(ScanProgress),
+    PhaseChanged(ScanPhase),
     /// A batch landed — carries the running processed-file total. The Library
     /// uses this to throttle live grid reloads during a scan.
     BatchLanded(u64),
     /// Terminal: scan finished with this many processed files.
     ScanComplete(u64),
+    ScanWarning(String),
     Error(String),
     ModelDownloadFailed {
         model_kind: String,
@@ -54,6 +56,9 @@ pub enum EngineEvent {
     },
     /// The engine process exited (crash or clean EOF). Triggers a respawn.
     Exited,
+    FaceClusteringComplete(fileid_engine::ipc::FaceClusteringResult),
+    FaceClusteringFailed(String),
+    FaceClusteringBusy(String),
 
     // ── Deep Analyze lifecycle (consumed by the Deep Analyze tab) ────────────
     DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
@@ -122,8 +127,13 @@ pub struct EngineClient {
     next_id: u64,
     respawns: u32,
     models_busy: bool,
+    ready: bool,
     /// Set on drop so the reader thread's EOF doesn't trigger a respawn.
     shutting_down: Arc<AtomicBool>,
+}
+
+fn prune_closed_subscribers(subscribers: &mut Vec<Sender<EngineEvent>>) {
+    subscribers.retain(|subscriber| !subscriber.is_closed());
 }
 
 impl EngineClient {
@@ -139,6 +149,7 @@ impl EngineClient {
             next_id: 0,
             respawns: 0,
             models_busy: false,
+            ready: false,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -147,11 +158,16 @@ impl EngineClient {
         self.models_busy
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+
     pub fn shutdown(&mut self) {
         if self.shutting_down.swap(true, Ordering::AcqRel) {
             return;
         }
         self.models_busy = false;
+        self.ready = false;
         self.subscribers.clear();
         self.thumb_tx.take();
         self.stdin.take();
@@ -201,15 +217,30 @@ impl EngineClient {
                     break;
                 };
                 match &ev {
+                    EngineEvent::Ready => {
+                        let mut client = client.borrow_mut();
+                        client.ready = true;
+                        client.respawns = 0;
+                    }
+                    EngineEvent::Spawning => {
+                        client.borrow_mut().ready = false;
+                    }
                     EngineEvent::Progress(_)
                     | EngineEvent::BatchLanded(_)
                     | EngineEvent::DeepAnalyzeStarting(_) => {
                         client.borrow_mut().models_busy = true;
                     }
                     EngineEvent::ScanComplete(_)
-                    | EngineEvent::DeepAnalyzeComplete(_)
-                    | EngineEvent::Exited => {
+                    | EngineEvent::PhaseChanged(ScanPhase::Completed)
+                    | EngineEvent::PhaseChanged(ScanPhase::Cancelled)
+                    | EngineEvent::PhaseChanged(ScanPhase::Failed)
+                    | EngineEvent::DeepAnalyzeComplete(_) => {
                         client.borrow_mut().models_busy = false;
+                    }
+                    EngineEvent::Exited => {
+                        let mut client = client.borrow_mut();
+                        client.models_busy = false;
+                        client.ready = false;
                     }
                     _ => {}
                 }
@@ -221,9 +252,7 @@ impl EngineClient {
                 let Some(client) = this_pump.upgrade() else {
                     break;
                 };
-                if let EngineEvent::Ready = ev {
-                    client.borrow_mut().respawns = 0;
-                }
+                prune_closed_subscribers(&mut client.borrow_mut().subscribers);
                 if let EngineEvent::Exited = ev {
                     let shutting = client.borrow().shutting_down.load(Ordering::Relaxed);
                     if !shutting {
@@ -535,36 +564,7 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
         let Ok(event) = serde_json::from_slice::<IpcEvent>(&frame) else {
             continue;
         };
-        let mapped = match event.payload {
-            EventPayload::Ready(_) => Some(EngineEvent::Ready),
-            EventPayload::Progress(w) => Some(EngineEvent::Progress(w.inner)),
-            EventPayload::BatchSummary(w) => {
-                Some(EngineEvent::BatchLanded(w.inner.processed_total))
-            }
-            EventPayload::ScanComplete(w) => {
-                Some(EngineEvent::ScanComplete(w.inner.processed_files))
-            }
-            EventPayload::Error(w) => match w.inner.model_kind {
-                Some(model_kind) => Some(EngineEvent::ModelDownloadFailed {
-                    model_kind,
-                    message: w.inner.message,
-                }),
-                None => Some(EngineEvent::Error(w.inner.message)),
-            },
-            EventPayload::DeepAnalyzeStarting(w) => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
-            EventPayload::DeepAnalyzeProgress(w) => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
-            EventPayload::DeepAnalyzeFileDone(w) => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
-            EventPayload::DeepAnalyzeComplete(w) => Some(EngineEvent::DeepAnalyzeComplete(w.inner)),
-            EventPayload::ModelDownloadProgress(w) => {
-                Some(EngineEvent::ModelDownloadProgress(w.inner))
-            }
-            EventPayload::RestructurePlan(w) => Some(EngineEvent::RestructurePlan(w.inner)),
-            EventPayload::RestructureApplyResult(w) => {
-                Some(EngineEvent::RestructureApplyResult(w.inner))
-            }
-            EventPayload::BulkActionResult(w) => Some(EngineEvent::BulkActionResult(w.inner)),
-            _ => None,
-        };
+        let mapped = map_engine_payload(event.payload);
         if let Some(ev) = mapped {
             if tx.send_blocking(ev).is_err() {
                 return;
@@ -572,6 +572,51 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
         }
     }
     let _ = tx.send_blocking(EngineEvent::Exited);
+}
+
+fn map_engine_payload(payload: EventPayload) -> Option<EngineEvent> {
+    match payload {
+        EventPayload::Ready(_) => Some(EngineEvent::Ready),
+        EventPayload::Progress(w) => Some(EngineEvent::Progress(w.inner)),
+        EventPayload::PhaseChanged(w) => Some(EngineEvent::PhaseChanged(w.inner)),
+        EventPayload::BatchSummary(w) => Some(EngineEvent::BatchLanded(w.inner.processed_total)),
+        EventPayload::ScanComplete(w) => Some(EngineEvent::ScanComplete(w.inner.processed_files)),
+        EventPayload::Error(w) if w.inner.kind == "face_clustering_failed" => {
+            Some(EngineEvent::FaceClusteringFailed(w.inner.message))
+        }
+        EventPayload::Error(w) if w.inner.kind == "face_clustering_busy" => {
+            Some(EngineEvent::FaceClusteringBusy(w.inner.message))
+        }
+        EventPayload::Error(w)
+            if matches!(
+                w.inner.kind.as_str(),
+                "rescan_no_changes" | "empty_folder" | "discovery_partial"
+            ) =>
+        {
+            Some(EngineEvent::ScanWarning(w.inner.message))
+        }
+        EventPayload::Error(w) => match w.inner.model_kind {
+            Some(model_kind) => Some(EngineEvent::ModelDownloadFailed {
+                model_kind,
+                message: w.inner.message,
+            }),
+            None => Some(EngineEvent::Error(w.inner.message)),
+        },
+        EventPayload::FaceClusteringComplete(w) => {
+            Some(EngineEvent::FaceClusteringComplete(w.inner))
+        }
+        EventPayload::DeepAnalyzeStarting(w) => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
+        EventPayload::DeepAnalyzeProgress(w) => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
+        EventPayload::DeepAnalyzeFileDone(w) => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
+        EventPayload::DeepAnalyzeComplete(w) => Some(EngineEvent::DeepAnalyzeComplete(w.inner)),
+        EventPayload::ModelDownloadProgress(w) => Some(EngineEvent::ModelDownloadProgress(w.inner)),
+        EventPayload::RestructurePlan(w) => Some(EngineEvent::RestructurePlan(w.inner)),
+        EventPayload::RestructureApplyResult(w) => {
+            Some(EngineEvent::RestructureApplyResult(w.inner))
+        }
+        EventPayload::BulkActionResult(w) => Some(EngineEvent::BulkActionResult(w.inner)),
+        _ => None,
+    }
 }
 
 /// Drain bounded engine stderr lines to the local debug log. Never transmits.
@@ -912,10 +957,92 @@ mod tests {
     }
 
     #[test]
+    fn closed_one_shot_subscribers_are_pruned() {
+        let (closed_sender, closed_receiver) = async_channel::bounded(1);
+        let (live_sender, _live_receiver) = async_channel::bounded(1);
+        drop(closed_receiver);
+        let mut subscribers = vec![closed_sender, live_sender];
+        prune_closed_subscribers(&mut subscribers);
+        assert_eq!(subscribers.len(), 1);
+        assert!(!subscribers[0].is_closed());
+    }
+
+    #[test]
     #[allow(clippy::assertions_on_constants)] // intentional compile-time bound checks
     fn engine_event_channels_are_bounded() {
         assert!(RAW_EVENT_CAP > 0 && RAW_EVENT_CAP <= 8);
         assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);
+    }
+
+    #[test]
+    fn scan_phase_terminals_are_forwarded_to_linux_state() {
+        for phase in [
+            ScanPhase::Failed,
+            ScanPhase::Cancelled,
+            ScanPhase::Completed,
+        ] {
+            let mapped = map_engine_payload(EventPayload::PhaseChanged(
+                fileid_engine::ipc::Wrap::new(phase),
+            ));
+            assert!(matches!(mapped, Some(EngineEvent::PhaseChanged(actual)) if actual == phase));
+        }
+    }
+
+    #[test]
+    fn nonterminal_scan_warnings_preserve_their_kind() {
+        for kind in ["rescan_no_changes", "empty_folder", "discovery_partial"] {
+            let mapped = map_engine_payload(EventPayload::Error(fileid_engine::ipc::Wrap::new(
+                fileid_engine::ipc::EngineError {
+                    kind: kind.into(),
+                    message: "Scan continues".into(),
+                    path: None,
+                    model_kind: None,
+                },
+            )));
+            assert!(
+                matches!(mapped, Some(EngineEvent::ScanWarning(message)) if message == "Scan continues")
+            );
+        }
+    }
+
+    #[test]
+    fn face_clustering_terminals_are_forwarded() {
+        let complete = map_engine_payload(EventPayload::FaceClusteringComplete(
+            fileid_engine::ipc::Wrap::new(fileid_engine::ipc::FaceClusteringResult {
+                person_count: 0,
+                face_count: 0,
+                unmatched_faces: 0,
+                duration_seconds: 0.0,
+            }),
+        ));
+        assert!(matches!(
+            complete,
+            Some(EngineEvent::FaceClusteringComplete(_))
+        ));
+
+        let failed = map_engine_payload(EventPayload::Error(fileid_engine::ipc::Wrap::new(
+            fileid_engine::ipc::EngineError {
+                kind: "face_clustering_failed".into(),
+                message: "failed".into(),
+                path: None,
+                model_kind: None,
+            },
+        )));
+        assert!(
+            matches!(failed, Some(EngineEvent::FaceClusteringFailed(message)) if message == "failed")
+        );
+
+        let busy = map_engine_payload(EventPayload::Error(fileid_engine::ipc::Wrap::new(
+            fileid_engine::ipc::EngineError {
+                kind: "face_clustering_busy".into(),
+                message: "busy".into(),
+                path: None,
+                model_kind: None,
+            },
+        )));
+        assert!(
+            matches!(busy, Some(EngineEvent::FaceClusteringBusy(message)) if message == "busy")
+        );
     }
 
     #[test]

@@ -339,15 +339,15 @@ $faceCount = if (Test-Path $faceCrops) { (Get-ChildItem $faceCrops -File).Count 
 # Acceptable: any (>= 0) — corpus may have no faces.
 Assert "[A10] face_crops directory present after scan (>= 0 files)" ($faceCount -ge 0) "(found $faceCount)"
 
-# A11: privacy gate -- no telemetry strings in shipped binary.
-$telemetryMarkers = @('sentry.io','applicationinsights','firebase','segment.com','mixpanel','google-analytics','amplitude','appcenter')
-$hits = @()
-$bytes = [System.IO.File]::ReadAllBytes($EnginePath)
-$text = [System.Text.Encoding]::ASCII.GetString($bytes)
-foreach ($m in $telemetryMarkers) {
-    if ($text -match $m) { $hits += $m }
+# A11: use the release-authoritative ASCII/UTF-16LE/UTF-16BE scanner.
+$privacyPython = Get-Command python -ErrorAction SilentlyContinue
+if (-not $privacyPython) {
+    Assert "[A11] privacy gate scanner available" $false "(python not found)"
+} else {
+    $privacyScanner = Join-Path $RepoRoot "shared\scripts\check_binary_privacy.py"
+    & $privacyPython.Source $privacyScanner $EnginePath
+    Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($LASTEXITCODE -eq 0)
 }
-Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($hits.Count -eq 0) "(found: $($hits -join ', '))"
 
 # A12: model-swap DB assertions — RAM++/CLIP tag content + SFace 128-d
 # (512-byte) face embeddings, which reject stale 512-d/2048-byte ArcFace data.

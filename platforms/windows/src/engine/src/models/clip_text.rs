@@ -12,7 +12,9 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::clip_tokenizer::ClipTokenizer;
-use super::runtime::{classify_inference_error, commit_chain_session};
+use super::runtime::{
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+};
 
 const CONTEXT_LEN: usize = 77;
 
@@ -54,6 +56,7 @@ impl ClipText {
             .context("CLIP text input shape")?;
         let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(tensor))])
@@ -106,6 +109,7 @@ impl ClipText {
             .context("CLIP text batch input shape")?;
         let tensor = Tensor::from_array(input).context("CLIP text batch input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(tensor))])

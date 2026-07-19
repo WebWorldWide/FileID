@@ -19,6 +19,287 @@ import Vision
 
 public enum FaceClustering {
 
+    struct ProtectedFacePair: Hashable, Sendable {
+        let first: Int64
+        let second: Int64
+
+        init(_ a: Int64, _ b: Int64) {
+            first = min(a, b)
+            second = max(a, b)
+        }
+    }
+
+    enum FaceProtectionError: Error {
+        case ambiguousVerdictAnchor
+        case identicalVerdictAnchors
+        case invalidPartition(String)
+        case protectedClusterCap
+        case verdictCap
+    }
+
+    static func currentPersonCount(database: Database) async -> Int {
+        do {
+            return try await database.pool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM persons") ?? 0
+            }
+        } catch {
+            JSONLog.shared.warn(ev: "face_cluster_person_count_failed", error: "\(error)")
+            return 0
+        }
+    }
+
+    struct ClusteringFaceRow: Sendable {
+        let id: Int64
+        let arcFace: Data
+        let quality: Double
+    }
+
+    static func loadClusteringFaceRows(
+        from db: GRDB.Database,
+        phaseZeroUnknownFaceIDs: Set<Int64>,
+        minQuality: Double,
+        limit: Int
+    ) throws -> (rows: [ClusteringFaceRow], overflowed: Bool) {
+        var cursor = try GRDB.Row.fetchCursor(db, sql: """
+            SELECT face_prints.id, face_prints.arcface_embedding, face_prints.face_quality
+            FROM face_prints
+            LEFT JOIN persons ON persons.id = face_prints.person_id
+            WHERE face_prints.excluded = 0
+              AND LENGTH(face_prints.arcface_embedding) > 0
+              AND COALESCE(persons.is_unknown, 0) = 0
+            ORDER BY face_prints.id ASC
+            """)
+        var loaded: [ClusteringFaceRow] = []
+        loaded.reserveCapacity(min(limit, 16_384))
+        var overflowed = false
+        while let row = try cursor.next() {
+            let id: Int64 = row["id"] ?? 0
+            if phaseZeroUnknownFaceIDs.contains(id) { continue }
+            let quality: Double = row["face_quality"] ?? -1
+            if minQuality > 0, quality < minQuality { continue }
+            if loaded.count == limit {
+                overflowed = true
+                break
+            }
+            loaded.append(ClusteringFaceRow(
+                id: id,
+                arcFace: row["arcface_embedding"] ?? Data(),
+                quality: quality
+            ))
+        }
+        return (loaded, overflowed)
+    }
+
+    static func differentFacePairs(from db: GRDB.Database) throws -> Set<ProtectedFacePair> {
+        let rows = try GRDB.Row.fetchAll(db, sql: """
+            SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b
+            FROM face_verifications
+            WHERE same_person = 0
+              AND ((face_a IS NOT NULL AND face_b IS NOT NULL)
+                   OR (file_a IS NOT NULL AND bbox_a IS NOT NULL
+                       AND file_b IS NOT NULL AND bbox_b IS NOT NULL))
+            ORDER BY person_a ASC, person_b ASC
+            LIMIT 100001
+            """)
+        guard rows.count <= 100_000 else { throw FaceProtectionError.verdictCap }
+        func resolve(_ legacy: Int64?, _ fileID: Int64?, _ bbox: String?) throws -> Int64? {
+            if let fileID, let bbox {
+                let ids = try Int64.fetchAll(
+                    db,
+                    sql: "SELECT id FROM face_prints WHERE file_id = ? AND bbox = ? ORDER BY id LIMIT 2",
+                    arguments: [fileID, bbox]
+                )
+                if ids.count > 1 { throw FaceProtectionError.ambiguousVerdictAnchor }
+                if let id = ids.first { return id }
+            }
+            guard let legacy, legacy != 0 else { return nil }
+            return try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM face_prints WHERE id = ?",
+                arguments: [legacy]
+            )
+        }
+
+        var pairs = Set<ProtectedFacePair>()
+        for row in rows {
+            guard let a = try resolve(row["face_a"], row["file_a"], row["bbox_a"]),
+                  let b = try resolve(row["face_b"], row["file_b"], row["bbox_b"])
+            else { continue }
+            if a == b { throw FaceProtectionError.identicalVerdictAnchors }
+            pairs.insert(ProtectedFacePair(a, b))
+        }
+        return pairs
+    }
+
+    static func partitionProtectedClusters(
+        _ byCluster: [Int: [Int]],
+        denseToFaceID: [Int64],
+        bucketOwnerByFaceID: [Int64: Int64],
+        differentPairs: Set<ProtectedFacePair>,
+        excludedFaceIDs: Set<Int64>
+    ) -> (clusters: [Int: [Int]], protectedFaceIDs: Set<Int64>) {
+        let denseByFaceID = Dictionary(
+            uniqueKeysWithValues: denseToFaceID.enumerated().map { ($0.element, $0.offset) }
+        )
+        let ownerlessEndpointSet = Set(differentPairs.flatMap { [$0.first, $0.second] })
+            .filter { bucketOwnerByFaceID[$0] == nil && !excludedFaceIDs.contains($0) }
+        var raw = byCluster.mapValues { denseIndexes in
+            denseIndexes.filter { denseIndex in
+                let faceID = denseToFaceID[denseIndex]
+                return !excludedFaceIDs.contains(faceID)
+                    && bucketOwnerByFaceID[faceID] == nil
+                    && !ownerlessEndpointSet.contains(faceID)
+            }
+        }
+        var ownerGroups: [Int64: [Int]] = [:]
+        for (faceID, ownerID) in bucketOwnerByFaceID {
+            guard !excludedFaceIDs.contains(faceID), let denseIndex = denseByFaceID[faceID] else {
+                continue
+            }
+            ownerGroups[ownerID, default: []].append(denseIndex)
+        }
+        let ownerlessEndpoints = ownerlessEndpointSet.sorted()
+        var singletonFaceIDsByOwner: [Int64: Set<Int64>] = [:]
+        for pair in differentPairs {
+            if let ownerID = bucketOwnerByFaceID[pair.first],
+               bucketOwnerByFaceID[pair.second] == ownerID {
+                singletonFaceIDsByOwner[ownerID, default: []].formUnion([pair.first, pair.second])
+            }
+        }
+
+        var buckets: [[Int]] = []
+        for ownerID in ownerGroups.keys.sorted() {
+            let members = ownerGroups[ownerID, default: []]
+            let singletonFaceIDs = singletonFaceIDsByOwner[ownerID, default: []]
+            let remainder = members.filter { !singletonFaceIDs.contains(denseToFaceID[$0]) }
+            if !remainder.isEmpty { buckets.append(remainder) }
+            for faceID in singletonFaceIDs.sorted() {
+                if let denseIndex = denseByFaceID[faceID] { buckets.append([denseIndex]) }
+            }
+        }
+        for faceID in ownerlessEndpoints {
+            if let denseIndex = denseByFaceID[faceID] { buckets.append([denseIndex]) }
+        }
+        for clusterID in raw.keys.sorted() {
+            let members = raw.removeValue(forKey: clusterID) ?? []
+            if !members.isEmpty { buckets.append(members) }
+        }
+
+        var clusters: [Int: [Int]] = [:]
+        for (clusterID, members) in buckets.enumerated() {
+            clusters[clusterID] = members.sorted { denseToFaceID[$0] < denseToFaceID[$1] }
+        }
+        var protectedFaceIDs = Set(bucketOwnerByFaceID.keys)
+        for pair in differentPairs {
+            protectedFaceIDs.insert(pair.first)
+            protectedFaceIDs.insert(pair.second)
+        }
+        protectedFaceIDs.subtract(excludedFaceIDs)
+        protectedFaceIDs.formIntersection(Set(denseByFaceID.keys))
+        return (clusters, protectedFaceIDs)
+    }
+
+    static func capClusters(
+        _ clusters: [Int: [Int]],
+        protectedClusterIDs: Set<Int>,
+        preservedPersonCount: Int,
+        maxPersons: Int
+    ) throws -> (kept: [Int: [Int]], truncatedFaces: Int) {
+        guard preservedPersonCount <= maxPersons else {
+            throw FaceProtectionError.protectedClusterCap
+        }
+        let availableClusterSlots = maxPersons - preservedPersonCount
+        let protectedIDs = protectedClusterIDs.intersection(Set(clusters.keys))
+        guard protectedIDs.count <= availableClusterSlots else {
+            throw FaceProtectionError.protectedClusterCap
+        }
+        guard clusters.count > availableClusterSlots else { return (clusters, 0) }
+        let availableUnprotected = availableClusterSlots - protectedIDs.count
+        let keepUnprotected = Set(
+            clusters
+                .filter { !protectedIDs.contains($0.key) }
+                .sorted {
+                    $0.value.count != $1.value.count
+                        ? $0.value.count > $1.value.count
+                        : $0.key < $1.key
+                }
+                .prefix(availableUnprotected)
+                .map(\.key)
+        )
+        var kept = clusters
+        var truncatedFaces = 0
+        for (clusterID, members) in clusters
+            where !protectedIDs.contains(clusterID) && !keepUnprotected.contains(clusterID) {
+            truncatedFaces += members.count
+            kept[clusterID] = nil
+        }
+        return (kept, truncatedFaces)
+    }
+
+    static func validatePersistPlan(
+        from db: GRDB.Database,
+        clusterFaceIDs: [[Int64]],
+        representativeFaceIDs: [Int64]
+    ) throws {
+        guard clusterFaceIDs.count == representativeFaceIDs.count else {
+            throw FaceProtectionError.invalidPartition("persistence plan cardinality mismatch")
+        }
+        var plannedFaceIDs = Set<Int64>()
+        var representativeSet = Set<Int64>()
+        for (faceIDs, representativeFaceID) in zip(clusterFaceIDs, representativeFaceIDs) {
+            guard !faceIDs.isEmpty,
+                  faceIDs.contains(representativeFaceID),
+                  representativeSet.insert(representativeFaceID).inserted
+            else {
+                throw FaceProtectionError.invalidPartition("invalid persistence anchor")
+            }
+            for faceID in faceIDs where !plannedFaceIDs.insert(faceID).inserted {
+                throw FaceProtectionError.invalidPartition("duplicate persistence member")
+            }
+        }
+        var currentCount = 0
+        let orderedFaceIDs = plannedFaceIDs.sorted()
+        for chunkStart in stride(from: 0, to: orderedFaceIDs.count, by: 900) {
+            let chunk = Array(orderedFaceIDs[chunkStart..<min(chunkStart + 900, orderedFaceIDs.count)])
+            let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+            currentCount += try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM face_prints WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(chunk.map { Int($0) })
+            ) ?? 0
+        }
+        guard currentCount == plannedFaceIDs.count else {
+            throw FaceProtectionError.invalidPartition("persistence plan references stale faces")
+        }
+    }
+
+    static func validateProtectedClusters(
+        _ clusters: [Int: [Int]],
+        denseToFaceID: [Int64],
+        identityOwnerByFaceID: [Int64: Int64],
+        differentPairs: Set<ProtectedFacePair>
+    ) throws {
+        var clusterByFaceID: [Int64: Int] = [:]
+        for (clusterID, denseIndexes) in clusters {
+            for denseIndex in denseIndexes { clusterByFaceID[denseToFaceID[denseIndex]] = clusterID }
+        }
+        var ownerByCluster: [Int: Int64] = [:]
+        for (faceID, ownerID) in identityOwnerByFaceID {
+            guard let clusterID = clusterByFaceID[faceID] else { continue }
+            if let existing = ownerByCluster[clusterID], existing != ownerID {
+                throw FaceProtectionError.invalidPartition("distinct named identities share a cluster")
+            }
+            ownerByCluster[clusterID] = ownerID
+        }
+        for pair in differentPairs {
+            if let first = clusterByFaceID[pair.first],
+               let second = clusterByFaceID[pair.second],
+               first == second {
+                throw FaceProtectionError.invalidPartition("different-people anchors share a cluster")
+            }
+        }
+    }
+
     /// Centroid cosine ≥ this triggers auto-merge regardless of cluster
     /// size — same person with very high confidence. Compare to ArcFace
     /// verification literature: 0.40 is the FAR=10⁻⁴ threshold for
@@ -97,13 +378,14 @@ public enum FaceClustering {
         denseToFaceID: [Int64],
         faceQualityByID: [Int64: Double],
         minSize: Int,
-        qualityFloor: Double
+        qualityFloor: Double,
+        alwaysKeep: Set<Int> = []
     ) -> (kept: [Int: [Int]], suppressedClusters: Int, suppressedFaces: Int) {
         guard qualityFloor > 0 else { return (byCluster, 0, 0) }
         var kept: [Int: [Int]] = [:]
         var sClusters = 0, sFaces = 0
         for (cid, denseIdxs) in byCluster {
-            if denseIdxs.count >= minSize {
+            if alwaysKeep.contains(cid) || denseIdxs.count >= minSize {
                 kept[cid] = denseIdxs
                 continue
             }
@@ -199,7 +481,8 @@ public enum FaceClustering {
                     message: "Face-recognition model is installed but failed to load (execution-provider/runtime error). See logs."
                 )))
             }
-            return FaceClusteringResult(personCount: 0, faceCount: 0,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: 0,
                                         unmatchedFaces: 0,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
@@ -230,7 +513,6 @@ public enum FaceClustering {
         // are filtered out: the user explicitly said "don't cluster these",
         // so they stay attached to their existing unknown person row and
         // never participate in a re-cluster pass.
-        struct FaceRow: Sendable { let id: Int64; let arcFace: Data; let quality: Double }
         // Pre-clustering quality gate — parity hook for the Rust
         // FILEID_FACE_CLUSTER_MIN_QUALITY. In the Windows engine sub-threshold
         // faces embed as non-discriminative noise (same-person cosine ~= diff)
@@ -244,30 +526,16 @@ public enum FaceClustering {
         // quality (-1 sentinel) is untouched at the default. (see MACOS_LOCKSTEP_NOTES)
         // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         let clusterMinQuality = envDouble("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0...1.0)
-        let rows: [FaceRow]
+        let rows: [ClusteringFaceRow]
+        let rowsOverflowed: Bool
         do {
-            rows = try await database.pool.read { db in
-                let r = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT id, arcface_embedding, face_quality
-                    FROM face_prints
-                    WHERE excluded = 0
-                      AND LENGTH(arcface_embedding) > 0
-                    ORDER BY id ASC LIMIT \(maxFacesPerRun)
-                    """)
-                return r.compactMap { row -> FaceRow? in
-                    let id: Int64 = row["id"] ?? 0
-                    if unknownFaceIDs.contains(id) { return nil }
-                    let quality: Double = row["face_quality"] ?? -1
-                    // Gate is OFF at the 0.0 default, so this is a no-op unless a
-                    // Mac-calibrated FILEID_FACE_CLUSTER_MIN_QUALITY is set. Gated
-                    // faces never enter the clustering pool and the Phase-4 persist
-                    // NULLs every non-preserved face_print, so they stay unclustered.
-                    // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
-                    if clusterMinQuality > 0, quality < clusterMinQuality { return nil }
-                    return FaceRow(id: id,
-                                   arcFace: row["arcface_embedding"] ?? Data(),
-                                   quality: quality)
-                }
+            (rows, rowsOverflowed) = try await database.pool.read { db in
+                try loadClusteringFaceRows(
+                    from: db,
+                    phaseZeroUnknownFaceIDs: unknownFaceIDs,
+                    minQuality: clusterMinQuality,
+                    limit: maxFacesPerRun
+                )
             }
         } catch {
             JSONLog.shared.error(ev: "face_cluster_query_failed", error: "\(error)")
@@ -279,21 +547,23 @@ public enum FaceClustering {
                 kind: "face_clustering_failed",
                 message: "Could not load face prints: \(error)"
             )))
-            return FaceClusteringResult(personCount: 0, faceCount: 0,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: 0,
                                         unmatchedFaces: 0,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
 
         guard !rows.isEmpty else {
             JSONLog.shared.info(ev: "face_cluster_empty")
-            return FaceClusteringResult(personCount: 0, faceCount: 0,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: 0,
                                         unmatchedFaces: 0,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
         // Hitting the cap means there are likely embedded faces past it that
         // this wipe-recluster run leaves unassigned. Surface it instead of the
         // old (false) "a re-run picks up overflow" promise. (audit F-C3-033)
-        if rows.count >= maxFacesPerRun {
+        if rowsOverflowed {
             JSONLog.shared.warn(ev: "face_cluster_overflow",
                                 error: "embedded faces reached the \(maxFacesPerRun) per-run cap; faces past it stay unassigned until a window-aware persist lands.")
         }
@@ -316,7 +586,8 @@ public enum FaceClustering {
         guard let firstDim = decoded.first?.vec.count else {
             JSONLog.shared.warn(ev: "face_cluster_no_decodable_prints",
                                 error: "all \(rows.count) embeddings failed to decode")
-            return FaceClusteringResult(personCount: 0, faceCount: 0,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: rows.count,
                                         unmatchedFaces: rows.count,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
@@ -349,7 +620,8 @@ public enum FaceClustering {
             ) {
                 JSONLog.shared.info(ev: "face_cluster_cancelled",
                                     extra: ["faces": AnyCodable(decoded.count)])
-                return FaceClusteringResult(personCount: 0, faceCount: decoded.count,
+                let personCount = await currentPersonCount(database: database)
+                return FaceClusteringResult(personCount: personCount, faceCount: decoded.count,
                                             unmatchedFaces: unmatched,
                                             durationSeconds: Date().timeIntervalSince(started))
             }
@@ -362,7 +634,8 @@ public enum FaceClustering {
         guard n > 0 else {
             JSONLog.shared.warn(ev: "face_cluster_no_inserts",
                                 error: "HNSW rejected every embedding")
-            return FaceClusteringResult(personCount: 0, faceCount: decoded.count,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: decoded.count,
                                         unmatchedFaces: rows.count,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
@@ -409,7 +682,8 @@ public enum FaceClustering {
         if icResult.cancelled {
             JSONLog.shared.info(ev: "face_cluster_cancelled",
                                 extra: ["faces": AnyCodable(decoded.count)])
-            return FaceClusteringResult(personCount: 0, faceCount: decoded.count,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: decoded.count,
                                         unmatchedFaces: unmatched,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
@@ -423,59 +697,7 @@ public enum FaceClustering {
             byCluster[cid, default: []].append(denseIdx)
         }
 
-        // Junk-cluster suppression — drop 1–2 face clusters built only from
-        // low-quality faces so the People tab isn't flooded with spurious
-        // singleton "persons" (the over-split the user sees). Suppressed faces
-        // get no person row here; the Phase-4 persist NULLs every non-preserved
-        // face_print first, so they correctly land unclustered (a re-scan can
-        // still attach them once a higher-quality frame of the same person
-        // appears). NEVER merges identities — pure removal. (face-quality gate)
-        let (keptClusters, suppressedClusters, suppressedFaces) = suppressLowQualityClusters(
-            byCluster, denseToFaceID: denseToFaceID, faceQualityByID: faceQualityByID,
-            minSize: minClusterSizeToKeep, qualityFloor: soloQualityFloor
-        )
-        byCluster = keptClusters
-        unmatched += suppressedFaces
-        if suppressedClusters > 0 {
-            JSONLog.shared.info(ev: "face_cluster_suppressed_lowq",
-                                extra: ["suppressedClusters": AnyCodable(suppressedClusters),
-                                        "suppressedFaces": AnyCodable(suppressedFaces),
-                                        "minClusterSize": AnyCodable(minClusterSizeToKeep),
-                                        "soloQualityFloor": AnyCodable(soloQualityFloor),
-                                        "remainingClusters": AnyCodable(byCluster.count)])
-        }
-
-        // Cap at maxPersons (catches DB corruption, not normal libraries).
-        var truncatedAtCap = 0
-        if byCluster.count > maxPersons {
-            // Largest clusters survive; tie → smaller cluster id, so the cap is
-            // deterministic across runs (audit F-C3-007).
-            let sorted = byCluster.sorted {
-                $0.value.count != $1.value.count
-                    ? $0.value.count > $1.value.count
-                    : $0.key < $1.key
-            }
-            let kept = Dictionary(uniqueKeysWithValues: sorted.prefix(maxPersons).map { ($0.key, $0.value) })
-            for entry in sorted.dropFirst(maxPersons) {
-                truncatedAtCap += entry.value.count
-                unmatched += entry.value.count
-            }
-            byCluster = kept
-        }
-        if truncatedAtCap > 0 {
-            JSONLog.shared.warn(ev: "face_cluster_truncated",
-                                error: "IdentityClustering produced \(byCluster.count + truncatedAtCap) clusters > maxPersons (\(maxPersons)); \(truncatedAtCap) faces unclustered.")
-        }
-
-        JSONLog.shared.info(ev: "face_cluster_built",
-                            extra: ["faces": AnyCodable(decoded.count),
-                                    "clusters": AnyCodable(byCluster.count),
-                                    "cores": AnyCodable(icResult.coreCount),
-                                    "outliersAssigned": AnyCodable(icResult.outliersAssigned),
-                                    "outliersAsSingletons": AnyCodable(icResult.outliersAsSingletons),
-                                    "splitsApplied": AnyCodable(icResult.splitsApplied),
-                                    "unmatched": AnyCodable(unmatched),
-                                    "buildSeconds": AnyCodable(icResult.durationSeconds)])
+        let rawClusters = byCluster
 
         // PHASE 4 — Compute new-cluster centroids + anchor radii, snapshot
         // prior anchors, match new clusters to old ones, persist with
@@ -488,20 +710,15 @@ public enum FaceClustering {
             let anchorRadius: Float
             let inherited: PriorAnchorMatch?
         }
-        let nextClusters: [(centroid: [Float], radius: Float, faceIDs: [Int64], repFaceID: Int64)] =
-            byCluster.sorted { $0.key < $1.key }.map { (_, denseIdxs) in
-                let centroid = computeNormalizedCentroid(
-                    denseIdxs: denseIdxs, vecsByDense: vecsByDense, dim: firstDim
-                )
-                let radius = computeAnchorRadius(
-                    denseIdxs: denseIdxs, vecsByDense: vecsByDense, centroid: centroid
-                )
-                let faceIDs = denseIdxs.map { denseToFaceID[$0] }
-                return (centroid, radius, faceIDs,
-                        representativeFaceID(faceIDs, quality: faceQualityByID))
-            }
-
-        struct PersistStats: Sendable { let inherited: Int; let lostNames: Int; let priors: Int }
+        struct PersistStats: Sendable {
+            let inherited: Int
+            let lostNames: Int
+            let priors: Int
+            let personCount: Int
+            let suppressedClusters: Int
+            let suppressedFaces: Int
+            let truncatedFaces: Int
+        }
         let stats: PersistStats
         do {
             stats = try await database.pool.write { db -> PersistStats in
@@ -515,21 +732,89 @@ public enum FaceClustering {
                 // extraction/clustering pool filtering; only the name carry-forward
                 // moves under the lock. (audit F-C3-002 / Windows S0)
                 let freshPriors = try Self.priorAnchors(from: db)
+                let differentPairs = try Self.differentFacePairs(from: db)
+                var ownerByFaceID: [Int64: Int64] = [:]
+                for prior in freshPriors {
+                    for faceID in prior.faceIDs { ownerByFaceID[faceID] = prior.id }
+                }
+                let verdictOwnerIDs = Set(differentPairs.flatMap { pair in
+                    [ownerByFaceID[pair.first], ownerByFaceID[pair.second]].compactMap { $0 }
+                })
+                let namedOwnerIDs = Set(
+                    freshPriors.filter { $0.hasName && !$0.isUnknown }.map { $0.id }
+                )
+                let protectedOwnerIDs = namedOwnerIDs.union(verdictOwnerIDs)
+                let poolFaceIDs = Set(denseToFaceID)
+                let protectedOutsidePool = protectedOutsidePoolOwnerIDs(
+                    priors: freshPriors,
+                    protectedOwnerIDs: protectedOwnerIDs,
+                    poolFaceIDs: poolFaceIDs
+                )
+                let preserveIDs = Set(freshPriors.filter { $0.isUnknown }.map { $0.id })
+                    .union(poolExcludedPersonIDs)
+                    .union(protectedOutsidePool)
+                let preservedPersonCount = freshPriors.filter {
+                    preserveIDs.contains($0.id)
+                }.count
+                let excludedFaceIDs = Set(
+                    freshPriors
+                        .filter { preserveIDs.contains($0.id) }
+                        .flatMap { $0.faceIDs }
+                )
+                let activeProtectedOwnerIDs = protectedOwnerIDs.subtracting(preserveIDs)
+                let bucketOwnerByFaceID = ownerByFaceID.filter {
+                    activeProtectedOwnerIDs.contains($0.value) && poolFaceIDs.contains($0.key)
+                }
+                let identityOwnerByFaceID = ownerByFaceID.filter {
+                    namedOwnerIDs.contains($0.value) && !preserveIDs.contains($0.value)
+                        && poolFaceIDs.contains($0.key)
+                }
+                let partition = partitionProtectedClusters(
+                    rawClusters,
+                    denseToFaceID: denseToFaceID,
+                    bucketOwnerByFaceID: bucketOwnerByFaceID,
+                    differentPairs: differentPairs,
+                    excludedFaceIDs: excludedFaceIDs
+                )
+                let protectedClusterIDs = Set(partition.clusters.compactMap { (clusterID, members) in
+                    members.contains { partition.protectedFaceIDs.contains(denseToFaceID[$0]) }
+                        ? clusterID : nil
+                })
+                let suppression = suppressLowQualityClusters(
+                    partition.clusters,
+                    denseToFaceID: denseToFaceID,
+                    faceQualityByID: faceQualityByID,
+                    minSize: minClusterSizeToKeep,
+                    qualityFloor: soloQualityFloor,
+                    alwaysKeep: protectedClusterIDs
+                )
+                let capped = try capClusters(
+                    suppression.kept,
+                    protectedClusterIDs: protectedClusterIDs,
+                    preservedPersonCount: preservedPersonCount,
+                    maxPersons: maxPersons
+                )
+                let finalClusters = capped.kept
+                let truncatedFaces = capped.truncatedFaces
+                try validateProtectedClusters(
+                    finalClusters,
+                    denseToFaceID: denseToFaceID,
+                    identityOwnerByFaceID: identityOwnerByFaceID,
+                    differentPairs: differentPairs
+                )
 
-                // Preserve set = persons whose faces left the pool. Union the FRESH
-                // unknowns (someone newly marked unknown in the window) with the
-                // PHASE-0 unknowns (someone UN-marked in the window — their faces
-                // were still excluded from the pool, so there is no new cluster to
-                // rebuild them from). Recomputing 'preserve' from the current
-                // is_unknown flag alone would delete the un-marked person and
-                // orphan its faces. (R3-02; companion to F-C3-002)
-                let preserveIDs: Set<Int64> =
-                    Set(freshPriors.filter { $0.isUnknown }.map { $0.id })
-                        .union(poolExcludedPersonIDs)
-                // Preserved rows keep their own identity, so they must not also be
-                // inheritance targets (that would duplicate a name onto a new
-                // cluster). In a race-free run preserveIDs == the fresh unknowns,
-                // so this matches the prior `!$0.isUnknown` filter exactly.
+                let nextClusters: [(centroid: [Float], radius: Float, faceIDs: [Int64], repFaceID: Int64)] =
+                    finalClusters.sorted { $0.key < $1.key }.map { (_, denseIdxs) in
+                        let centroid = computeNormalizedCentroid(
+                            denseIdxs: denseIdxs, vecsByDense: vecsByDense, dim: firstDim
+                        )
+                        let radius = computeAnchorRadius(
+                            denseIdxs: denseIdxs, vecsByDense: vecsByDense, centroid: centroid
+                        )
+                        let faceIDs = denseIdxs.map { denseToFaceID[$0] }
+                        return (centroid, radius, faceIDs,
+                                representativeFaceID(faceIDs, quality: faceQualityByID))
+                    }
                 let inheritanceCandidates = freshPriors.filter { !preserveIDs.contains($0.id) }
                 let matches = matchClustersToPriorAnchors(
                     newClusters: nextClusters.map { ($0.centroid, $0.faceIDs) },
@@ -540,16 +825,21 @@ public enum FaceClustering {
                 let lostAnchorCount = max(0, priorsWithNames - claimedPriorIDs.count)
                 let preserveList = Array(preserveIDs)
 
-                let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, c in
+                let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, cluster in
                     ClusterPersist(
-                        repFaceID: c.repFaceID,
-                        faceIDs: c.faceIDs,
-                        count: c.faceIDs.count,
-                        centroid: c.centroid,
-                        anchorRadius: c.radius,
+                        repFaceID: cluster.repFaceID,
+                        faceIDs: cluster.faceIDs,
+                        count: cluster.faceIDs.count,
+                        centroid: cluster.centroid,
+                        anchorRadius: cluster.radius,
                         inherited: matches[idx]
                     )
                 }
+                try validatePersistPlan(
+                    from: db,
+                    clusterFaceIDs: personsList.map(\.faceIDs),
+                    representativeFaceIDs: personsList.map(\.repFaceID)
+                )
 
                 // Preserve pool-excluded persons in place (fresh unknowns + anyone
                 // whose faces never entered this run's pool). Their face_ids stay
@@ -625,9 +915,15 @@ public enum FaceClustering {
                 // reconcilePersons exists to fix. (audit F-C3-041)
                 try repairDanglingRepresentativeFaces(db)
 
-                return PersistStats(inherited: matches.compactMap { $0 }.count,
-                                    lostNames: lostAnchorCount,
-                                    priors: freshPriors.count)
+                return PersistStats(
+                    inherited: matches.compactMap { $0 }.count,
+                    lostNames: lostAnchorCount,
+                    priors: freshPriors.count,
+                    personCount: preservedPersonCount + finalClusters.count,
+                    suppressedClusters: suppression.suppressedClusters,
+                    suppressedFaces: suppression.suppressedFaces,
+                    truncatedFaces: truncatedFaces
+                )
             }
         } catch {
             JSONLog.shared.error(ev: "face_cluster_persist_failed", error: "\(error)")
@@ -635,11 +931,34 @@ public enum FaceClustering {
                 kind: "face_cluster_persist_failed",
                 message: "Could not write clusters: \(error)"
             )))
-            return FaceClusteringResult(personCount: 0, faceCount: decoded.count,
+            let personCount = await currentPersonCount(database: database)
+            return FaceClusteringResult(personCount: personCount, faceCount: decoded.count,
                                         unmatchedFaces: unmatched,
                                         durationSeconds: Date().timeIntervalSince(started))
         }
-        let prePolishPersonCount = byCluster.count
+        unmatched += stats.suppressedFaces + stats.truncatedFaces
+        if stats.suppressedClusters > 0 {
+            JSONLog.shared.info(ev: "face_cluster_suppressed_lowq",
+                                extra: ["suppressedClusters": AnyCodable(stats.suppressedClusters),
+                                        "suppressedFaces": AnyCodable(stats.suppressedFaces),
+                                        "minClusterSize": AnyCodable(minClusterSizeToKeep),
+                                        "soloQualityFloor": AnyCodable(soloQualityFloor),
+                                        "remainingClusters": AnyCodable(stats.personCount)])
+        }
+        if stats.truncatedFaces > 0 {
+            JSONLog.shared.warn(ev: "face_cluster_truncated",
+                                error: "IdentityClustering exceeded maxPersons (\(maxPersons)); \(stats.truncatedFaces) unprotected faces stayed unclustered.")
+        }
+        JSONLog.shared.info(ev: "face_cluster_built",
+                            extra: ["faces": AnyCodable(decoded.count),
+                                    "clusters": AnyCodable(stats.personCount),
+                                    "cores": AnyCodable(icResult.coreCount),
+                                    "outliersAssigned": AnyCodable(icResult.outliersAssigned),
+                                    "outliersAsSingletons": AnyCodable(icResult.outliersAsSingletons),
+                                    "splitsApplied": AnyCodable(icResult.splitsApplied),
+                                    "unmatched": AnyCodable(unmatched),
+                                    "buildSeconds": AnyCodable(icResult.durationSeconds)])
+        let prePolishPersonCount = stats.personCount
         if stats.inherited > 0 || stats.lostNames > 0 {
             JSONLog.shared.info(ev: "face_cluster_anchor_match",
                                 extra: ["priors": AnyCodable(stats.priors),
@@ -796,41 +1115,11 @@ public enum FaceClustering {
                                 fileCount: payload.fileCount, named: payload.named)
                 }
 
-                // "Different people" verdicts. R3-15: resolve each anchor by its
-                // churn-stable (file_id, bbox) key to the face id that CURRENTLY
-                // occupies that slot — surviving a faces_evaluated re-scan that
-                // DELETE+re-INSERTs face_print ids — falling back to the legacy
-                // face_a/face_b id for pre-v17 / unresolvable rows. Then re-project
-                // onto the persons that own those faces now. (macOS has no verdict
-                // WRITE path; these arrive via a cross-platform / round-tripped DB.)
-                let vrows = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b FROM face_verifications
-                    WHERE same_person = 0
-                      AND ((face_a IS NOT NULL AND face_b IS NOT NULL)
-                           OR (file_a IS NOT NULL AND bbox_a IS NOT NULL
-                               AND file_b IS NOT NULL AND bbox_b IS NOT NULL))
-                    """)
-                func resolveAnchor(legacy: Int64?, file: Int64?, bbox: String?) -> Int64? {
-                    if let f = file, let b = bbox,
-                       let id = ((try? Int64.fetchOne(db, sql:
-                           "SELECT id FROM face_prints WHERE file_id = ? AND bbox = ? LIMIT 1",
-                           arguments: [f, b])) ?? nil) {
-                        return id
-                    }
-                    if let l = legacy, l != 0,
-                       ((try? Int.fetchOne(db, sql:
-                           "SELECT EXISTS(SELECT 1 FROM face_prints WHERE id = ?)",
-                           arguments: [l])) ?? nil) == 1 {
-                        return l
-                    }
-                    return nil
-                }
-                var rawPairs: [(Int64, Int64)] = []
+                let rawPairs = try Self.differentFacePairs(from: db)
                 var verdictFaces = Set<Int64>()
-                for vr in vrows {
-                    let a = resolveAnchor(legacy: vr["face_a"], file: vr["file_a"], bbox: vr["bbox_a"])
-                    let b = resolveAnchor(legacy: vr["face_b"], file: vr["file_b"], bbox: vr["bbox_b"])
-                    if let a, let b { rawPairs.append((a, b)); verdictFaces.insert(a); verdictFaces.insert(b) }
+                for pair in rawPairs {
+                    verdictFaces.insert(pair.first)
+                    verdictFaces.insert(pair.second)
                 }
                 var facePerson: [Int64: Int64] = [:]
                 if !verdictFaces.isEmpty {
@@ -846,8 +1135,11 @@ public enum FaceClustering {
                     }
                 }
                 var pairs: [(Int64, Int64)] = []
-                for (a, b) in rawPairs {
-                    if let pa = facePerson[a], let pb = facePerson[b], pa != pb { pairs.append((pa, pb)) }
+                for pair in rawPairs {
+                    if let personA = facePerson[pair.first],
+                       let personB = facePerson[pair.second], personA != personB {
+                        pairs.append((personA, personB))
+                    }
                 }
                 return ReadData(rows: rows, verdictPersonPairs: pairs,
                                 eligiblePersonCount: eligiblePersonCount,
@@ -922,11 +1214,14 @@ public enum FaceClustering {
         // transitively, where the old per-pair `ci.named && cj.named` guard was
         // defeated by a bridge singleton chaining them. (audit F-C3-005)
         var hasNamed = clusters.map { $0.named }
-        // Explicit "different people" verdicts as index pairs. (audit F-C3-004)
-        let blockedIdx: [(Int, Int)] = data.verdictPersonPairs.compactMap { (pa, pb) in
-            guard let ia = idxOf[pa], let ib = idxOf[pb] else { return nil }
-            return (ia, ib)
+        // Explicit "different people" verdicts as sparse component adjacency.
+        var forbidden = Array(repeating: Set<Int>(), count: clusters.count)
+        for (personA, personB) in data.verdictPersonPairs {
+            guard let indexA = idxOf[personA], let indexB = idxOf[personB] else { continue }
+            forbidden[indexA].insert(indexB)
+            forbidden[indexB].insert(indexA)
         }
+        var componentSize = Array(repeating: 1, count: clusters.count)
 
         // Exact metric threshold join. For normalized centroids, a cosine
         // cutoff is an Euclidean radius; the VP tree prunes metric regions,
@@ -960,13 +1255,30 @@ public enum FaceClustering {
             let ri = find(i), rj = find(j)
             if ri == rj { continue }
             if hasNamed[ri] && hasNamed[rj] { continue }
-            let conflict = blockedIdx.contains { (a, b) in
-                let ra = find(a), rb = find(b)
-                return (ra == ri && rb == rj) || (ra == rj && rb == ri)
+            if forbidden[ri].contains(rj) || forbidden[rj].contains(ri) { continue }
+            let keep: Int
+            let drop: Int
+            if forbidden[ri].count > forbidden[rj].count
+                || (forbidden[ri].count == forbidden[rj].count
+                    && componentSize[ri] >= componentSize[rj]) {
+                keep = ri; drop = rj
+            } else {
+                keep = rj; drop = ri
             }
-            if conflict { continue }
-            parent[ri] = rj
-            hasNamed[rj] = hasNamed[rj] || hasNamed[ri]
+            parent[drop] = keep
+            componentSize[keep] += componentSize[drop]
+            hasNamed[keep] = hasNamed[keep] || hasNamed[drop]
+            let moved = forbidden[drop]
+            forbidden[drop].removeAll(keepingCapacity: false)
+            for neighbor in moved {
+                let neighborRoot = find(neighbor)
+                if neighborRoot == keep { continue }
+                forbidden[neighborRoot].remove(drop)
+                forbidden[neighborRoot].insert(keep)
+                forbidden[keep].insert(neighborRoot)
+            }
+            forbidden[keep].remove(drop)
+            forbidden[keep].remove(keep)
         }
 
         // Resolve each union group to a survivor: the named member (≤1 by the
@@ -1015,8 +1327,10 @@ public enum FaceClustering {
                     try Self.priorAnchors(from: db).map { ($0.id, $0) })
                 var absorbed = 0
                 for entry in byTargetSnapshot {
-                    // Skip the group if the survivor vanished mid-window.
-                    guard freshByID[entry.target] != nil else { continue }
+                    // Skip the group if the survivor vanished or became Unknown mid-window.
+                    guard let freshTarget = freshByID[entry.target], !freshTarget.isUnknown else {
+                        continue
+                    }
                     let target = entry.target
                     // Drop any source that became named / unknown / deleted since
                     // the read — it is no longer an eligible merge source.
@@ -1135,6 +1449,18 @@ public enum FaceClustering {
             !(suffix ?? "").isEmpty ||
             !(legacyName ?? "").isEmpty
         }
+    }
+
+    static func protectedOutsidePoolOwnerIDs(
+        priors: [PriorAnchor],
+        protectedOwnerIDs: Set<Int64>,
+        poolFaceIDs: Set<Int64>
+    ) -> Set<Int64> {
+        Set(priors.compactMap { prior in
+            guard protectedOwnerIDs.contains(prior.id) else { return nil }
+            return (prior.faceIDs.isEmpty || !prior.faceIDs.isSubset(of: poolFaceIDs))
+                ? prior.id : nil
+        })
     }
 
     /// L2-normalized mean of the embeddings indexed by `denseIdxs`.

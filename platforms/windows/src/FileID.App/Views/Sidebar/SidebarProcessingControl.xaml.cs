@@ -59,7 +59,8 @@ public sealed partial class SidebarProcessingControl : UserControl
                               or nameof(EngineClient.State)
                               or nameof(EngineClient.IsPaused)
                               or nameof(EngineClient.LastScanDuration)
-                              or nameof(EngineClient.LastError))
+                              or nameof(EngineClient.LastError)
+                              or nameof(EngineClient.GpuDeviceRemoved))
             {
                 DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
@@ -101,6 +102,7 @@ public sealed partial class SidebarProcessingControl : UserControl
     /// cleared in the outermost `finally`. Sync() reads this to keep the
     /// button disabled for the entire click-to-engine-ack window.</summary>
     private bool _startInFlight;
+    private bool _restartInFlight;
 
     private async void OnStartScanClicked(object sender, RoutedEventArgs e)
     {
@@ -125,6 +127,13 @@ public sealed partial class SidebarProcessingControl : UserControl
             {
                 await ShowAlertAsync("Pick a folder first",
                     "FileID needs a folder to scan. Use the picker at the top of the sidebar.");
+                return;
+            }
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Restart the engine",
+                    EngineClient.GpuRestartRequiredMessage +
+                    " Use Restart Engine here in the sidebar, or restart FileID.");
                 return;
             }
 
@@ -185,14 +194,8 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             try
             {
-                // Optimistic UI flip: switch into the scanning panel immediately
-                // so the user gets visible feedback on click. The engine's
-                // first PhaseChanged(Discovering) event echoes the same value
-                // (no-op); any later transition (Tagging, Failed, Completed)
-                // overwrites this. If StartScanAsync faults (engine not Ready),
-                // the catch block surfaces an alert and the failure pill takes
-                // over via the Sync() Failed branch.
-                EngineClient.Instance.SetOptimisticScanningPhase();
+                // StartScanAsync owns the optimistic phase and conditionally
+                // rolls it back only while this generation/attempt still owns it.
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay,
                     excludedPaths: vm.Settings.ExcludedFolders);
                 DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
@@ -200,9 +203,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             catch (Exception ex)
             {
                 DebugLog.Error("StartScan IPC failed: " + ex.Message);
-                await ShowAlertAsync("Scan didn't start",
-                    "FileID couldn't tell the engine to start. Engine status: "
-                    + EngineClient.Instance.State);
+                await ShowAlertAsync("Scan didn't start", ex.Message);
             }
         }
         catch (Exception ex)
@@ -218,6 +219,28 @@ public sealed partial class SidebarProcessingControl : UserControl
             // state without waiting for the next PropertyChanged.
             _startInFlight = false;
             try { Sync(); } catch { /* swallow */ }
+        }
+    }
+
+    private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)
+    {
+        if (_restartInFlight) return;
+        _restartInFlight = true;
+        Sync();
+        try
+        {
+            IdleStatusText.Text = "Restarting engine…";
+            await EngineClient.Instance.RestartAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Error($"GPU recovery restart failed ({ex.GetType().Name}).");
+            await ShowAlertAsync("Engine restart failed", ex.Message);
+        }
+        finally
+        {
+            _restartInFlight = false;
+            Sync();
         }
     }
 
@@ -365,6 +388,10 @@ public sealed partial class SidebarProcessingControl : UserControl
         bool isInFlight = phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
         bool isCompleted = phase is ScanPhase.Completed;
         bool isFailed = phase is ScanPhase.Failed;
+        bool gpuRecovery = EngineClient.Instance.GpuDeviceRemoved;
+        StartScanButton.Visibility = gpuRecovery ? Visibility.Collapsed : Visibility.Visible;
+        RestartEngineButton.Visibility = gpuRecovery ? Visibility.Visible : Visibility.Collapsed;
+        RestartEngineButton.IsEnabled = gpuRecovery && !_restartInFlight;
 
         // Reset the latch between scans so the next scan starts indeterminate
         // until its file count lands.
@@ -389,6 +416,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             // can't issue a second startScan while the first is in flight.
             StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                       && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                      && !EngineClient.Instance.GpuDeviceRemoved
                                       && !_startInFlight;
             return;
         }
@@ -414,6 +442,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         // spam-clicking issues N concurrent IPC calls.
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                  && !EngineClient.Instance.GpuDeviceRemoved
                                   && !_startInFlight;
         // when the click has been registered but the engine hasn't
         // yet emitted PhaseChanged(Discovering), show "Starting…" so the

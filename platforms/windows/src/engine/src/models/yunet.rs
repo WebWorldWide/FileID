@@ -20,7 +20,9 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, commit_chain_session};
+use super::runtime::{
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+};
 use super::scrfd::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
@@ -113,6 +115,7 @@ impl YuNet {
 
         let input = Tensor::from_array(chw).context("YuNet input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

@@ -15,11 +15,17 @@ SPEC.loader.exec_module(package_tools)
 
 class PackageToolsTests(unittest.TestCase):
     def test_staged_dll_privacy_failure_blocks_packaging(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            payload = Path(directory) / "runtime.dll"
-            payload.write_bytes(b"embedded https://ingest.sentry.io endpoint")
-            with self.assertRaises(SystemExit):
-                package_tools.scan_staged_payloads(MODULE_PATH.parents[1], [payload])
+        fixtures = (
+            b"embedded https://ingest.sentry.io endpoint",
+            "embedded HTTPS://INGEST.SENTRY.IO endpoint".encode("utf-16le"),
+            "embedded HTTPS://INGEST.SENTRY.IO endpoint".encode("utf-16be"),
+        )
+        for index, fixture in enumerate(fixtures):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                payload = Path(directory) / "runtime.dll"
+                payload.write_bytes(fixture)
+                with self.assertRaises(SystemExit):
+                    package_tools.scan_staged_payloads(MODULE_PATH.parents[1], [payload])
 
     def test_archive_payload_must_exactly_match_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

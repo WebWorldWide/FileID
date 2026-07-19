@@ -22,7 +22,9 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::tensor::Shape;
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, commit_chain_session};
+use super::runtime::{
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+};
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -293,6 +295,7 @@ impl RamPlusTagger {
         // — calling select_tags in the same scope is the E0502 the old
         // closure-locals workaround sidestepped; the block drops it first.
         let logits_vec: Vec<f32> = {
+            ensure_gpu_inference_alive()?;
             let outputs: SessionOutputs = self
                 .session
                 .run(vec![(input_name, SessionInputValue::from(input))])
@@ -348,6 +351,7 @@ impl RamPlusTagger {
         let input_name = self.input_name.clone();
         let num_tags = self.tags.len();
         let logits_vec: Vec<f32> = {
+            ensure_gpu_inference_alive()?;
             let outputs: SessionOutputs = self
                 .session
                 .run(vec![(input_name, SessionInputValue::from(input))])

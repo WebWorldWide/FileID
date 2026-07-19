@@ -17,6 +17,10 @@ use std::path::Path;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use fileid_engine::db::zero_byte::{
+    apply_validated_zero_byte_files, finish_zero_byte_mutation, validate_zero_byte_files,
+    ZeroByteObservation,
+};
 use fileid_engine::pipeline::discovery::FileKind;
 use rusqlite::{params, OptionalExtension as _};
 use walkdir::WalkDir;
@@ -51,6 +55,7 @@ ON CONFLICT(path_text) DO UPDATE SET
 RETURNING id";
 
 enum ScanRecord {
+    Zero(ZeroByteObservation),
     Seen {
         path_text: String,
         file_ref: Option<u64>,
@@ -122,11 +127,24 @@ fn commit_batch(
     conn: &mut rusqlite::Connection,
     batch: &mut Vec<ScanRecord>,
     scan_marker: f64,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, u64)> {
     if batch.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     }
+    let mut zero_byte_observations = Vec::new();
+    let mut regular_records = Vec::with_capacity(batch.len());
+    for record in batch.drain(..) {
+        match record {
+            ScanRecord::Zero(observation) => zero_byte_observations.push(observation),
+            record => regular_records.push(record),
+        }
+    }
+    let zero_byte_validation = validate_zero_byte_files(&zero_byte_observations);
+    let rejected_zero_bytes = zero_byte_validation.changed_since_observation;
     let tx = conn.transaction().context("begin scan batch")?;
+    let zero_byte_mutation =
+        apply_validated_zero_byte_files(&tx, &zero_byte_validation.observations)
+            .context("transition observed zero-byte files")?;
     let mut indexed = 0;
     let mut text_indexed = 0;
     {
@@ -167,8 +185,11 @@ fn commit_batch(
             .prepare("DELETE FROM text_embeddings WHERE file_id = ?1")
             .context("prepare text-embedding invalidation")?;
 
-        for record in batch.drain(..) {
+        for record in regular_records {
             match record {
+                ScanRecord::Zero(_) => {
+                    unreachable!("zero-byte records were partitioned before the transaction")
+                }
                 ScanRecord::Seen {
                     path_text,
                     file_ref,
@@ -248,7 +269,8 @@ fn commit_batch(
         }
     }
     tx.commit().context("commit scan batch")?;
-    Ok((indexed, text_indexed))
+    finish_zero_byte_mutation(zero_byte_mutation);
+    Ok((indexed, text_indexed, rejected_zero_bytes))
 }
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
@@ -324,23 +346,27 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         };
         let size = meta.len();
         if size == 0 {
-            // A present-but-empty file isn't catalogued (no content to
-            // hash/embed) — parity with the engine, which marks zero-byte files
-            // "seen" but never records them. Recording it as seen keeps any
-            // existing row's scanned_at current so the post-scan missing-rows
-            // sweep can't hide a file that is actually on disk (a no-op for a
-            // brand-new empty file, which has no row to update).
-            batch.push(ScanRecord::Seen {
-                path_text: canonical_path_text(path),
+            // New empty files remain unindexed. An exact-path existing row is
+            // transitioned to an inactive zero state by the shared engine helper,
+            // preserving its ID and user tags while clearing stale content facts.
+            batch.push(ScanRecord::Zero(ZeroByteObservation {
+                path: path.to_path_buf(),
                 file_ref: fileid_engine::platform::file_ref(path),
-            });
+            }));
             // Respect the same batch-flush bound as the main path so a tree of
             // mostly-empty files can't grow the batch without limit.
             if batch.len() >= DB_BATCH_SIZE {
                 drop(sel);
-                let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+                let (batch_indexed, batch_text_indexed, batch_raced) =
+                    commit_batch(&mut conn, &mut batch, now)?;
                 indexed += batch_indexed;
                 text_indexed += batch_text_indexed;
+                failed += batch_raced;
+                if batch_raced > 0 && warnings.len() < 5 {
+                    warnings.push(format!(
+                        "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+                    ));
+                }
                 sel = conn
                     .prepare(
                         "SELECT scanned_at, size_bytes, modified_at, file_ref \
@@ -435,9 +461,16 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
 
         if batch.len() >= DB_BATCH_SIZE {
             drop(sel);
-            let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+            let (batch_indexed, batch_text_indexed, batch_raced) =
+                commit_batch(&mut conn, &mut batch, now)?;
             indexed += batch_indexed;
             text_indexed += batch_text_indexed;
+            failed += batch_raced;
+            if batch_raced > 0 && warnings.len() < 5 {
+                warnings.push(format!(
+                    "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+                ));
+            }
             sel = conn
                 .prepare(
                     "SELECT scanned_at, size_bytes, modified_at, file_ref \
@@ -460,9 +493,16 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         }
     }
     drop(sel);
-    let (batch_indexed, batch_text_indexed) = commit_batch(&mut conn, &mut batch, now)?;
+    let (batch_indexed, batch_text_indexed, batch_raced) =
+        commit_batch(&mut conn, &mut batch, now)?;
     indexed += batch_indexed;
     text_indexed += batch_text_indexed;
+    failed += batch_raced;
+    if batch_raced > 0 && warnings.len() < 5 {
+        warnings.push(format!(
+            "{batch_raced} file(s) changed after zero-byte discovery; run the scan again"
+        ));
+    }
     if failed == 0 {
         soft_hide_missing_rows(&conn, &root_abs, now)?;
     }
@@ -623,6 +663,15 @@ mod tests {
         i64,
         i64,
     );
+    type ZeroDormantState = (
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<Vec<u8>>,
+        Option<String>,
+        i64,
+    );
 
     fn test_layout(name: &str) -> (PathBuf, PathBuf, Ctx) {
         let temp = std::env::temp_dir().join(format!(
@@ -774,6 +823,258 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_rescan_dormants_then_restores_same_row_without_stale_content() {
+        let (temp, root, ctx) = test_layout("zero-byte-lifecycle");
+        let path = root.join("report.txt");
+        std::fs::write(&path, "original report").unwrap();
+        let original_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        run(&ctx, &root, false).unwrap();
+
+        let original_id;
+        {
+            let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+            original_id = conn
+                .query_row(
+                    "SELECT id FROM files WHERE path_text = ?1",
+                    params![canonical_path_text(&path)],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            conn.execute(
+                "UPDATE files SET phash = 9, aesthetic = 0.5, has_faces = 1, has_text = 1, \
+                 camera_model = 'camera', location_lat = 1, location_lon = 2, content_hash = x'01', \
+                 vlm_description = 'stale caption', vlm_proposed_name = 'stale name', \
+                 vlm_model = 'stale model', vlm_analyzed_at = 4, text_stage_done = 1 WHERE id = ?1",
+                params![original_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tags(file_id, tag, source) VALUES \
+                 (?1, 'auto-tag', 'auto'), (?1, 'vlm-tag', 'vlm'), (?1, 'user-tag', 'user')",
+                params![original_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO persons(id, name, file_count, created_at) VALUES (8, 'Person', 1, 1)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO face_prints(id, file_id, person_id, print_data, bbox, face_quality) \
+                 VALUES (12, ?1, 8, x'00', '0,0,1,1', 0.8)",
+                params![original_id],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE persons SET representative_face_id = 12 WHERE id = 8",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ocr_text(file_id, text) VALUES (?1, 'stale OCR')",
+                params![original_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO clip_embeddings(file_id, embedding, model) VALUES (?1, x'00', 'clip')",
+                params![original_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO text_embeddings(file_id, embedding, model) VALUES (?1, x'00', 'text')",
+                params![original_id],
+            )
+            .unwrap();
+        }
+
+        std::fs::write(&path, b"").unwrap();
+        run(&ctx, &root, false).unwrap();
+        {
+            let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+            let state: ZeroDormantState = conn
+                .query_row(
+                    "SELECT id, size_bytes, failed, phash, content_hash, vlm_description, text_stage_done \
+                     FROM files WHERE path_text = ?1",
+                    params![canonical_path_text(&path)],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                )
+                .unwrap();
+            assert_eq!(state, (original_id, 0, 1, None, None, None, 0));
+            let tags: Vec<(String, String)> = conn
+                .prepare("SELECT tag, source FROM tags WHERE file_id = ?1 ORDER BY tag")
+                .unwrap()
+                .query_map(params![original_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(tags, vec![("user-tag".to_string(), "user".to_string())]);
+            for table in [
+                "face_prints",
+                "ocr_text",
+                "doc_text",
+                "clip_embeddings",
+                "text_embeddings",
+            ] {
+                let count: i64 = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE file_id = ?1"),
+                        params![original_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+            for (fts, term) in [("ocr_fts", "stale"), ("doc_fts", "original")] {
+                let hits: i64 = conn
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {fts} WHERE {fts} MATCH ?1"),
+                        [term],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(hits, 0, "{fts}");
+            }
+            let person: (i64, Option<i64>) = conn
+                .query_row(
+                    "SELECT file_count, representative_face_id FROM persons WHERE id = 8",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(person, (0, None));
+        }
+
+        std::fs::write(&path, "restored report").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let restored: (i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT f.id, f.size_bytes, f.failed, d.text FROM files f \
+                 JOIN doc_text d ON d.file_id = f.id WHERE f.path_text = ?1",
+                params![canonical_path_text(&path)],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            restored,
+            (original_id, 15, 0, "restored report".to_string())
+        );
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn zero_byte_growth_race_is_partial_and_preserves_the_active_row() {
+        let (temp, root, ctx) = test_layout("zero-byte-race");
+        let path = root.join("race.txt");
+        std::fs::write(&path, b"").unwrap();
+        let observed_ref = fileid_engine::platform::file_ref(&path);
+        let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        conn.execute(
+            "INSERT INTO files(path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES (?1, 1, 20, 1, 'doc', 'txt')",
+            params![canonical_path_text(&path)],
+        )
+        .unwrap();
+        std::fs::write(&path, "grew after discovery").unwrap();
+        let mut batch = vec![ScanRecord::Zero(ZeroByteObservation {
+            path: path.clone(),
+            file_ref: observed_ref,
+        })];
+        let result = commit_batch(&mut conn, &mut batch, 2.0).unwrap();
+        assert_eq!(result, (0, 0, 1));
+        let state: (i64, i64, f64) = conn
+            .query_row(
+                "SELECT size_bytes, failed, scanned_at FROM files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (20, 0, 1.0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn zero_and_regular_records_share_one_transaction() {
+        let (temp, root, ctx) = test_layout("zero-byte-atomic");
+        let zero = root.join("zero.txt");
+        let regular = root.join("regular.txt");
+        std::fs::write(&zero, b"").unwrap();
+        std::fs::write(&regular, "regular").unwrap();
+        let mut conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        conn.execute(
+            "INSERT INTO files(id, path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES (1, ?1, 1, 20, 1, 'doc', 'txt'), (2, ?2, 2, 7, 1, 'doc', 'txt')",
+            params![canonical_path_text(&zero), canonical_path_text(&regular)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags(file_id, tag, source) VALUES (1, 'old-auto', 'auto')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_regular_update BEFORE UPDATE ON files \
+             WHEN old.id = 2 BEGIN SELECT RAISE(ABORT, 'injected regular failure'); END;",
+        )
+        .unwrap();
+        let mut batch = vec![
+            ScanRecord::Zero(ZeroByteObservation {
+                path: zero.clone(),
+                file_ref: fileid_engine::platform::file_ref(&zero),
+            }),
+            ScanRecord::Seen {
+                path_text: canonical_path_text(&regular),
+                file_ref: fileid_engine::platform::file_ref(&regular),
+            },
+        ];
+        assert!(commit_batch(&mut conn, &mut batch, 2.0).is_err());
+        let zero_state: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT size_bytes, failed, (SELECT COUNT(*) FROM tags WHERE file_id = 1) \
+                 FROM files WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(zero_state, (20, 0, 1));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn zero_byte_observations_remain_bounded_across_batch_boundary() {
+        let (temp, root, ctx) = test_layout("zero-byte-batches");
+        for index in 0..=DB_BATCH_SIZE {
+            std::fs::write(root.join(format!("{index}.txt")), "content").unwrap();
+        }
+        run(&ctx, &root, false).unwrap();
+        for index in 0..=DB_BATCH_SIZE {
+            std::fs::write(root.join(format!("{index}.txt")), b"").unwrap();
+        }
+        run(&ctx, &root, false).unwrap();
+        let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
+        let state: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(CASE WHEN failed = 1 AND size_bytes = 0 THEN 1 ELSE 0 END), \
+                 SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END) FROM files",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (501, 501, 0));
+        drop(conn);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn completed_rescan_soft_hides_disappeared_rows() {
         let (temp, root, ctx) = test_layout("missing");
         let kept = root.join("kept.txt");
@@ -861,6 +1162,13 @@ mod tests {
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o000);
         std::fs::set_permissions(&path, permissions).unwrap();
+        if std::fs::read(&path).is_ok() {
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            std::fs::remove_dir_all(temp).unwrap();
+            return;
+        }
 
         let scan = run(&ctx, &root, true);
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();

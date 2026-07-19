@@ -136,6 +136,51 @@ public class WelcomeSheetModelSizeTests
     }
 }
 
+public class GenerationOwnedOperationSlotTests
+{
+    [Fact]
+    public void RetiringOneGenerationCannotReleaseItsReplacement()
+    {
+        var slot = new GenerationOwnedOperationSlot<object>();
+        Assert.True(slot.TryReserve(7, 11, new object(), out var first));
+        Assert.Same(first, slot.Current);
+        Assert.Same(first, slot.ReleaseGeneration(7));
+
+        Assert.True(slot.TryReserve(8, 12, new object(), out var replacement));
+        Assert.False(slot.Release(first));
+        Assert.Null(slot.ReleaseGeneration(7));
+        Assert.Same(replacement, slot.Current);
+        Assert.True(slot.Release(replacement));
+        Assert.Null(slot.Current);
+    }
+
+    [Fact]
+    public void SlotRejectsOverlapAndCarriesAttemptGenerationAndRevision()
+    {
+        var payload = new object();
+        var slot = new GenerationOwnedOperationSlot<object>();
+        Assert.True(slot.TryReserve(3, 19, payload, out var owner));
+        Assert.False(slot.TryReserve(3, 20, new object(), out _));
+        Assert.Equal(3, owner.Generation);
+        Assert.Equal(19, owner.Revision);
+        Assert.Same(payload, owner.Payload);
+        Assert.True(owner.AttemptId > 0);
+    }
+}
+
+public class EngineTerminalErrorRoutingTests
+{
+    [Fact]
+    public void MergeSuggestionWaiterRecognizesOnlyItsCommandError()
+    {
+        Assert.True(EngineClient.IsMergeSuggestionTerminalError(
+            new EngineError("find_merge_suggestions_failed", "failed", null)));
+        Assert.False(EngineClient.IsMergeSuggestionTerminalError(
+            new EngineError("db_unavailable", "other command", null)));
+        Assert.False(EngineClient.IsMergeSuggestionTerminalError(null));
+    }
+}
+
 public class ScanProgressPhaseTests
 {
     // ScanProgress is the DTO carrying engine→app scan state. The
@@ -630,6 +675,7 @@ public class EngineWarningClassificationTests
     [Theory]
     [InlineData("face_clustering_busy")]
     [InlineData("deep_analyze_already_running")]
+    [InlineData("scan_already_running")]
     [InlineData("rescan_no_changes")]
     [InlineData("stages_skipped_missing_models")]
     [InlineData("discovery_partial")]
@@ -651,6 +697,31 @@ public class EngineWarningClassificationTests
     public void FatalOrUnknownKinds_RouteToError(string? kind)
     {
         Assert.False(EngineClient.IsNonFatalWarningKind(kind));
+    }
+
+    [Fact]
+    public void GpuRecoveryPolicyBlocksGpuCommandsAndAllowsRepresentativeControlCommands()
+    {
+        FileID.IpcSchema.CommandPayload[] blocked =
+        [
+            new FileID.IpcSchema.StartScanCommand("C:\\Library", null, false, null),
+            new FileID.IpcSchema.DeepAnalyzeFileCommand(1, "qwen2_5_vl_7b"),
+            new FileID.IpcSchema.DeepAnalyzeFolderCommand("C:\\Library", "qwen2_5_vl_7b"),
+            new FileID.IpcSchema.DeepAnalyzeAllCommand("qwen2_5_vl_7b", true, false, true),
+            new FileID.IpcSchema.EmbedTextQueryCommand("family", "q1"),
+        ];
+        Assert.All(blocked, command => Assert.True(EngineClient.RequiresHealthyGpu(command)));
+
+        FileID.IpcSchema.CommandPayload[] allowed =
+        [
+            new FileID.IpcSchema.RequestStatusCommand(),
+            new FileID.IpcSchema.ShutdownCommand(),
+            new FileID.IpcSchema.CancelScanCommand(),
+            new FileID.IpcSchema.DeepAnalyzeCancelCommand(),
+            new FileID.IpcSchema.WipeLibraryCommand(),
+            new FileID.IpcSchema.EmbedImageQueryCommand(1, "q2"),
+        ];
+        Assert.All(allowed, command => Assert.False(EngineClient.RequiresHealthyGpu(command)));
     }
 }
 

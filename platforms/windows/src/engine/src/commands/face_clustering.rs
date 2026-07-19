@@ -4,17 +4,236 @@
 //! algorithm, and persists the resulting `persons` + `face_prints.person_id`
 //! assignments in one transaction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, FaceClusteringResult, IpcEvent, Wrap,
 };
-use crate::pipeline::face_clustering::{cluster, FaceRow};
+use crate::pipeline::face_clustering::{cluster, ClusterAnchor, ClusterAssignment, FaceRow};
+use rusqlite::OptionalExtension;
+
+fn resolve_verdict_face(
+    conn: &rusqlite::Connection,
+    legacy: Option<i64>,
+    file_id: Option<i64>,
+    bbox: Option<String>,
+) -> anyhow::Result<Option<i64>> {
+    if let (Some(file_id), Some(bbox)) = (file_id, bbox) {
+        let mut statement = conn.prepare(
+            "SELECT id FROM face_prints WHERE file_id = ?1 AND bbox = ?2 ORDER BY id LIMIT 2",
+        )?;
+        let ids = statement
+            .query_map(rusqlite::params![file_id, bbox], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        match ids.as_slice() {
+            [id] => return Ok(Some(*id)),
+            [_, _, ..] => anyhow::bail!("different-people verdict anchor is ambiguous"),
+            [] => {}
+        }
+    }
+    let Some(legacy) = legacy else {
+        return Ok(None);
+    };
+    conn.query_row(
+        "SELECT id FROM face_prints WHERE id = ?1",
+        [legacy],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+const MAX_DIFFERENT_VERDICTS: usize = 100_000;
+
+fn load_different_verdict_pairs(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<HashSet<(i64, i64)>> {
+    let mut statement = conn.prepare(
+        "SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b \
+         FROM face_verifications \
+         WHERE same_person = 0 \
+           AND ((face_a IS NOT NULL AND face_b IS NOT NULL) \
+                OR (file_a IS NOT NULL AND bbox_a IS NOT NULL \
+                    AND file_b IS NOT NULL AND bbox_b IS NOT NULL)) \
+         ORDER BY person_a ASC, person_b ASC \
+         LIMIT 100001",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.len() > MAX_DIFFERENT_VERDICTS {
+        anyhow::bail!("different-people verdict count exceeds the protected clustering limit");
+    }
+    let mut pairs = BTreeSet::new();
+    for (face_a, face_b, file_a, bbox_a, file_b, bbox_b) in rows {
+        let (Some(a), Some(b)) = (
+            resolve_verdict_face(conn, face_a, file_a, bbox_a)?,
+            resolve_verdict_face(conn, face_b, file_b, bbox_b)?,
+        ) else {
+            continue;
+        };
+        if a == b {
+            anyhow::bail!("different-people verdict resolves both anchors to one face");
+        }
+        pairs.insert(if a < b { (a, b) } else { (b, a) });
+    }
+    Ok(pairs.into_iter().collect())
+}
+
+fn validate_persist_plan(
+    conn: &rusqlite::Connection,
+    assignments: &[ClusterAssignment],
+    anchors: &[ClusterAnchor],
+) -> anyhow::Result<()> {
+    let mut anchor_by_cluster = HashMap::new();
+    let mut anchor_cluster_by_face = HashMap::new();
+    for anchor in anchors {
+        if anchor_by_cluster.insert(anchor.cluster_id, anchor).is_some()
+            || anchor_cluster_by_face
+                .insert(anchor.anchor_face_id, anchor.cluster_id)
+                .is_some()
+        {
+            anyhow::bail!("face clustering produced duplicate persistence anchors");
+        }
+    }
+    let mut seen_faces = HashSet::new();
+    let mut matched_anchors = HashSet::new();
+    let mut counts: HashMap<i32, u32> = HashMap::new();
+    for assignment in assignments {
+        if !seen_faces.insert(assignment.face_id)
+            || !anchor_by_cluster.contains_key(&assignment.cluster_id)
+        {
+            anyhow::bail!("face clustering persistence plan is stale or incomplete");
+        }
+        *counts.entry(assignment.cluster_id).or_default() += 1;
+        if anchor_cluster_by_face.get(&assignment.face_id) == Some(&assignment.cluster_id) {
+            matched_anchors.insert(assignment.face_id);
+        }
+    }
+    let mut current_count = 0i64;
+    for chunk in assignments.chunks(900) {
+        let placeholders = std::iter::repeat_n("?", chunk.len()).collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT COUNT(*) FROM face_prints WHERE id IN ({placeholders})");
+        current_count += conn.query_row(
+            &sql,
+            rusqlite::params_from_iter(chunk.iter().map(|assignment| assignment.face_id)),
+            |row| row.get::<_, i64>(0),
+        )?;
+    }
+    if current_count != assignments.len() as i64 {
+        anyhow::bail!("face clustering persistence plan references stale faces");
+    }
+    for anchor in anchors {
+        if counts.get(&anchor.cluster_id).copied().unwrap_or(0) != anchor.member_count
+            || !matched_anchors.contains(&anchor.anchor_face_id)
+        {
+            anyhow::bail!("face clustering persistence anchor does not match its members");
+        }
+    }
+    Ok(())
+}
+
+fn protected_owner_ids_to_preserve(
+    protected_owner_ids: &HashSet<i64>,
+    unknown_owner_ids: &HashSet<i64>,
+    pool_face_ids: &HashSet<i64>,
+    face_to_owner: &HashMap<i64, i64>,
+) -> HashSet<i64> {
+    let owners_with_faces: HashSet<i64> = face_to_owner.values().copied().collect();
+    let mut preserve = unknown_owner_ids.clone();
+    preserve.extend(
+        protected_owner_ids
+            .iter()
+            .copied()
+            .filter(|owner_id| !owners_with_faces.contains(owner_id)),
+    );
+    preserve.extend(face_to_owner.iter().filter_map(|(&face_id, &owner_id)| {
+        (protected_owner_ids.contains(&owner_id) && !pool_face_ids.contains(&face_id))
+            .then_some(owner_id)
+    }));
+    preserve
+}
+
+fn matched_pool_face_count(
+    assignments: &[ClusterAssignment],
+    cid_to_person: &HashMap<i32, i64>,
+    pool_face_ids: &HashSet<i64>,
+    preserved_pool_face_count: usize,
+) -> usize {
+    assignments
+        .iter()
+        .filter(|assignment| {
+            pool_face_ids.contains(&assignment.face_id)
+                && cid_to_person.contains_key(&assignment.cluster_id)
+        })
+        .count()
+        + preserved_pool_face_count
+}
+
+fn prior_identity_winners(
+    cluster_votes: &HashMap<i32, HashMap<i64, u32>>,
+    anchors: &[ClusterAnchor],
+    face_to_prior: &HashMap<i64, i64>,
+) -> HashMap<i64, i32> {
+    let anchor_owner_by_cluster: HashMap<i32, Option<i64>> = anchors
+        .iter()
+        .map(|anchor| {
+            (
+                anchor.cluster_id,
+                face_to_prior.get(&anchor.anchor_face_id).copied(),
+            )
+        })
+        .collect();
+    let mut winners: HashMap<i64, (i32, u32, bool)> = HashMap::new();
+    for (&cluster_id, votes) in cluster_votes {
+        let anchor_owner = anchor_owner_by_cluster
+            .get(&cluster_id)
+            .copied()
+            .flatten();
+        for (&prior_id, &count) in votes {
+            let candidate = (cluster_id, count, anchor_owner == Some(prior_id));
+            let replace = match winners.get(&prior_id) {
+                None => true,
+                Some(&(winner_cluster, winner_count, winner_anchor)) => {
+                    (count, candidate.2, std::cmp::Reverse(cluster_id))
+                        > (
+                            winner_count,
+                            winner_anchor,
+                            std::cmp::Reverse(winner_cluster),
+                        )
+                }
+            };
+            if replace {
+                winners.insert(prior_id, candidate);
+            }
+        }
+    }
+    winners
+        .into_iter()
+        .map(|(prior_id, winner)| (prior_id, winner.0))
+        .collect()
+}
+
+fn release_active_before_terminal(active: &AtomicBool) {
+    active.store(false, Ordering::Release);
+}
 
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    active: Arc<AtomicBool>,
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
@@ -40,13 +259,6 @@ pub(crate) async fn handle_run_face_clustering(
         }
 
         let mut faces: Vec<FaceRow> = Vec::new();
-        // (b) raw "different people" verdict pairs, loaded here so phase 2 can
-        // build that part of the blocked set without touching the DB. The NAME
-        // guard is NOT loaded here — it's re-derived in PHASE 3 from the
-        // under-lock identity snapshot (see audit C1-023 below), so a rename
-        // committed during the lock-free phase-2 window can't unblock a
-        // wrong-cluster auto-merge off a stale phase-1 name snapshot.
-        let verdict_pairs: Vec<(i64, i64)>;
         {
             let conn = db.lock();
 
@@ -112,67 +324,7 @@ pub(crate) async fn handle_run_face_clustering(
                 }
             }
 
-            // (b) Raw "different people" verdict pairs. Re-projected onto the faces'
-            // CURRENT clusters in phase 2. R3-15: resolve each anchor by its
-            // churn-stable (file_id, bbox) key — which a faces_evaluated re-scan
-            // preserves — to the face id that CURRENTLY occupies that slot, instead
-            // of the legacy face_a/face_b id that the re-scan's DELETE+INSERT churns.
-            // Falls back to the legacy id for pre-v17 rows / unresolvable keys; if
-            // neither resolves, the pair is dropped (guard (c) still backstops).
-            verdict_pairs = {
-                let mut vstmt = conn.prepare(
-                    "SELECT face_a, face_b, file_a, bbox_a, file_b, bbox_b \
-                     FROM face_verifications \
-                     WHERE same_person = 0 \
-                       AND ((face_a IS NOT NULL AND face_b IS NOT NULL) \
-                            OR (file_a IS NOT NULL AND bbox_a IS NOT NULL \
-                                AND file_b IS NOT NULL AND bbox_b IS NOT NULL))",
-                )?;
-                let raw = vstmt
-                    .query_map([], |r| {
-                        Ok((
-                            r.get::<_, Option<i64>>(0)?,
-                            r.get::<_, Option<i64>>(1)?,
-                            r.get::<_, Option<i64>>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                            r.get::<_, Option<i64>>(4)?,
-                            r.get::<_, Option<String>>(5)?,
-                        ))
-                    })?
-                    .filter_map(|r| r.ok())
-                    .collect::<Vec<_>>();
-                let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> Option<i64> {
-                    if let (Some(f), Some(b)) = (file, bbox) {
-                        if let Ok(id) = conn.query_row(
-                            "SELECT id FROM face_prints WHERE file_id = ?1 AND bbox = ?2 LIMIT 1",
-                            rusqlite::params![f, b],
-                            |r| r.get::<_, i64>(0),
-                        ) {
-                            return Some(id);
-                        }
-                    }
-                    match legacy {
-                        Some(l)
-                            if conn
-                                .query_row("SELECT 1 FROM face_prints WHERE id = ?1", [l], |_| Ok(()))
-                                .is_ok() =>
-                        {
-                            Some(l)
-                        }
-                        _ => None,
-                    }
-                };
-                raw.into_iter()
-                    .filter_map(|(fa, fb, file_a, bbox_a, file_b, bbox_b)| {
-                        match (resolve(fa, file_a, bbox_a), resolve(fb, file_b, bbox_b)) {
-                            (Some(a), Some(b)) => Some((a, b)),
-                            _ => None,
-                        }
-                    })
-                    .collect::<Vec<(i64, i64)>>()
-            };
-
-            // (c) The user-identity snapshot (prior names/title/is_unknown + the
+            // The user-identity snapshot (prior names/title/is_unknown + the
             // face->person map) is read in PHASE 3 under the persist lock — NOT
             // here — so a People-tab edit (rename / merge / mark-unknown) that
             // commits during the lock-free phase 2 is carried forward instead of
@@ -214,7 +366,7 @@ pub(crate) async fn handle_run_face_clustering(
         // from the identity snapshot read UNDER the persist lock, not from a
         // phase-1 snapshot that a rename during the lock-free window would
         // invalidate. (audit C1-023)
-        let (assignments, anchors) = cluster(&faces);
+        let (assignments, _raw_anchors) = cluster(&faces);
 
         // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
@@ -232,13 +384,16 @@ pub(crate) async fn handle_run_face_clustering(
         // of its member faces (ties broken toward the cluster's anchor face).
         // (audit S0)  [PriorIdentity is defined at the top of this closure.]
         let mut prior_by_person: HashMap<i64, PriorIdentity> = HashMap::new();
+        let mut face_to_owner: HashMap<i64, i64> = HashMap::new();
         let mut face_to_prior: HashMap<i64, i64> = HashMap::new();
         {
             let mut stmt = tx.prepare(
                 "SELECT id, name, title, first_name, middle_name, last_name, suffix, \
                         COALESCE(is_unknown, 0), created_at \
                  FROM persons \
-                 WHERE name IS NOT NULL OR COALESCE(is_unknown, 0) = 1",
+                 WHERE name IS NOT NULL OR title IS NOT NULL OR first_name IS NOT NULL \
+                    OR middle_name IS NOT NULL OR last_name IS NOT NULL OR suffix IS NOT NULL \
+                    OR COALESCE(is_unknown, 0) = 1",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
@@ -266,18 +421,83 @@ pub(crate) async fn handle_run_face_clustering(
             let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
             for row in rows {
                 let (face_id, pid) = row?;
+                face_to_owner.insert(face_id, pid);
                 if prior_by_person.contains_key(&pid) {
                     face_to_prior.insert(face_id, pid);
                 }
             }
         }
+        let verdict_pairs = load_different_verdict_pairs(&tx)?;
+        let verdict_owner_ids: HashSet<i64> = verdict_pairs
+            .iter()
+            .flat_map(|&(a, b)| [a, b])
+            .filter_map(|face_id| face_to_owner.get(&face_id).copied())
+            .collect();
+        let pool_face_ids: HashSet<i64> = faces.iter().map(|face| face.face_id).collect();
+        let protected_owner_ids: HashSet<i64> = prior_by_person
+            .keys()
+            .copied()
+            .chain(verdict_owner_ids.iter().copied())
+            .collect();
+        let unknown_owner_ids: HashSet<i64> = prior_by_person
+            .iter()
+            .filter_map(|(&person_id, identity)| (identity.is_unknown != 0).then_some(person_id))
+            .collect();
+        let preserve_owner_ids = protected_owner_ids_to_preserve(
+            &protected_owner_ids,
+            &unknown_owner_ids,
+            &pool_face_ids,
+            &face_to_owner,
+        );
+        let excluded_face_ids: HashSet<i64> = face_to_owner
+            .iter()
+            .filter_map(|(&face_id, &owner_id)| {
+                preserve_owner_ids.contains(&owner_id).then_some(face_id)
+            })
+            .collect();
+        // A different-people verdict endpoint owned by a preserved identity is
+        // dropped from the clustering pool (that owner is kept separate
+        // wholesale via the preserve set), so it never lands in the partitioned
+        // cluster set. Such a pair is already satisfied by preservation; keeping
+        // it would make the downstream blocked-set build and
+        // validate_protected_clusters fail closed on a face that legitimately
+        // left the partition (permanently breaking the People tab, since
+        // clustering re-fires after every scan). Retain only pairs whose BOTH
+        // endpoints remain in the active pool — a non-excluded endpoint is
+        // always re-assigned by partition, so cluster_of lookups below cannot
+        // miss. Mirrors FaceClustering.swift's tolerant validate.
+        let verdict_pairs: HashSet<(i64, i64)> = verdict_pairs
+            .into_iter()
+            .filter(|&(a, b)| {
+                !excluded_face_ids.contains(&a) && !excluded_face_ids.contains(&b)
+            })
+            .collect();
+        face_to_prior.retain(|_, owner_id| !preserve_owner_ids.contains(owner_id));
+        let bucket_owner_by_face: HashMap<i64, i64> = face_to_owner
+            .iter()
+            .filter_map(|(&face_id, &owner_id)| {
+                (!preserve_owner_ids.contains(&owner_id)
+                    && (prior_by_person.contains_key(&owner_id)
+                        || verdict_owner_ids.contains(&owner_id)))
+                .then_some((face_id, owner_id))
+            })
+            .collect();
+        let (assignments, anchors) =
+            crate::pipeline::face_clustering::partition_protected_clusters_excluding(
+                &faces,
+                assignments,
+                &bucket_owner_by_face,
+                &verdict_pairs,
+                &excluded_face_ids,
+            );
 
         // Auto-consolidate near-certain duplicate clusters the over-split-safe
         // clusterer left fragmented (the "WAY too many similar faces" symptom),
         // RIGHT HERE under the persist lock — not in the lock-free phase 2 — so
         // the verification-aware blocked set is built from the same under-lock
-        // snapshot the persist below uses. Two blocked-pair sources keep a
-        // confirmed split from being silently re-merged:
+        // snapshot the persist below uses. Protected prior owners and explicit
+        // different-people anchors were partitioned before this pass and remain
+        // transitive cannot-links during consolidation.
         let (assignments, anchors) = {
             let threshold = crate::pipeline::face_clustering::automerge_threshold();
             let cluster_of: HashMap<i64, i32> =
@@ -285,65 +505,38 @@ pub(crate) async fn handle_run_face_clustering(
             let mut blocked: std::collections::HashSet<(i32, i32)> =
                 std::collections::HashSet::new();
 
-            // (a) Explicit "different people" verdicts, re-projected onto the
-            // faces' CURRENT clusters. Precise, but the link rides face_prints.id,
-            // which a faces_evaluated re-scan churns (DELETE+INSERT) — after which
-            // a stored verdict's faces no longer resolve. Guard (b) backstops that.
-            // Reads the pre-loaded `verdict_pairs` (phase 1), not the DB.
-            for &(fa, fb) in &verdict_pairs {
-                if let (Some(&ca), Some(&cb)) = (cluster_of.get(&fa), cluster_of.get(&fb)) {
-                    if ca != cb {
-                        blocked.insert(if ca < cb { (ca, cb) } else { (cb, ca) });
-                    }
+            for &(face_a, face_b) in &verdict_pairs {
+                let (Some(&cluster_a), Some(&cluster_b)) =
+                    (cluster_of.get(&face_a), cluster_of.get(&face_b))
+                else {
+                    anyhow::bail!("different-people verdict endpoint left the protected partition");
+                };
+                if cluster_a == cluster_b {
+                    anyhow::bail!("different-people verdict collapsed before consolidation");
                 }
+                blocked.insert(if cluster_a < cluster_b {
+                    (cluster_a, cluster_b)
+                } else {
+                    (cluster_b, cluster_a)
+                });
             }
-
-            // (b) Never auto-merge two clusters carrying DIFFERENT user-assigned
-            // names. The face→name mapping is RE-DERIVED here from the under-lock
-            // phase-3 identity snapshot (`face_to_prior` + `prior_by_person`),
-            // exactly like the S0 identity carry-forward — NOT from a phase-1
-            // `name_rows` capture. A rename committed during the lock-free phase-2
-            // window (it had to take this same writer lock) is therefore reflected
-            // in the guard, so it can never unblock a wrong-cluster auto-merge off
-            // a stale name. Same-named fragments and named+unnamed pairs still
-            // merge (the intended consolidation). (audit C1-023)
-            let face_name: HashMap<i64, String> = face_to_prior
-                .iter()
-                .filter_map(|(&fid, &pid)| {
-                    prior_by_person
-                        .get(&pid)
-                        .and_then(|p| p.name.clone())
-                        .map(|name| (fid, name))
-                })
-                .collect();
-            for pair in
-                crate::pipeline::face_clustering::name_blocked_pairs(&face_name, &cluster_of)
-            {
-                blocked.insert(pair);
-            }
-
-            // (c) Never fold a user-marked UNKNOWN cluster into a different prior
-            // person. mark-as-unknown nulls the name, so guard (b) is blind to it;
-            // without this the unknown cluster consolidates into a named/other
-            // person and the majority-vote persist (below) can overwrite a
-            // user-assigned name with NULL. Keyed on is_unknown=1 (not name=NULL),
-            // so untouched auto-clustered persons still consolidate normally. (R3-03)
-            let unknown_persons: std::collections::HashSet<i64> = prior_by_person
-                .iter()
-                .filter_map(|(&pid, p)| (p.is_unknown == 1).then_some(pid))
-                .collect();
-            for pair in crate::pipeline::face_clustering::unknown_blocked_pairs(
-                &face_to_prior,
-                &unknown_persons,
-                &cluster_of,
-            ) {
-                blocked.insert(pair);
-            }
+            let protected_owner_by_cluster =
+                crate::pipeline::face_clustering::protected_owner_by_cluster(
+                    &face_to_prior,
+                    &cluster_of,
+                )
+                .map_err(anyhow::Error::msg)?;
 
             let before = anchors.len();
-            let (a, an) = crate::pipeline::face_clustering::consolidate(
-                &faces, assignments, anchors, &blocked, threshold,
-            );
+            let (a, an) =
+                crate::pipeline::face_clustering::consolidate_with_protected_owners(
+                    &faces,
+                    assignments,
+                    anchors,
+                    &blocked,
+                    &protected_owner_by_cluster,
+                    threshold,
+                );
             if an.len() != before {
                 tracing::info!(
                     before,
@@ -358,12 +551,27 @@ pub(crate) async fn handle_run_face_clustering(
             // (the over-split the People tab shows). Pure removal: never merges
             // identities; suppressed faces fall through to person_id = NULL and
             // stay candidates. Mirrors FaceClustering.swift. (face-quality gate)
+            let protected_faces: HashSet<i64> = bucket_owner_by_face
+                .keys()
+                .copied()
+                .chain(verdict_pairs.iter().flat_map(|&(a, b)| [a, b]))
+                .collect();
+            let always_keep = crate::pipeline::face_clustering::protected_cluster_ids(
+                &a,
+                &protected_faces,
+            );
             let min_size = crate::pipeline::face_clustering::min_cluster_size();
             let q_floor = crate::pipeline::face_clustering::solo_quality_floor();
             let before_supp = an.len();
-            let (a, an) = crate::pipeline::face_clustering::suppress_low_quality_micro_clusters(
-                &faces, a, an, min_size, q_floor,
-            );
+            let (a, an) =
+                crate::pipeline::face_clustering::suppress_low_quality_micro_clusters_with_keep(
+                    &faces,
+                    a,
+                    an,
+                    min_size,
+                    q_floor,
+                    &always_keep,
+                );
             if an.len() != before_supp {
                 tracing::info!(
                     before = before_supp,
@@ -374,13 +582,44 @@ pub(crate) async fn handle_run_face_clustering(
                     "[CLUSTER] suppressed low-quality micro-clusters"
                 );
             }
+            crate::pipeline::face_clustering::validate_protected_clusters(
+                &a,
+                &face_to_prior,
+                &verdict_pairs,
+            )
+            .map_err(anyhow::Error::msg)?;
             (a, an)
         };
 
-        // Persist clusters: clear existing person_id assignments + persons,
-        // re-create one persons row per anchor, point face_prints at it.
-        tx.execute("UPDATE face_prints SET person_id = NULL", [])?;
-        tx.execute("DELETE FROM persons", [])?;
+        validate_persist_plan(&tx, &assignments, &anchors)?;
+        let preserved_person_count = preserve_owner_ids.len();
+        let preserved_pool_face_count = faces
+            .iter()
+            .filter(|face| excluded_face_ids.contains(&face.face_id))
+            .count();
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS face_cluster_preserve (id INTEGER PRIMARY KEY);\
+             DELETE FROM face_cluster_preserve;",
+        )?;
+        {
+            let mut preserve = tx.prepare("INSERT INTO face_cluster_preserve(id) VALUES (?1)")?;
+            for person_id in &preserve_owner_ids {
+                preserve.execute([person_id])?;
+            }
+        }
+
+        // Persist clusters: clear/re-create only identities that are fully
+        // represented in this clustering pool. Unknown identities and protected
+        // identities with any out-of-pool face remain byte-for-byte intact.
+        tx.execute(
+            "UPDATE face_prints SET person_id = NULL \
+             WHERE person_id IS NULL OR person_id NOT IN (SELECT id FROM face_cluster_preserve)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM persons WHERE id NOT IN (SELECT id FROM face_cluster_preserve)",
+            [],
+        )?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -399,6 +638,13 @@ pub(crate) async fn handle_run_face_clustering(
             }
         }
 
+        // One prior identity may span multiple new clusters when an explicit
+        // different-person verdict separates two of its old faces. Carry that
+        // identity to exactly one deterministic winner; duplicating a name or
+        // Unknown marker would manufacture a second user identity.
+        let prior_winner_cluster =
+            prior_identity_winners(&cluster_votes, &anchors, &face_to_prior);
+
         // Map cluster_id (1-based) → DB person row id.
         let mut cid_to_person: HashMap<i32, i64> = HashMap::new();
         for anchor in &anchors {
@@ -413,6 +659,10 @@ pub(crate) async fn handle_run_face_clustering(
                     (count, Some(pid) == anchor_owner, std::cmp::Reverse(pid))
                 };
                 for (&pid, &count) in votes {
+                    if prior_winner_cluster.get(&pid).copied() != Some(anchor.cluster_id)
+                    {
+                        continue;
+                    }
                     let better = match best {
                         None => true,
                         Some((bpid, bcount)) => key(pid, count) > key(bpid, bcount),
@@ -454,17 +704,20 @@ pub(crate) async fn handle_run_face_clustering(
             }
         }
         drop(update);
+        tx.execute("DROP TABLE face_cluster_preserve", [])?;
         tx.commit()?;
 
         // Faces that stayed person_id=NULL — either they never clustered, or their
         // micro-cluster was suppressed (below min-size / quality). = loaded faces
         // minus those assigned to a promoted person cluster.
-        let matched = assignments
-            .iter()
-            .filter(|a| cid_to_person.contains_key(&a.cluster_id))
-            .count();
+        let matched = matched_pool_face_count(
+            &assignments,
+            &cid_to_person,
+            &pool_face_ids,
+            preserved_pool_face_count,
+        );
         Ok(FaceClusteringResult {
-            person_count: anchors.len() as u32,
+            person_count: (anchors.len() + preserved_person_count) as u32,
             face_count,
             unmatched_faces: face_count.saturating_sub(matched as u64),
             duration_seconds: started.elapsed().as_secs_f64(),
@@ -472,6 +725,7 @@ pub(crate) async fn handle_run_face_clustering(
     })
     .await;
 
+    release_active_before_terminal(&active);
     match result {
         Ok(Ok(r)) => {
             sink.send(IpcEvent::now(EventPayload::FaceClusteringComplete(
@@ -504,5 +758,213 @@ pub(crate) async fn handle_run_face_clustering(
             }))))
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_publication_releases_single_flight_first() {
+        let active = AtomicBool::new(true);
+        release_active_before_terminal(&active);
+        assert!(!active.load(Ordering::Acquire));
+    }
+
+    fn verdict_db() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE face_prints (id INTEGER PRIMARY KEY, file_id INTEGER, bbox TEXT);\
+                 CREATE TABLE face_verifications (\
+                    person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,\
+                    face_a INTEGER, face_b INTEGER, same_person INTEGER,\
+                    file_a INTEGER, bbox_a TEXT, file_b INTEGER, bbox_b TEXT,\
+                    PRIMARY KEY(person_a, person_b)\
+                 );",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn different_verdict_resolves_fresh_stable_anchors() {
+        let connection = verdict_db();
+        connection
+            .execute_batch(
+                "INSERT INTO face_prints(id, file_id, bbox) VALUES\
+                    (10, 1, 'a'), (20, 2, 'b');\
+                 INSERT INTO face_verifications(\
+                    person_a, person_b, face_a, face_b, same_person,\
+                    file_a, bbox_a, file_b, bbox_b\
+                 ) VALUES (100, 200, 1, 2, 0, 1, 'a', 2, 'b');",
+            )
+            .unwrap();
+        let pairs = load_different_verdict_pairs(&connection).unwrap();
+        assert_eq!(pairs, [(10, 20)].into_iter().collect());
+    }
+
+    #[test]
+    fn verdict_limit_fails_closed_before_resolution_work() {
+        let mut connection = verdict_db();
+        connection
+            .execute_batch("INSERT INTO face_prints(id, file_id, bbox) VALUES (1, 1, 'a'), (2, 2, 'b')")
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO face_verifications(\
+                        person_a, person_b, face_a, face_b, same_person\
+                     ) VALUES (?1, ?2, 1, 2, 0)",
+                )
+                .unwrap();
+            for index in 0..=MAX_DIFFERENT_VERDICTS {
+                insert
+                    .execute(rusqlite::params![index as i64, index as i64 + 200_000])
+                    .unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+        assert!(load_different_verdict_pairs(&connection).is_err());
+    }
+
+    #[test]
+    fn production_verdict_schema_without_rows_is_accepted() {
+        let connection = verdict_db();
+        assert!(load_different_verdict_pairs(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn protected_owner_outside_pool_or_without_faces_is_preserved() {
+        let protected = HashSet::from([10, 20, 30]);
+        let unknown = HashSet::from([40]);
+        let pool = HashSet::from([1, 3]);
+        let face_to_owner = HashMap::from([(1, 10), (2, 20), (3, 40)]);
+        assert_eq!(
+            protected_owner_ids_to_preserve(&protected, &unknown, &pool, &face_to_owner),
+            HashSet::from([20, 30, 40])
+        );
+    }
+
+    #[test]
+    fn one_prior_identity_has_one_deterministic_inheritance_winner() {
+        let votes = HashMap::from([
+            (7, HashMap::from([(42, 1)])),
+            (3, HashMap::from([(42, 1)])),
+        ]);
+        let anchors = vec![
+            ClusterAnchor {
+                cluster_id: 7,
+                anchor_face_id: 70,
+                member_count: 1,
+            },
+            ClusterAnchor {
+                cluster_id: 3,
+                anchor_face_id: 30,
+                member_count: 1,
+            },
+        ];
+        let face_to_prior = HashMap::from([(70, 42), (30, 42)]);
+        assert_eq!(
+            prior_identity_winners(&votes, &anchors, &face_to_prior),
+            HashMap::from([(42, 3)])
+        );
+    }
+
+    #[test]
+    fn matched_count_ignores_out_of_pool_verdict_singletons() {
+        let assignments = vec![
+            ClusterAssignment { face_id: 1, cluster_id: 1 },
+            ClusterAssignment { face_id: 99, cluster_id: 2 },
+        ];
+        assert_eq!(
+            matched_pool_face_count(
+                &assignments,
+                &HashMap::from([(1, 10), (2, 20)]),
+                &HashSet::from([1, 2]),
+                1,
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn destructive_persistence_sql_rolls_back_atomically() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;\
+                 CREATE TABLE persons (id INTEGER PRIMARY KEY);\
+                 CREATE TABLE face_prints (\
+                    id INTEGER PRIMARY KEY,\
+                    person_id INTEGER REFERENCES persons(id)\
+                 );\
+                 INSERT INTO persons(id) VALUES (1), (2);\
+                 INSERT INTO face_prints(id, person_id) VALUES (10, 1), (20, 2);",
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch(
+                "CREATE TEMP TABLE face_cluster_preserve (id INTEGER PRIMARY KEY);\
+                 INSERT INTO face_cluster_preserve(id) VALUES (1);\
+                 UPDATE face_prints SET person_id = NULL \
+                    WHERE person_id NOT IN (SELECT id FROM face_cluster_preserve);\
+                 DELETE FROM persons WHERE id NOT IN (SELECT id FROM face_cluster_preserve);",
+            )
+            .unwrap();
+        transaction.rollback().unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM face_prints WHERE person_id IS NOT NULL",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn persistence_plan_rejects_missing_anchor_members() {
+        let connection = verdict_db();
+        connection
+            .execute("INSERT INTO face_prints(id, file_id, bbox) VALUES (10, 1, 'a')", [])
+            .unwrap();
+        let assignments = vec![ClusterAssignment {
+            face_id: 10,
+            cluster_id: 1,
+        }];
+        let anchors = vec![ClusterAnchor {
+            cluster_id: 1,
+            anchor_face_id: 11,
+            member_count: 1,
+        }];
+        assert!(validate_persist_plan(&connection, &assignments, &anchors).is_err());
+    }
+
+    #[test]
+    fn ambiguous_stable_verdict_anchor_fails_closed() {
+        let connection = verdict_db();
+        connection
+            .execute_batch(
+                "INSERT INTO face_prints(id, file_id, bbox) VALUES\
+                    (10, 1, 'a'), (11, 1, 'a'), (20, 2, 'b');\
+                 INSERT INTO face_verifications(\
+                    person_a, person_b, face_a, face_b, same_person,\
+                    file_a, bbox_a, file_b, bbox_b\
+                 ) VALUES (100, 200, 10, 20, 0, 1, 'a', 2, 'b');",
+            )
+            .unwrap();
+        assert!(load_different_verdict_pairs(&connection).is_err());
     }
 }

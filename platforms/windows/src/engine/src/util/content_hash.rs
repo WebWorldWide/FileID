@@ -51,8 +51,30 @@ pub struct ExactDuplicateGrouping {
     pub skipped: usize,
 }
 
+pub(crate) struct ExactFileHash {
+    pub(crate) hash: [u8; 32],
+    pub(crate) identity: crate::platform::FileIdentity,
+    _file: std::fs::File,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ExactFileLock {
+    None,
+    DenyWrite,
+    DenyMutation,
+}
+
 pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
-    exact_file_sha256_until(path, expected_size, || false)
+    exact_file_sha256_until_with_identity(path, expected_size, || false, ExactFileLock::None)
+        .map(|proof| proof.hash)
+}
+
+pub(crate) fn exact_file_sha256_guard(
+    path: &Path,
+    expected_size: u64,
+    lock: ExactFileLock,
+) -> std::io::Result<ExactFileHash> {
+    exact_file_sha256_until_with_identity(path, expected_size, || false, lock)
 }
 
 fn exact_file_sha256_until(
@@ -60,7 +82,41 @@ fn exact_file_sha256_until(
     expected_size: u64,
     should_cancel: impl Fn() -> bool,
 ) -> std::io::Result<[u8; 32]> {
-    let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
+    exact_file_sha256_until_with_identity(
+        path,
+        expected_size,
+        should_cancel,
+        ExactFileLock::None,
+    )
+    .map(|proof| proof.hash)
+}
+
+fn exact_file_sha256_until_with_identity(
+    path: &Path,
+    expected_size: u64,
+    should_cancel: impl Fn() -> bool,
+    lock: ExactFileLock,
+) -> std::io::Result<ExactFileHash> {
+    let extended = super::path_safety::to_extended_length(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        match lock {
+            ExactFileLock::None => {}
+            ExactFileLock::DenyWrite => {
+                options.share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0);
+            }
+            ExactFileLock::DenyMutation => {
+                options.share_mode(FILE_SHARE_READ.0);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = lock;
+    let mut file = options.open(extended)?;
     let before = file.metadata()?;
     if !before.is_file() || before.len() != expected_size {
         return Err(std::io::Error::new(
@@ -68,6 +124,12 @@ fn exact_file_sha256_until(
             "file type or size changed before exact hashing",
         ));
     }
+    let before_identity = crate::platform::file_identity_from_file(&file).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "could not capture exact file handle identity",
+        )
+    })?;
     let mut sha = sha2::Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     loop {
@@ -90,9 +152,25 @@ fn exact_file_sha256_until(
             "file type or size changed during exact hashing",
         ));
     }
+    let after_identity = crate::platform::file_identity_from_file(&file).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "could not recapture exact file handle identity",
+        )
+    })?;
+    if after_identity != before_identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file handle identity changed during exact hashing",
+        ));
+    }
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&sha.finalize());
-    Ok(hash)
+    Ok(ExactFileHash {
+        hash,
+        identity: before_identity,
+        _file: file,
+    })
 }
 
 pub fn group_exact_duplicates(

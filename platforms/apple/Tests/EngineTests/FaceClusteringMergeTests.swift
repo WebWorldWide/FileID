@@ -64,6 +64,155 @@ struct FaceClusteringMergeTests {
         try await db.pool.read { d in Set(try Int64.fetchAll(d, sql: "SELECT id FROM persons")) }
     }
 
+    @Test("raw bridge cannot fuse two protected identities before persistence")
+    func rawNamedBridgePartition() throws {
+        let raw = [7: [0, 1, 2]]
+        let denseToFaceID: [Int64] = [1, 2, 3]
+        let owners: [Int64: Int64] = [1: 10, 3: 20]
+        let partition = FaceClustering.partitionProtectedClusters(
+            raw,
+            denseToFaceID: denseToFaceID,
+            bucketOwnerByFaceID: owners,
+            differentPairs: [],
+            excludedFaceIDs: []
+        )
+        try FaceClustering.validateProtectedClusters(
+            partition.clusters,
+            denseToFaceID: denseToFaceID,
+            identityOwnerByFaceID: owners,
+            differentPairs: []
+        )
+        let clusterByFace = Dictionary(uniqueKeysWithValues: partition.clusters.flatMap {
+            entry in entry.value.map { (denseToFaceID[$0], entry.key) }
+        })
+        #expect(clusterByFace[1] != clusterByFace[3])
+        #expect(partition.clusters.values.flatMap { $0 }.count == 3)
+    }
+
+    @Test("raw bridge cannot collapse an explicit different-people pair")
+    func rawVerdictBridgePartition() throws {
+        let raw = [0: [0, 1, 2]]
+        let denseToFaceID: [Int64] = [11, 12, 13]
+        let pair = FaceClustering.ProtectedFacePair(11, 13)
+        let partition = FaceClustering.partitionProtectedClusters(
+            raw,
+            denseToFaceID: denseToFaceID,
+            bucketOwnerByFaceID: [:],
+            differentPairs: [pair],
+            excludedFaceIDs: []
+        )
+        try FaceClustering.validateProtectedClusters(
+            partition.clusters,
+            denseToFaceID: denseToFaceID,
+            identityOwnerByFaceID: [:],
+            differentPairs: [pair]
+        )
+        let clusterByFace = Dictionary(uniqueKeysWithValues: partition.clusters.flatMap {
+            entry in entry.value.map { (denseToFaceID[$0], entry.key) }
+        })
+        #expect(clusterByFace[11] != clusterByFace[13])
+        #expect(partition.protectedFaceIDs == Set([11, 13]))
+    }
+
+    @Test("protected micro-clusters bypass junk suppression")
+    func protectedSuppression() {
+        let result = FaceClustering.suppressLowQualityClusters(
+            [1: [0], 2: [1]],
+            denseToFaceID: [1, 2],
+            faceQualityByID: [1: 0.01, 2: 0.01],
+            minSize: 3,
+            qualityFloor: 0.40,
+            alwaysKeep: [1]
+        )
+        #expect(result.kept[1] == [0])
+        #expect(result.kept[2] == nil)
+    }
+
+    @Test("protected identity without current faces is preserved")
+    func emptyProtectedIdentityIsPreserved() {
+        let prior = FaceClustering.PriorAnchor(
+            id: 42,
+            centroid: nil,
+            anchorRadius: nil,
+            faceIDs: [],
+            title: nil,
+            firstName: "Alice",
+            middleName: nil,
+            lastName: nil,
+            suffix: nil,
+            legacyName: nil,
+            isUnknown: false
+        )
+        #expect(FaceClustering.protectedOutsidePoolOwnerIDs(
+            priors: [prior],
+            protectedOwnerIDs: [42],
+            poolFaceIDs: []
+        ) == Set([42]))
+    }
+
+    @Test("stale persistence members fail before destructive SQL")
+    func stalePersistencePlanFails() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (_, faceIDs) = try await insertPerson(db, embedding: l2norm([1, 0, 0]))
+        try await db.pool.write { database in
+            try FaceClustering.validatePersistPlan(
+                from: database,
+                clusterFaceIDs: [faceIDs],
+                representativeFaceIDs: [faceIDs[0]]
+            )
+            try database.execute(sql: "DELETE FROM face_prints WHERE id = ?", arguments: [faceIDs[0]])
+            #expect(throws: FaceClustering.FaceProtectionError.self) {
+                try FaceClustering.validatePersistPlan(
+                    from: database,
+                    clusterFaceIDs: [faceIDs],
+                    representativeFaceIDs: [faceIDs[0]]
+                )
+            }
+        }
+    }
+
+    @Test("preserved persons consume the hard person cap")
+    func preservedPersonsConsumeCap() throws {
+        let capped = try FaceClustering.capClusters(
+            [1: [0, 1], 2: [2]],
+            protectedClusterIDs: [2],
+            preservedPersonCount: 2,
+            maxPersons: 3
+        )
+        #expect(Set(capped.kept.keys) == Set([2]))
+        #expect(capped.truncatedFaces == 2)
+        #expect(capped.kept.count + 2 == 3)
+    }
+
+    @Test("phase-zero unknown faces do not consume the eligible window")
+    func unknownFacesDoNotStarveWindow() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (_, unknownFaces) = try await insertPerson(
+            db, isUnknown: true, embedding: l2norm([1, 0, 0])
+        )
+        let (_, eligibleFaces) = try await insertPerson(db, embedding: l2norm([0, 1, 0]))
+        try await db.pool.write { database in
+            try database.execute(sql: "UPDATE persons SET is_unknown = 0")
+        }
+        let loaded = try await db.pool.read { database in
+            try FaceClustering.loadClusteringFaceRows(
+                from: database,
+                phaseZeroUnknownFaceIDs: Set(unknownFaces),
+                minQuality: 0,
+                limit: 1
+            )
+        }
+        #expect(loaded.rows.map(\.id) == eligibleFaces)
+        #expect(!loaded.overflowed)
+    }
+
+    @Test("no-work clustering result can report preserved persons")
+    func noWorkPersonCount() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        try await insertPerson(db, isUnknown: true, embedding: l2norm([1, 0, 0]))
+        #expect(await FaceClustering.currentPersonCount(database: db) == 1)
+    }
+
     // F-C3-003 — an is_unknown person is excluded from auto-merge entirely; the
     // "don't identify these" verdict is never overwritten by a cosine match.
     @Test("an is_unknown person is never auto-merged")
@@ -100,6 +249,10 @@ struct FaceClusteringMergeTests {
                 VALUES (?, ?, 0, 0.9, 'test', ?, ?, ?)
                 """, arguments: [a, b, Date().timeIntervalSince1970, fa[0], fb[0]])
         }
+        let resolved = try await db.pool.read { d in
+            try FaceClustering.differentFacePairs(from: d)
+        }
+        #expect(resolved == Set([FaceClustering.ProtectedFacePair(fa[0], fb[0])]))
         let merged = await FaceClustering.tightPairAutoMerge(database: db)
         #expect(merged == 0, "the user-refused pair must not be force-merged")
         let ids = try await personIDs(db)

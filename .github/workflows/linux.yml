@@ -9,6 +9,8 @@ on:
       - 'platforms/tui/**'
       - 'platforms/windows/src/engine/**'
       - 'shared/ipc-schema/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/linux.yml'
   pull_request:
     paths:
@@ -17,6 +19,8 @@ on:
       - 'platforms/tui/**'
       - 'platforms/windows/src/engine/**'
       - 'shared/ipc-schema/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/linux.yml'
   workflow_dispatch:
 
@@ -102,53 +106,11 @@ jobs:
           size_mb=$(du -m "$bin" | cut -f1)
           echo "$bin OK (${size_mb} MB)"
 
-      # Privacy gate: the shipped engine binary must NOT contain telemetry SDK
-      # strings. Parity with macos.yml + windows-engine.yml — the forbidden list
-      # MUST stay in sync across all workflows + publish-bundle.ps1. Failing this
-      # is a release blocker; no exception.
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          forbidden=(
-            "sentry.io"
-            "io.sentry"
-            "applicationinsights"
-            "applicationinsights.azure.com"
-            "googletagmanager"
-            "google-analytics.com"
-            "segment.io"
-            "segment.com"
-            "mixpanel.com"
-            "amplitude.com"
-            "posthog.com"
-            "datadoghq"
-            "bugsnag"
-            "rollbar.com"
-            "honeycomb.io"
-            "newrelic.com"
-            "raygun.io"
-            "firebase"
-            "firebaseio.com"
-            "appcenter.ms"
-            "in.appcenter.ms"
-            "crashpad"
-            "breakpad"
-          )
-          bin="target/release/FileIDEngine"
-          hits=()
-          for needle in "${forbidden[@]}"; do
-            # `strings -a` extracts printable ASCII + UTF-16 runs; covers Rust
-            # literal pools and ELF .rodata sections.
-            if strings -a "$bin" | grep -q -F "$needle"; then
-              hits+=("$bin:$needle")
-            fi
-          done
-          if (( ${#hits[@]} > 0 )); then
-            printf '::error::Telemetry strings found in shipped binary:\n'
-            printf '  %s\n' "${hits[@]}"
-            exit 1
-          fi
-          echo "No telemetry strings detected. ✅"
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" \
+            target/release/FileIDEngine
 
   # ---------------------------------------------------------------------------
   # CLI — the cross-OS `fileid` front-end. It's its own Cargo workspace and
@@ -311,49 +273,10 @@ jobs:
           size_mb=$(du -m "$bin" | cut -f1)
           echo "$bin OK (${size_mb} MB)"
 
-      # Privacy gate parity with the engine + macOS/Windows app workflows. The
-      # GTK app dynamically links the system GTK stack, so only the statically
-      # linked Rust crates (tokio/serde/tracing/glib-rs bindings) contribute
-      # strings here — none carry telemetry endpoints. Closes the CLAUDE.md TODO
-      # ("Linux scan will mirror the Windows + macOS one once linux CI lands").
+      # The GTK app is a directly shipped executable even though its platform
+      # libraries are dynamic; scan its complete binary with the shared gate.
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          forbidden=(
-            "sentry.io"
-            "io.sentry"
-            "applicationinsights"
-            "applicationinsights.azure.com"
-            "googletagmanager"
-            "google-analytics.com"
-            "segment.io"
-            "segment.com"
-            "mixpanel.com"
-            "amplitude.com"
-            "posthog.com"
-            "datadoghq"
-            "bugsnag"
-            "rollbar.com"
-            "honeycomb.io"
-            "newrelic.com"
-            "raygun.io"
-            "firebase"
-            "firebaseio.com"
-            "appcenter.ms"
-            "in.appcenter.ms"
-            "crashpad"
-            "breakpad"
-          )
-          bin="target/debug/fileid-linux"
-          hits=()
-          for needle in "${forbidden[@]}"; do
-            if strings -a "$bin" | grep -q -F "$needle"; then
-              hits+=("$bin:$needle")
-            fi
-          done
-          if (( ${#hits[@]} > 0 )); then
-            printf '::error::Telemetry strings found in shipped binary:\n'
-            printf '  %s\n' "${hits[@]}"
-            exit 1
-          fi
-          echo "No telemetry strings detected. ✅"
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" \
+            target/debug/fileid-linux

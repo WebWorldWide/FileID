@@ -121,6 +121,11 @@ fi
 [ -x "$APP/Contents/MacOS/FileID" ] || { echo "❌ Missing $APP/Contents/MacOS/FileID"; exit 1; }
 [ -x "$APP/Contents/MacOS/FileIDEngine" ] || { echo "❌ Missing $APP/Contents/MacOS/FileIDEngine"; exit 1; }
 
+echo "🔒 Scanning shipped binaries for forbidden telemetry markers…"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
+    "$APP/Contents/MacOS/FileID" \
+    "$APP/Contents/MacOS/FileIDEngine"
+
 if [ -d "/Volumes/$VOL_NAME" ]; then
     hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true
 fi

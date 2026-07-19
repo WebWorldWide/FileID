@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use tokio::sync::mpsc;
@@ -309,6 +309,46 @@ impl ScanSession {
         let discovered_errors = handle.error_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
         let discovered_rx = handle.rx;
+        let mut zero_byte_rx = handle.zero_byte_rx;
+        let zero_byte_conn = self.db_conn.clone();
+        let zero_byte_worker = tokio::task::spawn_blocking(move || -> Result<(u64, u64)> {
+            const ZERO_BYTE_BATCH_SIZE: usize = 64;
+            let mut observations = Vec::with_capacity(ZERO_BYTE_BATCH_SIZE);
+            let mut applied = 0_u64;
+            let mut rejected = 0_u64;
+            while let Some(observation) = zero_byte_rx.blocking_recv() {
+                observations.push(observation);
+                if observations.len() < ZERO_BYTE_BATCH_SIZE {
+                    continue;
+                }
+                let validation = crate::db::zero_byte::validate_zero_byte_files(&observations);
+                rejected += validation.changed_since_observation;
+                let mutation = {
+                    let conn = zero_byte_conn.lock();
+                    crate::db::zero_byte::deactivate_validated_zero_byte_files(
+                        &conn,
+                        &validation.observations,
+                    )?
+                };
+                let summary = crate::db::zero_byte::finish_zero_byte_mutation(mutation);
+                applied += summary.applied;
+                observations.clear();
+            }
+            if !observations.is_empty() {
+                let validation = crate::db::zero_byte::validate_zero_byte_files(&observations);
+                rejected += validation.changed_since_observation;
+                let mutation = {
+                    let conn = zero_byte_conn.lock();
+                    crate::db::zero_byte::deactivate_validated_zero_byte_files(
+                        &conn,
+                        &validation.observations,
+                    )?
+                };
+                let summary = crate::db::zero_byte::finish_zero_byte_mutation(mutation);
+                applied += summary.applied;
+            }
+            Ok((applied, rejected))
+        });
 
         // Emit a live Progress event every 250 ms while discovery walks
         // the tree. Without this, the sidebar stays on "Discovering…" with
@@ -451,24 +491,54 @@ impl ScanSession {
         // PhaseChanged(Failed).
         tick.abort();
 
-        let (total, failed) = match writer_outcome {
-            Ok(t) => t,
-            Err(err) => {
-                // Stamp the row 'failed' so Settings → Recent scans doesn't
-                // show it as 'running' forever. Best-effort: the writer
-                // failure may be the DB itself (SQLITE_FULL / unreachable).
-                let conn = self.db_conn.lock();
-                let completed_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0);
-                let _ = conn.execute(
-                    "UPDATE scan_sessions SET completed_at = ?1, status = 'failed' WHERE id = ?2",
-                    rusqlite::params![completed_unix, session_id],
-                );
-                return Err(err);
-            }
-        };
+        let zero_byte_outcome = zero_byte_worker
+            .await
+            .context("joining zero-byte catalog worker")
+            .and_then(|outcome| outcome);
+        let (total, failed, zero_byte_applied, zero_byte_rejected) =
+            match (writer_outcome, zero_byte_outcome) {
+                (Ok((total, failed)), Ok((applied, rejected))) => {
+                    (total, failed, applied, rejected)
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    // Stamp the row 'failed' so Settings → Recent scans doesn't
+                    // show it as 'running' forever. Best-effort: the failure may be
+                    // the DB itself (SQLITE_FULL / unreachable).
+                    let conn = self.db_conn.lock();
+                    let completed_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    let _ = conn.execute(
+                        "UPDATE scan_sessions SET completed_at = ?1, status = 'failed' WHERE id = ?2",
+                        rusqlite::params![completed_unix, session_id],
+                    );
+                    return Err(err);
+                }
+            };
+        if zero_byte_applied > 0 {
+            tracing::info!(
+                zero_byte_applied,
+                "[SCAN] transitioned existing zero-byte rows to dormant state"
+            );
+        }
+        if zero_byte_rejected > 0 {
+            tracing::warn!(
+                zero_byte_rejected,
+                "[SCAN] files changed after zero-byte discovery; preserving catalog rows"
+            );
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
+                crate::ipc::EngineError {
+                    kind: "discovery_partial".into(),
+                    message: format!(
+                        "{zero_byte_rejected} file(s) changed after zero-byte discovery; their catalog rows were preserved for the next scan."
+                    ),
+                    path: Some(root.to_string_lossy().into_owned()),
+                    model_kind: None,
+                },
+            ))))
+            .await;
+        }
 
         // discoveryComplete backstop (audit F-C2-006): the 250 ms tick emits this
         // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
@@ -505,7 +575,8 @@ impl ScanSession {
             }
         }
 
-        let clean_walk = should_reconcile_missing_rows(
+        let clean_walk = zero_byte_rejected == 0
+            && should_reconcile_missing_rows(
             self.coordinator.is_cancelled(),
             self.coordinator.is_gpu_dead(),
             discovered_done_post.load(std::sync::atomic::Ordering::Acquire),
@@ -563,7 +634,7 @@ impl ScanSession {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
                 crate::ipc::EngineError {
                     kind: "gpu_device_removed".into(),
-                    message: "Windows reported GPU device removed (TDR). The scan has been aborted to keep the system responsive. Restart the engine to recover; if this repeats, consider lowering FILEID_MODEL_POOL_SIZE or switching to CPU EP via gpuExecutionProviderOverride.".into(),
+                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
                     path: None,
                     model_kind: None,
                 },

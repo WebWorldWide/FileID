@@ -1,5 +1,5 @@
-// DBWriter — drains the Tagging → DB channel and writes 100-file or
-// 200ms batches into the single SQLite writer connection.
+// DBWriter — drains the Tagging → DB channel into adaptive-size or 200 ms
+// batches on the single SQLite writer connection.
 //
 // Single-writer is by design: WAL permits concurrent readers but only
 // one writer. Every insert + the resume cursor update land in the same
@@ -31,6 +31,31 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 /// size before we OOM (rather than tripping the OS-level reaper).
 fn current_batch_size() -> usize {
     dbwriter_batch_size_for(memory_tier()).max(1)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeferredFaceCrop {
+    face_id: i64,
+    file_index: usize,
+    face_index: usize,
+}
+
+fn take_deferred_face_crops(
+    buffer: &mut [TaggedFile],
+    deferred: Vec<DeferredFaceCrop>,
+) -> Vec<(i64, Vec<u8>)> {
+    deferred
+        .into_iter()
+        .filter_map(|item| {
+            buffer
+                .get_mut(item.file_index)?
+                .faces
+                .get_mut(item.face_index)?
+                .crop_rgb_112
+                .take()
+                .map(|crop| (item.face_id, crop))
+        })
+        .collect()
 }
 
 /// Stats reported per batch — fed into the `batchSummary` IPC event so
@@ -172,9 +197,9 @@ impl DbWriter {
         // the batch commits — never inside the tx, so a batch rollback (which
         // restores the old face_prints rows) can't leave them crop-less.
         let mut crop_ids_to_prune: Vec<i64> = Vec::new();
-        // (face_id, crop bytes) to encode + write AFTER commit, outside the writer
-        // lock — the JPEG encode + fs::write must not run inside the tx. (audit P1)
-        let mut crops_to_write: Vec<(i64, Vec<u8>)> = Vec::new();
+        // Face/crop positions to extract by move only after commit. The JPEG
+        // encode + fs::write stays outside the transaction and writer lock.
+        let mut deferred_crops: Vec<DeferredFaceCrop> = Vec::new();
 
         // Legacy BLAKE3 digests for rows stamped before the cross-platform
         // SHA-256 switch: computing them re-reads the file off disk (full read
@@ -494,7 +519,7 @@ impl DbWriter {
                         .query_map(params![file_id], |r| r.get::<_, i64>(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()
                         .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                    for face in &f.faces {
+                    for (face_index, face) in f.faces.iter().enumerate() {
                         let bbox_json = serde_json::json!({
                             "x": face.bbox[0],
                             "y": face.bbox[1],
@@ -518,11 +543,12 @@ impl DbWriter {
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
-                        if let Some(crop) = &face.crop_rgb_112 {
-                            let face_id = tx.last_insert_rowid();
-                            // Defer the JPEG encode + fs::write to after commit so it
-                            // never runs inside the tx under the writer lock. (audit P1)
-                            crops_to_write.push((face_id, crop.clone()));
+                        if face.crop_rgb_112.is_some() {
+                            deferred_crops.push(DeferredFaceCrop {
+                                face_id: tx.last_insert_rowid(),
+                                file_index: i,
+                                face_index,
+                            });
                         }
                     }
                     // New AUTOINCREMENT ids never collide with the deleted ones,
@@ -610,16 +636,10 @@ impl DbWriter {
         }
         tx.commit().context("commit batch")?;
 
-        // The batch is durable and every crop was already copied into
-        // crops_to_write — release the buffered originals now, so the JPEG
-        // encode/write loop below doesn't hold TWO copies of the whole
-        // batch's crop bytes (500 files × faces × 37 KB). Rollback-safe by
-        // construction: this runs only after a successful commit.
-        for f in buffer.iter_mut() {
-            for face in &mut f.faces {
-                face.crop_rgb_112 = None;
-            }
-        }
+        // The batch is durable: move each original crop allocation into the
+        // post-commit work list. Before commit the originals remain untouched,
+        // so a rollback never writes crops for rows that do not exist.
+        let crops_to_write = take_deferred_face_crops(buffer, deferred_crops);
 
         // Batch is durable; now prune crop JPEGs for the face ids it replaced.
         // (After commit so a rolled-back batch never deletes a live crop.)
@@ -659,9 +679,9 @@ impl DbWriter {
         // Encode + write the batch's face-crop JPEGs now — AFTER the tx committed
         // and the writer lock dropped — so per-face JPEG encode + fs::write never
         // blocks the engine's only writer (or a concurrent scan flush). (audit P1)
-        for (face_id, crop) in &crops_to_write {
-            if let Err(err) = save_face_crop(*face_id, crop) {
-                tracing::warn!(?err, face_id = *face_id, "face crop write failed");
+        for (face_id, crop) in crops_to_write {
+            if let Err(err) = save_face_crop(face_id, crop) {
+                tracing::warn!(?err, face_id, "face crop write failed");
             }
         }
 
@@ -728,6 +748,7 @@ const INSERT_FILE_SQL: &str = r#"
         -- content change bumps modified_at and the successful re-decode supplies
         -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
         phash        = COALESCE(excluded.phash, phash),
+        aesthetic    = COALESCE(excluded.aesthetic, aesthetic),
         camera_model = COALESCE(excluded.camera_model, camera_model),
         location_lat = COALESCE(excluded.location_lat, location_lat),
         location_lon = COALESCE(excluded.location_lon, location_lon),
@@ -775,6 +796,7 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         -- content change bumps modified_at and the successful re-decode supplies
         -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
         phash        = COALESCE(excluded.phash, phash),
+        aesthetic    = COALESCE(excluded.aesthetic, aesthetic),
         camera_model = COALESCE(excluded.camera_model, camera_model),
         location_lat = COALESCE(excluded.location_lat, location_lat),
         location_lon = COALESCE(excluded.location_lon, location_lon),
@@ -1002,13 +1024,13 @@ const NFC_LATIN_COMPOSE: &[(u32, u32, u32)] = &[
 /// Encode a 112×112 RGB crop as JPEG and write to face_crops/<face_id>.jpg.
 /// Cheap (37 KB raw → ~5 KB JPEG @ q85). Lets the People tab card render
 /// real faces instead of placeholder gray circles.
-fn save_face_crop(face_id: i64, crop_rgb_112: &[u8]) -> anyhow::Result<()> {
+fn save_face_crop(face_id: i64, crop_rgb_112: Vec<u8>) -> anyhow::Result<()> {
     use anyhow::Context;
     let dir = crate::paths::faces_dir().context("resolving faces dir")?;
     std::fs::create_dir_all(&dir).ok();
     let dest = dir.join(format!("{face_id}.jpg"));
     let img: image::ImageBuffer<image::Rgb<u8>, _> =
-        image::ImageBuffer::from_raw(112, 112, crop_rgb_112.to_vec())
+        image::ImageBuffer::from_raw(112, 112, crop_rgb_112)
             .context("face crop bytes don't match 112x112")?;
     let dyn_img = image::DynamicImage::ImageRgb8(img);
     let mut bytes = Vec::with_capacity(8 * 1024);
@@ -1032,6 +1054,7 @@ pub(crate) fn remove_face_crop(face_id: i64) {
 mod tests {
     use super::*;
     use crate::pipeline::discovery::FileKind;
+    use crate::pipeline::tagging::DetectedFace;
     use rusqlite::OptionalExtension; // .optional() in ingest_with_heal (lib code no longer uses it)
     use std::path::PathBuf;
 
@@ -1063,7 +1086,7 @@ mod tests {
                 f.kind.as_str(),
                 extension,
                 f.phash,
-                None::<f64>,
+                f.aesthetic,
                 f.has_faces as i64,
                 f.has_text as i64,
                 f.camera_model,
@@ -1117,6 +1140,35 @@ mod tests {
             text_stage_done: false,
             tags_evaluated: true,
         }
+    }
+
+    #[test]
+    fn deferred_face_crop_transfer_moves_the_original_allocation() {
+        let mut file = fixture("face.jpg");
+        file.faces.push(DetectedFace {
+            bbox: [0.0; 4],
+            landmarks: [[0.0; 2]; 5],
+            embedding: vec![1.0],
+            roll: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            quality: 1.0,
+            excluded: false,
+            crop_rgb_112: Some(vec![7; 112 * 112 * 3]),
+        });
+        let original = file.faces[0].crop_rgb_112.as_ref().unwrap().as_ptr();
+        let mut buffer = vec![file];
+        let moved = take_deferred_face_crops(
+            &mut buffer,
+            vec![DeferredFaceCrop {
+                face_id: 42,
+                file_index: 0,
+                face_index: 0,
+            }],
+        );
+        assert!(buffer[0].faces[0].crop_rgb_112.is_none());
+        assert_eq!(moved[0].0, 42);
+        assert_eq!(moved[0].1.as_ptr(), original);
     }
 
     fn in_memory_db() -> Connection {
@@ -1175,7 +1227,7 @@ mod tests {
             let path_text = f.path.to_string_lossy().to_string();
             (path_text, path_hash, f.size_bytes as i64, None::<f64>,
              f.modified_unix, f.scanned_unix, f.kind.as_str().to_string(),
-             extension.clone(), f.phash, None::<f64>,
+             extension.clone(), f.phash, f.aesthetic,
              f.has_faces as i64, f.has_text as i64,
              f.camera_model.clone(), f.location_lat, f.location_lon,
              f.failed as i64, f.error_message.clone(),
@@ -1259,6 +1311,25 @@ mod tests {
                        params![r"C:\lib\IMG_META.jpg"], |r| r.get(0))
             .unwrap();
         assert_eq!(hf2, 0, "has_faces cleared when the faces stage actually ran and found none");
+    }
+
+    #[test]
+    fn successful_rescan_restores_aesthetic_on_existing_row() {
+        let conn = in_memory_db();
+        let path = r"C:\lib\restored.jpg";
+        let dormant = fixture(path);
+        insert_one(&conn, &dormant).unwrap();
+        let mut restored = fixture(path);
+        restored.aesthetic = Some(0.91);
+        insert_one(&conn, &restored).unwrap();
+        let aesthetic: Option<f64> = conn
+            .query_row(
+                "SELECT aesthetic FROM files WHERE path_text = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(aesthetic, Some(0.91));
     }
 
     /// ON CONFLICT must UPDATE (not skip) so a rescan with new
