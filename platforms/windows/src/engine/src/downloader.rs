@@ -136,6 +136,15 @@ const PINNED_ROOT_CERTS: [(&str, &[u8]); 11] = [
 /// reverts to the OS root store — validation only ever changes, never the
 /// egress surface — and is logged loudly as a diagnostic escape hatch for
 /// networks that intercept HTTPS.
+pub fn fail_closed_client() -> Arc<reqwest::Client> {
+    Arc::new(
+        reqwest::Client::builder()
+            .tls_built_in_root_certs(false)
+            .build()
+            .expect("no-roots fallback client"),
+    )
+}
+
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
     // Restrict redirects to the host families we actually download from (HF +
     // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to

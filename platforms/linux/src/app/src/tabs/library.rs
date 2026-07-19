@@ -88,6 +88,20 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
     scroller.add_css_class("fileid-tab");
 
+    // Empty state (no scan yet / no matches) ↔ the grid. Without this a fresh
+    // install shows a silent black void where the Library should invite the
+    // first scan (macOS/Windows both present an empty-state hint here).
+    let empty_page = adw::StatusPage::builder()
+        .icon_name("view-grid-symbolic")
+        .title("No files yet")
+        .vexpand(true)
+        .build();
+    let content_stack = gtk::Stack::new();
+    content_stack.set_hexpand(true);
+    content_stack.set_vexpand(true);
+    content_stack.add_named(&scroller, Some("grid"));
+    content_stack.add_named(&empty_page, Some("empty"));
+
     // ── Header (title + count + search + pills) ──────────────────────────────
     let title = gtk::Label::builder()
         .label("Library")
@@ -114,22 +128,17 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Reusable reload closure shared by search + pills + scan events.
     let reload: Rc<dyn Fn()> = {
-        let engine = engine.clone();
-        let model = model.clone();
-        let count_label = count_label.clone();
-        let search_text = search_text.clone();
-        let kind_filter = kind_filter.clone();
-        let query_gen = query_gen.clone();
-        Rc::new(move || {
-            run_reload(
-                &engine,
-                &model,
-                &count_label,
-                &search_text,
-                &kind_filter,
-                &query_gen,
-            );
-        })
+        let ctx = Rc::new(ReloadCtx {
+            engine: engine.clone(),
+            model: model.clone(),
+            count_label: count_label.clone(),
+            content_stack: content_stack.clone(),
+            empty_page: empty_page.clone(),
+            search_text: search_text.clone(),
+            kind_filter: kind_filter.clone(),
+            query_gen: query_gen.clone(),
+        });
+        Rc::new(move || run_reload(&ctx))
     };
 
     let pills = build_pills(kind_filter.clone(), reload.clone());
@@ -205,42 +214,79 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-tab"])
         .build();
     root.append(&header);
-    root.append(&scroller);
+    root.append(&content_stack);
+    // Re-read on every tab switch: the startup read can race the engine's DB
+    // open, and renames/deletes done from other tabs must show on return.
+    {
+        let reload = reload.clone();
+        root.connect_map(move |_| reload());
+    }
     root.upcast()
 }
 
 // ── Reload ───────────────────────────────────────────────────────────────────
 
-fn run_reload(
-    engine: &Rc<RefCell<EngineClient>>,
-    model: &gio::ListStore,
-    count_label: &gtk::Label,
-    search_text: &Rc<RefCell<String>>,
-    kind_filter: &Rc<RefCell<Option<String>>>,
-    query_gen: &Rc<Cell<u64>>,
-) {
-    let g = query_gen.get().wrapping_add(1);
-    query_gen.set(g);
+struct ReloadCtx {
+    engine: Rc<RefCell<EngineClient>>,
+    model: gio::ListStore,
+    count_label: gtk::Label,
+    content_stack: gtk::Stack,
+    empty_page: adw::StatusPage,
+    search_text: Rc<RefCell<String>>,
+    kind_filter: Rc<RefCell<Option<String>>>,
+    query_gen: Rc<Cell<u64>>,
+}
+
+fn run_reload(ctx: &Rc<ReloadCtx>) {
+    let g = ctx.query_gen.get().wrapping_add(1);
+    ctx.query_gen.set(g);
     let spec = QuerySpec {
-        search: search_text.borrow().clone(),
-        kind: kind_filter.borrow().clone(),
+        search: ctx.search_text.borrow().clone(),
+        kind: ctx.kind_filter.borrow().clone(),
         limit: QUERY_LIMIT,
     };
-    let rx = engine.borrow().query_files(spec);
-    let model = model.clone();
-    let count_label = count_label.clone();
-    let query_gen = query_gen.clone();
+    let searched = spec.search.trim().to_string();
+    let filtered = !searched.is_empty() || spec.kind.is_some();
+    let rx = ctx.engine.borrow().query_files(spec);
+    let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
-        let rows = rx.recv().await.unwrap_or_default();
+        let (rows, total) = rx.recv().await.unwrap_or_default();
         // Latest-wins: a slower earlier query can't clobber a newer one.
-        if query_gen.get() != g {
+        if ctx.query_gen.get() != g {
             return;
         }
-        model.remove_all();
+        ctx.model.remove_all();
         for row in &rows {
-            model.append(&BoxedAnyObject::new(row.clone()));
+            ctx.model.append(&BoxedAnyObject::new(row.clone()));
         }
-        count_label.set_text(&format!("{} files", rows.len()));
+        if total > rows.len() as i64 {
+            ctx.count_label
+                .set_text(&format!("showing {} of {} files", rows.len(), total));
+        } else {
+            ctx.count_label.set_text(&format!("{} files", rows.len()));
+        }
+        if rows.is_empty() {
+            if filtered {
+                ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
+                ctx.empty_page.set_title("No matches");
+                let description = if searched.is_empty() {
+                    "Nothing of this kind in the library yet — try another filter.".to_string()
+                } else {
+                    format!("Nothing matches “{searched}” — try a different search or filter.")
+                };
+                ctx.empty_page.set_description(Some(&description));
+            } else {
+                ctx.empty_page.set_icon_name(Some("view-grid-symbolic"));
+                ctx.empty_page.set_title("No files yet");
+                ctx.empty_page.set_description(Some(
+                    "Pick a folder in the sidebar and click Start Scan — your files appear \
+                     here as they're found, searchable by name, tags, and text.",
+                ));
+            }
+            ctx.content_stack.set_visible_child_name("empty");
+        } else {
+            ctx.content_stack.set_visible_child_name("grid");
+        }
     });
 }
 
@@ -307,6 +353,17 @@ fn build_tile() -> gtk::Box {
         .hexpand(true)
         .css_classes(["tile-thumb"])
         .build();
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&pic));
+    let play = gtk::Image::builder()
+        .icon_name("media-playback-start-symbolic")
+        .pixel_size(22)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .css_classes(["video-play-badge"])
+        .build();
+    overlay.add_overlay(&play);
     let name = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -316,10 +373,21 @@ fn build_tile() -> gtk::Box {
         .xalign(0.0)
         .css_classes(["tile-caption"])
         .build();
-    vbox.append(&pic);
+    vbox.append(&overlay);
     vbox.append(&name);
     vbox.append(&caption);
     vbox
+}
+
+/// Resolve the fixed tile-widget structure built by `build_tile`:
+/// `(picture, play-badge, name, caption)`.
+fn tile_parts(vbox: &gtk::Box) -> Option<(gtk::Picture, gtk::Image, gtk::Label, gtk::Label)> {
+    let overlay = vbox.first_child()?.downcast::<gtk::Overlay>().ok()?;
+    let pic = overlay.child()?.downcast::<gtk::Picture>().ok()?;
+    let play = pic.next_sibling()?.downcast::<gtk::Image>().ok()?;
+    let name = overlay.next_sibling()?.downcast::<gtk::Label>().ok()?;
+    let caption = name.next_sibling()?.downcast::<gtk::Label>().ok()?;
+    Some((pic, play, name, caption))
 }
 
 const THUMB_CACHE_CAP: usize = 512;
@@ -385,22 +453,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     else {
         return;
     };
-    let Some(pic) = vbox
-        .first_child()
-        .and_then(|w| w.downcast::<gtk::Picture>().ok())
-    else {
-        return;
-    };
-    let Some(name) = pic
-        .next_sibling()
-        .and_then(|w| w.downcast::<gtk::Label>().ok())
-    else {
-        return;
-    };
-    let Some(caption) = name
-        .next_sibling()
-        .and_then(|w| w.downcast::<gtk::Label>().ok())
-    else {
+    let Some((pic, play, name, caption)) = tile_parts(&vbox) else {
         return;
     };
 
@@ -419,18 +472,28 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         format_bytes(row.size_bytes)
     ));
 
-    if row.kind == "image" {
+    let is_video = row.kind == "video";
+    play.set_visible(false);
+    if row.kind == "image" || is_video {
         let key = ThumbCacheKey::for_row(&row);
         if let Some(tex) = thumb_cache_get(&key) {
             pic.set_paintable(Some(&tex));
+            play.set_visible(is_video);
             return;
         }
         pic.set_paintable(None::<&gtk::gdk::Texture>);
         let want = key.clone();
-        let rx = engine
-            .borrow()
-            .request_scaled_thumbnail(key.path.clone(), TILE_THUMB_PX);
+        let rx = if is_video {
+            engine
+                .borrow()
+                .request_video_thumbnail(key.path.clone(), TILE_THUMB_PX)
+        } else {
+            engine
+                .borrow()
+                .request_scaled_thumbnail(key.path.clone(), TILE_THUMB_PX)
+        };
         let pic_weak = pic.downgrade();
+        let play_weak = play.downgrade();
         let li_weak = list_item.downgrade();
         glib::MainContext::default().spawn_local(async move {
             let Ok(Some(decoded)) = rx.recv().await else {
@@ -445,6 +508,9 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             if let Some(pic) = pic_weak.upgrade() {
                 pic.set_paintable(Some(&tex));
             }
+            if let Some(play) = play_weak.upgrade() {
+                play.set_visible(is_video);
+            }
         });
     } else {
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
@@ -452,11 +518,12 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
 }
 
 fn clear_tile(tile: &gtk::Widget) {
-    if let Some(pic) = tile
-        .first_child()
-        .and_then(|w| w.downcast::<gtk::Picture>().ok())
-    {
+    let Some(vbox) = tile.downcast_ref::<gtk::Box>() else {
+        return;
+    };
+    if let Some((pic, play, _, _)) = tile_parts(vbox) {
         pic.set_paintable(None::<&gtk::gdk::Texture>);
+        play.set_visible(false);
     }
 }
 
@@ -670,20 +737,31 @@ fn load_preview_image(
     active_generation: Rc<Cell<u64>>,
     generation: u64,
 ) {
-    if row.kind == "image" {
-        let rx = engine
-            .borrow()
-            .request_scaled_thumbnail(row.path.clone(), PREVIEW_PX);
+    if row.kind == "image" || row.kind == "video" {
+        let rx = if row.kind == "video" {
+            engine
+                .borrow()
+                .request_video_thumbnail(row.path.clone(), PREVIEW_PX)
+        } else {
+            engine
+                .borrow()
+                .request_scaled_thumbnail(row.path.clone(), PREVIEW_PX)
+        };
+        let kind = row.kind.clone();
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(decoded)) = rx.recv().await else {
-                return;
-            };
+            let decoded = rx.recv().await.ok().flatten();
             if active_generation.get() != generation {
                 return;
             }
-            if let Some(pic) = pic_weak.upgrade() {
-                pic.set_paintable(Some(&texture_from_decoded(&decoded)));
+            let Some(pic) = pic_weak.upgrade() else {
+                return;
+            };
+            match decoded {
+                Some(decoded) => pic.set_paintable(Some(&texture_from_decoded(&decoded))),
+                // A video with no extractable keyframe (ffmpeg absent) still
+                // deserves its kind icon rather than an empty pane.
+                None => pic.set_paintable(icon_paintable(icon_for_kind(&kind), 128).as_ref()),
             }
         });
     } else {

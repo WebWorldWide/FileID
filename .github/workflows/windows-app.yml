@@ -15,6 +15,8 @@ on:
       - 'platforms/windows/VERSION'
       - 'platforms/windows/installer/**'
       - 'platforms/windows/build/publish-bundle.ps1'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   pull_request:
@@ -30,6 +32,8 @@ on:
       - 'platforms/windows/VERSION'
       - 'platforms/windows/installer/**'
       - 'platforms/windows/build/publish-bundle.ps1'
+      - 'shared/scripts/check_binary_privacy.py'
+      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   workflow_dispatch:
@@ -272,63 +276,14 @@ jobs:
           $allDlls = Get-ChildItem -Path $publishDir -Filter "*.dll"
           Write-Host ("publish dir contains {0} dll(s)" -f $allDlls.Count)
 
-      # Privacy gate — parity with macos.yml + windows-engine.yml. The
-      # forbidden-strings list MUST stay in sync across all three
-      # workflows + platforms/windows/build/publish-bundle.ps1. Failing
-      # this is a release blocker — no exception.
+      # The shared scanner recursively covers every shipped EXE/DLL and owns
+      # the raw ASCII/UTF-16LE/UTF-16BE marker contract.
       - name: Privacy — telemetry-string scan
         shell: pwsh
         run: |
           $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
-          $forbidden = @(
-            "sentry.io",
-            "io.sentry",
-            "applicationinsights",
-            "applicationinsights.azure.com",
-            "googletagmanager",
-            "google-analytics.com",
-            "segment.io",
-            "segment.com",
-            "mixpanel.com",
-            "amplitude.com",
-            "posthog.com",
-            "datadoghq",
-            "bugsnag",
-            "rollbar.com",
-            "honeycomb.io",
-            "newrelic.com",
-            "raygun.io",
-            "firebase",
-            "firebaseio.com",
-            "appcenter.ms",
-            "in.appcenter.ms",
-            "crashpad",
-            "breakpad"
-          )
-          # Scan every shipped binary (EXE + every DLL). The .NET
-          # framework + WinUI runtime DLLs are bundled into self-contained
-          # publish output and could in principle ship telemetry strings;
-          # we want to know.
-          $targets = @()
-          $targets += Get-ChildItem -Path $publishDir -Filter "FileID.exe"
-          $targets += Get-ChildItem -Path $publishDir -Filter "*.dll"
-          $hits = @()
-          foreach ($file in $targets) {
-            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
-            $textAscii = [System.Text.Encoding]::ASCII.GetString($bytes)
-            $textUtf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
-            foreach ($needle in $forbidden) {
-              if ($textAscii -match [regex]::Escape($needle) -or
-                  $textUtf16 -match [regex]::Escape($needle)) {
-                $hits += "$($file.Name):$needle"
-              }
-            }
-          }
-          if ($hits.Count -gt 0) {
-            Write-Error "Telemetry strings found in shipped binary:`n  $($hits -join "`n  ")"
-            exit 1
-          }
-          Write-Host ("Scanned {0} binaries; no telemetry strings detected. ✅" -f $targets.Count)
+          python "$env:GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" $publishDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Launch smoke — verifies the published binary at least starts,
       # paints chrome, and stays alive for a few seconds. Catches the

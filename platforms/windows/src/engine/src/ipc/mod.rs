@@ -196,6 +196,7 @@ const MAX_RESTRUCTURE_MOVES: usize = 250_000;
 const MAX_EXCLUDED_PATHS: usize = 10_000;
 const MAX_TAGS_PER_COMMAND: usize = 1_024;
 const MAX_APPLY_TAG_OPERATIONS: usize = 100_000;
+const MAX_EXACT_TRASH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Result<(), String> {
     fn check_len(field: &str, len: usize, max: usize) -> Result<(), String> {
@@ -251,6 +252,65 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
         }
         CommandPayload::TrashFiles(payload) => {
             check_len("trashFiles.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
+            if let Some(identities) = &payload.exact_identities {
+                check_len("trashFiles.exactIdentities", identities.len(), MAX_BULK_ITEMS)?;
+                let requested: std::collections::HashSet<i64> =
+                    payload.file_ids.iter().copied().collect();
+                let selected_paths: std::collections::HashSet<&str> =
+                    identities.iter().map(|identity| identity.path.as_str()).collect();
+                let mut seen = std::collections::HashSet::with_capacity(identities.len());
+                let mut exact_bytes = 0u64;
+                for identity in identities {
+                    if !requested.contains(&identity.file_id) {
+                        return Err(format!(
+                            "trashFiles exact identity #{} is not in fileIDs",
+                            identity.file_id
+                        ));
+                    }
+                    if !seen.insert(identity.file_id) {
+                        return Err(format!(
+                            "trashFiles contains duplicate exact identity #{}",
+                            identity.file_id
+                        ));
+                    }
+                    if identity.path.is_empty()
+                        || identity.size_bytes < 0
+                        || identity.sha256_hex.len() != 64
+                        || !identity.sha256_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        || identity.keeper_path.is_empty()
+                        || selected_paths.contains(identity.keeper_path.as_str())
+                        || identity.keeper_size_bytes < 0
+                        || identity.size_bytes != identity.keeper_size_bytes
+                        || !identity
+                            .sha256_hex
+                            .eq_ignore_ascii_case(&identity.keeper_sha256_hex)
+                        || identity.keeper_sha256_hex.len() != 64
+                        || !identity
+                            .keeper_sha256_hex
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit())
+                    {
+                        return Err(format!(
+                            "trashFiles exact identity #{} is invalid",
+                            identity.file_id
+                        ));
+                    }
+                    exact_bytes = exact_bytes
+                        .checked_add(identity.size_bytes as u64)
+                        .and_then(|total| total.checked_add(identity.keeper_size_bytes as u64))
+                        .ok_or_else(|| "trashFiles exact byte total overflowed".to_string())?;
+                }
+                if seen != requested {
+                    return Err(
+                        "trashFiles exactIdentities must cover every requested fileID".into(),
+                    );
+                }
+                if exact_bytes > MAX_EXACT_TRASH_BYTES {
+                    return Err(format!(
+                        "trashFiles exact verification needs {exact_bytes} bytes; maximum is {MAX_EXACT_TRASH_BYTES}"
+                    ));
+                }
+            }
             dedupe_ids(&mut payload.file_ids);
         }
         CommandPayload::MarkPersonsAsUnknown(payload) => {
@@ -451,6 +511,21 @@ pub struct RenameEntry {
 pub struct TrashFilesPayload {
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_identities: Option<Vec<ExactTrashIdentity>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactTrashIdentity {
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub path: String,
+    pub size_bytes: i64,
+    pub sha256_hex: String,
+    pub keeper_path: String,
+    pub keeper_size_bytes: i64,
+    pub keeper_sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1050,7 +1125,7 @@ pub struct RestructureApplyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkActionResult {
-    /// "applyTags" | "renameFiles" | "trashFiles" | "mergeClusters".
+    /// Bulk command discriminator, including person-verdict and restore actions.
     pub action: String,
     pub succeeded: u32,
     pub failed: u32,
@@ -1262,6 +1337,7 @@ mod tests {
     fn destructive_command_ids_are_deduplicated_before_dispatch() {
         let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
             file_ids: vec![7, 7, 9, 7, 9],
+            exact_identities: None,
         });
         normalize_and_validate_command(&mut payload).unwrap();
         let CommandPayload::TrashFiles(payload) = payload else {
@@ -1271,9 +1347,85 @@ mod tests {
     }
 
     #[test]
+    fn exact_trash_identity_round_trips_and_must_belong_to_request() {
+        let exact = |file_id, path: &str, size_bytes| ExactTrashIdentity {
+            file_id,
+            path: path.into(),
+            size_bytes,
+            sha256_hex: "ab".repeat(32),
+            keeper_path: "/library/keeper.bin".into(),
+            keeper_size_bytes: size_bytes,
+            keeper_sha256_hex: "ab".repeat(32),
+        };
+        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7],
+            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
+        });
+        normalize_and_validate_command(&mut payload).unwrap();
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json["trashFiles"]["exactIdentities"][0]["fileID"],
+            serde_json::json!(7)
+        );
+        assert_eq!(
+            json["trashFiles"]["exactIdentities"][0]["keeperSha256Hex"],
+            serde_json::json!("ab".repeat(32))
+        );
+
+        let mut invalid = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![9],
+            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
+        });
+        assert!(normalize_and_validate_command(&mut invalid)
+            .unwrap_err()
+            .contains("not in fileIDs"));
+
+        let mut partial = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7, 9],
+            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
+        });
+        assert!(normalize_and_validate_command(&mut partial)
+            .unwrap_err()
+            .contains("cover every"));
+
+        let mut unequal = exact(7, "/library/a.bin", 4);
+        unequal.keeper_sha256_hex = "cd".repeat(32);
+        let mut unequal_payload = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7],
+            exact_identities: Some(vec![unequal]),
+        });
+        assert!(normalize_and_validate_command(&mut unequal_payload)
+            .unwrap_err()
+            .contains("invalid"));
+
+        let mut wrong_size = exact(7, "/library/a.bin", 4);
+        wrong_size.keeper_size_bytes = 5;
+        let mut wrong_size_payload = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7],
+            exact_identities: Some(vec![wrong_size]),
+        });
+        assert!(normalize_and_validate_command(&mut wrong_size_payload)
+            .unwrap_err()
+            .contains("invalid"));
+
+        let mut over_budget = CommandPayload::TrashFiles(TrashFilesPayload {
+            file_ids: vec![7],
+            exact_identities: Some(vec![exact(
+                7,
+                "/library/huge.bin",
+                (MAX_EXACT_TRASH_BYTES + 1) as i64,
+            )]),
+        });
+        assert!(normalize_and_validate_command(&mut over_budget)
+            .unwrap_err()
+            .contains("maximum"));
+    }
+
+    #[test]
     fn destructive_command_rejects_max_plus_one_items() {
         let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
             file_ids: vec![1; MAX_BULK_ITEMS + 1],
+            exact_identities: None,
         });
         let error = normalize_and_validate_command(&mut payload).unwrap_err();
         assert!(error.contains("maximum"));
@@ -1391,6 +1543,7 @@ mod tests {
             }),
             CommandPayload::TrashFiles(TrashFilesPayload {
                 file_ids: vec![1, 2, 3],
+                exact_identities: None,
             }),
             CommandPayload::MergeClusters(MergeClustersPayload {
                 source_person_id: 1,

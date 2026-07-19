@@ -72,7 +72,7 @@ public struct IPCCommand: Codable, Sendable {
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
         case purgeExcluded(excludedPaths: [String])
-        case trashFiles(fileIDs: [Int64])
+        case trashFiles(fileIDs: [Int64], exactIdentities: [ExactTrashIdentity]?)
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
@@ -151,6 +151,27 @@ public struct RenameEntry: Codable, Sendable {
     public init(fileID: Int64, newName: String) {
         self.fileID = fileID
         self.newName = newName
+    }
+}
+
+public struct ExactTrashIdentity: Codable, Sendable {
+    public let fileID: Int64
+    public let path: String
+    public let sizeBytes: Int64
+    public let sha256Hex: String
+    public let keeperPath: String
+    public let keeperSizeBytes: Int64
+    public let keeperSha256Hex: String
+
+    public init(fileID: Int64, path: String, sizeBytes: Int64, sha256Hex: String,
+                keeperPath: String, keeperSizeBytes: Int64, keeperSha256Hex: String) {
+        self.fileID = fileID
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.sha256Hex = sha256Hex
+        self.keeperPath = keeperPath
+        self.keeperSizeBytes = keeperSizeBytes
+        self.keeperSha256Hex = keeperSha256Hex
     }
 }
 

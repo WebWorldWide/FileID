@@ -24,11 +24,15 @@ pub(super) fn icon_for_kind(kind: &str) -> &'static str {
 }
 
 pub(super) fn format_bytes(b: i64) -> String {
-    let kb = b as f64 / 1024.0;
-    if kb < 1024.0 {
-        format!("{kb:.0} KB")
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = b as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
     } else {
-        format!("{:.1} MB", kb / 1024.0)
+        format!("{:.0} KB", bytes / 1024.0)
     }
 }
 

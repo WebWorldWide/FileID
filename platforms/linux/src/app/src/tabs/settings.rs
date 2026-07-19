@@ -637,7 +637,11 @@ fn build_model_card(
                     busy_events.set(true);
                     true
                 }
-                EngineEvent::ScanComplete(_) | EngineEvent::DeepAnalyzeComplete(_) => {
+                EngineEvent::ScanComplete(_)
+                | EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Completed)
+                | EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Cancelled)
+                | EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Failed)
+                | EngineEvent::DeepAnalyzeComplete(_) => {
                     busy_events.set(false);
                     true
                 }
@@ -740,7 +744,15 @@ fn build_engine_card(engine: &Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         format!("Status: scanning… {} / {}", p.processed, p.total)
                     }
                     EngineEvent::BatchLanded(n) => format!("Status: scanning… {n} files"),
+                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Failed) => {
+                        "Status: scan failed".to_string()
+                    }
+                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Cancelled) => {
+                        "Status: scan cancelled".to_string()
+                    }
+                    EngineEvent::PhaseChanged(_) => continue,
                     EngineEvent::ScanComplete(n) => format!("Status: ready — last scan {n} files"),
+                    EngineEvent::ScanWarning(m) => format!("Status: scanning — {m}"),
                     EngineEvent::Error(m) => format!("Status: {m}"),
                     EngineEvent::Exited => "Status: restarting…".to_string(),
                     // Deep Analyze / Restructure / model-download events are driven

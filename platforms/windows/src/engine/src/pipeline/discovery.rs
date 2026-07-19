@@ -40,6 +40,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::coordinator::ScanCoordinator;
+use crate::db::zero_byte::ZeroByteObservation;
 
 /// Fixed-size key for the incremental-rescan cache. Keeping every catalogued
 /// `PathBuf` duplicated the full path string (and one heap allocation) for the
@@ -67,6 +68,7 @@ pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
 /// Sized so that on typical user corpora (<50K files) the channel never
 /// fills, decoupling the discovery counter from ML throughput.
 const DISCOVERY_CHANNEL_CAP: usize = 32768;
+const ZERO_BYTE_CHANNEL_CAP: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -174,10 +176,11 @@ pub struct Discovery {
 /// "no supported files found" instead of hanging).
 pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
+    pub zero_byte_rx: mpsc::Receiver<ZeroByteObservation>,
     pub count: Arc<AtomicU64>,
     pub done: Arc<AtomicBool>,
-    /// Stable path hashes of every supported, non-empty file observed during
-    /// the walk, including files skipped as already current.
+    /// Stable path hashes of every physically present eligible or skipped file
+    /// observed during the walk, including zero-byte files.
     pub seen_paths: Arc<Mutex<Vec<i64>>>,
     /// Walk errors swallowed during traversal. Surfaced as a non-fatal
     /// `discovery_partial` event by the scan orchestrator.
@@ -186,6 +189,7 @@ pub struct DiscoveryHandle {
 
 struct ClassifiedEntry {
     discovered: Option<DiscoveredFile>,
+    zero_byte: Option<ZeroByteObservation>,
     seen_path_hash: Option<i64>,
 }
 
@@ -215,6 +219,7 @@ impl Discovery {
     /// requested.
     pub fn spawn(self) -> DiscoveryHandle {
         let (tx, rx) = mpsc::channel(DISCOVERY_CHANNEL_CAP);
+        let (zero_byte_tx, zero_byte_rx) = mpsc::channel(ZERO_BYTE_CHANNEL_CAP);
         let root = self.root.clone();
         let coordinator = self.coordinator.clone();
         let skip_paths = self.skip_paths.clone();
@@ -291,10 +296,12 @@ impl Discovery {
             } else {
                 root.clone()
             };
-            // ClientState = ((), Option<DiscoveredFile>): the per-entry slot
-            // (DirEntryState) carries each file's finished payload, computed
-            // in parallel inside process_read_dir below.
-            let walker = jwalk::WalkDirGeneric::<((), Option<DiscoveredFile>)>::new(&walk_root)
+            // The per-entry client state carries either content work, a zero-byte
+            // observation, or neither, computed in parallel below.
+            let walker = jwalk::WalkDirGeneric::<(
+                (),
+                (Option<DiscoveredFile>, Option<ZeroByteObservation>),
+            )>::new(&walk_root)
                 .follow_links(false)
                 .skip_hidden(false)   // we do our own dot-file filter to also catch thumbs.db etc.
                 .parallelism(jwalk::Parallelism::RayonNewPool(walk_threads))
@@ -380,7 +387,7 @@ impl Discovery {
                         if let Some(path_hash) = classified.seen_path_hash {
                             seen_in_directory.push(path_hash);
                         }
-                        entry.client_state = classified.discovered;
+                        entry.client_state = (classified.discovered, classified.zero_byte);
                     }
                     if !seen_in_directory.is_empty() {
                         seen_for_dir.lock().extend(seen_in_directory);
@@ -401,13 +408,17 @@ impl Discovery {
                         continue;
                     }
                 };
-                // Payload was computed in parallel inside process_read_dir;
-                // None = a file we skip (unsupported kind, zero-byte, skip-set
-                // hit, metadata failure) or a directory entry. Errors were
-                // already counted at the parallel stage.
-                let Some(discovered) = entry.client_state else {
+                // Payload was computed in parallel inside process_read_dir.
+                // Zero-byte observations use their own bounded path so they never
+                // enter decode/model work and never inflate content-work totals.
+                let (discovered, zero_byte) = entry.client_state;
+                if let Some(observation) = zero_byte {
+                    if zero_byte_tx.blocking_send(observation).is_err() {
+                        break;
+                    }
                     continue;
-                };
+                }
+                let Some(discovered) = discovered else { continue };
 
                 // Increment the FS-walk counter BEFORE the channel send so
                 // the "Discovered N" sidebar reflects walk progress even if
@@ -430,7 +441,14 @@ impl Discovery {
             // Channel auto-closes when tx drops here.
         });
 
-        DiscoveryHandle { rx, count, done, seen_paths, error_count }
+        DiscoveryHandle {
+            rx,
+            zero_byte_rx,
+            count,
+            done,
+            seen_paths,
+            error_count,
+        }
     }
 }
 
@@ -464,7 +482,11 @@ fn classify_entry(
              surrogate?) — skipping; rename the file to include it"
         );
         error_count.fetch_add(1, Ordering::Relaxed);
-        return ClassifiedEntry { discovered: None, seen_path_hash: None };
+        return ClassifiedEntry {
+            discovered: None,
+            zero_byte: None,
+            seen_path_hash: None,
+        };
     }
     // follow_links is false on the walk, so symlink_metadata matches jwalk's
     // own DirEntry::metadata for the non-followed case.
@@ -472,7 +494,11 @@ fn classify_entry(
         Ok(m) => m,
         Err(_) => {
             error_count.fetch_add(1, Ordering::Relaxed);
-            return ClassifiedEntry { discovered: None, seen_path_hash: None };
+            return ClassifiedEntry {
+                discovered: None,
+                zero_byte: None,
+                seen_path_hash: None,
+            };
         }
     };
     let size = metadata.len();
@@ -483,7 +509,14 @@ fn classify_entry(
     // soft-hide its catalog row as "no longer present" while it plainly exists.
     let seen_path_hash = crate::util::path_safety::stable_path_hash(&path.to_string_lossy());
     if size == 0 {
-        return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
+        return ClassifiedEntry {
+            discovered: None,
+            zero_byte: Some(ZeroByteObservation {
+                path,
+                file_ref: crate::platform::file_ref(entry_path),
+            }),
+            seen_path_hash: Some(seen_path_hash),
+        };
     }
     let fingerprint = path_fingerprint(&path);
     let modified = metadata
@@ -505,7 +538,11 @@ fn classify_entry(
                 None => false,
             };
         if unchanged {
-            return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
+            return ClassifiedEntry {
+                discovered: None,
+                zero_byte: None,
+                seen_path_hash: Some(seen_path_hash),
+            };
         }
     }
     let created_unix = metadata
@@ -541,7 +578,11 @@ fn classify_entry(
         // Present but not pipeline-eligible: keep it in `seen` so a catalog row
         // whose kind mapping changed across versions is never soft-hidden as
         // "no longer present" while the file still exists on disk.
-        return ClassifiedEntry { discovered: None, seen_path_hash: Some(seen_path_hash) };
+        return ClassifiedEntry {
+            discovered: None,
+            zero_byte: None,
+            seen_path_hash: Some(seen_path_hash),
+        };
     }
 
     // Volume-local file id: lets the dbwriter heal a renamed/moved file's
@@ -559,6 +600,7 @@ fn classify_entry(
             online_only,
             file_ref,
         }),
+        zero_byte: None,
         seen_path_hash: Some(seen_path_hash),
     }
 }
@@ -683,10 +725,12 @@ mod tests {
 
         let z = classify_entry(&zero, &skips, &errs);
         assert!(z.discovered.is_none(), "zero-byte file must not be catalogued");
+        assert!(z.zero_byte.is_some(), "zero-byte file needs a dormant-row observation");
         assert!(z.seen_path_hash.is_some(), "zero-byte file is present and must be seen");
 
         let o = classify_entry(&other, &skips, &errs);
         assert!(o.discovered.is_none(), "unsupported kind must not be catalogued");
+        assert!(o.zero_byte.is_none());
         assert!(o.seen_path_hash.is_some(), "unsupported-kind file is present and must be seen");
 
         assert_eq!(errs.load(std::sync::atomic::Ordering::Relaxed), 0);
@@ -911,35 +955,52 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let coord = ScanCoordinator::new();
-            let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
-            let handle = disc.spawn();
-            let count = handle.count.clone();
-            let done = handle.done.clone();
-            let seen_paths = handle.seen_paths.clone();
-            let mut rx = handle.rx;
-            // Wait for the walk to finish (done flag flips after the last
-            // count.fetch_add + tx.send). Then assert count == 100 even if
-            // we haven't drained the receiver yet (the 32k channel buffers all
-            // 100, so the walk completes regardless of drain) — proving the
-            // counter reflects walk progress independent of receiver drain.
-            // Budget is generous (15s) because the rayon walk shares the thread
-            // pool with the rest of the suite under `cargo test`; a tight 2s
-            // poll flaked when scheduler starvation delayed `done` past 2s.
-            for _ in 0..750 {
-                if done.load(Ordering::Acquire) {
-                    break;
+            // Retry the walk a few times over the same tree. Under `cargo test`
+            // the jwalk rayon pool is shared with the whole suite, and on a
+            // saturated CI runner (observed on windows-arm64) a per-file
+            // `symlink_metadata` can transiently fail — classify_entry then
+            // returns `discovered: None` and bumps error_count, so `count`
+            // lands a few below 100 even though the walk completed. A fresh
+            // walk recovers; a genuine persistent under-enumeration still fails
+            // after every attempt. The decoupling property under test (count
+            // reflects walk progress before the receiver drains) is unaffected.
+            let mut last = 0u64;
+            for _attempt in 0..5 {
+                let coord = ScanCoordinator::new();
+                let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
+                let handle = disc.spawn();
+                let count = handle.count.clone();
+                let done = handle.done.clone();
+                let seen_paths = handle.seen_paths.clone();
+                let mut rx = handle.rx;
+                // Wait for the walk to finish (done flag flips after the last
+                // count.fetch_add + tx.send). Budget is generous (15s) because
+                // the rayon walk shares the thread pool with the rest of the
+                // suite under `cargo test`; a tight 2s poll flaked when
+                // scheduler starvation delayed `done` past 2s.
+                for _ in 0..750 {
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
+                // Assert count == 100 even without draining the receiver yet (the
+                // 32k channel buffers all 100, so the walk completes regardless of
+                // drain) — proving the counter reflects walk progress independent
+                // of receiver drain.
+                last = count.load(Ordering::Relaxed);
+                if last == 100 {
+                    let mut drained = 0;
+                    while rx.try_recv().is_ok() {
+                        drained += 1;
+                    }
+                    assert_eq!(drained, 100);
+                    assert_eq!(seen_paths.lock().len(), 100);
+                    return;
+                }
             }
-            assert!(done.load(Ordering::Acquire), "discovery walk did not finish within budget");
-            assert_eq!(count.load(Ordering::Relaxed), 100);
-            let mut drained = 0;
-            while rx.try_recv().is_ok() {
-                drained += 1;
-            }
-            assert_eq!(drained, 100);
-            assert_eq!(seen_paths.lock().len(), 100);
+            panic!("discovery walk under-enumerated after retries: last count = {last}");
         });
     }
 
@@ -978,6 +1039,7 @@ mod tests {
         fs::write(&empty, b"").unwrap();
         let empty_result = classify_entry(&empty, &skip, &errors);
         assert!(empty_result.discovered.is_none());
+        assert!(empty_result.zero_byte.is_some());
         assert!(empty_result.seen_path_hash.is_some());
         let other = root.join("notes.xyz");
         fs::write(&other, b"data").unwrap();

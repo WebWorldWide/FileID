@@ -110,7 +110,17 @@ public sealed record RenameFilesCommand(
 public sealed record RenameEntry([property: JsonPropertyName("fileID")] long FileId, string NewName);
 
 public sealed record TrashFilesCommand(
-    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,
+    System.Collections.Generic.IReadOnlyList<ExactTrashIdentity>? ExactIdentities = null) : CommandPayload;
+
+public sealed record ExactTrashIdentity(
+    [property: JsonPropertyName("fileID")] long FileId,
+    string Path,
+    long SizeBytes,
+    string Sha256Hex,
+    string KeeperPath,
+    long KeeperSizeBytes,
+    string KeeperSha256Hex);
 
 public sealed record MergeClustersCommand(
     [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,

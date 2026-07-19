@@ -67,6 +67,7 @@ impl VlmServer {
     /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
     /// never blocks the working Vulkan one.
     pub async fn start(gguf: &Path, mmproj: &Path, cancel: &AtomicBool) -> Result<Self> {
+        crate::models::runtime::ensure_gpu_inference_alive()?;
         let bins = Self::server_binaries();
         if bins.is_empty() {
             bail!(
@@ -76,12 +77,16 @@ impl VlmServer {
         }
         let mut last_err: Option<anyhow::Error> = None;
         for bin in bins {
+            crate::models::runtime::ensure_gpu_inference_alive()?;
             if cancel.load(Ordering::Relaxed) {
                 bail!("VLM server startup cancelled");
             }
             match Self::start_with_binary(&bin, gguf, mmproj, cancel).await {
                 Ok(server) => return Ok(server),
                 Err(err) => {
+                    if crate::coordinator::process_gpu_device_removed() {
+                        return Err(err);
+                    }
                     tracing::warn!(binary = %crate::platform::redact_path_for_log(&bin), ?err, "[VLM-SERVER] candidate failed; trying next backend");
                     last_err = Some(err);
                 }
@@ -96,6 +101,7 @@ impl VlmServer {
         mmproj: &Path,
         cancel: &AtomicBool,
     ) -> Result<Self> {
+        crate::models::runtime::ensure_gpu_inference_alive()?;
         let port = pick_free_port()?;
         let api_key = new_api_key();
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
@@ -137,10 +143,7 @@ impl VlmServer {
 
         let mut child = cmd.spawn().context("spawn bundled llama-server")?;
         let base_url = format!("http://127.0.0.1:{port}");
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .build()
-            .context("build VLM HTTP client")?;
+        let client = build_loopback_client()?;
 
         // Health-poll until ready, but bail FAST if the child exits early — a
         // CUDA build missing its runtime DLLs dies on launch, and we don't want
@@ -148,6 +151,10 @@ impl VlmServer {
         let health_url = format!("{base_url}/health");
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
+            if let Err(err) = crate::models::runtime::ensure_gpu_inference_alive() {
+                stop_child(&mut child).await;
+                return Err(err);
+            }
             if cancel.load(Ordering::Relaxed) {
                 stop_child(&mut child).await;
                 bail!("VLM server startup cancelled");
@@ -246,6 +253,19 @@ impl VlmServer {
             .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
         Ok(content.trim().to_string())
     }
+}
+
+fn build_loopback_client() -> Result<reqwest::Client> {
+    build_loopback_client_with(reqwest::Client::builder())
+}
+
+fn build_loopback_client_with(builder: reqwest::ClientBuilder) -> Result<reqwest::Client> {
+    builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(300))
+        .build()
+        .context("build VLM HTTP client")
 }
 
 async fn stop_child(child: &mut Child) {
@@ -378,6 +398,73 @@ mod tests {
         let token = &first["fileid-".len()..];
         assert_eq!(token.len(), 32);
         assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn loopback_client_never_follows_redirects() {
+        use std::io::{Read, Write};
+
+        let redirect = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let target = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_url = format!("http://{}/capture", target.local_addr().unwrap());
+        let redirect_url = format!("http://{}/start", redirect.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = redirect.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime
+            .block_on(async { build_loopback_client().unwrap().get(redirect_url).send().await })
+            .unwrap();
+        server.join().unwrap();
+        assert!(response.status().is_redirection());
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn loopback_client_bypasses_configured_proxy() {
+        use std::io::{Read, Write};
+
+        let target = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        proxy.set_nonblocking(true).unwrap();
+        let target_url = format!("http://{}/health", target.local_addr().unwrap());
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = target.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+            )
+            .unwrap();
+        });
+        let configured = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy_url).unwrap());
+        let client = build_loopback_client_with(configured).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let response = runtime
+            .block_on(async { client.get(target_url).send().await })
+            .unwrap();
+        server.join().unwrap();
+        assert!(response.status().is_success());
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(matches!(proxy.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
     }
 
     #[test]

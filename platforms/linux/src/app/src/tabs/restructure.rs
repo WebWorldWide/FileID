@@ -314,7 +314,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let (status_row, status_inner) = padded_card();
     status_inner.set_orientation(gtk::Orientation::Horizontal);
     status_inner.set_spacing(10);
-    let status_icon = gtk::Image::from_icon_name("emblem-ok-symbolic");
+    let status_icon = gtk::Image::from_icon_name("object-select-symbolic");
     let status_label = gtk::Label::builder()
         .label("")
         .xalign(0.0)
@@ -1084,7 +1084,7 @@ fn render_stat_hero(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
 
     if sum.anchor_folders > 0 {
         ui.stat_hero.append(&stat_chip(
-            "emblem-ok-symbolic",
+            "object-select-symbolic",
             &format!(
                 "Keep {} folder{}",
                 sum.anchor_folders,
@@ -1528,7 +1528,7 @@ fn set_status(ui: &Rc<Ui>, msg: &str, is_error: bool) {
     ui.status_icon.set_icon_name(Some(if is_error {
         "dialog-warning-symbolic"
     } else {
-        "emblem-ok-symbolic"
+        "object-select-symbolic"
     }));
     ui.status_icon.remove_css_class("gold-accent");
     if !is_error {
@@ -2247,7 +2247,7 @@ fn truncate(s: &str, max: usize) -> String {
 fn confidence_badge(conf: &str) -> Option<(&'static str, &'static str, Option<&'static str>)> {
     match conf.to_ascii_lowercase().as_str() {
         "auto" => Some((
-            "emblem-ok-symbolic",
+            "object-select-symbolic",
             "High confidence — safe to apply.",
             Some("gold-accent"),
         )),
