@@ -390,6 +390,360 @@ pub(crate) async fn handle_rename_files(
     emit_bulk_result(&sink, "renameFiles", result).await;
 }
 
+#[derive(Clone)]
+struct TrashCandidate {
+    file_id: i64,
+    path: PathBuf,
+    staging_path: PathBuf,
+    indexed_size: u64,
+    indexed_file_ref: Option<i64>,
+    indexed_content_hash: Option<Vec<u8>>,
+    source_identity: crate::platform::FileIdentity,
+    expected_exact: Option<ipc::ExactTrashIdentity>,
+}
+
+#[derive(Debug)]
+enum CheckedTrashOutcome {
+    Trashed,
+    Rejected(String),
+    Failed(String),
+}
+
+#[cfg(test)]
+fn exact_hash_at_stable_path_with(
+    path: &std::path::Path,
+    expected_size: u64,
+    hash_file: impl FnOnce(
+        &std::path::Path,
+        u64,
+    ) -> Result<([u8; 32], crate::platform::FileIdentity), String>,
+) -> Result<[u8; 32], String> {
+    let probe = crate::util::path_safety::to_extended_length(path);
+    let before_metadata = std::fs::symlink_metadata(&probe)
+        .map_err(|error| format!("exact file is missing or unreadable: {error}"))?;
+    if !before_metadata.file_type().is_file() || before_metadata.len() != expected_size {
+        return Err("exact file type or size changed before hashing".into());
+    }
+    let before_identity = crate::platform::file_identity(path)
+        .ok_or_else(|| "could not capture exact file identity before hashing".to_string())?;
+    let (hash, handle_identity) = hash_file(path, expected_size)?;
+    let after_metadata = std::fs::symlink_metadata(&probe)
+        .map_err(|error| format!("exact file disappeared after hashing: {error}"))?;
+    let after_identity = crate::platform::file_identity(path)
+        .ok_or_else(|| "could not recapture exact file identity after hashing".to_string())?;
+    if !after_metadata.file_type().is_file()
+        || after_metadata.len() != expected_size
+        || handle_identity != before_identity
+        || after_identity != before_identity
+    {
+        return Err("exact file path identity changed during hashing".into());
+    }
+    Ok(hash)
+}
+
+fn exact_hash_guard_at_stable_path(
+    path: &std::path::Path,
+    expected_size: u64,
+    lock: crate::util::content_hash::ExactFileLock,
+) -> Result<crate::util::content_hash::ExactFileHash, String> {
+    let probe = crate::util::path_safety::to_extended_length(path);
+    let before_metadata = std::fs::symlink_metadata(&probe)
+        .map_err(|error| format!("exact file is missing or unreadable: {error}"))?;
+    if !before_metadata.file_type().is_file() || before_metadata.len() != expected_size {
+        return Err("exact file type or size changed before hashing".into());
+    }
+    let before_identity = crate::platform::file_identity(path)
+        .ok_or_else(|| "could not capture exact file identity before hashing".to_string())?;
+    let proof = crate::util::content_hash::exact_file_sha256_guard(path, expected_size, lock)
+    .map_err(|error| format!("could not hash exact file contents: {error}"))?;
+    let after_metadata = std::fs::symlink_metadata(&probe)
+        .map_err(|error| format!("exact file disappeared after hashing: {error}"))?;
+    let after_identity = crate::platform::file_identity(path)
+        .ok_or_else(|| "could not recapture exact file identity after hashing".to_string())?;
+    if !after_metadata.file_type().is_file()
+        || after_metadata.len() != expected_size
+        || proof.identity != before_identity
+        || after_identity != before_identity
+    {
+        return Err("exact file path identity changed during hashing".into());
+    }
+    Ok(proof)
+}
+
+struct ExactTrashGuards {
+    _keeper: crate::util::content_hash::ExactFileHash,
+    _victim: crate::util::content_hash::ExactFileHash,
+}
+
+fn validate_trash_candidate_at(
+    candidate: &TrashCandidate,
+    actual_path: &std::path::Path,
+    verify_contents: bool,
+) -> Result<Option<ExactTrashGuards>, String> {
+    if let Some(expected) = &candidate.expected_exact {
+        let victim_hash = hex::decode(&expected.sha256_hex)
+            .map_err(|_| "exact-cleanup evidence contains an invalid SHA-256".to_string())?;
+        let keeper_hash = hex::decode(&expected.keeper_sha256_hex)
+            .map_err(|_| "exact-cleanup keeper SHA-256 is invalid".to_string())?;
+        if expected.path != candidate.path.to_string_lossy()
+            || expected.size_bytes != candidate.indexed_size as i64
+            || expected.size_bytes != expected.keeper_size_bytes
+            || victim_hash != keeper_hash
+        {
+            return Err("exact-cleanup evidence does not prove equal victim and keeper bytes".into());
+        }
+    }
+    let probe = crate::util::path_safety::to_extended_length(actual_path);
+    let metadata = std::fs::symlink_metadata(&probe)
+        .map_err(|error| format!("file is missing or unreadable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("indexed path no longer names a regular file".into());
+    }
+    if metadata.len() != candidate.indexed_size {
+        return Err("file size changed since it was indexed".into());
+    }
+
+    match crate::platform::file_identity(actual_path) {
+        Some(current_identity) if current_identity == candidate.source_identity => {}
+        Some(_) => return Err("a different file now occupies the claimed path".into()),
+        None => return Err("could not revalidate the claimed file identity".into()),
+    }
+
+    let current_ref = crate::platform::file_ref(actual_path);
+    if let Some(indexed_ref) = candidate.indexed_file_ref {
+        match current_ref {
+            Some(current_ref) if current_ref == indexed_ref as u64 => {}
+            Some(_) => return Err("a different file now occupies the indexed path".into()),
+            None => return Err("could not revalidate the indexed file identity".into()),
+        }
+    }
+    if !verify_contents {
+        return Ok(None);
+    }
+
+    if let Some(expected) = &candidate.expected_exact {
+        let keeper_size = u64::try_from(expected.keeper_size_bytes)
+            .map_err(|_| "exact-cleanup keeper size is invalid".to_string())?;
+        let keeper_expected = hex::decode(&expected.keeper_sha256_hex)
+            .map_err(|_| "exact-cleanup keeper SHA-256 is invalid".to_string())?;
+        let keeper_actual = exact_hash_guard_at_stable_path(
+            std::path::Path::new(&expected.keeper_path),
+            keeper_size,
+            crate::util::content_hash::ExactFileLock::DenyMutation,
+        )
+        .map_err(|error| format!("could not revalidate the exact-duplicate keeper: {error}"))?;
+        if keeper_actual.hash.as_slice() != keeper_expected.as_slice() {
+            return Err("the exact-duplicate keeper changed before Trash".into());
+        }
+        let expected_hash = hex::decode(&expected.sha256_hex)
+            .map_err(|_| "exact-cleanup evidence contains an invalid SHA-256".to_string())?;
+        let victim_actual = exact_hash_guard_at_stable_path(
+            actual_path,
+            candidate.indexed_size,
+            crate::util::content_hash::ExactFileLock::DenyWrite,
+        )
+        .map_err(|error| format!("could not verify exact file contents: {error}"))?;
+        if victim_actual.hash.as_slice() != expected_hash.as_slice() {
+            return Err("file contents changed after exact-duplicate verification".into());
+        }
+        return Ok(Some(ExactTrashGuards {
+            _keeper: keeper_actual,
+            _victim: victim_actual,
+        }));
+    } else if candidate.indexed_file_ref.is_none() {
+        if candidate.indexed_size > crate::util::content_hash::FULL_HASH_MAX_BYTES {
+            return Err(
+                "the catalog has no stable identity for this large file; rescan before trashing it"
+                    .into(),
+            );
+        }
+        let Some(indexed_hash) = candidate.indexed_content_hash.as_deref() else {
+            return Err(
+                "the catalog has no stable identity for this file; rescan before trashing it"
+                    .into(),
+            );
+        };
+        if indexed_hash.len() != 32 {
+            return Err("the catalog contains an invalid file identity".into());
+        }
+        let matches = crate::util::content_hash::matches_known_hash_hex(
+            actual_path,
+            candidate.indexed_size,
+            &hex::encode(indexed_hash),
+        )
+        .map_err(|error| format!("could not revalidate file contents: {error}"))?;
+        if !matches {
+            return Err("file contents changed since they were indexed".into());
+        }
+    }
+    Ok(None)
+}
+
+fn restore_failed_claim(candidate: &TrashCandidate, reason: String) -> CheckedTrashOutcome {
+    match crate::util::rename_no_replace(&candidate.staging_path, &candidate.path) {
+        Ok(()) => CheckedTrashOutcome::Rejected(reason),
+        Err(error) => CheckedTrashOutcome::Failed(format!(
+            "{reason}; the claimed file could not be restored ({error}) and remains at {}",
+            candidate.staging_path.display()
+        )),
+    }
+}
+
+fn checked_trash_one_with(
+    candidate: &TrashCandidate,
+    trash: impl FnOnce(
+        &std::path::Path,
+        &std::path::Path,
+        crate::platform::FileIdentity,
+    ) -> anyhow::Result<()>,
+) -> CheckedTrashOutcome {
+    if let Err(reason) = validate_trash_candidate_at(candidate, &candidate.path, false) {
+        return CheckedTrashOutcome::Rejected(reason);
+    }
+    if let Err(error) = crate::util::rename_no_replace(&candidate.path, &candidate.staging_path) {
+        return CheckedTrashOutcome::Failed(format!("could not atomically claim file for Trash: {error}"));
+    }
+    let _exact_guards = match validate_trash_candidate_at(candidate, &candidate.staging_path, true) {
+        Ok(guard) => guard,
+        Err(reason) => return restore_failed_claim(candidate, reason),
+    };
+    match trash(
+        &candidate.staging_path,
+        &candidate.path,
+        candidate.source_identity,
+    ) {
+        Ok(()) => CheckedTrashOutcome::Trashed,
+        Err(error) => match crate::util::rename_no_replace(&candidate.staging_path, &candidate.path) {
+            Ok(()) => CheckedTrashOutcome::Failed(error.to_string()),
+            Err(restore_error) => CheckedTrashOutcome::Failed(format!(
+                "{error}; the failed Trash claim also could not be restored ({restore_error}) and remains at {}",
+                candidate.staging_path.display()
+            )),
+        },
+    }
+}
+
+fn checked_trash_one(candidate: &TrashCandidate) -> CheckedTrashOutcome {
+    checked_trash_one_with(candidate, crate::shell::trash::trash_path_as)
+}
+
+fn checked_trash_candidates(candidates: &[TrashCandidate]) -> Vec<CheckedTrashOutcome> {
+    if candidates.len() <= 4 {
+        return candidates.iter().map(checked_trash_one).collect();
+    }
+
+    const POOL_SIZE: usize = 8;
+    let n = candidates.len();
+    let (input_tx, input_rx) = crossbeam_channel::bounded::<(usize, TrashCandidate)>(n);
+    let (output_tx, output_rx) =
+        crossbeam_channel::bounded::<(usize, CheckedTrashOutcome)>(n);
+
+    for _ in 0..POOL_SIZE.min(n) {
+        let rx = input_rx.clone();
+        let tx = output_tx.clone();
+        std::thread::spawn(move || {
+            while let Ok((index, candidate)) = rx.recv() {
+                let _ = tx.send((index, checked_trash_one(&candidate)));
+            }
+        });
+    }
+    drop(output_tx);
+    for (index, candidate) in candidates.iter().cloned().enumerate() {
+        let _ = input_tx.send((index, candidate));
+    }
+    drop(input_tx);
+
+    let mut outcomes: Vec<Option<CheckedTrashOutcome>> =
+        std::iter::repeat_with(|| None).take(n).collect();
+    while let Ok((index, outcome)) = output_rx.recv() {
+        if let Some(slot) = outcomes.get_mut(index) {
+            *slot = Some(outcome);
+        }
+    }
+    outcomes
+        .into_iter()
+        .map(|outcome| {
+            outcome.unwrap_or_else(|| CheckedTrashOutcome::Failed("Trash worker exited".into()))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn bind_windows_trash_receipts_with(
+    candidates: &[TrashCandidate],
+    outcomes: &mut [CheckedTrashOutcome],
+    entry: &mut TrashLogEntry,
+    locate: impl FnOnce(&[&str]) -> std::collections::HashMap<String, std::path::PathBuf>,
+    append: impl FnOnce(&TrashLogEntry) -> anyhow::Result<()>,
+) {
+    let claims: Vec<&str> = candidates
+        .iter()
+        .zip(outcomes.iter())
+        .filter_map(|(candidate, outcome)| {
+            matches!(outcome, CheckedTrashOutcome::Trashed)
+                .then(|| candidate.staging_path.to_str())
+                .flatten()
+        })
+        .collect();
+    let physical = locate(&claims);
+    let mut verified = Vec::new();
+    for (index, (candidate, outcome)) in candidates.iter().zip(outcomes.iter_mut()).enumerate() {
+        if !matches!(outcome, CheckedTrashOutcome::Trashed) {
+            continue;
+        }
+        let key = crate::util::path_safety::normalize_for_exclusion(&candidate.staging_path);
+        let Some(path) = physical.get(&key) else {
+            *outcome = CheckedTrashOutcome::Failed(
+                "Recycle Bin did not return an identity-bound receipt; the catalog row was retained"
+                    .into(),
+            );
+            continue;
+        };
+        if crate::platform::file_identity(path) != Some(candidate.source_identity) {
+            *outcome = CheckedTrashOutcome::Failed(
+                "Recycle Bin receipt identity did not match the claimed file; the catalog row was retained"
+                    .into(),
+            );
+            continue;
+        }
+        entry.items[index].recycle_physical_path = Some(path.to_string_lossy().into_owned());
+        verified.push(index);
+    }
+    if !verified.is_empty() {
+        if let Err(error) = append(entry) {
+            for index in verified {
+                outcomes[index] = CheckedTrashOutcome::Failed(format!(
+                    "file moved to the Recycle Bin, but its identity receipt could not be journaled ({error}); the catalog row was retained"
+                ));
+                entry.items[index].recycle_physical_path = None;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn bind_windows_trash_receipts(
+    candidates: &[TrashCandidate],
+    outcomes: &mut [CheckedTrashOutcome],
+    entry: &mut TrashLogEntry,
+) {
+    bind_windows_trash_receipts_with(
+        candidates,
+        outcomes,
+        entry,
+        super::trash::invoke_windows_restore_batch,
+        trash_log::append,
+    );
+}
+
+#[cfg(not(windows))]
+fn bind_windows_trash_receipts(
+    _candidates: &[TrashCandidate],
+    _outcomes: &mut [CheckedTrashOutcome],
+    _entry: &mut TrashLogEntry,
+) {
+}
+
 fn trash_commit_failure_result(
     batch_id: String,
     succeeded: u32,
@@ -418,8 +772,7 @@ fn trash_commit_failure_result(
     }
 }
 
-/// Trash a set of files. Looks up paths from the DB, hands a Vec<PathBuf>
-/// to shell::trash::trash, removes the rows on success.
+/// Trash indexed files only after immediately revalidating their on-disk identity.
 pub(crate) async fn handle_trash_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -429,141 +782,187 @@ pub(crate) async fn handle_trash_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        // ENG-93: capture each path's pre-op existence. shell::trash::trash_path
-        // is idempotent — a source that is already gone returns Ok (reported as
-        // `true`). That is correct for the shell layer but must not be recorded
-        // here as a successful trash: it would pollute the undo/trash log with an
-        // entry restoreFromTrash can never honor. A file missing before the op is
-        // skipped (failed), not trashed.
-        let mut path_for_id: Vec<(i64, PathBuf, bool)> = Vec::with_capacity(payload.file_ids.len());
-
-        {
-            let conn = db.lock();
-            for fid in &payload.file_ids {
-                match conn.query_row(
-                    "SELECT path_text FROM files WHERE id = ?1",
-                    rusqlite::params![fid],
-                    |r| r.get::<_, String>(0),
-                ) {
-                    Ok(p) => {
-                        let path = PathBuf::from(p);
-                        // Verbatim (\\?\) probe so a >260-char file is classified as
-                        // present (and trashed) instead of "already missing" (#28).
-                        let existed = std::fs::symlink_metadata(
-                            crate::util::path_safety::to_extended_length(&path),
-                        )
-                        .is_ok();
-                        path_for_id.push((*fid, path, existed));
-                    }
-                    // A file_id with no DB row was silently dropped before, so
-                    // succeeded+failed didn't sum to the request and the app got
-                    // no per-item reason. Report it as failed, matching
-                    // handle_apply_tags / handle_rename_files. (audit 2026-07-08)
-                    Err(err) => {
-                        failed += 1;
-                        messages.push(BulkActionItem {
-                            file_id: Some(*fid),
-                            ok: false,
-                            message: Some(format!("not found: {err}")),
-                        });
-                    }
-                }
+        let mut file_ids = payload.file_ids;
+        let mut seen_ids = std::collections::HashSet::with_capacity(file_ids.len());
+        file_ids.retain(|file_id| seen_ids.insert(*file_id));
+        let mut candidates = Vec::with_capacity(file_ids.len());
+        let mut exact_by_id = std::collections::HashMap::new();
+        for identity in payload.exact_identities.unwrap_or_default() {
+            let file_id = identity.file_id;
+            if exact_by_id.insert(file_id, identity).is_some() {
+                anyhow::bail!("trashFiles contains duplicate exact identity #{file_id}");
             }
         }
 
-        let outcomes = crate::shell::trash::trash(
-            &path_for_id
-                .iter()
-                .map(|(_, p, _)| p.clone())
-                .collect::<Vec<_>>(),
-        );
-
-        let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
-        let mut log_items: Vec<TrashLogItem> = Vec::new();
-        for ((fid, path, existed), trashed_ok) in path_for_id.iter().zip(outcomes) {
-            if !existed {
-                tracing::warn!(
-                    path = %crate::platform::redact_path_for_log(path),
-                    "ENG-93: skipping trash record — file was already missing before the op"
-                );
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(*fid),
-                    ok: false,
-                    message: Some(format!("already missing: {}", path.display())),
-                });
-                continue;
-            }
-            if trashed_ok {
-                log_items.push(TrashLogItem {
-                    file_id: *fid,
-                    original_path: path.to_string_lossy().to_string(),
-                    recycle_bin_id: None,
-                });
-                match tx.execute("DELETE FROM files WHERE id = ?1", rusqlite::params![fid]) {
-                    Ok(1) => {
-                        succeeded += 1;
-                        messages.push(BulkActionItem {
-                            file_id: Some(*fid),
-                            ok: true,
-                            message: Some(path.to_string_lossy().to_string()),
-                        });
-                    }
-                    Ok(changed) => {
-                        failed += 1;
-                        messages.push(BulkActionItem {
-                            file_id: Some(*fid),
-                            ok: false,
-                            message: Some(format!(
-                                "moved to Trash, but the catalog update affected {changed} rows (expected 1); use Undo to restore"
-                            )),
-                        });
+        {
+            let conn = db.lock();
+            for fid in &file_ids {
+                match conn.query_row(
+                    "SELECT path_text,size_bytes,file_ref,content_hash FROM files WHERE id = ?1",
+                    rusqlite::params![fid],
+                    |row| {
+                        let indexed_size = row.get::<_, i64>(1)?;
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            indexed_size,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<Vec<u8>>>(3)?,
+                        ))
+                    },
+                ) {
+                    Ok((path, indexed_size, indexed_file_ref, indexed_content_hash)) => {
+                        match u64::try_from(indexed_size) {
+                            Ok(indexed_size) => {
+                                let path = PathBuf::from(path);
+                                let staging_path = path.with_file_name(format!(
+                                    ".fileid-trash-{}",
+                                    uuid::Uuid::new_v4()
+                                ));
+                                match crate::platform::file_identity(&path) {
+                                    Some(source_identity) => candidates.push(TrashCandidate {
+                                        file_id: *fid,
+                                        path,
+                                        staging_path,
+                                        indexed_size,
+                                        indexed_file_ref,
+                                        indexed_content_hash,
+                                        source_identity,
+                                        expected_exact: exact_by_id.remove(fid),
+                                    }),
+                                    None => {
+                                        failed += 1;
+                                        messages.push(BulkActionItem {
+                                            file_id: Some(*fid),
+                                            ok: false,
+                                            message: Some(
+                                                "could not capture a volume-qualified file identity; rescan before trashing"
+                                                    .into(),
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                failed += 1;
+                                messages.push(BulkActionItem {
+                                    file_id: Some(*fid),
+                                    ok: false,
+                                    message: Some("catalog contains an invalid file size".into()),
+                                });
+                            }
+                        }
                     }
                     Err(error) => {
                         failed += 1;
                         messages.push(BulkActionItem {
                             file_id: Some(*fid),
                             ok: false,
-                            message: Some(format!(
-                                "moved to Trash, but the catalog update failed ({error}); use Undo to restore"
-                            )),
+                            message: Some(format!("not found: {error}")),
                         });
                     }
                 }
-            } else {
-                failed += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(*fid),
-                    ok: false,
-                    message: Some(format!("trash failed: {}", path.display())),
-                });
             }
         }
-        // C1-018: write the undo journal BEFORE committing the row-DELETE. The
-        // bytes are already in the Recycle Bin (irreversible from here), and the
-        // journal is the ONLY map back to them — `restoreFromTrash` reads it to
-        // find which paths to bring back. If the append fails AFTER we delete the
-        // Library rows, the app's UndoStack restore is a silent no-op (no journal
-        // entry). So: append first; on failure, roll back the DELETE (drop the tx
-        // without commit) so the file rows survive as a recovery handle and
-        // surface a hard error rather than a silently-unrecoverable trash.
+
         let batch_id = uuid::Uuid::new_v4().to_string();
-        if !log_items.is_empty() {
-            let entry = TrashLogEntry {
-                batch_id: batch_id.clone(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0),
-                items: log_items,
-            };
-            if let Err(err) = trash_log::append(&entry) {
-                tracing::error!(?err, "trash_log append failed — rolling back DELETE so the trashed files stay recoverable");
-                drop(tx); // rollback: keep the Library rows as a recovery handle
-                anyhow::bail!(
-                    "files were moved to the Recycle Bin but the undo journal could not be written ({err}); restore is unavailable for this batch"
-                );
+        let mut entry = TrashLogEntry {
+            batch_id: batch_id.clone(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs_f64())
+                .unwrap_or(0.0),
+            items: candidates
+                .iter()
+                .map(|candidate| TrashLogItem {
+                    file_id: candidate.file_id,
+                    original_path: candidate.path.to_string_lossy().into_owned(),
+                    recycle_bin_id: Some(candidate.staging_path.to_string_lossy().into_owned()),
+                    recycle_physical_path: None,
+                    source_identity: Some(candidate.source_identity),
+                })
+                .collect(),
+        };
+        if !candidates.is_empty() {
+            trash_log::append(&entry).map_err(|error| {
+                anyhow::anyhow!(
+                    "Trash was not started because its recovery journal could not be written: {error}"
+                )
+            })?;
+        }
+
+        let mut outcomes = checked_trash_candidates(&candidates);
+        bind_windows_trash_receipts(&candidates, &mut outcomes, &mut entry);
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        for (candidate, outcome) in candidates.iter().zip(outcomes) {
+            match outcome {
+                CheckedTrashOutcome::Trashed => {
+                    let changed = tx.execute(
+                        "DELETE FROM files \
+                         WHERE id=?1 AND path_text=?2 AND size_bytes=?3 \
+                           AND ((file_ref IS NULL AND ?4 IS NULL) OR file_ref=?4) \
+                           AND ((content_hash IS NULL AND ?5 IS NULL) OR content_hash=?5)",
+                        rusqlite::params![
+                            candidate.file_id,
+                            candidate.path.to_string_lossy().as_ref(),
+                            candidate.indexed_size as i64,
+                            candidate.indexed_file_ref,
+                            candidate.indexed_content_hash.as_deref(),
+                        ],
+                    );
+                    match changed {
+                        Ok(1) => {
+                            succeeded += 1;
+                            messages.push(BulkActionItem {
+                                file_id: Some(candidate.file_id),
+                                ok: true,
+                                message: Some(candidate.path.to_string_lossy().to_string()),
+                            });
+                        }
+                        Ok(changed) => {
+                            failed += 1;
+                            messages.push(BulkActionItem {
+                                file_id: Some(candidate.file_id),
+                                ok: false,
+                                message: Some(format!(
+                                    "moved to Trash, but the catalog identity changed and the update affected {changed} rows; use Undo to restore"
+                                )),
+                            });
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            messages.push(BulkActionItem {
+                                file_id: Some(candidate.file_id),
+                                ok: false,
+                                message: Some(format!(
+                                    "moved to Trash, but the catalog update failed ({error}); use Undo to restore"
+                                )),
+                            });
+                        }
+                    }
+                }
+                CheckedTrashOutcome::Rejected(reason) => {
+                    tracing::warn!(
+                        file_id = candidate.file_id,
+                        path = %crate::platform::redact_path_for_log(&candidate.path),
+                        reason,
+                        "refusing to trash a stale catalog identity"
+                    );
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(candidate.file_id),
+                        ok: false,
+                        message: Some(reason),
+                    });
+                }
+                CheckedTrashOutcome::Failed(error) => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(candidate.file_id),
+                        ok: false,
+                        message: Some(format!("trash failed: {error}")),
+                    });
+                }
             }
         }
         if let Err(error) = tx.commit() {
@@ -716,7 +1115,7 @@ pub(crate) async fn emit_bulk_result(
                 BulkActionResult {
                     action: action.into(),
                     succeeded: 0,
-                    failed: 0,
+                    failed: 1,
                     messages: vec![BulkActionItem {
                         file_id: None,
                         ok: false,
@@ -728,6 +1127,19 @@ pub(crate) async fn emit_bulk_result(
         }
         Err(err) => {
             tracing::warn!(?err, action, "bulk action spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
+                BulkActionResult {
+                    action: action.into(),
+                    succeeded: 0,
+                    failed: 1,
+                    messages: vec![BulkActionItem {
+                        file_id: None,
+                        ok: false,
+                        message: Some(format!("bulk action worker failed: {err}")),
+                    }],
+                },
+            ))))
+            .await;
         }
     }
 }
@@ -837,14 +1249,14 @@ pub(crate) async fn handle_mark_persons_as_unknown(
 /// path) and the stable (min,max) anchor face_print pair (v13), so
 /// findMergeSuggestions keeps suppressing the pair across re-clustering. Routed
 /// here so the write goes through the engine's single-writer connection rather
-/// than a second app-side writer. Fire-and-forget: emits an Error event only on
-/// failure; the app updates its status text optimistically.
+/// than a second app-side writer. Completion uses the same awaited bulk result
+/// contract as the adjacent person mutations.
 pub(crate) async fn handle_mark_persons_different(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::MarkPersonsDifferentPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
         let (pa, pb) = if payload.source_person_id <= payload.destination_person_id {
             (payload.source_person_id, payload.destination_person_id)
         } else {
@@ -882,26 +1294,20 @@ pub(crate) async fn handle_mark_persons_different(
              VALUES (?1, ?2, 0, 1.0, 'user-verified', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![pa, pb, now, fa, fb, file_a, bbox_a, file_b, bbox_b],
         )?;
-        Ok(())
+        Ok(BulkActionResult {
+            action: "markPersonsDifferent".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![BulkActionItem {
+                file_id: None,
+                ok: true,
+                message: None,
+            }],
+        })
     })
     .await;
 
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            tracing::warn!(?err, "mark_persons_different failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "mark_persons_different_failed".into(),
-                message: format!("Mark different failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
-            .await;
-        }
-        Err(err) => {
-            tracing::warn!(?err, "mark_persons_different spawn failed");
-        }
-    }
+    emit_bulk_result(&sink, "markPersonsDifferent", result).await;
 }
 
 /// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
@@ -1157,6 +1563,13 @@ pub(crate) async fn handle_find_merge_suggestions(
         }
         Err(err) => {
             tracing::warn!(?err, "find_merge_suggestions spawn failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "find_merge_suggestions_failed".into(),
+                message: format!("Find merge suggestions worker failed: {err}"),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
         }
     }
 }
@@ -1218,6 +1631,310 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn trash_candidate(path: &std::path::Path, file_id: i64) -> TrashCandidate {
+        let metadata = std::fs::metadata(path).unwrap();
+        TrashCandidate {
+            file_id,
+            path: path.to_path_buf(),
+            staging_path: path.with_file_name(format!(".fileid-test-stage-{file_id}")),
+            indexed_size: metadata.len(),
+            indexed_file_ref: crate::platform::file_ref(path).map(|value| value as i64),
+            indexed_content_hash: Some(
+                crate::util::content_hash::content_hash(path, metadata.len())
+                    .unwrap()
+                    .to_vec(),
+            ),
+            source_identity: crate::platform::file_identity(path).unwrap(),
+            expected_exact: None,
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_trash_requires_a_durable_identity_bound_receipt() {
+        let dir = unique_temp_dir("trash-windows-receipt");
+        let path = dir.join("claimed.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        let candidate = trash_candidate(&path, 7);
+        let make_entry = || TrashLogEntry {
+            batch_id: "receipt-test".into(),
+            timestamp: 0.0,
+            items: vec![TrashLogItem {
+                file_id: candidate.file_id,
+                original_path: candidate.path.to_string_lossy().into_owned(),
+                recycle_bin_id: Some(candidate.staging_path.to_string_lossy().into_owned()),
+                recycle_physical_path: None,
+                source_identity: Some(candidate.source_identity),
+            }],
+        };
+        let locate = |claims: &[&str]| {
+            assert_eq!(claims, [candidate.staging_path.to_str().unwrap()]);
+            std::collections::HashMap::from([(
+                crate::util::path_safety::normalize_for_exclusion(&candidate.staging_path),
+                path.clone(),
+            )])
+        };
+        let appended = std::cell::Cell::new(false);
+        let mut entry = make_entry();
+        let mut outcomes = vec![CheckedTrashOutcome::Trashed];
+
+        bind_windows_trash_receipts_with(
+            std::slice::from_ref(&candidate),
+            &mut outcomes,
+            &mut entry,
+            locate,
+            |_| {
+                appended.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(outcomes[0], CheckedTrashOutcome::Trashed));
+        assert!(appended.get());
+        assert_eq!(
+            entry.items[0].recycle_physical_path.as_deref(),
+            path.to_str()
+        );
+
+        let mut entry = make_entry();
+        let mut outcomes = vec![CheckedTrashOutcome::Trashed];
+        bind_windows_trash_receipts_with(
+            std::slice::from_ref(&candidate),
+            &mut outcomes,
+            &mut entry,
+            locate,
+            |_| anyhow::bail!("injected receipt append failure"),
+        );
+        assert!(matches!(outcomes[0], CheckedTrashOutcome::Failed(_)));
+        assert_eq!(entry.items[0].recycle_physical_path, None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn trash_rejects_same_path_replacement_before_backend_call() {
+        let dir = unique_temp_dir("trash-replacement");
+        let path = dir.join("duplicate.bin");
+        let original = dir.join("original.bin");
+        std::fs::write(&path, b"original").unwrap();
+        let candidate = trash_candidate(&path, 7);
+        std::fs::rename(&path, &original).unwrap();
+        std::fs::write(&path, b"replaced").unwrap();
+
+        let called = std::cell::Cell::new(false);
+        let outcome = checked_trash_one_with(&candidate, |_, _, _| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Rejected(_)));
+        assert!(!called.get(), "a stale identity must never reach the Trash backend");
+        assert_eq!(std::fs::read(&path).unwrap(), b"replaced");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exact_trash_evidence_rejects_same_size_in_place_changes_and_restores_claim() {
+        let dir = unique_temp_dir("trash-exact-change");
+        let path = dir.join("duplicate.bin");
+        let keeper = dir.join("keeper.bin");
+        std::fs::write(&path, b"original").unwrap();
+        std::fs::write(&keeper, b"original").unwrap();
+        let mut candidate = trash_candidate(&path, 8);
+        candidate.expected_exact = Some(ipc::ExactTrashIdentity {
+            file_id: 8,
+            path: path.to_string_lossy().into_owned(),
+            size_bytes: 8,
+            sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&path, 8).unwrap(),
+            ),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 8,
+            keeper_sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&keeper, 8).unwrap(),
+            ),
+        });
+        std::fs::write(&path, b"replaced").unwrap();
+
+        let called = std::cell::Cell::new(false);
+        let outcome = checked_trash_one_with(&candidate, |_, _, _| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Rejected(_)));
+        assert!(!called.get());
+        assert_eq!(std::fs::read(&path).unwrap(), b"replaced");
+        assert!(!candidate.staging_path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exact_trash_rejects_individually_valid_but_unequal_proof() {
+        let dir = unique_temp_dir("trash-exact-unequal");
+        let path = dir.join("victim.bin");
+        let keeper = dir.join("keeper.bin");
+        std::fs::write(&path, b"victim!!").unwrap();
+        std::fs::write(&keeper, b"keeper!!").unwrap();
+        let mut candidate = trash_candidate(&path, 10);
+        candidate.expected_exact = Some(ipc::ExactTrashIdentity {
+            file_id: 10,
+            path: path.to_string_lossy().into_owned(),
+            size_bytes: 8,
+            sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&path, 8).unwrap(),
+            ),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 8,
+            keeper_sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&keeper, 8).unwrap(),
+            ),
+        });
+
+        let called = std::cell::Cell::new(false);
+        let outcome = checked_trash_one_with(&candidate, |_, _, _| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Rejected(_)));
+        assert!(!called.get());
+        assert_eq!(std::fs::read(&path).unwrap(), b"victim!!");
+        assert!(!candidate.staging_path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exact_hash_rejects_path_replacement_during_hashing() {
+        let dir = unique_temp_dir("trash-exact-path-swap");
+        let path = dir.join("keeper.bin");
+        let held = dir.join("held.bin");
+        std::fs::write(&path, b"same").unwrap();
+        let result = exact_hash_at_stable_path_with(&path, 4, |current, size| {
+            std::fs::rename(current, &held).map_err(|error| error.to_string())?;
+            std::fs::write(current, b"swap").map_err(|error| error.to_string())?;
+            let hash = crate::util::content_hash::exact_file_sha256(current, size)
+                .map_err(|error| error.to_string())?;
+            let hashed_identity = crate::platform::file_identity(current)
+                .ok_or_else(|| "missing replacement identity".to_string())?;
+            std::fs::remove_file(current).map_err(|error| error.to_string())?;
+            std::fs::rename(&held, current).map_err(|error| error.to_string())?;
+            Ok((hash, hashed_identity))
+        });
+        assert!(result.unwrap_err().contains("path identity changed"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn exact_trash_locks_keeper_and_victim_through_backend_call() {
+        let dir = unique_temp_dir("trash-exact-file-locks");
+        let path = dir.join("victim.bin");
+        let keeper = dir.join("keeper.bin");
+        std::fs::write(&path, b"same").unwrap();
+        std::fs::write(&keeper, b"same").unwrap();
+        let mut candidate = trash_candidate(&path, 11);
+        candidate.expected_exact = Some(ipc::ExactTrashIdentity {
+            file_id: 11,
+            path: path.to_string_lossy().into_owned(),
+            size_bytes: 4,
+            sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&path, 4).unwrap(),
+            ),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 4,
+            keeper_sha256_hex: hex::encode(
+                crate::util::content_hash::exact_file_sha256(&keeper, 4).unwrap(),
+            ),
+        });
+
+        let moved = dir.join("recycled.bin");
+        let keeper_blocked = std::cell::Cell::new(false);
+        let victim_write_blocked = std::cell::Cell::new(false);
+        let outcome = checked_trash_one_with(&candidate, |actual, _, _| {
+            keeper_blocked.set(std::fs::remove_file(&keeper).is_err());
+            victim_write_blocked.set(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(actual)
+                    .is_err(),
+            );
+            std::fs::rename(actual, &moved)?;
+            Ok(())
+        });
+        assert!(keeper_blocked.get());
+        assert!(victim_write_blocked.get());
+        assert!(matches!(outcome, CheckedTrashOutcome::Trashed));
+        assert!(!path.exists());
+        assert!(moved.exists());
+        assert!(keeper.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exact_trash_rejects_when_unselected_keeper_changes() {
+        let dir = unique_temp_dir("trash-exact-keeper");
+        let path = dir.join("victim.bin");
+        let keeper = dir.join("keeper.bin");
+        std::fs::write(&path, b"same").unwrap();
+        std::fs::write(&keeper, b"same").unwrap();
+        let expected = hex::encode(
+            crate::util::content_hash::exact_file_sha256(&path, 4).unwrap(),
+        );
+        let mut candidate = trash_candidate(&path, 9);
+        candidate.expected_exact = Some(ipc::ExactTrashIdentity {
+            file_id: 9,
+            path: path.to_string_lossy().into_owned(),
+            size_bytes: 4,
+            sha256_hex: expected.clone(),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 4,
+            keeper_sha256_hex: expected,
+        });
+        std::fs::write(&keeper, b"gone").unwrap();
+
+        let called = std::cell::Cell::new(false);
+        let outcome = checked_trash_one_with(&candidate, |_, _, _| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(matches!(outcome, CheckedTrashOutcome::Rejected(_)));
+        assert!(!called.get());
+        assert_eq!(std::fs::read(&path).unwrap(), b"same");
+        assert!(!candidate.staging_path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trash_identity_check_is_per_item_for_mixed_batches() {
+        let dir = unique_temp_dir("trash-mixed");
+        let good_path = dir.join("good.bin");
+        let replaced_path = dir.join("replaced.bin");
+        let missing_path = dir.join("missing.bin");
+        std::fs::write(&good_path, b"good").unwrap();
+        std::fs::write(&replaced_path, b"before").unwrap();
+        std::fs::write(&missing_path, b"gone").unwrap();
+        let good = trash_candidate(&good_path, 1);
+        let replaced = trash_candidate(&replaced_path, 2);
+        let missing = trash_candidate(&missing_path, 3);
+        std::fs::rename(&replaced_path, dir.join("old-replaced.bin")).unwrap();
+        std::fs::write(&replaced_path, b"after!").unwrap();
+        std::fs::remove_file(&missing_path).unwrap();
+
+        let backend_calls = std::cell::Cell::new(0usize);
+        let outcomes: Vec<CheckedTrashOutcome> = [&good, &replaced, &missing]
+            .into_iter()
+            .map(|candidate| {
+                checked_trash_one_with(candidate, |staged, _, _| {
+                    backend_calls.set(backend_calls.get() + 1);
+                    std::fs::remove_file(staged)?;
+                    Ok(())
+                })
+            })
+            .collect();
+        assert!(matches!(outcomes[0], CheckedTrashOutcome::Trashed));
+        assert!(matches!(outcomes[1], CheckedTrashOutcome::Rejected(_)));
+        assert!(matches!(outcomes[2], CheckedTrashOutcome::Rejected(_)));
+        assert_eq!(backend_calls.get(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn trash_commit_failure_preserves_recovery_batch_and_reports_failure() {
         let result = trash_commit_failure_result(
@@ -1243,6 +1960,84 @@ mod tests {
     }
 
     // C1-012: a second write appends rather than truncating (NDJSON growth).
+    #[tokio::test]
+    async fn bulk_join_failure_still_emits_terminal_result() {
+        let joined = tokio::task::spawn_blocking(|| -> anyhow::Result<BulkActionResult> {
+            panic!("injected worker panic")
+        })
+        .await;
+        let (sink, mut events) = Sink::channel_for_test(1);
+        emit_bulk_result(&sink, "trashFiles", joined).await;
+        let event = events.recv().await.expect("terminal bulk event");
+        let EventPayload::BulkActionResult(result) = event.payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!(result.inner.action, "trashFiles");
+        assert_eq!(result.inner.succeeded, 0);
+        assert_eq!(result.inner.failed, 1);
+        assert!(result.inner.messages.iter().any(|item| {
+            !item.ok
+                && item
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("worker failed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn merge_suggestion_failure_emits_command_terminal_error() {
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_find_merge_suggestions(
+            sink,
+            std::env::temp_dir().join(format!(
+                "fileid-missing-suggestions-{}-{}.sqlite",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        )
+        .await;
+
+        let event = events.recv().await.expect("terminal error event");
+        assert!(matches!(
+            event.payload,
+            EventPayload::Error(Wrap {
+                inner: EngineError { ref kind, .. }
+            }) if kind == "find_merge_suggestions_failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn mark_persons_different_failure_emits_awaited_bulk_result() {
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_mark_persons_different(
+            sink,
+            db,
+            ipc::MarkPersonsDifferentPayload {
+                source_person_id: 1,
+                destination_person_id: 2,
+                source_anchor_face_id: 3,
+                destination_anchor_face_id: 4,
+            },
+        )
+        .await;
+
+        let event = events.recv().await.expect("terminal bulk event");
+        let EventPayload::BulkActionResult(result) = event.payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!(result.inner.action, "markPersonsDifferent");
+        assert_eq!(result.inner.succeeded, 0);
+        assert_eq!(result.inner.failed, 1);
+        assert!(result.inner.messages.iter().all(|item| !item.ok));
+    }
+
     #[test]
     fn recovery_sidecar_appends() {
         let dir = unique_temp_dir("append");

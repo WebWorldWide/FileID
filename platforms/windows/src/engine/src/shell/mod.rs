@@ -118,6 +118,59 @@ mod linux_util {
         std::env::temp_dir().join(format!("fileid-{}-{nanos}-{n}.{ext}", std::process::id()))
     }
 
+    fn read_with_limit(
+        mut reader: impl std::io::Read,
+        max_bytes: usize,
+        initial_capacity: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        let limit = max_bytes.checked_add(1).ok_or_else(|| {
+            std::io::Error::other("bounded read limit overflow")
+        })?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(initial_capacity).map_err(|_| {
+            std::io::Error::other("bounded read allocation failed")
+        })?;
+        let mut chunk = [0u8; 64 * 1024];
+        while bytes.len() < limit {
+            let read_len = chunk.len().min(limit - bytes.len());
+            let n = reader.read(&mut chunk[..read_len])?;
+            if n == 0 {
+                return Ok(bytes);
+            }
+            bytes.try_reserve_exact(n).map_err(|_| {
+                std::io::Error::other("bounded read allocation failed")
+            })?;
+            bytes.extend_from_slice(&chunk[..n]);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream exceeds bounded read limit",
+        ))
+    }
+
+    pub fn read_stream_bounded(
+        reader: impl std::io::Read,
+        max_bytes: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        read_with_limit(reader, max_bytes, 0)
+    }
+
+    pub fn read_bounded(path: &Path, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+        let file = std::fs::File::open(path)?;
+        let initial = file
+            .metadata()
+            .ok()
+            .and_then(|m| usize::try_from(m.len()).ok())
+            .unwrap_or(0);
+        if initial > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file exceeds bounded read limit",
+            ));
+        }
+        read_with_limit(file, max_bytes, initial)
+    }
+
     /// Run a command with all stdio discarded; true iff it exited 0. A missing
     /// binary (ENOENT) is a clean `false`, never an error.
     pub fn run_silent(cmd: &mut Command) -> bool {
@@ -127,6 +180,21 @@ mod linux_util {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{read_bounded, read_stream_bounded, temp_file};
+
+        #[test]
+        fn bounded_reader_rejects_cap_plus_one_without_reading_past_it() {
+            let path = temp_file("bounded-read-test");
+            std::fs::write(&path, [1, 2, 3, 4, 5]).expect("write test file");
+            assert_eq!(read_bounded(&path, 5).expect("bounded read"), [1, 2, 3, 4, 5]);
+            assert!(read_bounded(&path, 4).is_err());
+            assert!(read_stream_bounded(std::io::Cursor::new([1, 2, 3, 4, 5]), 4).is_err());
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
@@ -399,13 +467,16 @@ pub mod thumbnail {
 pub mod trash {
     use super::linux_util::{absolute, percent_decode_path, percent_encode_path};
     use anyhow::{Context, Result};
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::{CString, OsStr, OsString};
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
 
     /// Batch wrapper. Trashes each path; returns one bool per input, true =
     /// success. Order is preserved. Filesystem moves are cheap, so this runs
     /// sequentially (no worker pool, unlike the COM-apartment Windows path).
+    #[allow(dead_code)]
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         let trash = match home_trash_dir() {
             Ok(t) => t,
@@ -422,72 +493,461 @@ pub mod trash {
         trash_into(path, &trash)
     }
 
-    /// Restore files previously trashed by [`trash`]/[`trash_path`] back to
-    /// their original locations — the Linux parity of the Windows Recycle-Bin
-    /// batch restore (the Cleanup-tab undo). Best-effort: scans the home trash's
-    /// `info/*.trashinfo`, and for any whose recorded original `Path` matches a
-    /// requested path, moves the file back from `files/` (recreating the parent
-    /// if it was since removed) and deletes the `.trashinfo`. Never clobbers — a
-    /// path now occupied by something else is left alone. A requested path with
-    /// no matching trash entry is silently skipped (the caller verifies on-disk
-    /// presence, exactly like the Windows path).
-    pub fn restore(wanted: &[&Path]) {
+    pub(crate) fn trash_path_as(
+        source: &Path,
+        original_path: &Path,
+        expected: crate::platform::FileIdentity,
+    ) -> Result<()> {
+        let trash = home_trash_dir()?;
+        trash_into_as(source, original_path, &trash, expected)
+    }
+
+    #[derive(Debug)]
+    pub(crate) enum RestoreOutcome {
+        Restored(crate::platform::FileIdentity),
+        Conflict,
+        Failed(String),
+    }
+
+    pub(crate) struct RestoreTarget {
+        original: PathBuf,
+        parent: std::fs::File,
+        leaf: CString,
+    }
+
+    impl RestoreTarget {
+        pub(crate) fn prepare(original: &Path, authorized_roots: &[PathBuf]) -> Result<Self> {
+            let destination = crate::util::path_safety::canonicalize_for_containment(original);
+            let root = authorized_roots
+                .iter()
+                .filter(|root| destination.starts_with(root))
+                .max_by_key(|root| root.components().count())
+                .context("destination is outside every authorized library root")?;
+            let parent_path = destination.parent().context("restore destination has no parent")?;
+            let leaf = destination
+                .file_name()
+                .context("restore destination has no filename")?;
+            let leaf = CString::new(leaf.as_bytes()).context("restore filename contains NUL")?;
+            let root_handle = open_absolute_directory(root)?;
+            let relative_parent = parent_path
+                .strip_prefix(root)
+                .context("restore parent is outside the authorized root")?;
+            let parent = open_relative_directory(&root_handle, relative_parent)?;
+            Ok(Self {
+                original: original.to_path_buf(),
+                parent,
+                leaf,
+            })
+        }
+
+        pub(crate) fn original(&self) -> &Path {
+            &self.original
+        }
+
+        pub(crate) fn restore_claim(
+            &self,
+            claim: &Path,
+            expected: Option<crate::platform::FileIdentity>,
+        ) -> Result<crate::platform::FileIdentity> {
+            let claim_parent = claim.parent().context("claim has no parent")?;
+            if claim_parent != self.original.parent().context("destination has no parent")? {
+                anyhow::bail!("claim is not a sibling of the restore destination");
+            }
+            let claim_leaf = claim.file_name().context("claim has no filename")?;
+            let claim_leaf = CString::new(claim_leaf.as_bytes()).context("claim contains NUL")?;
+            let expected = expected.context("Trash journal has no source identity")?;
+            let actual = identity_at(self.parent.as_raw_fd(), &claim_leaf)?;
+            if actual != expected {
+                anyhow::bail!("restored claim identity does not match the Trash journal");
+            }
+            renameat2_no_replace(
+                self.parent.as_raw_fd(),
+                &claim_leaf,
+                self.parent.as_raw_fd(),
+                &self.leaf,
+            )
+            .context("restore claimed file")?;
+            if let Err(sync_error) = self.parent.sync_all() {
+                if renameat2_no_replace(
+                    self.parent.as_raw_fd(),
+                    &self.leaf,
+                    self.parent.as_raw_fd(),
+                    &claim_leaf,
+                )
+                .is_ok()
+                {
+                    let _ = self.parent.sync_all();
+                    return Err(sync_error).context("sync restored destination parent");
+                }
+                if identity_at(self.parent.as_raw_fd(), &self.leaf).ok() == Some(expected) {
+                    tracing::warn!(?sync_error, "restore committed but its parent sync failed");
+                    return Ok(expected);
+                }
+                return Err(sync_error).context("sync restored destination parent");
+            }
+            identity_at(self.parent.as_raw_fd(), &self.leaf)
+        }
+
+        fn restore_external(
+            &self,
+            source: &Path,
+            expected: Option<crate::platform::FileIdentity>,
+        ) -> Result<crate::platform::FileIdentity> {
+            let expected = expected.context("Trash journal has no source identity")?;
+            let source_parent_path = source.parent().context("Trash source has no parent")?;
+            let source_leaf = source.file_name().context("Trash source has no filename")?;
+            let source_parent = std::fs::File::open(source_parent_path)
+                .context("open Trash source parent")?;
+            let source_leaf =
+                CString::new(source_leaf.as_bytes()).context("Trash source contains NUL")?;
+            let mut quarantine_name = b".fileid-restore-finalize-".to_vec();
+            quarantine_name.extend_from_slice(source_leaf.as_bytes());
+            let quarantine_leaf = CString::new(quarantine_name)?;
+            let rollback_source = || {
+                let _ = renameat2_no_replace(
+                    source_parent.as_raw_fd(),
+                    &quarantine_leaf,
+                    source_parent.as_raw_fd(),
+                    &source_leaf,
+                );
+                let _ = source_parent.sync_all();
+            };
+            match identity_at(source_parent.as_raw_fd(), &quarantine_leaf) {
+                Ok(actual) if actual == expected => {}
+                Ok(_) => anyhow::bail!("restore quarantine is occupied by another Trash item"),
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    if identity_at(source_parent.as_raw_fd(), &source_leaf)? != expected {
+                        anyhow::bail!("Trash source identity does not match the recovery journal");
+                    }
+                    renameat2_no_replace(
+                        source_parent.as_raw_fd(),
+                        &source_leaf,
+                        source_parent.as_raw_fd(),
+                        &quarantine_leaf,
+                    )
+                    .context("claim Trash source for restore")?;
+                    if let Err(error) = source_parent.sync_all() {
+                        rollback_source();
+                        return Err(error).context("sync claimed Trash source");
+                    }
+                }
+                Err(error) => return Err(error).context("inspect restore quarantine"),
+            }
+            let actual = match identity_at(source_parent.as_raw_fd(), &quarantine_leaf) {
+                Ok(actual) => actual,
+                Err(error) => {
+                    rollback_source();
+                    return Err(error).context("revalidate claimed Trash source");
+                }
+            };
+            if actual != expected {
+                rollback_source();
+                anyhow::bail!("Trash source identity does not match the recovery journal");
+            }
+
+            match renameat2_no_replace(
+                source_parent.as_raw_fd(),
+                &quarantine_leaf,
+                self.parent.as_raw_fd(),
+                &self.leaf,
+            ) {
+                Ok(()) => {
+                    let sync_result = self
+                        .parent
+                        .sync_all()
+                        .and_then(|()| source_parent.sync_all());
+                    if let Err(sync_error) = sync_result {
+                        if renameat2_no_replace(
+                            self.parent.as_raw_fd(),
+                            &self.leaf,
+                            source_parent.as_raw_fd(),
+                            &quarantine_leaf,
+                        )
+                        .is_ok()
+                        {
+                            let _ = self.parent.sync_all();
+                            let _ = source_parent.sync_all();
+                            return Err(sync_error).context("sync restored Trash item");
+                        }
+                        if identity_at(self.parent.as_raw_fd(), &self.leaf).ok() == Some(expected) {
+                            tracing::warn!(?sync_error, "restore committed but a directory sync failed");
+                            return Ok(expected);
+                        }
+                        return Err(sync_error).context("sync restored Trash item");
+                    }
+                    identity_at(self.parent.as_raw_fd(), &self.leaf)
+                }
+                Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                    match self.copy_claimed_external(&source_parent, &quarantine_leaf, expected) {
+                        Ok(identity) => Ok(identity),
+                        Err(error) => {
+                            rollback_source();
+                            Err(error)
+                        }
+                    }
+                }
+                Err(error) => {
+                    rollback_source();
+                    Err(error).context("restore claimed Trash item")
+                }
+            }
+        }
+
+        fn copy_claimed_external(
+            &self,
+            source_parent: &std::fs::File,
+            source_leaf: &CString,
+            expected: crate::platform::FileIdentity,
+        ) -> Result<crate::platform::FileIdentity> {
+            use std::os::unix::fs::MetadataExt;
+
+            let input_fd = unsafe {
+                libc::openat(
+                    source_parent.as_raw_fd(),
+                    source_leaf.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if input_fd < 0 {
+                return Err(std::io::Error::last_os_error()).context("open claimed Trash source");
+            }
+            let mut input = unsafe { std::fs::File::from_raw_fd(input_fd) };
+            let before = input.metadata()?;
+            if !before.is_file()
+                || before.dev() != expected.volume
+                || before.ino() != expected.file
+            {
+                anyhow::bail!("claimed Trash source identity changed before restore copy");
+            }
+            let output_fd = unsafe {
+                libc::openat(
+                    self.parent.as_raw_fd(),
+                    self.leaf.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    before.mode(),
+                )
+            };
+            if output_fd < 0 {
+                return Err(std::io::Error::last_os_error()).context("create restore destination");
+            }
+            let mut output = unsafe { std::fs::File::from_raw_fd(output_fd) };
+            let rollback_destination = || {
+                unsafe {
+                    libc::unlinkat(self.parent.as_raw_fd(), self.leaf.as_ptr(), 0);
+                }
+                let _ = self.parent.sync_all();
+            };
+            if let Err(error) = std::io::copy(&mut input, &mut output) {
+                rollback_destination();
+                return Err(error).context("copy Trash item to restore destination");
+            }
+            if let Err(error) = output.sync_all() {
+                rollback_destination();
+                return Err(error).context("sync restored file");
+            }
+            if let Err(error) = self.parent.sync_all() {
+                rollback_destination();
+                return Err(error).context("durably commit restored file");
+            }
+            if unsafe { libc::unlinkat(source_parent.as_raw_fd(), source_leaf.as_ptr(), 0) } != 0 {
+                let error = std::io::Error::last_os_error();
+                rollback_destination();
+                return Err(error).context("remove claimed Trash source after restore copy");
+            }
+            if let Err(error) = source_parent.sync_all() {
+                tracing::warn!(?error, "restore copy committed but the Trash parent sync failed");
+            }
+            identity_at(self.parent.as_raw_fd(), &self.leaf)
+        }
+    }
+
+    fn open_absolute_directory(path: &Path) -> Result<std::fs::File> {
+        if !path.is_absolute() {
+            anyhow::bail!("authorized root is not absolute");
+        }
+        let mut current = std::fs::File::open("/").context("open filesystem root")?;
+        for component in path.components() {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(name) => current = open_directory_at(&current, name)?,
+                _ => anyhow::bail!("authorized root contains an unsafe component"),
+            }
+        }
+        Ok(current)
+    }
+
+    fn open_relative_directory(base: &std::fs::File, path: &Path) -> Result<std::fs::File> {
+        let mut current = base.try_clone().context("clone authorized root handle")?;
+        for component in path.components() {
+            match component {
+                Component::Normal(name) => current = open_directory_at(&current, name)?,
+                _ => anyhow::bail!("restore parent contains an unsafe component"),
+            }
+        }
+        Ok(current)
+    }
+
+    fn open_directory_at(parent: &std::fs::File, name: &OsStr) -> Result<std::fs::File> {
+        let name = CString::new(name.as_bytes()).context("directory name contains NUL")?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("open restore parent without links");
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    fn renameat2_no_replace(
+        source_dir: i32,
+        source: &CString,
+        destination_dir: i32,
+        destination: &CString,
+    ) -> std::io::Result<()> {
+        let result = unsafe {
+            libc::renameat2(
+                source_dir,
+                source.as_ptr(),
+                destination_dir,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn identity_at(parent: i32, leaf: &CString) -> Result<crate::platform::FileIdentity> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::fstatat(
+                parent,
+                leaf.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context("read claim identity");
+        }
+        Ok(crate::platform::FileIdentity {
+            volume: stat.st_dev,
+            file: stat.st_ino,
+        })
+    }
+
+    pub(crate) fn restore(
+        targets: &[(&RestoreTarget, Option<crate::platform::FileIdentity>)],
+    ) -> Vec<RestoreOutcome> {
+        let Ok(trash) = home_trash_dir() else {
+            return targets
+                .iter()
+                .map(|_| RestoreOutcome::Failed("could not resolve the Trash directory".into()))
+                .collect();
+        };
+        restore_from(targets, &trash)
+    }
+
+    pub fn forget_restore_record(original: &Path) {
         let Ok(trash) = home_trash_dir() else {
             return;
         };
-        restore_from(wanted, &trash);
-    }
-
-    /// Inner restore against an explicit trash dir (so it's unit-testable
-    /// without mutating the process's `$XDG_DATA_HOME`). Mirrors how
-    /// `trash_into` is the testable core of `trash`.
-    fn restore_from(wanted: &[&Path], trash: &Path) {
-        use std::collections::HashSet;
-        if wanted.is_empty() {
-            return;
-        }
         let info_dir = trash.join("info");
         let files_dir = trash.join("files");
-        let mut remaining: HashSet<PathBuf> = wanted.iter().map(|p| p.to_path_buf()).collect();
-
         let Ok(entries) = std::fs::read_dir(&info_dir) else {
             return;
         };
         for entry in entries.flatten() {
-            if remaining.is_empty() {
-                break;
-            }
             let info_path = entry.path();
-            if info_path.extension().and_then(|e| e.to_str()) != Some("trashinfo") {
-                continue;
-            }
             let Ok(contents) = std::fs::read_to_string(&info_path) else {
                 continue;
             };
-            let Some(orig) = parse_trashinfo_orig(&contents) else {
-                continue;
-            };
-            if !remaining.contains(&orig) {
+            if parse_trashinfo_orig(&contents).as_deref() != Some(original) {
                 continue;
             }
-            // info name is "<files-entry-name>.trashinfo" → the trashed file's
-            // name is the stem.
-            let Some(stem) = info_path.file_stem() else {
-                continue;
-            };
-            let src = files_dir.join(stem);
-            if let Some(parent) = orig.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Don't overwrite whatever now sits at the original path.
-            if orig.symlink_metadata().is_ok() {
-                continue;
-            }
-            if move_into(&src, &orig).is_ok() {
-                let _ = std::fs::remove_file(&info_path);
-                remaining.remove(&orig);
+            let trashed_file_exists = info_path
+                .file_stem()
+                .is_some_and(|stem| files_dir.join(stem).symlink_metadata().is_ok());
+            if !trashed_file_exists {
+                let _ = std::fs::remove_file(info_path);
             }
         }
+    }
+
+    fn restore_from(
+        targets: &[(&RestoreTarget, Option<crate::platform::FileIdentity>)],
+        trash: &Path,
+    ) -> Vec<RestoreOutcome> {
+        let info_dir = trash.join("info");
+        let files_dir = trash.join("files");
+        let mut outcomes: Vec<Option<RestoreOutcome>> =
+            std::iter::repeat_with(|| None).take(targets.len()).collect();
+        let mut failures: Vec<Option<String>> =
+            std::iter::repeat_with(|| None).take(targets.len()).collect();
+
+        if let Ok(entries) = std::fs::read_dir(&info_dir) {
+            for entry in entries.flatten() {
+                let info_path = entry.path();
+                if info_path.extension().and_then(|extension| extension.to_str())
+                    != Some("trashinfo")
+                {
+                    continue;
+                }
+                let Ok(contents) = std::fs::read_to_string(&info_path) else {
+                    continue;
+                };
+                let Some(original) = parse_trashinfo_orig(&contents) else {
+                    continue;
+                };
+                let Some(stem) = info_path.file_stem() else {
+                    continue;
+                };
+                let source = files_dir.join(stem);
+                for (index, (target, expected)) in targets.iter().enumerate() {
+                    if outcomes[index].is_some() || target.original() != original {
+                        continue;
+                    }
+                    match target.restore_external(&source, *expected) {
+                        Ok(identity) => outcomes[index] = Some(RestoreOutcome::Restored(identity)),
+                        Err(error)
+                            if error
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|error| error.raw_os_error() == Some(libc::EEXIST)) =>
+                        {
+                            outcomes[index] = Some(RestoreOutcome::Conflict);
+                        }
+                        Err(error) => failures[index] = Some(error.to_string()),
+                    }
+                }
+            }
+        }
+
+        outcomes
+            .into_iter()
+            .zip(failures)
+            .map(|(outcome, failure)| {
+                outcome.unwrap_or_else(|| {
+                    RestoreOutcome::Failed(
+                        failure.unwrap_or_else(|| "Trash item was not found".into()),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Pull the original location out of a `.trashinfo` body's `Path=` line
@@ -497,6 +957,13 @@ pub mod trash {
             .lines()
             .find_map(|l| l.strip_prefix("Path="))
             .map(|v| percent_decode_path(v.trim()))
+    }
+
+    fn sync_dir(path: &Path) -> Result<()> {
+        std::fs::File::open(path)
+            .with_context(|| format!("open directory {} for durability", path.display()))?
+            .sync_all()
+            .with_context(|| format!("sync directory {}", path.display()))
     }
 
     fn home_trash_dir() -> Result<PathBuf> {
@@ -514,15 +981,35 @@ pub mod trash {
         if std::fs::symlink_metadata(path).is_err() {
             return Ok(());
         }
+        let expected = crate::platform::file_identity(path)
+            .context("capture volume-qualified Trash source identity")?;
+        trash_into_as(path, path, trash, expected)
+    }
+
+    fn trash_into_as(
+        path: &Path,
+        original_path: &Path,
+        trash: &Path,
+        expected: crate::platform::FileIdentity,
+    ) -> Result<()> {
+        if std::fs::symlink_metadata(path).is_err() {
+            return Ok(());
+        }
         let files_dir = trash.join("files");
         let info_dir = trash.join("info");
         std::fs::create_dir_all(&files_dir)
             .with_context(|| format!("create {}", files_dir.display()))?;
         std::fs::create_dir_all(&info_dir)
             .with_context(|| format!("create {}", info_dir.display()))?;
+        sync_dir(trash)?;
+        if let Some(parent) = trash.parent() {
+            sync_dir(parent)?;
+        }
 
-        let orig_name = path.file_name().context("path has no file name")?;
-        let abs = absolute(path);
+        let orig_name = original_path
+            .file_name()
+            .context("original path has no file name")?;
+        let abs = absolute(original_path);
 
         let mut n = 0u32;
         loop {
@@ -546,21 +1033,25 @@ pub mod trash {
                 .open(&info_path)
             {
                 Ok(mut f) => {
-                    let body = format!(
-                        "[Trash Info]\nPath={}\nDeletionDate={}\n",
-                        percent_encode_path(&abs),
-                        deletion_date_now()
-                    );
-                    f.write_all(body.as_bytes())
-                        .with_context(|| format!("write {}", info_path.display()))?;
-                    drop(f);
-                    return match move_into(path, &target) {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            let _ = std::fs::remove_file(&info_path);
-                            Err(e)
-                        }
-                    };
+                    let result = (|| -> Result<()> {
+                        let body = format!(
+                            "[Trash Info]\nPath={}\nDeletionDate={}\n",
+                            percent_encode_path(&abs),
+                            deletion_date_now()
+                        );
+                        f.write_all(body.as_bytes())
+                            .with_context(|| format!("write {}", info_path.display()))?;
+                        f.sync_all()
+                            .with_context(|| format!("sync {}", info_path.display()))?;
+                        drop(f);
+                        sync_dir(&info_dir)?;
+                        move_into(path, &target, expected)
+                    })();
+                    if result.is_err() && crate::platform::file_identity(&target) != Some(expected) {
+                        let _ = std::fs::remove_file(&info_path);
+                        let _ = sync_dir(&info_dir);
+                    }
+                    return result;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     n += 1;
@@ -590,18 +1081,47 @@ pub mod trash {
         out
     }
 
-    fn move_into(src: &Path, dst: &Path) -> Result<()> {
-        match std::fs::rename(src, dst) {
-            Ok(()) => Ok(()),
-            // Cross-filesystem move (e.g. NAS mount → home disk): copy + unlink.
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                std::fs::copy(src, dst)
-                    .with_context(|| format!("copy {} across filesystems into trash", src.display()))?;
-                std::fs::remove_file(src)
-                    .with_context(|| format!("remove original {} after copy", src.display()))?;
+    fn move_into(
+        src: &Path,
+        dst: &Path,
+        expected: crate::platform::FileIdentity,
+    ) -> Result<()> {
+        let src_parent = src.parent().context("source has no parent directory")?;
+        let dst_parent = dst.parent().context("destination has no parent directory")?;
+        sync_dir(src_parent)?;
+        sync_dir(dst_parent)?;
+        if crate::platform::file_identity(src) != Some(expected) {
+            anyhow::bail!("Trash source identity changed at the mutation boundary");
+        }
+        match crate::util::rename_no_replace(src, dst) {
+            Ok(()) => {
+                if crate::platform::file_identity(dst) != Some(expected) {
+                    anyhow::bail!(
+                        "Trash backend moved an object that does not match the recovery journal"
+                    );
+                }
+                if let Err(error) = sync_dir(dst_parent).and_then(|_| {
+                    if src_parent == dst_parent {
+                        Ok(())
+                    } else {
+                        sync_dir(src_parent)
+                    }
+                }) {
+                    let _ = crate::util::rename_no_replace(dst, src);
+                    let _ = sync_dir(dst_parent);
+                    let _ = sync_dir(src_parent);
+                    return Err(error).context("durably commit Trash rename");
+                }
                 Ok(())
             }
-            Err(e) => Err(e).with_context(|| format!("move {} to trash", src.display())),
+            Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+                Err(error).context(
+                    "Trash is on another filesystem; refusing an identity-changing copy so Undo remains provable",
+                )
+            }
+            Err(error) => {
+                Err(error).with_context(|| format!("move {} to trash", src.display()))
+            }
         }
     }
 
@@ -653,6 +1173,32 @@ pub mod trash {
         }
 
         #[test]
+        fn staged_trash_records_and_restores_the_original_path() {
+            let base =
+                std::env::temp_dir().join(format!("fileid-trash-staged-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let trash = base.join("Trash");
+            let src_dir = base.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            let original = src_dir.join("photo.jpg");
+            let staged = src_dir.join(".fileid-trash-claim");
+            std::fs::write(&staged, b"payload").unwrap();
+            let expected = crate::platform::file_identity(&staged);
+
+            trash_into_as(&staged, &original, &trash, expected.unwrap()).unwrap();
+            assert!(trash.join("files/photo.jpg").exists());
+            let info = std::fs::read_to_string(trash.join("info/photo.jpg.trashinfo")).unwrap();
+            assert!(info.contains("photo.jpg"));
+            assert!(!info.contains("fileid-trash-claim"));
+            let root = std::fs::canonicalize(&src_dir).unwrap();
+            let target = RestoreTarget::prepare(&original, &[root]).unwrap();
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Restored(_)]));
+            assert_eq!(std::fs::read(&original).unwrap(), b"payload");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
         fn handles_name_collision() {
             let base = std::env::temp_dir().join(format!("fileid-trash-coll-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
@@ -669,6 +1215,152 @@ pub mod trash {
             assert!(trash.join("files/dup.txt").exists());
             assert!(trash.join("files/dup.1.txt").exists(), "collision should append .1");
 
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn trash_backend_rejects_a_mismatched_mutation_identity_before_move() {
+            let base = std::env::temp_dir().join(format!(
+                "fileid-trash-mismatch-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&base).unwrap();
+            let source = base.join("source.bin");
+            let other = base.join("other.bin");
+            let destination = base.join("trashed.bin");
+            std::fs::write(&source, b"source").unwrap();
+            std::fs::write(&other, b"other!").unwrap();
+            let wrong_identity = crate::platform::file_identity(&other).unwrap();
+
+            let error = move_into(&source, &destination, wrong_identity).unwrap_err();
+
+            assert!(error.to_string().contains("mutation boundary"));
+            assert_eq!(std::fs::read(&source).unwrap(), b"source");
+            assert!(!destination.exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn occupied_dangling_target_does_not_leak_trashinfo() {
+            use std::os::unix::fs::symlink;
+
+            let base = std::env::temp_dir().join(format!(
+                "fileid-trash-dangling-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let trash = base.join("Trash");
+            let files = trash.join("files");
+            let source_dir = base.join("source");
+            std::fs::create_dir_all(&files).unwrap();
+            std::fs::create_dir_all(&source_dir).unwrap();
+            let source = source_dir.join("blocked.bin");
+            std::fs::write(&source, b"payload").unwrap();
+            symlink("missing-target", files.join("blocked.bin")).unwrap();
+            let expected = crate::platform::file_identity(&source).unwrap();
+
+            assert!(trash_into_as(&source, &source, &trash, expected).is_err());
+
+            assert_eq!(std::fs::read(&source).unwrap(), b"payload");
+            assert!(!trash.join("info/blocked.bin.trashinfo").exists());
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn cross_filesystem_trash_fails_without_copying() {
+            use std::os::unix::fs::MetadataExt;
+
+            let shared_memory = Path::new("/dev/shm");
+            let temp = std::env::temp_dir();
+            let Ok(shared_metadata) = std::fs::metadata(shared_memory) else {
+                return;
+            };
+            let Ok(temp_metadata) = std::fs::metadata(&temp) else {
+                return;
+            };
+            if shared_metadata.dev() == temp_metadata.dev() {
+                return;
+            }
+            let source_dir = shared_memory.join(format!(
+                "fileid-trash-exdev-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let destination_dir = temp.join(format!(
+                "fileid-trash-exdev-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&source_dir).unwrap();
+            std::fs::create_dir_all(&destination_dir).unwrap();
+            let source = source_dir.join("source.bin");
+            let destination = destination_dir.join("destination.bin");
+            std::fs::write(&source, b"payload").unwrap();
+            let expected = crate::platform::file_identity(&source).unwrap();
+
+            let error = move_into(&source, &destination, expected).unwrap_err();
+
+            assert!(error.to_string().contains("another filesystem"));
+            assert_eq!(std::fs::read(&source).unwrap(), b"payload");
+            assert!(!destination.exists());
+            let _ = std::fs::remove_dir_all(source_dir);
+            let _ = std::fs::remove_dir_all(destination_dir);
+        }
+
+        #[test]
+        fn restore_selects_matching_identity_across_same_path_generations() {
+            let base = std::env::temp_dir().join(format!(
+                "fileid-trash-generations-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let trash = base.join("Trash");
+            let src_dir = base.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            let original = src_dir.join("dup.txt");
+            std::fs::write(&original, b"older").unwrap();
+            trash_into(&original, &trash).unwrap();
+            std::fs::write(&original, b"newer").unwrap();
+            let expected = crate::platform::file_identity(&original);
+            trash_into(&original, &trash).unwrap();
+
+            let root = std::fs::canonicalize(&src_dir).unwrap();
+            let target = RestoreTarget::prepare(&original, &[root]).unwrap();
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Restored(_)]));
+            assert_eq!(std::fs::read(&original).unwrap(), b"newer");
+            assert_eq!(std::fs::read(trash.join("files/dup.txt")).unwrap(), b"older");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn restore_recovers_durable_quarantine_after_interruption() {
+            let base = std::env::temp_dir().join(format!(
+                "fileid-trash-quarantine-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let trash = base.join("Trash");
+            let src_dir = base.join("src");
+            std::fs::create_dir_all(&src_dir).unwrap();
+            let original = src_dir.join("resume.txt");
+            std::fs::write(&original, b"payload").unwrap();
+            let expected = crate::platform::file_identity(&original);
+            trash_into(&original, &trash).unwrap();
+            let source = trash.join("files/resume.txt");
+            let quarantine = trash
+                .join("files/.fileid-restore-finalize-resume.txt");
+            std::fs::rename(&source, &quarantine).unwrap();
+
+            let root = std::fs::canonicalize(&src_dir).unwrap();
+            let target = RestoreTarget::prepare(&original, &[root]).unwrap();
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Restored(_)]));
+            assert_eq!(std::fs::read(&original).unwrap(), b"payload");
+            assert!(!quarantine.exists());
             let _ = std::fs::remove_dir_all(&base);
         }
 
@@ -691,18 +1383,22 @@ pub mod trash {
             std::fs::create_dir_all(&src_dir).unwrap();
             let file = src_dir.join("restoreme.txt");
             std::fs::write(&file, b"payload").unwrap();
+            let expected = crate::platform::file_identity(&file);
 
             trash_into(&file, &trash).unwrap();
             assert!(!file.exists(), "original should be gone after trash");
             assert!(trash.join("files/restoreme.txt").exists());
 
-            restore_from(&[file.as_path()], &trash);
+            let root = std::fs::canonicalize(&src_dir).unwrap();
+            let target = RestoreTarget::prepare(&file, &[root]).unwrap();
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Restored(_)]));
 
             assert!(file.exists(), "file should be back at its original path");
             assert_eq!(std::fs::read(&file).unwrap(), b"payload");
             assert!(
-                !trash.join("info/restoreme.txt.trashinfo").exists(),
-                "the .trashinfo should be cleaned up after a successful restore"
+                trash.join("info/restoreme.txt.trashinfo").exists(),
+                "metadata remains until the command verifies the restored path identity"
             );
             assert!(
                 !trash.join("files/restoreme.txt").exists(),
@@ -722,17 +1418,103 @@ pub mod trash {
             std::fs::create_dir_all(&src_dir).unwrap();
             let file = src_dir.join("keep.txt");
             std::fs::write(&file, b"old").unwrap();
+            let expected = crate::platform::file_identity(&file);
             trash_into(&file, &trash).unwrap();
 
-            // Something new now occupies the original path.
+            let root = std::fs::canonicalize(&src_dir).unwrap();
+            let target = RestoreTarget::prepare(&file, &[root]).unwrap();
             std::fs::write(&file, b"new").unwrap();
-            restore_from(&[file.as_path()], &trash);
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Conflict]));
 
             assert_eq!(
                 std::fs::read(&file).unwrap(),
                 b"new",
                 "restore must not overwrite a file that now occupies the original path"
             );
+            assert!(trash.join("files/keep.txt").exists());
+            assert!(trash.join("info/keep.txt.trashinfo").exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn restore_rejects_substituted_trash_source() {
+            let base = std::env::temp_dir().join(format!(
+                "fileid-trash-restore-substitute-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let trash = base.join("Trash");
+            let source_dir = base.join("src");
+            std::fs::create_dir_all(&source_dir).unwrap();
+            let original = source_dir.join("file.bin");
+            std::fs::write(&original, b"original").unwrap();
+            let expected = crate::platform::file_identity(&original);
+            trash_into(&original, &trash).unwrap();
+            let trash_file = trash.join("files/file.bin");
+            std::fs::remove_file(&trash_file).unwrap();
+            std::fs::write(&trash_file, b"substitute").unwrap();
+            let root = std::fs::canonicalize(&source_dir).unwrap();
+            let target = RestoreTarget::prepare(&original, &[root]).unwrap();
+
+            let outcomes = restore_from(&[(&target, expected)], &trash);
+
+            assert!(matches!(outcomes.as_slice(), [RestoreOutcome::Failed(_)]));
+            assert!(!original.exists());
+            assert_eq!(std::fs::read(trash_file).unwrap(), b"substitute");
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn restore_target_rejects_symlinked_parent() {
+            use std::os::unix::fs::symlink;
+
+            let base = std::env::temp_dir().join(format!(
+                "fileid-restore-symlink-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let root = base.join("root");
+            let outside = base.join("outside");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            symlink(&outside, root.join("parent")).unwrap();
+            let authorized = std::fs::canonicalize(&root).unwrap();
+            let original = root.join("parent/file.bin");
+
+            assert!(RestoreTarget::prepare(&original, &[authorized]).is_err());
+            assert!(!outside.join("file.bin").exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn pinned_restore_parent_never_follows_replacement_symlink() {
+            use std::os::unix::fs::symlink;
+
+            let base = std::env::temp_dir().join(format!(
+                "fileid-restore-pinned-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let root = base.join("root");
+            let parent = root.join("parent");
+            let moved = base.join("moved-parent");
+            let outside = base.join("outside");
+            std::fs::create_dir_all(&parent).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            let original = parent.join("file.bin");
+            let claim = parent.join(".fileid-trash-claim");
+            std::fs::write(&claim, b"payload").unwrap();
+            let expected = crate::platform::file_identity(&claim);
+            let authorized = std::fs::canonicalize(&root).unwrap();
+            let target = RestoreTarget::prepare(&original, &[authorized]).unwrap();
+
+            std::fs::rename(&parent, &moved).unwrap();
+            symlink(&outside, &parent).unwrap();
+            target.restore_claim(&claim, expected).unwrap();
+
+            assert!(!outside.join("file.bin").exists());
+            assert_eq!(std::fs::read(moved.join("file.bin")).unwrap(), b"payload");
             let _ = std::fs::remove_dir_all(&base);
         }
     }
@@ -743,12 +1525,20 @@ pub mod trash {
     use std::path::{Path, PathBuf};
     /// Fallback stub: returns all-false so the caller logs failure cleanly
     /// rather than silently claiming a successful trash.
+    #[allow(dead_code)]
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         vec![false; paths.len()]
     }
     #[allow(dead_code)]
     pub fn trash_path(_path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("shell::trash::trash_path not implemented on this platform")
+    }
+    pub(crate) fn trash_path_as(
+        _source: &Path,
+        _original_path: &Path,
+        _expected: crate::platform::FileIdentity,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("shell::trash::trash_path_as not implemented on this platform")
     }
 }
 
@@ -854,10 +1644,13 @@ pub mod ocr {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod video {
-    use super::linux_util::temp_file;
+    use super::linux_util::read_stream_bounded;
     use anyhow::{Context, Result};
     use std::path::Path;
     use std::process::{Command, Stdio};
+
+    const MAX_VIDEO_PIXELS: u64 = 64_000_000;
+    const MAX_PPM_BYTES: u64 = MAX_VIDEO_PIXELS * 3 + 64 * 1024;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
@@ -869,16 +1662,12 @@ pub mod video {
         pub time_seconds: f64,
     }
 
-    /// Best-effort keyframe at ~25% of duration via the `ffmpeg` CLI. ffmpeg
-    /// writes a self-describing P6 PPM (RGB) that we parse directly — no image
-    /// decoder needed. Returns Err (gracefully, never a panic) when ffmpeg is
-    /// absent or no frame can be extracted, matching the prior stub contract
-    /// the callers already tolerate.
+    /// Best-effort keyframe at ~25% of duration via the `ffmpeg` CLI. The PPM
+    /// stream is consumed while ffmpeg runs and the child is killed if it emits
+    /// more than one bounded frame.
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         let seconds = probe_duration(path).map(|d| (d * 0.25).max(0.0)).unwrap_or(0.0);
-        let out = temp_file("ppm");
-
-        let status = Command::new("ffmpeg")
+        let child = Command::new("ffmpeg")
             .arg("-nostdin")
             .arg("-loglevel")
             .arg("error")
@@ -888,22 +1677,36 @@ pub mod video {
             .arg(path)
             .arg("-frames:v")
             .arg("1")
+            .arg("-vf")
+            .arg("scale=w='min(iw,8000)':h='min(ih,8000)':force_original_aspect_ratio=decrease")
             .arg("-f")
-            .arg("image2")
+            .arg("image2pipe")
             .arg("-vcodec")
             .arg("ppm")
-            .arg("-y")
-            .arg(&out)
+            .arg("pipe:1")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status();
+            .spawn();
 
-        let read = match status {
-            Ok(s) if s.success() => std::fs::read(&out).ok(),
-            _ => None,
+        let read = match child {
+            Ok(mut child) => {
+                let bytes = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| std::io::Error::other("ffmpeg stdout unavailable"))
+                    .and_then(|stdout| read_stream_bounded(stdout, MAX_PPM_BYTES as usize));
+                match bytes {
+                    Ok(bytes) if child.wait().is_ok_and(|status| status.success()) => Some(bytes),
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        None
+                    }
+                }
+            }
+            Err(_) => None,
         };
-        let _ = std::fs::remove_file(&out);
 
         let bytes = read.context("ffmpeg unavailable or produced no keyframe")?;
         let (width, height, rgb) =
@@ -944,10 +1747,19 @@ pub mod video {
         let w = next_uint(bytes, &mut pos)?;
         let h = next_uint(bytes, &mut pos)?;
         let maxval = next_uint(bytes, &mut pos)?;
-        if maxval != 255 {
+        let pixels = w.checked_mul(h)?;
+        if w == 0
+            || h == 0
+            || w > u32::MAX as u64
+            || h > u32::MAX as u64
+            || pixels > MAX_VIDEO_PIXELS
+            || maxval != 255
+            || !bytes
+                .get(pos)
+                .is_some_and(|separator| separator.is_ascii_whitespace())
+        {
             return None;
         }
-        // Exactly one whitespace byte separates the header from the raster.
         pos += 1;
         let need = (w as usize).checked_mul(h as usize)?.checked_mul(3)?;
         if pos.checked_add(need)? > bytes.len() {
@@ -978,6 +1790,25 @@ pub mod video {
         }
         std::str::from_utf8(&b[start..*pos]).ok()?.parse::<u64>().ok()
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::parse_ppm;
+
+        #[test]
+        fn ppm_parser_accepts_bounded_rgb_and_rejects_unsafe_dimensions() {
+            let valid = b"P6\n2 1\n255\n\x01\x02\x03\x04\x05\x06";
+            let (w, h, rgb) = parse_ppm(valid).expect("valid PPM");
+            assert_eq!((w, h), (2, 1));
+            assert_eq!(rgb, [1, 2, 3, 4, 5, 6]);
+
+            assert!(parse_ppm(b"P6\n0 1\n255\n").is_none());
+            assert!(parse_ppm(b"P6\n4294967296 1\n255\n").is_none());
+            assert!(parse_ppm(b"P6\n64000001 1\n255\n").is_none());
+            assert!(parse_ppm(b"P6\n2 1\n255\n\x01").is_none());
+            assert!(parse_ppm(b"P6\n1 1\n255X\x01\x02\x03").is_none());
+        }
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
@@ -1003,24 +1834,26 @@ pub mod video {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod heic {
-    use super::linux_util::{run_silent, temp_file};
+    use super::linux_util::{read_bounded, temp_file};
     use anyhow::{Context, Result};
+    use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
-    /// Best-effort HEIC/HEIF decode on Linux via the libheif command-line tools
-    /// (`heif-dec`, falling back to the older `heif-convert`). Converts to a temp
-    /// PNG we then decode with the already-bundled `image` crate → RGB8 +
-    /// dimensions. Returns Err (never panics) when the tools are absent or the
-    /// conversion fails, so the caller cleanly skips the file — matching the
-    /// prior stub contract. No new dependency and no GPL `libheif` linked in: the
-    /// tools are an optional system package (`libheif-examples`), honoring the
-    /// download-and-run / no-GPL-dep rule.
+    const MAX_HEIC_PIXELS: u64 = 50_000_000;
+    const MAX_CONVERTED_PNG_BYTES: u64 = 256 * 1024 * 1024;
+    const MAX_CONVERTED_FILES: usize = 64;
+
+    /// Best-effort HEIC/HEIF decode through the optional libheif CLI tools.
+    /// Every generated member lives in one private, aggregate-capped temp
+    /// directory that is removed on all return paths.
     pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
-        let out = temp_file("png");
+        let outputs = TempOutputDir::create()?;
+        let out = outputs.path().join("frame.png");
         let mut produced: Option<PathBuf> = None;
         for tool in ["heif-dec", "heif-convert"] {
-            if run_silent(Command::new(tool).arg(path).arg(&out)) {
+            clear_output_dir(outputs.path()).context("clear heic output directory")?;
+            if run_converter_bounded(tool, path, &out, outputs.path()) {
                 if let Some(p) = resolve_output(&out) {
                     produced = Some(p);
                     break;
@@ -1028,20 +1861,126 @@ pub mod heic {
             }
         }
         let Some(png) = produced else {
-            let _ = std::fs::remove_file(&out);
             anyhow::bail!("heif-dec/heif-convert unavailable or produced no output");
         };
 
-        let bytes = std::fs::read(&png);
-        let _ = std::fs::remove_file(&png);
-        if png != out {
-            let _ = std::fs::remove_file(&out);
-        }
-        let bytes = bytes.context("read converted heic png")?;
+        let dimensions = image::image_dimensions(&png).ok();
+        let within_limits = dimensions.is_some_and(|(w, h)| {
+            w > 0
+                && h > 0
+                && u64::from(w) * u64::from(h) <= MAX_HEIC_PIXELS
+        });
+        let bytes = if within_limits {
+            read_bounded(&png, MAX_CONVERTED_PNG_BYTES as usize)
+                .context("read converted heic png")
+        } else {
+            Err(anyhow::anyhow!("converted heic exceeds decode limits"))
+        };
+        let bytes = bytes?;
+        let (encoded_w, encoded_h) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .context("guess converted heic png format")?
+            .into_dimensions()
+            .context("read converted heic png dimensions")?;
+        anyhow::ensure!(
+            encoded_w > 0
+                && encoded_h > 0
+                && u64::from(encoded_w) * u64::from(encoded_h) <= MAX_HEIC_PIXELS,
+            "converted heic exceeds pixel limit"
+        );
         let dyn_img = image::load_from_memory(&bytes).context("decode converted heic png")?;
-        let rgb = dyn_img.to_rgb8();
+        let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
         Ok((rgb.into_raw(), w, h))
+    }
+
+    struct TempOutputDir(PathBuf);
+
+    impl TempOutputDir {
+        fn create() -> Result<Self> {
+            let path = temp_file("heic-output");
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .context("create heic output directory")?;
+            Ok(Self(path))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempOutputDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn run_converter_bounded(tool: &str, input: &Path, out: &Path, dir: &Path) -> bool {
+        let child = Command::new(tool)
+            .arg(input)
+            .arg(out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else {
+            return false;
+        };
+        loop {
+            if !output_dir_within_limits(dir) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return status.success() && output_dir_within_limits(dir);
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn clear_output_dir(dir: &Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            std::fs::remove_file(entry?.path())?;
+        }
+        Ok(())
+    }
+
+    fn output_dir_within_limits(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let mut files = 0usize;
+        let mut bytes = 0u64;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let Ok(metadata) = entry.metadata() else {
+                return false;
+            };
+            if !metadata.is_file() {
+                return false;
+            }
+            files += 1;
+            let Some(total) = bytes.checked_add(metadata.len()) else {
+                return false;
+            };
+            bytes = total;
+            if files > MAX_CONVERTED_FILES || bytes > MAX_CONVERTED_PNG_BYTES {
+                return false;
+            }
+        }
+        true
     }
 
     /// `heif-convert` writes the requested name for a single-image file but
@@ -1054,6 +1993,30 @@ pub mod heic {
         let stem = out.file_stem()?.to_str()?;
         let alt = out.with_file_name(format!("{stem}-1.png"));
         alt.exists().then_some(alt)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{clear_output_dir, output_dir_within_limits, TempOutputDir, MAX_CONVERTED_PNG_BYTES};
+
+        #[test]
+        fn converted_output_directory_is_aggregate_capped_and_drop_cleaned() {
+            let path;
+            {
+                let outputs = TempOutputDir::create().expect("temp output directory");
+                path = outputs.path().to_path_buf();
+                std::fs::write(path.join("frame-1.png"), [1]).expect("first output");
+                let second = std::fs::File::create(path.join("frame-2.png"))
+                    .expect("second output");
+                second
+                    .set_len(MAX_CONVERTED_PNG_BYTES)
+                    .expect("sparse output");
+                assert!(!output_dir_within_limits(&path));
+                clear_output_dir(&path).expect("clear outputs");
+                assert!(output_dir_within_limits(&path));
+            }
+            assert!(!path.exists());
+        }
     }
 }
 

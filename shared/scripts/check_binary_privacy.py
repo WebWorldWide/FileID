@@ -34,16 +34,42 @@ FORBIDDEN = (
 )
 
 
-def scan(paths: list[Path]) -> list[str]:
+def resolve_binary_paths(paths: list[Path]) -> tuple[list[Path], list[str]]:
+    binaries: list[Path] = []
     failures: list[str] = []
     for path in paths:
-        if not path.is_file():
+        if path.is_file():
+            binaries.append(path)
+        elif path.is_dir():
+            discovered = sorted(
+                candidate
+                for candidate in path.rglob("*")
+                if candidate.is_file() and candidate.suffix.lower() in {".exe", ".dll"}
+            )
+            if discovered:
+                binaries.extend(discovered)
+            else:
+                failures.append(f"no EXE/DLL binaries found under: {path}")
+        else:
             failures.append(f"missing binary: {path}")
-            continue
+    return list(dict.fromkeys(binaries)), failures
+
+
+def scan_binary_paths(paths: list[Path]) -> list[str]:
+    failures: list[str] = []
+    for path in paths:
         data = path.read_bytes().lower()
         for marker in FORBIDDEN:
-            if marker in data:
-                failures.append(f"{path}: {marker.decode('ascii')}")
+            text = marker.decode("ascii")
+            variants = (marker, text.encode("utf-16le"), text.encode("utf-16be"))
+            if any(variant in data for variant in variants):
+                failures.append(f"{path}: {text}")
+    return failures
+
+
+def scan(paths: list[Path]) -> list[str]:
+    binaries, failures = resolve_binary_paths(paths)
+    failures.extend(scan_binary_paths(binaries))
     return failures
 
 
@@ -52,13 +78,14 @@ def main() -> int:
     parser.add_argument("binary", nargs="+", type=Path)
     args = parser.parse_args()
 
-    failures = scan(args.binary)
+    binaries, failures = resolve_binary_paths(args.binary)
+    failures.extend(scan_binary_paths(binaries))
     if failures:
         print("Telemetry markers found in shipped binaries:")
         for failure in failures:
             print(f"  {failure}")
         return 1
-    print(f"Privacy scan clean: {len(args.binary)} binary/binaries")
+    print(f"Privacy scan clean: {len(binaries)} binary/binaries")
     return 0
 
 

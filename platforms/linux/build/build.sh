@@ -52,6 +52,9 @@ install -m 0644 "$PLATFORM_DIR/data/io.github.fileid.FileID.desktop" "$DIST_DIR/
 install -m 0644 "$PLATFORM_DIR/data/io.github.fileid.FileID.metainfo.xml" "$DIST_DIR/"
 install -m 0644 "$PLATFORM_DIR/data/io.github.fileid.FileID.svg" "$DIST_DIR/"
 install -m 0644 "$REPO_ROOT/LICENSE" "$DIST_DIR/LICENSE"
+python3 "$REPO_ROOT/shared/scripts/check_binary_privacy.py" \
+    "$DIST_DIR/fileid-linux" \
+    "$DIST_DIR/FileIDEngine" || fail "binary privacy gate failed"
 ok  "staged"
 
 step "Done."

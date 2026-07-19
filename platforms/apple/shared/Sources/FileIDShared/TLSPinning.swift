@@ -27,6 +27,12 @@ public enum TLSPinning {
         "developer.download.nvidia.com",
     ]
 
+    public static let externalDownloadHosts: [String] = [
+        "huggingface.co",
+        "*.huggingface.co",
+        "*.hf.co",
+    ]
+
     public static let pinnedRoots: [PinnedRoot] = [
         PinnedRoot(slug: "amazon-root-ca-1",      spkiSHA256Base64: "++MBgDH5WGvL9Bcn5Be30cRcL0f5O+NyoXuWtQdX1aI="),
         PinnedRoot(slug: "amazon-root-ca-2",      spkiSHA256Base64: "f0KW/FtqTjs108NpYj42SrGvOB2PpxIVM8nWxjPqJGE="),
@@ -91,6 +97,13 @@ public enum TLSPinning {
     /// allowlist (which only checks the ORIGINAL URL).
     public static let maxRedirects = 10
 
+    public static func allowsExternalRequest(to url: URL?) -> Bool {
+        guard let url,
+              url.scheme?.lowercased() == "https",
+              let host = url.host else { return false }
+        return matches(host, patterns: externalDownloadHosts)
+    }
+
     /// Whether a redirect target may be followed. Enforces https-only AND
     /// the pinning host scope, so EVERY hop terminates on a pin-covered
     /// host: a 302 can neither downgrade to plaintext `http://` (which an
@@ -100,17 +113,18 @@ public enum TLSPinning {
     /// Tying the redirect allowlist to `hostMatches` keeps a single source
     /// of truth — anything we follow is exactly the set we pin. (audit E11)
     public static func allowsRedirect(to url: URL?) -> Bool {
-        guard let url,
-              url.scheme?.lowercased() == "https",
-              let host = url.host else { return false }
-        return hostMatches(host)
+        allowsExternalRequest(to: url)
     }
 
     /// `*.` patterns require at least one extra label — `*.hf.co`
     /// matches `cas-bridge.xethub.hf.co` but not `hf.co` itself.
     static func hostMatches(_ host: String) -> Bool {
+        matches(host, patterns: appliesToHosts)
+    }
+
+    private static func matches(_ host: String, patterns: [String]) -> Bool {
         let h = host.lowercased()
-        for pattern in appliesToHosts {
+        for pattern in patterns {
             if pattern.hasPrefix("*.") {
                 let suffix = String(pattern.dropFirst(1))
                 if h.hasSuffix(suffix), h.count > suffix.count { return true }
@@ -176,13 +190,20 @@ public enum TLSPinning {
 /// call sites (e.g. the HF tree listing) that don't need download
 /// callbacks. `pinningRejected` lets the caller distinguish a pinning
 /// cancellation (surfaces as URLError.cancelled) from a user cancel.
-public final class TLSPinningSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+public final class TLSPinningSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let rejectedLock = NSLock()
     private var _pinningRejected = false
+    private var _redirectRejected = false
+    private var redirectCount = 0
     public var pinningRejected: Bool {
         rejectedLock.lock()
         defer { rejectedLock.unlock() }
         return _pinningRejected
+    }
+    public var redirectRejected: Bool {
+        rejectedLock.lock()
+        defer { rejectedLock.unlock() }
+        return _redirectRejected
     }
 
     public func urlSession(_ session: URLSession,
@@ -195,5 +216,19 @@ public final class TLSPinningSessionDelegate: NSObject, URLSessionDelegate, @unc
             rejectedLock.unlock()
         }
         completionHandler(disposition, credential)
+    }
+
+    public func urlSession(_ session: URLSession,
+                           task: URLSessionTask,
+                           willPerformHTTPRedirection response: HTTPURLResponse,
+                           newRequest request: URLRequest,
+                           completionHandler: @escaping (URLRequest?) -> Void) {
+        rejectedLock.lock()
+        redirectCount += 1
+        let allowed = redirectCount <= TLSPinning.maxRedirects
+            && TLSPinning.allowsRedirect(to: request.url)
+        if !allowed { _redirectRejected = true }
+        rejectedLock.unlock()
+        completionHandler(allowed ? request : nil)
     }
 }

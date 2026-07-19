@@ -18,8 +18,14 @@ internal sealed partial class EngineClient
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
     // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
+    internal const string GpuRestartRequiredMessage =
+        "Windows reset the GPU while FileID was using it. Restart FileID's engine before scanning again.";
 
-    public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
+    public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default) =>
+        SendCommandAsync(payload, onWriteStarted: null, ct: ct);
+
+    private Task SendCommandAsync(
+        CommandPayload payload, Action? onWriteStarted, CancellationToken ct = default)
     {
         var commandKind = payload.GetType().Name.Replace("Command", "");
 
@@ -32,6 +38,11 @@ internal sealed partial class EngineClient
             var msg = $"Engine not ready (state={State}). Wait for Ready or call WaitForReadyAsync first.";
             DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
             return Task.FromException(new InvalidOperationException(msg));
+        }
+        if (GpuDeviceRemoved && RequiresHealthyGpu(payload))
+        {
+            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {GpuRestartRequiredMessage}");
+            return Task.FromException(new InvalidOperationException(GpuRestartRequiredMessage));
         }
 
         // The engine's stdin reader handles concurrent writers because
@@ -64,6 +75,7 @@ internal sealed partial class EngineClient
                         DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
                         throw new InvalidOperationException("Engine not running.");
                     }
+                    onWriteStarted?.Invoke();
                     _stdin.BaseStream.Write(bytes, 0, bytes.Length);
                     _stdin.BaseStream.Flush();
                 }
@@ -77,9 +89,27 @@ internal sealed partial class EngineClient
         }, ct);
     }
 
+    internal static bool RequiresHealthyGpu(CommandPayload payload) => payload is
+        StartScanCommand
+        or DeepAnalyzeFileCommand
+        or DeepAnalyzeFolderCommand
+        or DeepAnalyzeAllCommand
+        or EmbedTextQueryCommand;
+
     // FEAT-2: track scan duration locally so the SidebarProcessingControl
     // CompletedPanel can show "Scan complete — N files in 1m 23s." Used
     // to be hard-coded to "in 0s" because of a placeholder typo.
+    private sealed class ScanStartPresentation
+    {
+        internal ScanPhase? PreviousPhase { get; init; }
+        internal EngineError? PreviousError { get; init; }
+        internal DateTime? PreviousStartedAt { get; init; }
+        internal int PreviousShownPhaseRank { get; init; }
+        internal long Revision { get; set; }
+    }
+
+    private readonly GenerationOwnedOperationSlot<ScanStartPresentation> _scanStartSlot = new();
+    private long _scanPresentationRevision;
     private DateTime? _scanStartedAt;
     private TimeSpan _lastScanDuration;
     public TimeSpan LastScanDuration
@@ -97,24 +127,114 @@ internal sealed partial class EngineClient
         get => _lastScanProcessedFiles;
         private set => Set(ref _lastScanProcessedFiles, value);
     }
-    public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false,
+    public async Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false,
         IReadOnlyList<string>? excludedPaths = null)
     {
+        if (State != LifecycleState.Ready)
+        {
+            throw new InvalidOperationException(
+                $"Engine not ready (state={State}). Wait for Ready or call WaitForReadyAsync first.");
+        }
+        if (GpuDeviceRemoved)
+        {
+            throw new InvalidOperationException(GpuRestartRequiredMessage);
+        }
+        if (Phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan)
+        {
+            throw new InvalidOperationException("A scan is already active.");
+        }
+
+        var presentation = new ScanStartPresentation
+        {
+            PreviousPhase = Phase,
+            PreviousError = LastError,
+            PreviousStartedAt = _scanStartedAt,
+            PreviousShownPhaseRank = _shownPhaseRank,
+        };
+        if (!_scanStartSlot.TryReserve(SpawnGeneration, 0, presentation, out var owner))
+        {
+            throw new InvalidOperationException("A scan start is already awaiting confirmation from the engine.");
+        }
+
+        presentation.Revision = Interlocked.Increment(ref _scanPresentationRevision);
+        if (!ReferenceEquals(_scanStartSlot.Current, owner) || owner.Generation != SpawnGeneration)
+        {
+            _scanStartSlot.Release(owner);
+            throw new InvalidOperationException("The engine changed while the scan was starting.");
+        }
+
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
-        // Clear stale Deep Analyze latches so the pipeline strip doesn't jump a
-        // fresh (re)scan straight to "Done" off a prior session's
-        // DeepAnalyzeComplete. Done here — the common path for ALL scan starts
-        // (incl. Settings "Force re-tag") — not only the optimistic-UI hook.
-        DeepAnalyzeComplete = null;
-        DeepAnalyzeProgress = null;
-        DeepAnalyzeStarting = null;
-        // Snapshot now (UI thread): the caller usually hands us the live
-        // settings list, and encode happens later on a Task.Run worker.
+        Phase = ScanPhase.Discovering;
+        LastError = null;
+
         string[]? exclusions = excludedPaths is { Count: > 0 }
             ? System.Linq.Enumerable.ToArray(excludedPaths)
             : null;
-        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan, exclusions));
+        try
+        {
+            await SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan, exclusions))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            if (_scanStartSlot.Release(owner)
+                && owner.Generation == SpawnGeneration
+                && Interlocked.Read(ref _scanPresentationRevision) == presentation.Revision)
+            {
+                _ui.TryEnqueue(() =>
+                {
+                    if (owner.Generation != SpawnGeneration
+                        || Interlocked.Read(ref _scanPresentationRevision) != presentation.Revision)
+                    {
+                        return;
+                    }
+                    Phase = presentation.PreviousPhase;
+                    if (LastError is null) LastError = presentation.PreviousError;
+                    _scanStartedAt = presentation.PreviousStartedAt;
+                    _shownPhaseRank = presentation.PreviousShownPhaseRank;
+                });
+            }
+            throw;
+        }
+    }
+
+    private void ObserveAuthoritativeScanEvent(int generation)
+    {
+        if (generation != SpawnGeneration) return;
+        Interlocked.Increment(ref _scanPresentationRevision);
+        _scanStartSlot.ReleaseGeneration(generation);
+        DeepAnalyzeComplete = null;
+        DeepAnalyzeProgress = null;
+        DeepAnalyzeStarting = null;
+    }
+
+    private void RetireScanStartGeneration(int generation)
+    {
+        Interlocked.Increment(ref _scanPresentationRevision);
+        _scanStartSlot.ReleaseGeneration(generation);
+    }
+
+    private void RejectScanStartCommand(int generation)
+    {
+        var owner = _scanStartSlot.Current;
+        if (owner is null || owner.Generation != generation || !_scanStartSlot.Release(owner))
+        {
+            return;
+        }
+        var presentation = owner.Payload;
+        _ui.TryEnqueue(() =>
+        {
+            if (owner.Generation != SpawnGeneration
+                || Interlocked.Read(ref _scanPresentationRevision) != presentation.Revision)
+            {
+                return;
+            }
+            Phase = presentation.PreviousPhase;
+            _scanStartedAt = presentation.PreviousStartedAt;
+            _shownPhaseRank = presentation.PreviousShownPhaseRank;
+            Interlocked.Increment(ref _scanPresentationRevision);
+        });
     }
 
     /// <summary>Immediately purge cataloged rows under the given excluded
@@ -181,6 +301,7 @@ internal sealed partial class EngineClient
         // error. #10: a second Deep Analyze bounced because one is already
         // running — a benign "already busy" notice, not a failure.
         "rescan_no_changes" => true,
+        "scan_already_running" => true,
         "deep_analyze_already_running" => true,
         // A concurrent RunFaceClustering bounced off the engine's single-flight
         // guard — a manual Re-cluster while clustering is already running is a
@@ -191,18 +312,6 @@ internal sealed partial class EngineClient
         "command_decode_failed" => true,
         _ => false,
     };
-
-    /// <summary>Pre-flip Phase to <see cref="ScanPhase.Discovering"/> as soon
-    /// as the user clicks Start Scan, so the sidebar transitions out of the
-    /// idle panel before the engine's first PhaseChanged event lands. The
-    /// engine's own Discovering event echoes the same value (no-op); any
-    /// real phase transition takes over immediately afterwards.</summary>
-    public void SetOptimisticScanningPhase()
-    {
-        _shownPhaseRank = -1;
-        Phase = ScanPhase.Discovering;
-        LastError = null;
-    }
 
     // FEAT-1: optimistic pause flag — flipped here on the IPC send so
     // the sidebar UI can bind to IsPaused without waiting for the next
@@ -256,6 +365,8 @@ internal sealed partial class EngineClient
         // we set the flag only AFTER SendCommandAsync succeeds, and clear
         // it if SendCommandAsync throws.
         Interlocked.Exchange(ref _restartAfterExpectedExit, 0);
+        var expectedProcess = _process;
+        Interlocked.Exchange(ref _expectedExitProcess, expectedProcess);
         Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
         Interlocked.Exchange(ref _expectingExit, 1);
         try
@@ -264,6 +375,7 @@ internal sealed partial class EngineClient
         }
         catch
         {
+            Interlocked.CompareExchange(ref _expectedExitProcess, null, expectedProcess);
             Interlocked.Exchange(ref _expectingExit, 0);
             throw;
         }
@@ -394,9 +506,9 @@ internal sealed partial class EngineClient
     // ignores). Two concurrent same-prefix waits would both subscribe a handler
     // against that one slot and both resolve off whichever reply lands first, so
     // the later op silently reports the earlier op's Succeeded/Failed and its own
-    // reply is dropped. Serialize per prefix so at most one same-prefix wait (one
-    // handler, one in-flight command) is live at a time; the per-request-id fix is
-    // a deferred cross-platform IPC-schema change.
+    // reply is dropped. Reserve one wait per prefix and reject overlap; a timed-out
+    // reservation remains owned until its late terminal or an engine transition.
+    // Per-request IDs remain a deferred cross-platform IPC-schema change.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _bulkWaitGates = new();
 
     /// <summary>Run a bulk command and await its <c>BulkActionResult</c> reply,
@@ -407,17 +519,42 @@ internal sealed partial class EngineClient
     /// "user thinks files were deleted but they weren't"). Throws TimeoutException
     /// if no matching reply lands. The separate UndoStack listener still captures
     /// the same result for undo independently.</summary>
+    public Task<BulkActionResult> WaitForBulkActionResultAsync(
+        string actionPrefix,
+        Func<Task> send,
+        TimeSpan timeout,
+        CancellationToken ct) =>
+        WaitForBulkActionResultAsync(actionPrefix, send, timeout, beforeSend: null, ct: ct);
+
     public async Task<BulkActionResult> WaitForBulkActionResultAsync(
-        string actionPrefix, Func<Task> send, TimeSpan timeout, CancellationToken ct = default)
+        string actionPrefix,
+        Func<Task> send,
+        TimeSpan timeout,
+        Func<IDisposable?>? beforeSend = null,
+        CancellationToken ct = default)
     {
-        // Serialize same-prefix waits so only one handler + one in-flight command
-        // exists per prefix at a time — otherwise two concurrent same-prefix ops
-        // cross-resolve off whichever reply lands first (see _bulkWaitGates). The
-        // gate is released in the finally below.
+        // Permit only one handler + one in-flight command per prefix. Queueing is
+        // unsafe after a timeout because the late terminal from the first command
+        // could resolve the queued command; reject promptly and require the prior
+        // terminal or an engine transition to retire that ownership.
         var gate = _bulkWaitGates.GetOrAdd(actionPrefix, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await gate.WaitAsync(TimeSpan.Zero, ct).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException(
+                $"A prior '{actionPrefix}' operation is still active or awaiting its terminal result. Restart the engine if it does not finish.");
+        }
         var tcs = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var terminal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var leaseReleased = 0;
+        IDisposable? sendRegistration = null;
         PropertyChangedEventHandler? handler = null;
+        void ReleaseLease()
+        {
+            if (Interlocked.CompareExchange(ref leaseReleased, 1, 0) != 0) return;
+            PropertyChanged -= handler;
+            sendRegistration?.Dispose();
+            gate.Release();
+        }
         handler = (_, e) =>
         {
             if (e.PropertyName == nameof(LastBulkAction)
@@ -425,32 +562,52 @@ internal sealed partial class EngineClient
                 && r.Action is { } a
                 && a.StartsWith(actionPrefix, StringComparison.Ordinal))
             {
-                PropertyChanged -= handler;
                 tcs.TrySetResult(r);
+                terminal.TrySetResult();
+            }
+            else if (e.PropertyName == nameof(State) && State != LifecycleState.Ready)
+            {
+                tcs.TrySetException(new InvalidOperationException(
+                    $"Engine stopped before confirming '{actionPrefix}'."));
+                terminal.TrySetResult();
             }
         };
+        var releaseAfterReturn = true;
+        var sendCompleted = false;
         try
         {
             // Reset first so a value-equal reply still re-fires PropertyChanged.
             // Inside the try so the finally always releases the gate even if a
             // PropertyChanged subscriber throws during the reset.
             LastBulkAction = null;
+            // Register Undo first so its handler consumes a successful terminal
+            // before this waiter's release path can dispose the registration.
+            sendRegistration = beforeSend?.Invoke();
             PropertyChanged += handler;
             await send().ConfigureAwait(false);
+            sendCompleted = true;
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeout);
             using var reg = cts.Token.Register(() =>
             {
-                PropertyChanged -= handler;
                 tcs.TrySetException(new TimeoutException(
                     $"Engine did not confirm '{actionPrefix}' within {timeout.TotalSeconds:0}s."));
             });
             return await tcs.Task.ConfigureAwait(false);
         }
+        catch (TimeoutException) when (sendCompleted)
+        {
+            releaseAfterReturn = false;
+            _ = terminal.Task.ContinueWith(
+                _ => ReleaseLease(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
+        }
         finally
         {
-            PropertyChanged -= handler;
-            gate.Release();
+            if (releaseAfterReturn) ReleaseLease();
         }
     }
 
@@ -462,95 +619,279 @@ internal sealed partial class EngineClient
     /// restart.</summary>
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
 
-    // DeepAnalyzeFile replies carry no per-file id — the engine's single-file
-    // handler writes the one shared DeepAnalyzeComplete slot (the DTO/schema have
-    // no fileID; adding one is a deferred cross-platform IPC change, cf. the R7
-    // note on WaitForBulkActionResultAsync). Two concurrent waits would both
-    // subscribe against that one slot and both resolve off whichever terminal
-    // reply lands first — the second op reports the first op's outcome and its
-    // own reply is dropped. The Deep Analyze view never disables the per-file
-    // "Selected"/"Current" buttons (SyncStream gates only AnalyzeAllButton), so
-    // two clicks overlap. Serialize so at most one wait — one handler, one
-    // in-flight command — is live; released in the finally.
-    private readonly SemaphoreSlim _deepAnalyzeFileGate = new(1, 1);
-
-    /// <summary>Send deepAnalyzeFile and await the engine's terminal
-    /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits
-    /// one — on success, analyze failure, AND the no-model early return), so a
-    /// stuck or no-model run surfaces instead of fire-and-forgetting (the user
-    /// otherwise sees the stream card stay open with no result and no error).
-    /// Mirrors the awaited-bounded pattern in <see cref="WaitForBulkActionResultAsync"/>;
-    /// the IPC wire shape is unchanged. A single VLM caption can be slow, so the
-    /// timeout is generous and a no-response is surfaced as a warning (the run
-    /// may still be in flight) rather than a hard error.</summary>
-    public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
+    private sealed class DeepAnalyzeOperation
     {
-        await _deepAnalyzeFileGate.WaitAsync().ConfigureAwait(false);
-        var tcs = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(TaskCreationOptions.RunContinuationsAsynchronously);
-        PropertyChangedEventHandler? handler = null;
-        handler = (_, e) =>
+        internal DeepAnalyzeOperation(string modelKind, bool awaitCompletion)
         {
-            if (e.PropertyName == nameof(DeepAnalyzeComplete) && DeepAnalyzeComplete is { } r)
+            ModelKind = modelKind;
+            Completion = awaitCompletion
+                ? new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(
+                    TaskCreationOptions.RunContinuationsAsynchronously)
+                : null;
+        }
+
+        internal string ModelKind { get; }
+        internal TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>? Completion { get; }
+        internal int HasStarted;
+        internal int SendBegan;
+        internal int TerminalState;
+    }
+
+    private readonly GenerationOwnedOperationSlot<DeepAnalyzeOperation> _deepAnalyzeCommandSlot = new();
+    private readonly object _deepAnalyzeTerminalLock = new();
+
+    private bool TryReserveDeepAnalyzeCommand(
+        string modelKind,
+        bool awaitCompletion,
+        out GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner)
+    {
+        if (!_deepAnalyzeCommandSlot.TryReserve(
+                SpawnGeneration, 0, new DeepAnalyzeOperation(modelKind, awaitCompletion), out owner))
+        {
+            return false;
+        }
+        DeepAnalyzeComplete = null;
+        DeepAnalyzeLast = null;
+        DeepAnalyzeProgress = null;
+        DeepAnalyzeStarting = null;
+        NotifyDeepAnalyzeCommandOwnershipChanged();
+        return true;
+    }
+
+    private void NotifyDeepAnalyzeCommandOwnershipChanged()
+    {
+        void Raise()
+        {
+            try
             {
-                PropertyChanged -= handler;
-                tcs.TrySetResult(r);
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
             }
-        };
-        try
-        {
-            // Reset + subscribe under the gate so a 2nd concurrent call can't
-            // null the shared slot or add a 2nd handler mid-flight; inside the
-            // try so the finally always releases the gate even if the reset's
-            // PropertyChanged subscriber throws (mirrors WaitForBulkActionResultAsync).
-            DeepAnalyzeComplete = null;
-            PropertyChanged += handler;
-            await SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind)).ConfigureAwait(false);
-            using var cts = new CancellationTokenSource(DeepAnalyzeFileTimeout);
-            using var reg = cts.Token.Register(() =>
+            catch (Exception ex)
             {
-                PropertyChanged -= handler;
-                tcs.TrySetException(new TimeoutException(
-                    $"Engine did not confirm deepAnalyzeFile({fileId}) within {DeepAnalyzeFileTimeout.TotalSeconds:0}s."));
-            });
-            var result = await tcs.Task.ConfigureAwait(false);
-            if (!result.Cancelled && result.Failed > 0)
-            {
-                // This runs on the ConfigureAwait(false) thread-pool continuation;
-                // marshal the observable write to the UI thread so its
-                // PropertyChanged never fires off-thread into x:Bind. (audit A12)
-                _ui.TryEnqueue(() => LastWarning = new EngineError(
-                    "deep_analyze_file_failed",
-                    "Deep Analyze couldn't process this file. It may be an unsupported format, or the model isn't installed yet.",
-                    null,
-                    modelKind));
+                DebugLog.Warn("Deep Analyze ownership notification threw: " + ex.Message);
             }
         }
-        catch (TimeoutException)
+        if (_ui.HasThreadAccess) Raise();
+        else _ui.TryEnqueue(Raise);
+    }
+
+    private bool ReleaseDeepAnalyzeCommand(
+        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner,
+        Exception? error = null)
+    {
+        if (!_deepAnalyzeCommandSlot.Release(owner)) return false;
+        if (error is not null) owner.Payload.Completion?.TrySetException(error);
+        NotifyDeepAnalyzeCommandOwnershipChanged();
+        return true;
+    }
+
+    private void MarkDeepAnalyzeCommandStarted(int generation)
+    {
+        var owner = _deepAnalyzeCommandSlot.Current;
+        if (owner is not null
+            && owner.Generation == generation
+            && Volatile.Read(ref owner.Payload.TerminalState) == 0)
         {
-            _ui.TryEnqueue(() => LastWarning = new EngineError(
-                "deep_analyze_no_confirm",
-                $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model — check the stream, or cancel and retry if it stays stuck.",
-                null,
-                modelKind));
-        }
-        finally
-        {
-            PropertyChanged -= handler;
-            _deepAnalyzeFileGate.Release();
+            Volatile.Write(ref owner.Payload.HasStarted, 1);
         }
     }
 
-    /// <summary>Ceiling for a single-file Deep Analyze before we surface a
-    /// "no response" warning. Generous: a 7B VLM captioning one image on CPU
-    /// can run well over a minute, and we must NOT abort a healthy slow run —
-    /// this only guards a genuinely wedged engine.</summary>
+    private void FenceRejectedDeepAnalyzeCommand(int generation, string message)
+    {
+        var owner = _deepAnalyzeCommandSlot.Current;
+        if (owner is null
+            || owner.Generation != generation
+            || Volatile.Read(ref owner.Payload.HasStarted) != 0)
+        {
+            return;
+        }
+        if (Interlocked.CompareExchange(ref owner.Payload.TerminalState, 1, 0) != 0)
+        {
+            return;
+        }
+        owner.Payload.Completion?.TrySetException(new InvalidOperationException(message));
+        DebugLog.Warn("Deep Analyze was rejected as busy; restarting the engine before allowing another attempt.");
+        _ = RestartAfterDeepAnalyzeFenceAsync(owner, message);
+    }
+
+    private bool CompleteDeepAnalyzeCommand(
+        int generation,
+        FileID.IpcSchema.DeepAnalyzeComplete result,
+        Action publishPresentation)
+    {
+        Exception? publicationError = null;
+        bool released;
+        lock (_deepAnalyzeTerminalLock)
+        {
+            var owner = _deepAnalyzeCommandSlot.Current;
+            if (owner is null
+                || owner.Generation != generation
+                || Interlocked.CompareExchange(ref owner.Payload.TerminalState, 2, 0) != 0)
+            {
+                return false;
+            }
+            try
+            {
+                publishPresentation();
+            }
+            catch (Exception ex)
+            {
+                publicationError = ex;
+            }
+            owner.Payload.Completion?.TrySetResult(result);
+            released = _deepAnalyzeCommandSlot.Release(owner);
+        }
+        if (released) NotifyDeepAnalyzeCommandOwnershipChanged();
+        if (publicationError is not null) throw publicationError;
+        return released;
+    }
+
+    private void RetireDeepAnalyzeGeneration(int generation)
+    {
+        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner? owner;
+        lock (_deepAnalyzeTerminalLock)
+        {
+            owner = _deepAnalyzeCommandSlot.ReleaseGeneration(generation);
+        }
+        if (owner is null) return;
+        owner.Payload.Completion?.TrySetException(new InvalidOperationException(
+            "The engine stopped before Deep Analyze completed."));
+        NotifyDeepAnalyzeCommandOwnershipChanged();
+    }
+
+    private void HandleDeepAnalyzeSendFailure(
+        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner, Exception error)
+    {
+        if (Volatile.Read(ref owner.Payload.SendBegan) == 0)
+        {
+            ReleaseDeepAnalyzeCommand(owner);
+            return;
+        }
+        if (Interlocked.CompareExchange(ref owner.Payload.TerminalState, 1, 0) != 0)
+        {
+            return;
+        }
+        owner.Payload.Completion?.TrySetCanceled();
+        DebugLog.Warn("Deep Analyze send outcome is uncertain; restarting the engine before allowing another attempt.");
+        _ = RestartAfterDeepAnalyzeFenceAsync(owner, error.Message);
+    }
+
+    private async Task RestartAfterDeepAnalyzeFenceAsync(
+        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner, string reason)
+    {
+        if (!ReferenceEquals(_deepAnalyzeCommandSlot.Current, owner)) return;
+        try
+        {
+            await RestartAsync().ConfigureAwait(false);
+        }
+        catch (Exception restartError)
+        {
+            DebugLog.Error(
+                $"Engine recovery after fenced Deep Analyze attempt failed: {restartError.Message}; " +
+                $"reason: {reason}");
+        }
+    }
+
+    internal bool DeepAnalyzeCommandInFlight => _deepAnalyzeCommandSlot.Current is not null;
+    internal long DeepAnalyzeCommandAttemptId => _deepAnalyzeCommandSlot.Current?.AttemptId ?? 0;
+
+    public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
+    {
+        if (!TryReserveDeepAnalyzeCommand(modelKind, awaitCompletion: true, out var owner))
+        {
+            throw new InvalidOperationException("A Deep Analyze operation is already running.");
+        }
+        try
+        {
+            DeepAnalyzeComplete = null;
+            LastWarning = null;
+            await SendCommandAsync(
+                new DeepAnalyzeFileCommand(fileId, modelKind),
+                () => Volatile.Write(ref owner.Payload.SendBegan, 1)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            HandleDeepAnalyzeSendFailure(owner, ex);
+            throw;
+        }
+
+        using var timeout = new CancellationTokenSource();
+        var timeoutTask = Task.Delay(DeepAnalyzeFileTimeout, timeout.Token);
+        var completionTask = owner.Payload.Completion!.Task;
+        if (await Task.WhenAny(completionTask, timeoutTask).ConfigureAwait(false) != completionTask)
+        {
+            _ui.TryEnqueue(() =>
+            {
+                if (!ReferenceEquals(_deepAnalyzeCommandSlot.Current, owner)) return;
+                LastWarning = new EngineError(
+                    "deep_analyze_no_confirm",
+                    $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model — check the stream, or cancel and retry if it stays stuck.",
+                    null,
+                    modelKind);
+            });
+            return;
+        }
+        timeout.Cancel();
+        var result = await completionTask.ConfigureAwait(false);
+        if (!result.Cancelled && result.Failed > 0)
+        {
+            _ui.TryEnqueue(() =>
+            {
+                var current = _deepAnalyzeCommandSlot.Current;
+                if (SpawnGeneration != owner.Generation
+                    || current is not null && current.AttemptId > owner.AttemptId)
+                {
+                    return;
+                }
+                LastWarning = new EngineError(
+                    "deep_analyze_file_failed",
+                    "Deep Analyze couldn't process this file. It may be an unsupported format, or the model isn't installed yet.",
+                    null,
+                    modelKind);
+            });
+        }
+    }
+
     private static readonly TimeSpan DeepAnalyzeFileTimeout = TimeSpan.FromMinutes(5);
-    public Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind) =>
-        SendCommandAsync(new DeepAnalyzeFolderCommand(pathPrefix, modelKind));
-    // tagsOnly = the fast background auto-tag pass (one VLM call/file). The
-    // manual Deep Analyze pass leaves it false → full caption + rename + tags.
-    public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true) =>
-        SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames));
+
+    public async Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind)
+    {
+        if (!TryReserveDeepAnalyzeCommand(modelKind, awaitCompletion: false, out var owner))
+        {
+            throw new InvalidOperationException("A Deep Analyze operation is already running.");
+        }
+        try
+        {
+            await SendCommandAsync(
+                new DeepAnalyzeFolderCommand(pathPrefix, modelKind),
+                () => Volatile.Write(ref owner.Payload.SendBegan, 1));
+        }
+        catch (Exception ex)
+        {
+            HandleDeepAnalyzeSendFailure(owner, ex);
+            throw;
+        }
+    }
+
+    public async Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true)
+    {
+        if (!TryReserveDeepAnalyzeCommand(modelKind, awaitCompletion: false, out var owner))
+        {
+            throw new InvalidOperationException("A Deep Analyze operation is already running.");
+        }
+        try
+        {
+            await SendCommandAsync(
+                new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames),
+                () => Volatile.Write(ref owner.Payload.SendBegan, 1));
+        }
+        catch (Exception ex)
+        {
+            HandleDeepAnalyzeSendFailure(owner, ex);
+            throw;
+        }
+    }
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
     /// <summary>No-progress (stall) window for a prewarm/pack install. A large
     /// pack download is legitimately long, so we do NOT cap total wall time —
@@ -733,16 +1074,26 @@ internal sealed partial class EngineClient
     // case). Deep Analyze stays manual on both platforms (gated on the
     // user naming ≥1 person first).
 
-    public Task PlanRestructureAsync(string libraryRoot) =>
-        SendCommandAsync(new PlanRestructureCommand(libraryRoot, SupportsPagedPlans: true));
-    public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves,
-        bool useSymlinks, string? planId = null) =>
-        SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks, planId));
+    public async Task PlanRestructureAsync(string libraryRoot)
+    {
+        LastError = null;
+        await SendCommandAsync(new PlanRestructureCommand(libraryRoot, SupportsPagedPlans: true));
+    }
+
+    public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves,
+        bool useSymlinks, string? planId = null)
+    {
+        LastError = null;
+        await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks, planId));
+    }
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
     /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
     /// CanUndoRestructure. (R2)</summary>
     public async Task UndoRestructureAsync(string libraryRoot)
     {
+        // Clear the prior terminal error so a value-identical retry still raises
+        // PropertyChanged when its new error arrives.
+        LastError = null;
         // Clear the flag if the send faults (engine not Ready) — else it latches and
         // mis-attributes the next apply's result as the undo's. (audit R2-app)
         UndoRestructureInFlight = true;
@@ -765,6 +1116,25 @@ internal sealed partial class EngineClient
 
     public Task TrashFilesAsync(IReadOnlyList<long> fileIds) =>
         SendCommandAsync(new TrashFilesCommand(fileIds));
+
+    public Task TrashExactFilesAsync(IReadOnlyList<ExactTrashIdentity> identities) =>
+        SendCommandAsync(CreateExactTrashCommand(identities));
+
+    internal static TrashFilesCommand CreateExactTrashCommand(
+        IReadOnlyList<ExactTrashIdentity> identities)
+    {
+        ArgumentNullException.ThrowIfNull(identities);
+        if (identities.Count == 0)
+        {
+            throw new ArgumentException("Exact Trash requires at least one identity.", nameof(identities));
+        }
+        var ids = identities.Select(identity => identity.FileId).ToArray();
+        if (ids.Distinct().Count() != ids.Length)
+        {
+            throw new ArgumentException("Exact Trash identities must have unique file IDs.", nameof(identities));
+        }
+        return new TrashFilesCommand(ids, identities.ToArray());
+    }
 
     public Task MergeClustersAsync(long sourcePersonId, long destinationPersonId) =>
         SendCommandAsync(new MergeClustersCommand(sourcePersonId, destinationPersonId));
@@ -800,7 +1170,15 @@ internal sealed partial class EngineClient
                 PropertyChanged -= handler;
                 tcs.TrySetResult(r);
             }
+            else if (e.PropertyName == nameof(LastError)
+                && IsMergeSuggestionTerminalError(LastError)
+                && LastError is { } error)
+            {
+                PropertyChanged -= handler;
+                tcs.TrySetException(new InvalidOperationException(error.Message));
+            }
         };
+        LastError = null;
         // Do NOT reset LastMergeSuggestions to null here. That fires
         // PropertyChanged → SuggestedMergesSheet.Render() with a null result,
         // flashing "No likely merges found." over the "Looking…" placeholder before
@@ -827,6 +1205,9 @@ internal sealed partial class EngineClient
             PropertyChanged -= handler;
         }
     }
+
+    internal static bool IsMergeSuggestionTerminalError(EngineError? error)
+        => error?.Kind == "find_merge_suggestions_failed";
 
     public Task MarkPersonsDifferentAsync(long sourcePersonId, long destinationPersonId, long sourceAnchorFaceId, long destinationAnchorFaceId) =>
         SendCommandAsync(new MarkPersonsDifferentCommand(sourcePersonId, destinationPersonId, sourceAnchorFaceId, destinationAnchorFaceId));

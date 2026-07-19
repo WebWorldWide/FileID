@@ -316,6 +316,9 @@ public actor VLMDownloader {
         guard let url = Self.treeListURL(repo: repo, revision: revision) else {
             throw VLMDownloaderError.treeListFailed(status: 0)
         }
+        guard TLSPinning.allowsExternalRequest(to: url) else {
+            throw StreamingDownloadError.redirectBlocked(url: url.absoluteString)
+        }
         var req = URLRequest(url: url)
         req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         let pinDelegate = TLSPinningSessionDelegate()
@@ -331,6 +334,9 @@ public actor VLMDownloader {
                 throw StreamingDownloadError.pinningFailed
             }
             throw error
+        }
+        if pinDelegate.redirectRejected {
+            throw StreamingDownloadError.redirectBlocked(url: url.absoluteString)
         }
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw VLMDownloaderError.treeListFailed(status: (resp as? HTTPURLResponse)?.statusCode ?? 0)

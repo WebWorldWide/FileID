@@ -158,6 +158,11 @@ if [ "$APP_TEAM" != "$ENGINE_TEAM" ]; then
     exit 1
 fi
 
+echo "🔍 Scanning signed binaries for telemetry markers…"
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
+    "$SIGN_TMP/$APP/Contents/MacOS/FileID" \
+    "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
+
 mv "$SIGN_TMP/$APP" "$PROJECT_DIR/$APP"
 rm -rf "$SIGN_TMP"
 

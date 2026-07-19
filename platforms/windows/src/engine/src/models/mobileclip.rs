@@ -16,7 +16,9 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, commit_chain_session};
+use super::runtime::{
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+};
 
 /// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
 /// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
@@ -82,6 +84,7 @@ impl MobileClipImage {
 
         let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -138,6 +141,7 @@ impl MobileClipImage {
         }
         let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

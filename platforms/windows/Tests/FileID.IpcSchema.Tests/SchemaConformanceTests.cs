@@ -162,7 +162,17 @@ public class SchemaConformanceTests
             PlanId: "00000000-0000-0000-0000-000000000123"),
         new ApplyTagsCommand(_exampleFileIds, _exampleTags, "replace"),
         new RenameFilesCommand(new[] { new RenameEntry(1, "Renamed.jpg") }),
-        new TrashFilesCommand(_exampleFileIds),
+        new TrashFilesCommand(new long[] { 1 }, new[]
+        {
+            new ExactTrashIdentity(
+                1,
+                @"C:\Users\adam\Pictures\duplicate.jpg",
+                4,
+                new string('a', 64),
+                @"C:\Users\adam\Pictures\keeper.jpg",
+                4,
+                new string('a', 64))
+        }),
         new MergeClustersCommand(1, 2),
         new EmbedTextQueryCommand("sunset at the beach", "q-1"),
         new RenamePersonCommand(1, Title: "Dr", FirstName: "Mary", MiddleName: "Q", LastName: "Smith", Suffix: "Jr"),
@@ -210,6 +220,9 @@ public class SchemaConformanceTests
         new BulkActionResultEvent(new BulkActionResult(
             "trashFiles:00000000-0000-0000-0000-000000000000", 2, 1,
             new[] { new BulkActionItem(1, true, null), new BulkActionItem(2, false, "file locked") })),
+        new BulkActionResultEvent(new BulkActionResult(
+            "markPersonsDifferent", 1, 0,
+            new[] { new BulkActionItem(null, true, null) })),
         new ClipTextEmbeddingEvent(new ClipTextEmbedding("q-1", "sunset at the beach", _embedding512)),
         new MergeSuggestionsEvent(new MergeSuggestions(new[] { new MergeSuggestion(1, 2, 0.93f, 10, 20, 4, 7) })),
         new HardwareReprobedEvent(new HardwareReprobed(ExampleHardware(), "cuDNN missing from PATH")),

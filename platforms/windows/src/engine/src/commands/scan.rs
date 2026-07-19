@@ -23,6 +23,13 @@ enum BlockingWait<T> {
     TimedOut(tokio::task::JoinHandle<T>),
 }
 
+struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>);
+impl Drop for ScanStateGuard {
+    fn drop(&mut self) {
+        *self.0.lock() = None;
+    }
+}
+
 async fn wait_for_blocking<T: Send + 'static>(
     mut task: tokio::task::JoinHandle<T>,
     timeout: Duration,
@@ -33,11 +40,30 @@ async fn wait_for_blocking<T: Send + 'static>(
     }
 }
 
+async fn reject_gpu_device_removed(
+    sink: &Sink,
+    scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
+) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "gpu_device_removed".into(),
+        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+    sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+        ScanPhase::Failed,
+    ))))
+    .await;
+    *scan_state.lock() = None;
+}
+
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
     scan_state: Arc<Mutex<Option<ScanCoordinator>>>,
     payload: ipc::StartScanPayload,
+    cancel_requested: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
@@ -68,6 +94,24 @@ pub(crate) async fn handle_start_scan(
         }))))
         .await;
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
+        return;
+    }
+    let _state_guard = ScanStateGuard(scan_state.clone());
+
+    if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
+        coord.request_cancel();
+        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+            ScanPhase::Cancelled,
+        ))))
+        .await;
+        *scan_state.lock() = None;
+        tracing::info!("[SCAN] queued scan cancelled before model loading");
+        return;
+    }
+
+    if coord.is_gpu_dead() {
+        reject_gpu_device_removed(&sink, &scan_state).await;
+        tracing::warn!("[SCAN] handle_start_scan exiting: process GPU failure is latched");
         return;
     }
 
@@ -276,6 +320,12 @@ pub(crate) async fn handle_start_scan(
         }
     };
 
+    if coord.is_gpu_dead() {
+        reject_gpu_device_removed(&sink, &scan_state).await;
+        tracing::warn!("[SCAN] model load observed a process GPU failure");
+        return;
+    }
+
     // A model whose install SENTINEL passed the pre-flight above but whose
     // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
     // file, or an EP bind failure on every provider) must ABORT the scan — not
@@ -347,13 +397,6 @@ pub(crate) async fn handle_start_scan(
     );
     let root = PathBuf::from(payload.root_path.clone());
 
-    // RAII guard: clear scan_state on normal completion OR panic so a faulting
-    // task can't permanently block future scans.
-    struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>);
-    impl Drop for ScanStateGuard {
-        fn drop(&mut self) { *self.0.lock() = None; }
-    }
-    let _state_guard = ScanStateGuard(scan_state.clone());
     let outcome = session.run(&root, |_| {}).await;
 
     if let Err(err) = outcome {
@@ -385,6 +428,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[test]
+    fn scan_state_guard_clears_a_preflight_panic() {
+        let scan_state = Arc::new(Mutex::new(Some(ScanCoordinator::new())));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let scan_state = scan_state.clone();
+            move || {
+                let _guard = ScanStateGuard(scan_state);
+                panic!("injected preflight panic");
+            }
+        }));
+        assert!(result.is_err());
+        assert!(scan_state.lock().is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timed_out_blocking_load_remains_joinable() {
         let release = Arc::new(AtomicBool::new(false));
@@ -403,6 +460,62 @@ mod tests {
         assert!(!task.is_finished());
         release.store(true, Ordering::Release);
         assert_eq!(task.await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn preset_pending_cancel_stops_scan_before_model_loading() {
+        let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let scan_state = Arc::new(Mutex::new(None));
+        let cancel_requested = Arc::new(AtomicBool::new(true));
+        let (sink, mut events) = Sink::channel_for_test(2);
+        let payload = ipc::StartScanPayload {
+            root_path: std::env::temp_dir().to_string_lossy().into_owned(),
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
+        };
+
+        handle_start_scan(
+            sink,
+            db,
+            scan_state.clone(),
+            payload,
+            cancel_requested,
+        )
+        .await;
+
+        let event = events.recv().await.expect("cancelled phase event");
+        assert!(matches!(
+            event.payload,
+            EventPayload::PhaseChanged(Wrap {
+                inner: ScanPhase::Cancelled
+            })
+        ));
+        assert!(scan_state.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn gpu_failure_rejection_is_terminal_and_releases_scan_slot() {
+        let coordinator = ScanCoordinator::new();
+        let scan_state = Arc::new(Mutex::new(Some(coordinator)));
+        let (sink, mut events) = Sink::channel_for_test(2);
+
+        reject_gpu_device_removed(&sink, &scan_state).await;
+
+        let error = events.recv().await.expect("GPU error event");
+        let phase = events.recv().await.expect("failed phase event");
+        match error.payload {
+            EventPayload::Error(error) => {
+                assert_eq!(error.inner.kind, "gpu_device_removed");
+                assert_eq!(error.inner.message, crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE);
+            }
+            other => panic!("expected GPU error, got {other:?}"),
+        }
+        assert!(matches!(
+            phase.payload,
+            EventPayload::PhaseChanged(Wrap { inner: ScanPhase::Failed })
+        ));
+        assert!(scan_state.lock().is_none());
     }
 }
 

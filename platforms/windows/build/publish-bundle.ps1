@@ -75,6 +75,7 @@ $BundleProj  = Join-Path $PlatformDir "installer/FileID.Bundle/FileID.Bundle.wix
 $DistDir     = Join-Path $PlatformDir "dist/installer"
 $PrereqDir   = Join-Path $PlatformDir "dist/prereqs"
 $FetchRuntimeScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
+$PrivacyScanner = Resolve-Path (Join-Path $PlatformDir "..\..\shared\scripts\check_binary_privacy.py")
 
 $AppTfm = "net8.0-windows10.0.19041.0"
 $WinAppRuntimeVersion = "1.7.250606001"
@@ -82,36 +83,6 @@ $WinAppRuntimeX64Url = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/w
 $WinAppRuntimeArm64Url = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/windowsappruntimeinstall-arm64.exe"
 $WinAppRuntimeX64Sha256 = "0bd5e81e5475d97bf3a2e73d7abe34dcf43a9ab9226534aba51d1757ec0b2ce1"
 $WinAppRuntimeArm64Sha256 = "d02fe67517b9c72d14ed5fdd41d8b667e40b6a8b76872d43677a20d28b6cbeab"
-
-# Telemetry strings the privacy gate refuses to ship. Anything matching
-# any of these in the final shipped binaries fails the build.
-$ForbiddenTelemetryStrings = @(
-    # MUST stay in sync with .github/workflows/windows-engine.yml's
-    # privacy gate. Add to both lists when adding a new SDK marker.
-    "sentry.io",
-    "io.sentry",
-    "applicationinsights",
-    "applicationinsights.azure.com",
-    "googletagmanager",
-    "google-analytics.com",
-    "segment.io",
-    "segment.com",
-    "mixpanel.com",
-    "amplitude.com",
-    "posthog.com",
-    "datadoghq",
-    "bugsnag",
-    "rollbar.com",
-    "honeycomb.io",
-    "newrelic.com",
-    "raygun.io",
-    "firebase",
-    "firebaseio.com",
-    "appcenter.ms",
-    "in.appcenter.ms",
-    "crashpad",
-    "breakpad"
-)
 
 Write-Host "FileID release publish + bundle" -ForegroundColor Cyan
 Write-Host "  Skip ARM64:    $SkipArm64"
@@ -147,6 +118,7 @@ function Resolve-SignTool {
 Require-Command "cargo" "Install Rust via https://rustup.rs"
 Require-Command "rustup" "Install Rust via https://rustup.rs"
 Require-Command "dotnet" "winget install Microsoft.DotNet.SDK.8"
+Require-Command "python" "Install Python 3 and add it to PATH"
 $SignTool = if ($SkipSign) { $null } else { Resolve-SignTool }
 
 $rustVersion = & rustup run 1.90 rustc --version 2>$null
@@ -696,29 +668,13 @@ if (-not $SkipSign) {
 if (-not $SkipPrivacyGate) {
     Write-Host ""
     Write-Host "Privacy gate: scanning shipped binaries..." -ForegroundColor Cyan
-    $hits = @()
-    $publishDirs = @((Resolve-PublishDir "win-x64" "x64"))
+    $privacyInputs = @((Resolve-PublishDir "win-x64" "x64"), $PrereqDir, $BundleExe, $MsiX64)
     if (-not $SkipArm64) {
-        $publishDirs += (Resolve-PublishDir "win-arm64" "arm64")
+        $privacyInputs += (Resolve-PublishDir "win-arm64" "arm64")
+        $privacyInputs += $MsiArm64
     }
-    $binaryEncoding = [System.Text.Encoding]::GetEncoding(28591)
-    foreach ($d in $publishDirs) {
-        $files = Get-ChildItem -Path $d -Recurse -Include *.exe, *.dll
-        foreach ($f in $files) {
-            $binaryText = $binaryEncoding.GetString([System.IO.File]::ReadAllBytes($f.FullName))
-            foreach ($needle in $ForbiddenTelemetryStrings) {
-                if ($binaryText.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                    $hits += [pscustomobject]@{ File = $f.FullName; Pattern = $needle }
-                }
-            }
-        }
-    }
-    if ($hits.Count -gt 0) {
-        Write-Host "ERROR: Privacy gate found $($hits.Count) telemetry-pattern hit(s):" -ForegroundColor Red
-        $hits | Format-Table -AutoSize
-        Write-Host "       Refusing to ship. Investigate or pass -SkipPrivacyGate to bypass (NOT for releases)." -ForegroundColor Yellow
-        exit 1
-    }
+    & python $PrivacyScanner @privacyInputs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "  Privacy gate          OK (zero telemetry strings)" -ForegroundColor Green
 }
 

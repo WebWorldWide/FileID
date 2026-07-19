@@ -401,14 +401,38 @@ const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
 
 /// Per-image ceiling on persisted faces (top-K by quality). 32 comfortably
 /// covers real family group shots; the cap exists for crowd/stadium photos
-/// whose hundreds of 37 KB crops would otherwise amplify through the tagging
-/// channel and DBWriter batch. Env-tunable for corpus-specific sweeps.
+/// whose 37 KB crops would otherwise amplify through the tagging channel and
+/// DBWriter batch. The environment override may lower, never raise, this bound.
+const FACE_MAX_PER_IMAGE: usize = 32;
+
+fn parse_face_max_per_image(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|v| v.clamp(1, FACE_MAX_PER_IMAGE))
+        .unwrap_or(FACE_MAX_PER_IMAGE)
+}
+
 fn face_max_per_image() -> usize {
-    std::env::var("FILEID_FACE_MAX_PER_IMAGE")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .map(|v| v.clamp(1, 512))
-        .unwrap_or(32)
+    let raw = std::env::var("FILEID_FACE_MAX_PER_IMAGE").ok();
+    parse_face_max_per_image(raw.as_deref())
+}
+
+struct FaceCandidate {
+    ordinal: usize,
+    detection: scrfd::Detection,
+    bbox_xywh: [f32; 4],
+    quality: f32,
+}
+
+fn prioritize_face_candidates(candidates: &mut [FaceCandidate], cap: usize) -> bool {
+    if candidates.len() <= cap {
+        return false;
+    }
+    candidates.sort_by(|a, b| {
+        b.quality
+            .total_cmp(&a.quality)
+            .then_with(|| a.ordinal.cmp(&b.ordinal))
+    });
+    true
 }
 
 fn resolve_pool_size(worker_count: usize) -> usize {
@@ -1041,10 +1065,9 @@ pub struct PreDecoded {
     budget: Option<PredecodeBudgetGuard>,
 }
 
-/// Byte-weighted read-ahead budget for decoded frames. The channel's slot
-/// cap alone assumed TYPICAL_FRAME_MB per slot, but MAX_DECODED_PIXELS
-/// admits ~150 MB frames — decoders must reserve each frame's ACTUAL byte
-/// size before sending so high-MP libraries can't pin ~6x the design budget.
+/// Byte-weighted read-ahead budget for decoded frames. Decoders reserve their
+/// known heap peak, or the full capacity for an uncertain codec, before any
+/// full-frame allocation and shrink the guard to retained RGB bytes afterward.
 struct PredecodeBudget {
     capacity: usize,
     used: Mutex<usize>,
@@ -1071,18 +1094,31 @@ impl PredecodeBudget {
     ) -> Option<PredecodeBudgetGuard> {
         let bytes = bytes.min(self.capacity);
         let mut used = self.used.lock();
-        while *used + bytes > self.capacity {
+        loop {
             if coord.is_cancelled() {
                 return None;
             }
+            if used
+                .checked_add(bytes)
+                .is_some_and(|total| total <= self.capacity)
+            {
+                break;
+            }
             self.freed
                 .wait_for(&mut used, std::time::Duration::from_millis(100));
+        }
+        if coord.is_cancelled() {
+            return None;
         }
         *used += bytes;
         Some(PredecodeBudgetGuard {
             budget: self.clone(),
             bytes,
         })
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity
     }
 
     fn release(&self, bytes: usize) {
@@ -1097,10 +1133,33 @@ struct PredecodeBudgetGuard {
     bytes: usize,
 }
 
+impl PredecodeBudgetGuard {
+    fn shrink_to(&mut self, bytes: usize) -> bool {
+        let bytes = bytes.min(self.budget.capacity);
+        if bytes > self.bytes {
+            return false;
+        }
+        let released = self.bytes - bytes;
+        self.bytes = bytes;
+        self.budget.release(released);
+        true
+    }
+}
+
 impl Drop for PredecodeBudgetGuard {
     fn drop(&mut self) {
         self.budget.release(self.bytes);
     }
+}
+
+fn decode_reserved<T>(
+    budget: &Arc<PredecodeBudget>,
+    bytes: usize,
+    coord: &ScanCoordinator,
+    decode: impl FnOnce() -> anyhow::Result<T>,
+) -> Option<(anyhow::Result<T>, PredecodeBudgetGuard)> {
+    let guard = budget.acquire(bytes, coord)?;
+    Some((decode(), guard))
 }
 
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
@@ -1212,34 +1271,50 @@ fn run_decoder_thread(
             }
         }
 
-        // Pre-decode budget reservation for images: the header probe is ~free
-        // and yields the exact decoded RGB size (w×h×3), so the reservation
-        // lands BEFORE the up-to-150 MB frame exists. Without it, every
-        // decoder thread held one full decoded frame while BLOCKED in
-        // budget.acquire — decoder_count × frame_size OUTSIDE the budget,
-        // scaling with core count (12 threads on a 9900X ≈ +1.8 GB worst
-        // case). Video/obj frames and unprobeable images (HEIC shell path)
-        // still reserve post-decode below. (audit 2026-07-14)
+        // Reserve before every full-frame allocation. Header-probeable images
+        // charge the decoder's source buffer plus final RGB bytes. Large/path-
+        // backed or unsupported images (including HEIC) and videos take the
+        // entire budget exclusively before entering their decoder, bounding the
+        // otherwise unaccounted BGRA/RGB peak to one decoder instead of one per
+        // worker. The guard shrinks to retained RGB bytes after success.
         let mut budget_guard = None;
-        if !file.online_only && file.kind == FileKind::Image {
-            if let Some(expected) = probe_decoded_rgb_bytes(&file.path, file_bytes.as_deref()) {
-                match budget.acquire(expected, &coord) {
-                    Some(g) => budget_guard = Some(g),
-                    None => return,
-                }
-            }
-        }
 
         // Cloud placeholders: never read content (reading hydrates the file,
         // a surprise network download). Emit a metadata-only row (decoded =
         // None) just like an unsupported kind; a later scan after the user
         // hydrates the file picks up its content.
-        let decoded = if file.online_only {
+        let mut decoded = if file.online_only {
             None
         } else {
             match file.kind {
-                FileKind::Image => Some(decode_image_sync(&file.path, file_bytes.as_deref())),
-                FileKind::Video => Some(decode_video_keyframe_sync(&file.path)),
+                FileKind::Image => {
+                    let reservation = file_bytes
+                        .as_deref()
+                        .and_then(probe_image_decode_reservation_bytes)
+                        .unwrap_or_else(|| budget.capacity());
+                    let Some((result, guard)) = decode_reserved(
+                        &budget,
+                        reservation,
+                        &coord,
+                        || decode_image_sync(&file.path, file_bytes.as_deref()),
+                    ) else {
+                        return;
+                    };
+                    budget_guard = Some(guard);
+                    Some(result)
+                }
+                FileKind::Video => {
+                    let Some((result, guard)) = decode_reserved(
+                        &budget,
+                        budget.capacity(),
+                        &coord,
+                        || decode_video_keyframe_sync(&file.path),
+                    ) else {
+                        return;
+                    };
+                    budget_guard = Some(guard);
+                    Some(result)
+                }
                 // 3D `.obj` → rendered-shape RGB for CLIP (lockstep with macOS processModel).
                 // A render failure is NOT a file failure (the model still groups under 3D
                 // Models/), so map Err→None rather than letting the Some(Err) path mark the
@@ -1251,7 +1326,21 @@ fn run_decoder_thread(
                         .and_then(|s| s.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
                     if is_obj {
-                        crate::pipeline::obj_render::render_obj_to_rgb(&file.path).ok().map(Ok)
+                        let Some((result, guard)) = decode_reserved(
+                            &budget,
+                            512 * 512 * 3,
+                            &coord,
+                            || crate::pipeline::obj_render::render_obj_to_rgb(&file.path),
+                        ) else {
+                            return;
+                        };
+                        match result {
+                            Ok(frame) => {
+                                budget_guard = Some(guard);
+                                Some(Ok(frame))
+                            }
+                            Err(_) => None,
+                        }
                     } else {
                         None
                     }
@@ -1298,13 +1387,14 @@ fn run_decoder_thread(
             _ => 0,
         };
         if frame_bytes > 0 {
-            // Post-decode fallback for frames that couldn't reserve ahead
-            // (video keyframes, obj renders, unprobeable image headers).
-            if budget_guard.is_none() {
-                match budget.acquire(frame_bytes, &coord) {
-                    Some(g) => budget_guard = Some(g),
-                    None => return,
-                }
+            let covered = budget_guard
+                .as_mut()
+                .is_some_and(|guard| guard.shrink_to(frame_bytes));
+            if !covered {
+                decoded = Some(Err(anyhow::anyhow!(
+                    "decoded frame exceeded its pre-allocation reservation"
+                )));
+                budget_guard = None;
             }
         } else {
             // Decode failed or produced no frame — release any pre-decode
@@ -1430,26 +1520,26 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
     primary
 }
 
-/// Header-only dimension probe → exact decoded RGB8 byte count (w×h×3),
-/// bounded by the same MAX_DECODED_PIXELS bar the decoder enforces. Used to
-/// reserve the predecode budget BEFORE the frame exists; None (unreadable
-/// header, HEIC shell path, over-cap) falls back to the post-decode
-/// reservation.
-fn probe_decoded_rgb_bytes(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<usize> {
+/// Conservative reservation for an image decoded from immutable pre-read
+/// bytes: decoder output plus a possible RGB8 conversion. Decoder setup reads
+/// headers only; admission occurs before `decode()` allocates either full
+/// frame. Path-backed images use an exclusive reservation instead.
+fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
+    use image::ImageDecoder;
     use std::io::Cursor;
-    let (w, h) = match bytes {
-        Some(b) => image::ImageReader::new(Cursor::new(b))
-            .with_guessed_format()
-            .ok()?
-            .into_dimensions()
-            .ok()?,
-        None => image::image_dimensions(path).ok()?,
-    };
-    let pixels = w as u64 * h as u64;
+
+    let decoder = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+    let (w, h) = decoder.dimensions();
+    let pixels = u64::from(w).checked_mul(u64::from(h))?;
     if pixels == 0 || pixels > MAX_DECODED_PIXELS {
         return None;
     }
-    usize::try_from(pixels.checked_mul(3)?).ok()
+    let final_rgb = pixels.checked_mul(3)?;
+    usize::try_from(decoder.total_bytes().checked_add(final_rgb)?).ok()
 }
 
 fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
@@ -1485,7 +1575,7 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
             .with_guessed_format()
             .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
         let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-        let rgb = dyn_img.to_rgb8();
+        let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
         Ok((rgb.into_raw(), w, h))
     }));
@@ -1721,6 +1811,7 @@ async fn process_file_predecoded(
                 // Short-circuit GPU stages if a prior file already detected
                 // device-removed. Submitting new work against the dead GPU
                 // device wedges the system when TDR fires.
+                let face_cap = face_max_per_image();
                 let gpu_alive = !coord.is_gpu_dead();
                 if gpu_alive {
                 if let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
@@ -1728,7 +1819,7 @@ async fn process_file_predecoded(
                     let permit = vision_sem.acquire().await;
                     STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
                     let vision_started = Instant::now();
-                    if permit.is_ok() {
+                    if permit.is_ok() && !coord.is_gpu_dead() {
                         let scrfd_mu = &scrfd_pool[worker_idx % scrfd_pool.len()];
                         let arcface_mu = &arcface_pool[worker_idx % arcface_pool.len()];
                         let scrfd_started = Instant::now();
@@ -1740,29 +1831,47 @@ async fn process_file_predecoded(
                         let arcface_started = Instant::now();
                         match detections {
                             Ok(dets) => {
-                                for det in dets {
-                                    if coord.is_gpu_dead() { break; }
-                                    let quality = match scrfd::validate_face_geometry(&det, w, h) {
-                                        Some(q) => q,
-                                        None => continue,
-                                    };
-                                    // SCRFD emits corner coords [x1,y1,x2,y2]; the crop +
-                                    // DetectedFace.bbox + the persisted bbox all expect
-                                    // [x,y,w,h]. Convert once: without this the crop ran
-                                    // from the face's top-left to the image's bottom-right
-                                    // (blank / not-a-face thumbnails) and ArcFace embedded
-                                    // that smear, corrupting clustering.
-                                    let bbox_xywh = [
-                                        det.bbox[0],
-                                        det.bbox[1],
-                                        (det.bbox[2] - det.bbox[0]).max(0.0),
-                                        (det.bbox[3] - det.bbox[1]).max(0.0),
-                                    ];
+                                let mut candidates: Vec<FaceCandidate> = dets
+                                    .into_iter()
+                                    .enumerate()
+                                    .filter_map(|(ordinal, detection)| {
+                                        let quality = scrfd::validate_face_geometry(&detection, w, h)?;
+                                        let bbox_xywh = [
+                                            detection.bbox[0],
+                                            detection.bbox[1],
+                                            (detection.bbox[2] - detection.bbox[0]).max(0.0),
+                                            (detection.bbox[3] - detection.bbox[1]).max(0.0),
+                                        ];
+                                        Some(FaceCandidate {
+                                            ordinal,
+                                            detection,
+                                            bbox_xywh,
+                                            quality,
+                                        })
+                                    })
+                                    .collect();
+                                prioritize_face_candidates(&mut candidates, face_cap);
+
+                                for candidate in candidates {
+                                    if coord.is_gpu_dead() || tagged.faces.len() >= face_cap {
+                                        break;
+                                    }
+                                    let FaceCandidate {
+                                        detection,
+                                        bbox_xywh,
+                                        quality,
+                                        ..
+                                    } = candidate;
                                     // Aligned 112×112 (5-pt similarity → ArcFace
                                     // template) for SFace; fall back to a plain bbox
                                     // crop if the landmark fit is degenerate.
-                                    let crop = face_align::align_112(&rgb, w, h, &det.landmarks)
-                                        .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
+                                    let crop = face_align::align_112(
+                                        &rgb,
+                                        w,
+                                        h,
+                                        &detection.landmarks,
+                                    )
+                                    .or_else(|| crop_and_resize_face(&rgb, w, h, &bbox_xywh));
                                     if let Some(crop) = crop {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
@@ -1770,7 +1879,7 @@ async fn process_file_predecoded(
                                         };
                                         match embed_result {
                                             Ok(emb) => {
-                                                let pose = scrfd::estimate_pose(&det.landmarks);
+                                                let pose = scrfd::estimate_pose(&detection.landmarks);
                                                 let img_area = (w as f32) * (h as f32);
                                                 let area_fraction = if img_area > 0.0 {
                                                     (bbox_xywh[2] * bbox_xywh[3]) / img_area
@@ -1779,14 +1888,17 @@ async fn process_file_predecoded(
                                                 };
                                                 tagged.faces.push(DetectedFace {
                                                     bbox: bbox_xywh,
-                                                    landmarks: det.landmarks,
+                                                    landmarks: detection.landmarks,
                                                     embedding: emb,
                                                     roll: pose.roll,
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
                                                     quality,
                                                     excluded: face_is_excluded(
-                                                        quality, pose.yaw, pose.pitch, area_fraction,
+                                                        quality,
+                                                        pose.yaw,
+                                                        pose.pitch,
+                                                        area_fraction,
                                                     ),
                                                     crop_rgb_112: Some(crop),
                                                 });
@@ -1820,18 +1932,6 @@ async fn process_file_predecoded(
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
                 }
                 }
-                // A crowd shot can emit hundreds of DetectedFaces, each holding a
-                // 37 KB aligned crop — and they ride the 256-slot tagging→DBWriter
-                // channel plus the 500-file batch buffer with no other ceiling, so
-                // one dense stretch of group photos is a real RSS amplifier. Keep
-                // the top-K by quality; K is generous for family group shots.
-                let face_cap = face_max_per_image();
-                if tagged.faces.len() > face_cap {
-                    tagged
-                        .faces
-                        .sort_unstable_by(|a, b| b.quality.total_cmp(&a.quality));
-                    tagged.faces.truncate(face_cap);
-                }
                 // The face stage truly ran this session iff the GPU was alive at
                 // entry, the face models were loaded, AND the GPU did not die
                 // mid-pass. The dbwriter keys its stale-face DELETE on this (not
@@ -1846,7 +1946,7 @@ async fn process_file_predecoded(
                 if let Some(clip_pool) = &models.mobileclip_pool {
                     let permit = clip_sem.acquire().await;
                     let clip_started = Instant::now();
-                    if permit.is_ok() {
+                    if permit.is_ok() && !coord.is_gpu_dead() {
                         let clip_mu = &clip_pool[worker_idx % clip_pool.len()];
                         let resized = resize_rgb_quality(&rgb, w as usize, h as usize, 224, 224);
                         let embed_result = {
@@ -1927,7 +2027,7 @@ async fn process_file_predecoded(
                                         rwait.elapsed().as_micros() as u64,
                                         Ordering::Relaxed,
                                     );
-                                    if permit.is_ok() {
+                                    if permit.is_ok() && !coord.is_gpu_dead() {
                                         let ram_mu = &ram_pool[worker_idx % ram_pool.len()];
                                         let mut g = ram_mu.lock();
                                         Some(g.tag_prepared(chw))
@@ -2503,6 +2603,7 @@ fn grayscale(rgb: &[u8], stride: usize, x: usize, y: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     #[tokio::test]
@@ -2607,6 +2708,52 @@ mod tests {
     }
 
     #[test]
+    fn decode_callback_waits_for_preallocation_reservation() {
+        let coord = ScanCoordinator::new();
+        let budget = PredecodeBudget::new(100);
+        let held = budget.acquire(100, &coord).unwrap();
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_thread = entered.clone();
+        let budget_thread = budget.clone();
+        let coord_thread = coord.clone();
+        let worker = std::thread::spawn(move || {
+            decode_reserved(&budget_thread, 100, &coord_thread, || {
+                entered_thread.store(true, Ordering::Release);
+                Ok(())
+            })
+            .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!entered.load(Ordering::Acquire));
+        drop(held);
+        let (result, _guard) = worker.join().unwrap();
+        result.unwrap();
+        assert!(entered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn predecode_guard_shrinks_to_retained_frame_bytes() {
+        let coord = ScanCoordinator::new();
+        let budget = PredecodeBudget::new(100);
+        let mut guard = budget.acquire(100, &coord).unwrap();
+        assert!(guard.shrink_to(40));
+        let _remaining = budget.acquire(60, &coord).expect("released peak bytes");
+    }
+
+    #[test]
+    fn image_probe_accounts_source_and_rgb_conversion() {
+        let image = image::RgbImage::from_pixel(4, 3, image::Rgb([1, 2, 3]));
+        let mut encoded = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut encoded),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert_eq!(probe_image_decode_reservation_bytes(&encoded), Some(4 * 3 * 6));
+    }
+
+    #[test]
     fn predecode_budget_clamps_oversize_frame_to_capacity() {
         let coord = ScanCoordinator::new();
         let budget = PredecodeBudget::new(100);
@@ -2615,6 +2762,14 @@ mod tests {
             .expect("a frame larger than the budget must still be admitted alone");
         drop(g);
         assert!(budget.acquire(100, &coord).is_some());
+    }
+
+    #[test]
+    fn predecode_budget_rejects_cancel_even_when_capacity_is_free() {
+        let coord = ScanCoordinator::new();
+        coord.request_cancel();
+        let budget = PredecodeBudget::new(100);
+        assert!(budget.acquire(50, &coord).is_none());
     }
 
     #[test]
@@ -2676,6 +2831,73 @@ mod tests {
         let out = resize_rgb_nearest(&rgb, 16, 16, 4, 4);
         assert_eq!(out.len(), 4 * 4 * 3);
         assert!(out.iter().all(|&v| v == 200));
+    }
+
+    fn synthetic_candidate(ordinal: usize, quality: f32) -> FaceCandidate {
+        FaceCandidate {
+            ordinal,
+            detection: scrfd::Detection {
+                bbox: [ordinal as f32, 0.0, 1.0, 1.0],
+                landmarks: [[0.0; 2]; 5],
+                score: quality,
+            },
+            bbox_xywh: [ordinal as f32, 0.0, 1.0, 1.0],
+            quality,
+        }
+    }
+
+    #[test]
+    fn crowded_face_candidates_rank_by_quality_then_detector_order() {
+        let mut candidates = vec![
+            synthetic_candidate(0, 0.5),
+            synthetic_candidate(1, 0.9),
+            synthetic_candidate(2, 0.9),
+            synthetic_candidate(3, 0.8),
+        ];
+        assert!(prioritize_face_candidates(&mut candidates, 2));
+        assert_eq!(
+            candidates.iter().map(|candidate| candidate.ordinal).collect::<Vec<_>>(),
+            [1, 2, 3, 0]
+        );
+    }
+
+    #[test]
+    fn ordinary_face_candidates_keep_detector_order() {
+        let mut candidates = vec![
+            synthetic_candidate(0, 0.2),
+            synthetic_candidate(1, 0.9),
+        ];
+        assert!(!prioritize_face_candidates(&mut candidates, 2));
+        assert_eq!(
+            candidates.iter().map(|candidate| candidate.ordinal).collect::<Vec<_>>(),
+            [0, 1]
+        );
+    }
+
+    #[test]
+    fn ranked_candidates_continue_past_failures_until_the_cap_is_full() {
+        let mut candidates: Vec<_> = (0..1024)
+            .map(|ordinal| synthetic_candidate(ordinal, ordinal as f32 / 1024.0))
+            .collect();
+        prioritize_face_candidates(&mut candidates, FACE_MAX_PER_IMAGE);
+        let successful: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| candidate.ordinal != 1023)
+            .take(FACE_MAX_PER_IMAGE)
+            .map(|candidate| candidate.ordinal)
+            .collect();
+        assert_eq!(successful.len(), FACE_MAX_PER_IMAGE);
+        assert_eq!(successful[0], 1022);
+        assert_eq!(successful[FACE_MAX_PER_IMAGE - 1], 991);
+    }
+
+    #[test]
+    fn face_cap_override_can_only_lower_the_production_bound() {
+        assert_eq!(parse_face_max_per_image(None), FACE_MAX_PER_IMAGE);
+        assert_eq!(parse_face_max_per_image(Some("0")), 1);
+        assert_eq!(parse_face_max_per_image(Some("8")), 8);
+        assert_eq!(parse_face_max_per_image(Some("512")), FACE_MAX_PER_IMAGE);
+        assert_eq!(parse_face_max_per_image(Some("invalid")), FACE_MAX_PER_IMAGE);
     }
 
     #[test]

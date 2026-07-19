@@ -183,7 +183,22 @@
         { "type": "object", "required": ["trashFiles"], "additionalProperties": false,
           "properties": { "trashFiles": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs"],
-            "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
+            "properties": {
+              "fileIDs": { "type": "array", "items": { "type": "integer" } },
+              "exactIdentities": { "description": "Optional complete exact-cleanup authorization. Each requested victim must have one entry, and its sizeBytes and decoded sha256Hex must equal the unselected keeperSizeBytes and keeperSha256Hex.", "type": ["array", "null"], "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["fileID", "path", "sizeBytes", "sha256Hex", "keeperPath", "keeperSizeBytes", "keeperSha256Hex"],
+                "properties": {
+                  "fileID":    { "type": "integer" },
+                  "path":      { "type": "string", "minLength": 1 },
+                  "sizeBytes": { "type": "integer", "minimum": 0 },
+                  "sha256Hex":       { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+                  "keeperPath":       { "type": "string", "minLength": 1 },
+                  "keeperSizeBytes":  { "type": "integer", "minimum": 0 },
+                  "keeperSha256Hex":  { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+                }
+              } }
+            } } } },
 
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
           "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,
@@ -701,7 +716,7 @@
       },
 
       "BulkActionResult": {
-        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator. A platform that implements restore-from-trash may append its undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'); platforms without restore support emit bare 'trashFiles'. messages carries per-file results.",
+        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / markPersonsDifferent / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator. A platform that implements restore-from-trash may append its undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'); platforms without restore support emit bare 'trashFiles'. messages carries per-file results.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
@@ -711,7 +726,7 @@
             "additionalProperties": false,
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
-              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
+              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|markPersonsDifferent|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,
