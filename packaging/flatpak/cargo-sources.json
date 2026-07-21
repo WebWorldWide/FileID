@@ -1757,6 +1757,19 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/jpeg-decoder/jpeg-decoder-0.3.2.crate",
+    "sha256": "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07",
+    "dest": "cargo/vendor/jpeg-decoder-0.3.2"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07\",\"files\":{}}",
+    "dest": "cargo/vendor/jpeg-decoder-0.3.2",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/js-sys/js-sys-0.3.102.crate",
     "sha256": "03d04c30968dffe80775bd4d7fb676131cd04a1fb46d2686dbffbaec2d9dfd31",
     "dest": "cargo/vendor/js-sys-0.3.102"
