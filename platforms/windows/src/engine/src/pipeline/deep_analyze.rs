@@ -602,6 +602,14 @@ pub(crate) fn name_from_transcript(transcript: &str) -> Option<(String, String)>
 
 const MAX_VLM_DECODED_PIXELS: u64 = 50_000_000;
 
+/// Longest-edge cap for images handed to the VLM. Qwen2.5-VL's dynamic-
+/// resolution vision encoder tokenizes proportionally to pixel count, so a
+/// native 24-48 MP photo multiplies prefill time (and llama.cpp's CPU-side
+/// mtmd preprocessing) several-fold over what caption/tag/rename quality
+/// needs — descriptions plateau around ~1-2 MP input. 1568 px matches the
+/// model family's documented high-detail operating point.
+const MAX_VLM_INPUT_EDGE: u32 = 1568;
+
 /// Resolve a file's on-disk path and rasterize it to an image the VLM can read:
 /// images pass through; video → 25%-duration keyframe; PDF → page-1 render.
 /// Returns the image path + an optional temp path the caller must clean up.
@@ -640,8 +648,19 @@ pub(crate) async fn rasterize_for_vlm(
                 .to_ascii_lowercase();
             if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
                 let checked = source_path.clone();
-                tokio::task::spawn_blocking(move || validate_vlm_image_dimensions(&checked)).await??;
-                Ok((source_path, None))
+                let (width, height) = tokio::task::spawn_blocking(move || {
+                    validate_vlm_image_dimensions(&checked)
+                })
+                .await??;
+                // Native-resolution 24-48 MP photos multiply the VLM's prefill
+                // and mtmd preprocessing cost several-fold with no caption/tag
+                // gain — downscale oversized inputs via the transcode path.
+                if width.max(height) <= MAX_VLM_INPUT_EDGE {
+                    Ok((source_path, None))
+                } else {
+                    let transcoded = transcode_image_to_jpeg(&source_path).await?;
+                    Ok((transcoded.clone(), Some(transcoded)))
+                }
             } else {
                 let transcoded = transcode_image_to_jpeg(&source_path).await?;
                 Ok((transcoded.clone(), Some(transcoded)))
@@ -669,9 +688,10 @@ pub(crate) async fn rasterize_for_vlm(
     }
 }
 
-/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
-/// temp JPEG the VLM's stb_image-based loader can read. Caller cleans up the
-/// temp file. Runs on a blocking thread (image-rs decode/encode is CPU-bound).
+/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…), downscale anything
+/// over [`MAX_VLM_INPUT_EDGE`], and re-encode as a temp JPEG the VLM's
+/// stb_image-based loader can read. Caller cleans up the temp file. Runs on a
+/// blocking thread (image-rs decode/encode is CPU-bound).
 async fn transcode_image_to_jpeg(
     path: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
@@ -680,6 +700,15 @@ async fn transcode_image_to_jpeg(
         validate_vlm_image_dimensions(&p)?;
         let img = image::open(&p)
             .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
+        let img = if img.width().max(img.height()) > MAX_VLM_INPUT_EDGE {
+            img.resize(
+                MAX_VLM_INPUT_EDGE,
+                MAX_VLM_INPUT_EDGE,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            img
+        };
         let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
         // Flatten to RGB8 — JPEG has no alpha channel.
         image::DynamicImage::ImageRgb8(img.to_rgb8())
@@ -690,14 +719,15 @@ async fn transcode_image_to_jpeg(
     .await?
 }
 
-fn validate_vlm_image_dimensions(path: &std::path::Path) -> anyhow::Result<()> {
+fn validate_vlm_image_dimensions(path: &std::path::Path) -> anyhow::Result<(u32, u32)> {
     let (width, height) = image::ImageReader::open(path)
         .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?
         .with_guessed_format()
         .map_err(|e| anyhow::anyhow!("guess format {}: {e}", path.display()))?
         .into_dimensions()
         .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", path.display()))?;
-    validate_vlm_pixel_count(width, height)
+    validate_vlm_pixel_count(width, height)?;
+    Ok((width, height))
 }
 
 fn validate_vlm_pixel_count(width: u32, height: u32) -> anyhow::Result<()> {

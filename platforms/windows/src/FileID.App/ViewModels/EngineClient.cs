@@ -968,8 +968,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Notify install service immediately so any in-flight download
             // owned by the now-dead engine flips to Failed instead of
             // spinning forever. Runs on every exit (graceful shutdown,
-            // crash + respawn, 3-strike terminal crash). Idempotent.
-            try { Services.ModelInstallerService.Instance.Reset(); }
+            // crash + respawn, 3-strike terminal crash). Idempotent. A
+            // deliberate (expected) exit — app close or an app-driven restart —
+            // gets a neutral caption instead of the false "Engine restarted".
+            try { Services.ModelInstallerService.Instance.Reset(cleanShutdown: expectedExit); }
             catch (Exception ex) { DebugLog.Warn("OnProcessExited: ModelInstallerService.Reset threw: " + ex.Message); }
 
             if (expectedExit)
@@ -1324,7 +1326,28 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // the latch; the authoritative PhaseChangedEvent below also
                         // syncs it.
                         var progRank = PhaseRank(p.Progress.Phase);
-                        if (progRank < _shownPhaseRank) break;
+                        if (progRank < _shownPhaseRank)
+                        {
+                            // A late lower-rank (Discovering) event during the
+                            // discovery/tagging overlap. Don't regress the
+                            // displayed Phase or its stats — but don't discard its
+                            // counts either. The engine holds Total at 0 until the
+                            // discovery walk finishes, so the event that first
+                            // carries the real Total (and the freshest Discovered
+                            // count) can arrive tagged Discovering AFTER Tagging
+                            // already latched. Merge those two forward; guard on an
+                            // actual change so this stays off the hot path.
+                            if (LastProgress is { } shown)
+                            {
+                                var mergedDiscovered = Math.Max(shown.Discovered, p.Progress.Discovered);
+                                var mergedTotal = Math.Max(shown.Total, p.Progress.Total);
+                                if (mergedDiscovered != shown.Discovered || mergedTotal != shown.Total)
+                                {
+                                    LastProgress = shown with { Discovered = mergedDiscovered, Total = mergedTotal };
+                                }
+                            }
+                            break;
+                        }
                         _shownPhaseRank = progRank;
                         // Throttle the heavy LastProgress-bound sidebar repaint to
                         // 10 Hz; a phase boundary bypasses the throttle so the

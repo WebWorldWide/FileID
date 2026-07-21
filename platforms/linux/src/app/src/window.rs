@@ -464,8 +464,14 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
                         if p.total > 0 {
                             scan_progress.set_fraction(p.processed as f64 / p.total as f64);
                             scan_progress.set_visible(true);
+                            format!("Scanning… {} / {}", p.processed, p.total)
+                        } else {
+                            // Schema contract: total stays 0 until the discovery
+                            // walk completes — pulse instead of rendering "/ 0".
+                            scan_progress.set_visible(true);
+                            scan_progress.pulse();
+                            format!("Scanning… {} processed", p.processed)
                         }
-                        format!("Scanning… {} / {}", p.processed, p.total)
                     }
                     EngineEvent::BatchLanded(n) => {
                         set_scan_ui(true);

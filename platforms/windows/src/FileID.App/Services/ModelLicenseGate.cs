@@ -16,7 +16,10 @@ internal static class ModelLicenseGate
     {
         "gemma_3_4b" or "gemma_3_12b" or "paligemma_3b" => "Gemma",
         "cudnn_runtime_x64" => "NVIDIA-cuDNN",
-        "llama_runtime_cuda_x64" => "NVIDIA-CUDA",
+        // The ORT CUDA pack carries the CUDA Toolkit redistributables
+        // (cudart/cublas/cuFFT/NVRTC) alongside the MIT-licensed ORT build,
+        // so it is governed by the CUDA Toolkit EULA like the llama runtime.
+        "ort_cuda_x64" or "llama_runtime_cuda_x64" => "NVIDIA-CUDA",
         _ => null,
     };
 

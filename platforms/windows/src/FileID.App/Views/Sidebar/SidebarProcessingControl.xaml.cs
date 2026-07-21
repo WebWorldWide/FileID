@@ -515,18 +515,21 @@ public sealed partial class SidebarProcessingControl : UserControl
                 FailuresStatBorder, $"Failures: {StatFailures.Text}");
 
             // Per-step ETA: attribute the estimate to the ACTIVE pipeline
-            // stage rather than showing a bare number. During discovery the
-            // total is unknowable (counting the files IS the work), so we never
-            // fabricate an ETA there — that was the class of wrong number the
-            // engine used to emit. The People/Captions stages are separate jobs
-            // that surface their own ETA when they run.
-            EtaText.Text = phase switch
-            {
-                ScanPhase.Discovering => "Counting files…",
-                _ when prog.EtaSeconds is { } eta && eta > 0 =>
-                    $"{StageLabel(phase)} — {FormatDuration(eta)} left",
-                _ => $"{StageLabel(phase)} — estimating…",
-            };
+            // stage rather than showing a bare number. While the total is still
+            // unknown (the engine holds Total at 0 until the discovery walk
+            // finishes), counting the files IS the work — show the live found
+            // count instead of fabricating an ETA. That was the class of wrong
+            // number the engine used to emit. The People/Captions stages are
+            // separate jobs that surface their own ETA when they run.
+            EtaText.Text = prog.Total == 0
+                ? $"Counting files — {prog.Discovered:N0} found"
+                : phase switch
+                {
+                    ScanPhase.Discovering => "Counting files…",
+                    _ when prog.EtaSeconds is { } eta && eta > 0 =>
+                        $"{StageLabel(phase)} — {FormatDuration(eta)} left",
+                    _ => $"{StageLabel(phase)} — estimating…",
+                };
         }
         else if (isCompleted && prog is not null)
         {
