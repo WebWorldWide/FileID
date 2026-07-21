@@ -191,20 +191,28 @@ async fn async_main() -> Result<()> {
         if std::env::var_os("ORT_DYLIB_PATH").is_none() {
             if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
                 if !models::ep_guard::is_disabled(ep) {
-                    // The CUDA gpu runtime carries NO DirectML EP, so pinning it
-                    // when the CUDA EP's native closure can't load strands the
-                    // whole process on CPU (the 2026-07-20 overnight regression).
-                    // Only swap out pyke's DirectML-capable base runtime once the
-                    // full stack is proven loadable.
-                    let stack_ok = ep != "cuda" || models::runtime::cuda_stack_ready();
-                    if !stack_ok {
-                        tracing::warn!(
-                            ep,
-                            "[EP] accelerator pack present but its CUDA runtime closure failed to load; keeping the base (DirectML) ONNX Runtime"
-                        );
-                    } else if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
-                        tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
-                        std::env::set_var("ORT_DYLIB_PATH", &dll);
+                    // Locate the pack runtime FIRST: active_pack_dir() is
+                    // vendor-keyed and returns the cuda pack path on every
+                    // NVIDIA box, installed or not — probing the CUDA stack
+                    // before confirming the pack exists spammed five ERROR
+                    // lines ("reinstall the pack") on the perfectly healthy
+                    // no-pack DirectML default.
+                    if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
+                        // The CUDA gpu runtime carries NO DirectML EP, so
+                        // pinning it when the CUDA EP's native closure can't
+                        // load strands the whole process on CPU (the
+                        // 2026-07-20 overnight regression). Only swap out
+                        // pyke's DirectML-capable base runtime once the full
+                        // stack is proven loadable.
+                        if ep == "cuda" && !models::runtime::cuda_stack_ready() {
+                            tracing::warn!(
+                                ep,
+                                "[EP] accelerator pack present but its CUDA runtime closure failed to load; keeping the base (DirectML) ONNX Runtime"
+                            );
+                        } else {
+                            tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
+                            std::env::set_var("ORT_DYLIB_PATH", &dll);
+                        }
                     }
                 }
             }
@@ -225,6 +233,31 @@ async fn async_main() -> Result<()> {
         } else {
             Vec::new()
         };
+
+    // Create the ORT environment eagerly (the ORT_DYLIB_PATH pin above must
+    // already be decided) so we control two things a lazy default would get
+    // wrong:
+    //   1. Telemetry: ort's builder defaults `telemetry: true` and relies on
+    //      the binary having none compiled in — but the CUDA pack pins
+    //      Microsoft's official build, which carries Windows ETW telemetry.
+    //      "No telemetry, ever" — disable it explicitly.
+    //   2. Log severity: with the `tracing` feature ort creates the
+    //      environment at VERBOSE and forwards EVERY native log line through
+    //      an `extern "system"` callback whose CStr asserts panic-abort the
+    //      whole process on a null pointer (0xC0000409 — a panic cannot
+    //      unwind across FFI), and the CUDA arena logs INFO lines
+    //      continuously under load. Warning keeps the EP-registration
+    //      failures the feature exists for while keeping the inference hot
+    //      path out of the callback entirely.
+    if let Err(err) = ort::init().with_telemetry(false).commit() {
+        tracing::warn!(%err, "[EP] eager ORT environment init failed; continuing with lazy init");
+    }
+    match ort::environment::get_environment() {
+        Ok(env) => env.set_log_level(ort::logging::LogLevel::Warning),
+        Err(err) => {
+            tracing::warn!(%err, "[EP] could not clamp ORT native log severity");
+        }
+    }
 
     // Open the DB up front so migrations apply (and any failure surfaces
     // before we tell the app we're ready). Checkpoint + close on shutdown.

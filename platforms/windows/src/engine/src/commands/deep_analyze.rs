@@ -736,7 +736,15 @@ async fn run_deep_analyze_batch(
         // ETA from the rate of the files completed BEFORE this wave. The IPC
         // currentPath carries the real path (not redacted) for parity with the
         // macOS reference; we never log it here. (F-C2-008)
-        for (idx, _file_id, current_path) in &wave {
+        //
+        // The UI has exactly ONE "current file" slot (name, thumbnail, caption,
+        // N-of-M counter) and no monotonic guard, so only the wave's FIRST
+        // (lowest-idx) file may drive the live progress channel — emitting a
+        // frame per in-flight file made the counter tick backwards and the
+        // name/thumbnail/caption flip between concurrent files every wave.
+        // Terminal DeepAnalyzeFileDone events still fire for every file.
+        {
+            let (idx, _file_id, current_path) = &wave[0];
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
                 DeepAnalyzeProgress {
                     processed: *idx as u64,
@@ -753,10 +761,13 @@ async fn run_deep_analyze_batch(
         // Persistent server while it's healthy (model already resident); else
         // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
         let server_active = if use_server { server.as_ref() } else { None };
+        let wave_used_server = server_active.is_some();
+        let streamer_idx = wave[0].0;
         let file_started = Instant::now();
         let wave_futures = wave.iter().map(|(idx, file_id, current_path)| {
             let idx = *idx;
             let file_id = *file_id;
+            let is_streamer = idx == streamer_idx;
             let sink_c = sink.clone();
             let model_kind_c = model_kind.to_string();
             // Carry ETA + the current file path onto the streamed caption
@@ -773,6 +784,11 @@ async fn run_deep_analyze_batch(
             let runner = runner.as_ref();
             async move {
                 let on_token = move |chunk: &str| {
+                    // Non-streamer wave members stay silent on the live
+                    // progress channel (see the pre-wave frame comment).
+                    if !is_streamer {
+                        return;
+                    }
                     append_caption_chunk(&caption_buf_cb, chunk);
                     let now = Instant::now();
                     let should_emit = {
@@ -853,77 +869,156 @@ async fn run_deep_analyze_batch(
             };
         }
 
+        // Drain EVERY outcome before acting on a terminal condition: with
+        // `join_all` the sibling files of a wave have already run (and
+        // persisted their results), so returning mid-iteration on the first
+        // device-removed/cancel outcome would silently drop their FileDone
+        // events and undercount `processed` in the terminal event.
+        let mut wave_gpu_dead = false;
+        let mut wave_cancelled = false;
+        let mut server_probed_this_wave = false;
         for (file_id, outcome) in outcomes {
-        match outcome {
-            Ok(out) => {
-                processed += 1;
-                sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
-                    DeepAnalyzeFileDone {
-                        file_id: out.file_id,
-                        description: out.description.clone().unwrap_or_default(),
-                        proposed_name: out.proposed_name.clone(),
-                        model_kind: model_kind.to_string(),
-                    },
-                ))))
-                .await;
-            }
-            Err(err) => {
-                if crate::coordinator::process_gpu_device_removed()
-                    || crate::models::runtime::error_has_device_removed_marker(&err)
-                {
-                    send_gpu_failure_complete(
-                        &sink,
-                        model_kind,
-                        processed,
-                        failed.saturating_add(1),
-                        started_at.elapsed().as_secs_f64(),
-                    )
-                    .await;
-                    return;
-                }
-                if cancel.load(Ordering::Relaxed) {
-                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                        DeepAnalyzeComplete {
-                            processed,
-                            failed,
-                            total_seconds: started_at.elapsed().as_secs_f64(),
+            match outcome {
+                Ok(out) => {
+                    processed += 1;
+                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
+                        DeepAnalyzeFileDone {
+                            file_id: out.file_id,
+                            description: out.description.clone().unwrap_or_default(),
+                            proposed_name: out.proposed_name.clone(),
                             model_kind: model_kind.to_string(),
-                            cancelled: true,
                         },
                     ))))
                     .await;
-                    return;
                 }
-                failed += 1;
-                tracing::warn!(?err, file_id, "deep analyze file failed");
-                // F-C1-021: a per-file error (unreadable image, decode failure,
-                // one rejected request) must NOT tear down a HEALTHY persistent
-                // server and downgrade the rest of the batch to the many-times
-                // slower per-file CLI. Only genuine server DEATH justifies the
-                // fallback. Re-probe the server with the same one-shot payload
-                // self-test used at startup; abandon it for the remaining files
-                // ONLY if that probe also fails (the server is actually gone).
-                if use_server && runner.is_some() {
-                    let server_dead = match server.as_ref() {
-                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
-                            .await
-                            .is_err(),
-                        None => true,
-                    };
-                    if server_dead {
-                        tracing::warn!(
-                            "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
-                        );
-                        use_server = false;
-                    } else {
-                        tracing::debug!(
-                            file_id,
-                            "[DEEP-ANALYZE] per-file error but server still healthy; keeping the persistent server"
-                        );
+                Err(err) => {
+                    if crate::coordinator::process_gpu_device_removed()
+                        || crate::models::runtime::error_has_device_removed_marker(&err)
+                    {
+                        failed += 1;
+                        wave_gpu_dead = true;
+                        continue;
                     }
+                    if cancel.load(Ordering::Relaxed) {
+                        wave_cancelled = true;
+                        continue;
+                    }
+                    tracing::warn!(?err, file_id, "deep analyze file failed");
+                    // F-C1-021: a per-file error (unreadable image, decode failure,
+                    // one rejected request) must NOT tear down a HEALTHY persistent
+                    // server and downgrade the rest of the batch to the many-times
+                    // slower per-file CLI. Only genuine server DEATH justifies the
+                    // fallback. Re-probe the server with the same one-shot payload
+                    // self-test used at startup (once per wave); abandon it for the
+                    // remaining files ONLY if that probe also fails.
+                    if use_server && runner.is_some() && !server_probed_this_wave {
+                        server_probed_this_wave = true;
+                        let server_dead = match server.as_ref() {
+                            Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
+                                .await
+                                .is_err(),
+                            None => true,
+                        };
+                        if server_dead {
+                            tracing::warn!(
+                                "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
+                            );
+                            use_server = false;
+                        } else {
+                            tracing::debug!(
+                                file_id,
+                                "[DEEP-ANALYZE] per-file error but server still healthy; keeping the persistent server"
+                            );
+                        }
+                    }
+                    // A dead server fails every in-flight file of the wave at
+                    // once — those are transport failures, not file failures.
+                    // The sequential code lost at most one file to a server
+                    // death; keep that bound by retrying each one on the CLI.
+                    if wave_used_server && !use_server {
+                        if let Some(r) = runner.as_ref() {
+                            let face_names = {
+                                let conn = db.lock();
+                                fetch_face_names(&conn, file_id)
+                            };
+                            match analyze_file(
+                                db.clone(),
+                                r,
+                                file_id,
+                                model_kind,
+                                mode,
+                                cancel.clone(),
+                                &face_names,
+                                |_| {},
+                            )
+                            .await
+                            {
+                                Ok(out) => {
+                                    processed += 1;
+                                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(
+                                        Wrap::new(DeepAnalyzeFileDone {
+                                            file_id: out.file_id,
+                                            description: out
+                                                .description
+                                                .clone()
+                                                .unwrap_or_default(),
+                                            proposed_name: out.proposed_name.clone(),
+                                            model_kind: model_kind.to_string(),
+                                        }),
+                                    )))
+                                    .await;
+                                    continue;
+                                }
+                                Err(retry_err) => {
+                                    if crate::coordinator::process_gpu_device_removed()
+                                        || crate::models::runtime::error_has_device_removed_marker(
+                                            &retry_err,
+                                        )
+                                    {
+                                        failed += 1;
+                                        wave_gpu_dead = true;
+                                        continue;
+                                    }
+                                    if cancel.load(Ordering::Relaxed) {
+                                        wave_cancelled = true;
+                                        continue;
+                                    }
+                                    tracing::warn!(
+                                        ?retry_err,
+                                        file_id,
+                                        "[DEEP-ANALYZE] CLI retry after server death also failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    failed += 1;
                 }
             }
         }
+        if wave_gpu_dead {
+            send_gpu_failure_complete(
+                &sink,
+                model_kind,
+                processed,
+                failed,
+                started_at.elapsed().as_secs_f64(),
+            )
+            .await;
+            return;
+        }
+        if wave_cancelled {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed,
+                    failed,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind: model_kind.to_string(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
+            return;
         }
     }
 
