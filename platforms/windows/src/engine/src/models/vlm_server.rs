@@ -101,14 +101,23 @@ impl VlmServer {
     /// Server inference slots. Two concurrent requests keep the GPU busy while
     /// the other request is in CPU-side mtmd image preprocessing; more mostly
     /// grows KV/context VRAM for no wall-clock win at our short 30-80 token
-    /// generations. 1 on small-VRAM cards and under forced-CPU. Overridable via
-    /// `FILEID_VLM_PARALLEL` (clamped 1..=4) for on-hardware tuning.
-    fn parallel_slots(forced_cpu: bool) -> usize {
+    /// generations. 1 on small-VRAM cards, under forced-CPU, and when the
+    /// weights themselves don't comfortably fit VRAM (a spilled model gains
+    /// nothing from a second slot — it just doubles KV while layers run on
+    /// CPU). Overridable via `FILEID_VLM_PARALLEL` (clamped 1..=4) for
+    /// on-hardware tuning.
+    fn parallel_slots(forced_cpu: bool, gguf: &Path) -> usize {
+        // Q4 GGUF file size ≈ resident weight footprint; reserve ~4 GB for
+        // the mmproj, KV across slots, and CUDA arenas.
+        const SLOT_HEADROOM_MB: u64 = 4_000;
+        let weights_mb = std::fs::metadata(gguf)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(u64::MAX);
         let default = if forced_cpu {
             1
         } else {
             match crate::platform::dedicated_vram_mb() {
-                Some(vram_mb) if vram_mb >= 12_000 => 2,
+                Some(vram_mb) if vram_mb >= 12_000 && weights_mb.saturating_add(SLOT_HEADROOM_MB) <= vram_mb => 2,
                 _ => 1,
             }
         };
@@ -131,7 +140,7 @@ impl VlmServer {
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
         // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
         let forced_cpu = crate::models::runtime::user_forced_cpu();
-        let slots = Self::parallel_slots(forced_cpu);
+        let slots = Self::parallel_slots(forced_cpu, gguf);
         let mut cmd = Command::new(bin);
         cmd.arg("-m")
             .arg(gguf)
