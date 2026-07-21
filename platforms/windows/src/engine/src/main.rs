@@ -249,13 +249,25 @@ async fn async_main() -> Result<()> {
     //      continuously under load. Warning keeps the EP-registration
     //      failures the feature exists for while keeping the inference hot
     //      path out of the callback entirely.
-    if let Err(err) = ort::init().with_telemetry(false).commit() {
-        tracing::warn!(%err, "[EP] eager ORT environment init failed; continuing with lazy init");
-    }
-    match ort::environment::get_environment() {
-        Ok(env) => env.set_log_level(ort::logging::LogLevel::Warning),
-        Err(err) => {
-            tracing::warn!(%err, "[EP] could not clamp ORT native log severity");
+    // ort PANICS (not Err) when the resolved dylib is missing or version-
+    // mismatched. Under lazy init that panic surfaced at first model load,
+    // inside a catch_unwind'd handler, and the engine kept serving — contain
+    // the eager path the same way so a bad dylib degrades instead of killing
+    // startup (the arm64 CI runner carries a stale system onnxruntime 1.17).
+    match std::panic::catch_unwind(|| ort::init().with_telemetry(false).commit().map(|_| ())) {
+        Ok(Ok(())) => match ort::environment::get_environment() {
+            Ok(env) => env.set_log_level(ort::logging::LogLevel::Warning),
+            Err(err) => {
+                tracing::warn!(%err, "[EP] could not clamp ORT native log severity");
+            }
+        },
+        Ok(Err(err)) => {
+            tracing::warn!(%err, "[EP] eager ORT environment init failed; continuing with lazy init");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "[EP] eager ORT environment init panicked (missing/incompatible onnxruntime dylib); continuing with lazy init"
+            );
         }
     }
 

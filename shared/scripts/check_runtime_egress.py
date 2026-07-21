@@ -147,7 +147,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
     "platforms/windows/src/engine/src/commands/prewarm.rs": "6e5c9462033feb8fcddfd2be39dffbff48e123116a0f0a2225bb1873585369a4",
     "platforms/windows/src/engine/src/downloader.rs": "a3533060920f874dbc328e745edcacf58208ee9c56756834627aea56c98a08c9",
-    "platforms/windows/src/engine/src/main.rs": "9125a10d40cbf57a9415663cb4417e73dc78133bfcaac6334100d5b7197635d7",
+    "platforms/windows/src/engine/src/main.rs": "8b32103a604dab8db07ed5d6607e9ec8e7542a1e5851603ba0c47e2f90b489be",
     "platforms/windows/src/engine/src/models/vlm_server.rs": "4ae47beb7e9e64f6898d271920157db78c8b8c87776f721bcfc90cfc3a43bec3",
     "platforms/apple/app/Sources/FileID/EngineClient.swift": "c7f7ffaf1bf0b7dfda3f1949d3de526cb642e9b0ee951f8c93d4667485245373",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "19360d2659d6fe8da52c6118d388881fcdf64343eba3c3b9a235fb762211f15b",
