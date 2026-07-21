@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-21 (later) — Adversarial closure: 8 review findings fixed, engine abort eliminated, full 71k soak green
+
+A 6-lens adversarial review (each finding independently refuted before acceptance) confirmed 8 defects — all fixed same-session: the Settings CUDA button installed NVIDIA CUDA Toolkit redists without surfacing the CUDA EULA (ModelLicenseGate now maps ort_cuda_x64 → NVIDIA-CUDA on every path); Deep Analyze wave progress no longer ticks backwards or flips the current-file display between concurrent files; wave terminals drain sibling outcomes; server death retries on the CLI; Settings no longer runs sentinel tree-walks on the UI thread at 50×/s mid-install nor clobbers a live VLM download row; no-pack NVIDIA startups no longer log five bogus "reinstall" ERRORs; Linux GTK renders the discovery-incomplete state honestly.
+
+Separately, a real crash was caught and killed: the engine aborted (0xC0000409) 25 min into a 71k soak — ort's `tracing` feature routes EVERY native ORT log line (VERBOSE env + CUDA arena spam) through an `extern "system"` callback whose CStr asserts abort the process on a null pointer. Fixed by eager `ort::init()` clamping native severity to Warning at the source (+ `ort=warn` subscriber filter), wrapped in catch_unwind so a missing/mismatched dylib degrades to lazy init instead of killing startup (arm64 CI's stale system ORT 1.17 proved that path). Bonus: the eager init also **explicitly disables ORT's ETW telemetry**, which the pinned Microsoft gpu build ships and ort's builder leaves on by default — a silent pre-existing "no telemetry" violation.
+
+**Final acceptance: the full uncapped Family Shared soak (71,361 files → 63,742 indexed) completed cleanly in 44 m 45 s (~23.7 files/s end-to-end incl. model load, faces, CLIP, post-scan) with 0 aborts and a clean shutdown** — vs the 2026-07-20 overnight run that projected 17+ hours and died silently on CPU. CUDA pool A/B: 1→20.4, 2→23.4 (default now, `CUDA_MODEL_POOL_MAX`), 3→17.2, 4→4.6 f/s. All gates green: engine clippy+1078 tests (Windows+WSL), app 287/287+format, egress audit, license policy, full PR CI matrix.
+
 ## 2026-07-21 — Tagging ~40× recovered: CUDA stack was unloadable (cuFFT) + non-Blackwell (cuDNN 9.5/CUDA 12.4); discovery/ETA truth + install-flicker fixed
 
 The 2026-07-20 overnight Adlon scan (163k files, RTX 5080) ran at **0.55 img/s with a 17-hour ETA that barely moved**. Root-caused on hardware and fixed end to end; the same 60-image sample that took 106-120 s now scans in **11-14 s**, and a live 71k-file "Family Shared" soak sustains **~21 img/s through RAM++ (single-slot; pool-4 higher)** with the GPU actually loaded.
