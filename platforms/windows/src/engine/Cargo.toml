@@ -147,6 +147,10 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "cuda",
     "openvino",
     "qnn",
+    # Bridge ORT's native C++ logger into `tracing` — without this, an EP that
+    # fails to register (missing provider DLL dependency, unsupported GPU arch)
+    # falls back silently and the engine log shows nothing.
+    "tracing",
 ] }
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,

@@ -451,28 +451,33 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// download that was in flight when the engine crashed is correctly
     /// flipped to Failed (otherwise the row would spin forever).
     /// </summary>
-    public void Reset()
+    public void Reset(bool cleanShutdown = false)
     {
         EngineClient.Instance.PropertyChanged -= OnEngineClientChanged;
         EngineClient.Instance.PropertyChanged += OnEngineClientChanged;
 
-        // Any in-flight download owned by the now-dead engine is
-        // unreachable — flip to Failed so the user sees a Retry button
-        // instead of a permanent spinner.
-        FailIfDownloading(Clip, "Engine restarted — please retry.");
-        FailIfDownloading(Arcface, "Engine restarted — please retry.");
+        // Any in-flight download owned by the now-dead engine is unreachable —
+        // flip to Failed so the user sees a Retry button instead of a permanent
+        // spinner. On a crash + respawn the engine genuinely "restarted"; on a
+        // deliberate app-driven stop/restart it did not, so don't claim it did —
+        // use a neutral, still-truthful caption.
+        var reason = cleanShutdown
+            ? "Download interrupted — please retry."
+            : "Engine restarted — please retry.";
+        FailIfDownloading(Clip, reason);
+        FailIfDownloading(Arcface, reason);
         // RamPlus + Accelerator were omitted: both reach Downloading (RamPlus is
         // a gate on AllInstalled/IsBusy), and SeedFromSentinels early-returns for
         // a still-Downloading slot, so an engine crash mid-download left them
         // spinning forever with no Retry — and a stuck RamPlus blocks the
         // "Install all" button + onboarding auto-dismiss permanently.
-        FailIfDownloading(RamPlus, "Engine restarted — please retry.");
-        FailIfDownloading(DeepVlm, "Engine restarted — please retry.");
-        FailIfDownloading(Accelerator, "Engine restarted — please retry.");
+        FailIfDownloading(RamPlus, reason);
+        FailIfDownloading(DeepVlm, reason);
+        FailIfDownloading(Accelerator, reason);
         // Whisper + Bge reach Downloading via the per-card Install button (SlotFor
         // now routes "whisper"/"bge_text"); same crash-mid-download strand as above.
-        FailIfDownloading(Whisper, "Engine restarted — please retry.");
-        FailIfDownloading(Bge, "Engine restarted — please retry.");
+        FailIfDownloading(Whisper, reason);
+        FailIfDownloading(Bge, reason);
 
         SeedFromSentinels();
     }
@@ -1082,7 +1087,6 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
 
     private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
     {
-        var sentAt = DateTime.UtcNow;
         // This method is reached after `await ...ConfigureAwait(false)`, so the
         // ambient DispatcherQueue.GetForCurrentThread() would return null here
         // and silently disable the watchdog (a genuinely stuck install would
@@ -1095,33 +1099,44 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         {
             try
             {
-                await Task.Delay(NoProgressTimeout, ct).ConfigureAwait(false);
-                // cancellation check after the delay — if the
-                // user cancelled the install during the watchdog window,
-                // don't surface a "no response" error on top of a clean
-                // cancellation flow.
-                if (ct.IsCancellationRequested) return;
-                // Read-only check off-thread is fine (status/timestamp are
-                // primitives + DateTime; no torn-read risk on x64/ARM64).
-                if (slot.Status != ModelInstallStatus.Downloading) return;
-                // B2: this slot OR any other download progressed after we
-                // scheduled → the engine is alive; don't false-fail.
-                if (slot.LastProgressAt > sentAt || new DateTime(Interlocked.Read(ref _lastAnyProgressAtTicks), DateTimeKind.Utc) > sentAt) return;
-                DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
-                if (ui is not null)
+                // Loop, re-checking every window. The old one-shot watchdog
+                // waited a single NoProgressTimeout and then stopped forever, so
+                // an install that streamed progress past 60 s and THEN stalled
+                // was never caught. Re-arm after each live window instead.
+                while (true)
                 {
-                    ui.TryEnqueue(() => slot.Fail("No response from engine — try again."));
-                }
-                else
-                {
-                    // previously fell through to calling slot.Fail()
-                    // directly on the thread-pool thread, which raises
-                    // PropertyChanged off the UI thread → x:Bind UI hit
-                    // off-thread → potential FrameworkElement violation.
-                    // Refuse to fail the slot when we can't marshal; log
-                    // and let the engine's own error event (if any) drive
-                    // the eventual transition.
-                    DebugLog.Warn($"[INSTALL] {modelKind} watchdog: no UI dispatcher; skipping slot.Fail to avoid off-thread PropertyChanged.");
+                    await Task.Delay(NoProgressTimeout, ct).ConfigureAwait(false);
+                    // cancellation check after the delay — if the user cancelled
+                    // the install during the watchdog window, don't surface a "no
+                    // response" error on top of a clean cancellation flow.
+                    if (ct.IsCancellationRequested) return;
+                    // Read-only check off-thread is fine (status/timestamp are
+                    // primitives + DateTime; no torn-read risk on x64/ARM64).
+                    // Slot reached a terminal state (Installed/Failed) or a fresh
+                    // install replaced it — nothing left to watch.
+                    if (slot.Status != ModelInstallStatus.Downloading) return;
+                    // B2: this slot OR any other download progressed within the
+                    // last window → the engine is alive; re-arm and keep watching.
+                    var lastAny = new DateTime(Interlocked.Read(ref _lastAnyProgressAtTicks), DateTimeKind.Utc);
+                    var lastProgress = slot.LastProgressAt > lastAny ? slot.LastProgressAt : lastAny;
+                    if (DateTime.UtcNow - lastProgress < NoProgressTimeout) continue;
+                    DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
+                    if (ui is not null)
+                    {
+                        ui.TryEnqueue(() => slot.Fail("No response from engine — try again."));
+                    }
+                    else
+                    {
+                        // previously fell through to calling slot.Fail()
+                        // directly on the thread-pool thread, which raises
+                        // PropertyChanged off the UI thread → x:Bind UI hit
+                        // off-thread → potential FrameworkElement violation.
+                        // Refuse to fail the slot when we can't marshal; log
+                        // and let the engine's own error event (if any) drive
+                        // the eventual transition.
+                        DebugLog.Warn($"[INSTALL] {modelKind} watchdog: no UI dispatcher; skipping slot.Fail to avoid off-thread PropertyChanged.");
+                    }
+                    return;
                 }
             }
             catch (OperationCanceledException)

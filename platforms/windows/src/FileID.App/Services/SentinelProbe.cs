@@ -82,8 +82,21 @@ internal static class SentinelProbe
             // this probe report an installed cuDNN pack as missing (same bug shape
             // as cudart64_12.dll above).
             "cudnn_runtime_x64" => TreeContains("cudnn", 100_000, "cudnn64_9.dll"),
+            // The CUDA pack now also ships the CUDA math runtime the CUDA EP
+            // hard-imports (cudart / cublas + cublasLt / cuFFT) plus NVRTC,
+            // matching registry.rs's runtime_required_names for the pack. Require
+            // all five under packs\cuda or a half-extracted pack reads "installed"
+            // and the CUDA EP fails to bind at scan time. cudart64_12.dll is
+            // CUDA's small dispatch shim (~540 KB), so a low 100 KB floor guards a
+            // truncated stub without rejecting the real one (same reasoning as
+            // 647e90c's cudart/cudnn floor fix).
             "ort_cuda_x64" => TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime.dll")
-                && TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime_providers_cuda.dll"),
+                && TreeContains(Path.Combine("packs", "cuda"), 1_000_000, "onnxruntime_providers_cuda.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 100_000, "cudart64_12.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 100_000, "cublas64_12.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 100_000, "cublasLt64_12.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 100_000, "cufft64_11.dll")
+                && TreeContains(Path.Combine("packs", "cuda"), 100_000, "nvrtc64_120_0.dll"),
             "ort_openvino_x64" => TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime.dll")
                 && TreeContains(Path.Combine("packs", "openvino"), 1_000_000, "onnxruntime_providers_openvino.dll"),
             "llama_runtime_cuda_x64" => TreeContains("llama.cpp-cuda", 20_000, "llama-server.exe")

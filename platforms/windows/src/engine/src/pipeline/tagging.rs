@@ -347,6 +347,13 @@ pub struct ModelStack {
     /// AND a dynamic-batch ONNX is installed; otherwise `ram_plus` (the
     /// single-image pool) is used. When this is `Some`, `ram_plus` is `None`.
     pub ram_plus_batch: Option<Arc<crate::models::ram_plus_batch::RamPlusBatchCoordinator>>,
+    /// The pool size the Sessions above were actually loaded with. Concurrency
+    /// caps MUST derive from this, not from re-running `resolve_pool_size` at
+    /// scan time: the live memory-tier probe inside `resolve_pool_size` can
+    /// flip between model load and cap computation (loading N large sessions
+    /// itself drops available RAM), silently serializing a 4-session pool to
+    /// one permit (the 2026-07-20 overnight regression).
+    pub pool_size: usize,
 }
 
 /// Aspirational pool size — actual cap is `min(this, vram_cap, worker_count)`
@@ -374,6 +381,22 @@ const MODEL_POOL_SIZE: usize = 4;
 /// fragmentation under longer-running scans. On a 6 GB card the gate now
 /// clamps the ArcFace/SCRFD/RAM++ pools to 2.
 const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
+
+/// CUDA-specific per-slot estimate. Measured on RTX 5080 16 GB (2026-07-21,
+/// CUDA 12.9 + cuDNN 9.8, 60-image Adlon sample): 4 pooled slots peaked at
+/// ~15.9 GB total dedicated VRAM ≈ 3.6 GB/slot including the shared
+/// MobileCLIP/face sessions and CUDA arenas — nearly double the DirectML
+/// allocator estimate above. Using the DirectML figure on CUDA would admit
+/// 4 slots on a 10 GB card (~15 GB demand) and wedge it.
+const VRAM_PER_POOL_INSTANCE_CUDA_MB: u64 = 3500;
+
+fn vram_per_pool_instance_mb(ep: crate::models::runtime::ExecutionProvider) -> u64 {
+    use crate::models::runtime::ExecutionProvider as Ep;
+    match ep {
+        Ep::Cuda | Ep::TensorRt => VRAM_PER_POOL_INSTANCE_CUDA_MB,
+        _ => VRAM_PER_POOL_INSTANCE_MB,
+    }
+}
 // HW-4 (RTX 2060, 2026-06-01): a CUDA-specific smaller estimate to fit pool=3
 // was TESTED on hardware and REGRESSED throughput (5.1→3.9 files/s, RAM++
 // 670→812 ms/file, peak RSS 5.7→7.6 GB) — 3 RAM++ Swin-L sessions over-subscribe
@@ -440,10 +463,11 @@ fn resolve_pool_size(worker_count: usize) -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok());
     let mut cap = env_override.unwrap_or(MODEL_POOL_SIZE);
+    let active_ep = crate::models::runtime::active_provider();
     match crate::platform::dedicated_vram_mb() {
         Some(vram_mb) => {
             let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
-            let vram_cap = ((usable / VRAM_PER_POOL_INSTANCE_MB).max(1)) as usize;
+            let vram_cap = ((usable / vram_per_pool_instance_mb(active_ep)).max(1)) as usize;
             if cap > vram_cap {
                 tracing::warn!(
                     requested = cap,
@@ -467,10 +491,28 @@ fn resolve_pool_size(worker_count: usize) -> usize {
             cap = cap.min(1);
         }
     }
-    // Additional Low-tier ceiling on a low-RAM box: each pooled SFace/YuNet/RAM++
-    // session adds resident weights, so cap the pool to 1 under MemoryTier::Low.
-    // Stacks with (does not replace) the VRAM clamp; non-Low tiers unchanged.
-    if crate::platform::memory_tier() == crate::platform::MemoryTier::Low {
+    // Additional Low-tier ceiling on a low-RAM box — but only for EPs whose
+    // session weights are RAM-resident (CPU, and conservatively DirectML's
+    // staging allocations). CUDA/TensorRT weights live in dedicated VRAM and
+    // are already bounded by the VRAM clamp above; keying their pool on a
+    // transient available-RAM dip (a parallel build, a browser) silently
+    // quartered GPU tagging throughput for the whole scan.
+    if crate::platform::memory_tier() == crate::platform::MemoryTier::Low
+        && !matches!(
+            active_ep,
+            crate::models::runtime::ExecutionProvider::Cuda
+                | crate::models::runtime::ExecutionProvider::TensorRt
+        )
+    {
+        cap = cap.min(1);
+    }
+    // A CPU-bound session set lives in system RAM, not VRAM, so the VRAM clamp
+    // above says nothing about it: N pooled RAM++ sessions on CPU are N copies
+    // of ~1 GB weights + arenas that contend for the same cores. One all-cores
+    // session is both faster and keeps available memory from cratering (the
+    // 2026-07-20 overnight run loaded 4 CPU-resident pools on a GPU box whose
+    // CUDA provider silently failed to bind, tipping the box into MemoryTier::Low).
+    if matches!(active_ep, crate::models::runtime::ExecutionProvider::Cpu) {
         cap = cap.min(1);
     }
     cap.max(1).min(worker_count.max(1))
@@ -488,7 +530,11 @@ fn resolve_pool_size(worker_count: usize) -> usize {
 fn ep_vision_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
     use crate::models::runtime::ExecutionProvider as Ep;
     match ep {
-        Ep::Cuda | Ep::TensorRt => pool_size.max(VISION_CONCURRENCY),
+        // Exactly one permit per loaded Session: extra permits beyond the pool
+        // just park workers on a session Mutex, and fewer would idle loaded
+        // slots. (The old `.max(VISION_CONCURRENCY)` handed a 2-slot CUDA pool
+        // 4 permits — two of them permanently mutex-blocked.)
+        Ep::Cuda | Ep::TensorRt => pool_size.max(1),
         _ => VISION_CONCURRENCY,
     }
 }
@@ -499,7 +545,7 @@ fn ep_vision_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_siz
 fn ep_clip_concurrency(ep: crate::models::runtime::ExecutionProvider, pool_size: usize) -> usize {
     use crate::models::runtime::ExecutionProvider as Ep;
     match ep {
-        Ep::Cuda | Ep::TensorRt => pool_size.max(CLIP_CONCURRENCY),
+        Ep::Cuda | Ep::TensorRt => pool_size.max(1),
         _ => CLIP_CONCURRENCY,
     }
 }
@@ -685,7 +731,7 @@ impl ModelStack {
             }
         };
 
-        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch }
+        Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch, pool_size }
     }
 
     #[allow(dead_code)]
@@ -699,6 +745,7 @@ impl ModelStack {
             bge_text: None,
             ram_plus: None,
             ram_plus_batch: None,
+            pool_size: 1,
         }
     }
 }
@@ -919,9 +966,13 @@ impl Tagger {
         // P3: derive the GPU-inference concurrency caps from the active EP. On
         // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
         // to the VRAM-clamped pool size so the semaphore doesn't throttle below
-        // the number of loaded Sessions.
+        // the number of loaded Sessions. Cap source is the pool size the models
+        // were ACTUALLY loaded with (ModelStack::pool_size) — never a fresh
+        // `resolve_pool_size` call, whose live memory-tier probe can flip
+        // between load and here (loading the sessions consumes the RAM the
+        // probe measures) and silently issue 1 permit against a 4-session pool.
         let active_ep = crate::models::runtime::active_provider();
-        let ep_pool_size = resolve_pool_size(self.worker_count);
+        let ep_pool_size = self.models.pool_size.max(1);
         // When the pool clamps to a SINGLE session, every vision permit-holder
         // serializes on that one parking_lot Mutex across the GPU forward, so the
         // extra permits just park OS threads instead of running. Issue exactly 1

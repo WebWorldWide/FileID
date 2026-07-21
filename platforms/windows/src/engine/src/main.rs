@@ -191,7 +191,18 @@ async fn async_main() -> Result<()> {
         if std::env::var_os("ORT_DYLIB_PATH").is_none() {
             if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
                 if !models::ep_guard::is_disabled(ep) {
-                    if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
+                    // The CUDA gpu runtime carries NO DirectML EP, so pinning it
+                    // when the CUDA EP's native closure can't load strands the
+                    // whole process on CPU (the 2026-07-20 overnight regression).
+                    // Only swap out pyke's DirectML-capable base runtime once the
+                    // full stack is proven loadable.
+                    let stack_ok = ep != "cuda" || models::runtime::cuda_stack_ready();
+                    if !stack_ok {
+                        tracing::warn!(
+                            ep,
+                            "[EP] accelerator pack present but its CUDA runtime closure failed to load; keeping the base (DirectML) ONNX Runtime"
+                        );
+                    } else if let Some(dll) = platform::find_file_under(&pack_dir, "onnxruntime.dll", 4) {
                         tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
                         std::env::set_var("ORT_DYLIB_PATH", &dll);
                     }

@@ -75,7 +75,13 @@ impl RuntimeProbe {
         // A pack EP that crashed during bind on the prior run is treated as
         // absent until the user re-enables it (ep_guard), so we transparently
         // fall through to DirectML instead of crash-looping.
-        let cuda_pack_present = cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda");
+        // Order matters: the stack preload only runs when the provider DLL is
+        // on disk and not crash-disabled, and its verdict is part of "present"
+        // — a pack whose native closure can't load must NOT advertise CUDA
+        // (the chain would silently land on CPU; see cuda_stack_ready).
+        let cuda_pack_present = cuda_provider_present()
+            && !crate::models::ep_guard::is_disabled("cuda")
+            && cuda_stack_ready();
         let openvino_pack_present = openvino_provider_present() && !crate::models::ep_guard::is_disabled("openvino");
         let qnn_pack_present = pack_present("qnn");
         let provider = pick_provider(
@@ -93,11 +99,12 @@ impl RuntimeProbe {
             static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             EMITTED.get_or_init(|| {
                 tracing::info!(
-                    "perf: NVIDIA GPU detected but the CUDA Performance Pack \
-                     (onnxruntime_providers_cuda.dll) isn't installed — ML inference \
-                     is on DirectML (~3-5x slower). Install the CUDA pack via \
-                     Settings → Models → GPU acceleration to enable the ONNX Runtime \
-                     CUDA EP. cuDNN auto-installs; the CUDA toolkit supplies cudart/cublas."
+                    "perf: NVIDIA GPU detected but the CUDA Performance Pack is \
+                     not installed (or its runtime DLLs failed to load — see any \
+                     [EP] CUDA stack lines above) — ML inference is on DirectML \
+                     (~3-5x slower). Install/reinstall the CUDA pack via Settings \
+                     → Models → GPU acceleration; the pack supplies the full CUDA \
+                     runtime (cudart/cublas/cuFFT) and cuDNN auto-installs."
                 );
             });
         }
@@ -547,6 +554,196 @@ fn cuda_provider_present() -> bool {
         4,
     )
     .is_some()
+}
+
+/// The CUDA EP's native dependency closure. `onnxruntime_providers_cuda.dll`
+/// (ORT 1.22 win-x64-gpu) hard-imports every one of these — a single missing
+/// name makes its LoadLibrary fail with ERROR_MOD_NOT_FOUND at session build,
+/// ORT falls through the chain, and (because the pinned gpu runtime carries no
+/// DirectML EP) the session lands on CPU with zero Rust-visible error. That
+/// exact shape burned a full overnight scan on 2026-07-20: pack "present",
+/// ep="cuda" everywhere, cufft64_11.dll absent, Swin-L on one CPU thread.
+#[cfg(windows)]
+const CUDA_STACK_REQUIRED: &[&str] = &[
+    "cudart64_12.dll",
+    "cublasLt64_12.dll",
+    "cublas64_12.dll",
+    "cufft64_11.dll",
+    "cudnn64_9.dll",
+];
+
+/// Loaded when present; their absence degrades specific paths (cuDNN
+/// runtime-compiled engines) rather than blocking the EP outright.
+#[cfg(windows)]
+const CUDA_STACK_OPTIONAL: &[&str] = &["nvrtc64_120_0.dll"];
+
+#[cfg(windows)]
+static CUDA_STACK_STATE: parking_lot::Mutex<Option<bool>> = parking_lot::Mutex::new(None);
+
+/// True once the CUDA math stack has been deterministically pre-loaded.
+/// Memoized (module identity can't change after first resolution) but
+/// invalidatable — a mid-session pack install must be able to flip
+/// absent → ready for the Settings "Verify install" flow without an engine
+/// restart. This is the loadability half of "is CUDA actually usable";
+/// `cuda_provider_present` is only the on-disk half.
+#[cfg(windows)]
+pub fn cuda_stack_ready() -> bool {
+    let mut state = CUDA_STACK_STATE.lock();
+    if let Some(ready) = *state {
+        return ready;
+    }
+    let ready = preload_cuda_math_stack();
+    *state = Some(ready);
+    ready
+}
+
+#[cfg(not(windows))]
+pub fn cuda_stack_ready() -> bool {
+    // Non-Windows builds never pin the CUDA gpu runtime; presence checks
+    // alone keep their existing meaning.
+    true
+}
+
+/// Re-run the stack preload on the next `cuda_stack_ready` query — called
+/// after a CUDA-related pack (re)install or EP re-enable. DLLs already loaded
+/// stay loaded for the process lifetime, so a re-run can only flip a previous
+/// "missing" verdict to ready, never unload a live stack.
+#[cfg(windows)]
+pub fn invalidate_cuda_stack_probe() {
+    *CUDA_STACK_STATE.lock() = None;
+}
+
+#[cfg(not(windows))]
+pub fn invalidate_cuda_stack_probe() {}
+
+/// Pre-load the CUDA EP's math DLLs by full path, in dependency order, from a
+/// deterministic per-DLL location preference: the CUDA Performance Pack →
+/// a system CUDA toolkit (`CUDA_PATH`/default install) → the llama.cpp CUDA
+/// runtime → the newest installed cuDNN drop. Two birds: (a) a broken/partial
+/// pack is detected here, BEFORE we advertise ep="cuda" or pin ORT_DYLIB_PATH
+/// to the DirectML-less gpu runtime; (b) when the same DLL name exists in
+/// several registered directories (llama.cpp-cuda ships its own cudart/cublas
+/// line), the copy the CUDA EP binds is the one chosen here — AddDllDirectory
+/// search order is explicitly unspecified.
+#[cfg(windows)]
+fn preload_cuda_math_stack() -> bool {
+    let mut ok = true;
+    for name in CUDA_STACK_REQUIRED {
+        match locate_stack_dll(name) {
+            Some(path) => match crate::platform::preload_dll(&path) {
+                Ok(()) => {
+                    tracing::info!(
+                        dll = name,
+                        path = %crate::platform::redact_path_for_log(&path),
+                        "[EP] CUDA stack preloaded"
+                    );
+                }
+                Err(code) => {
+                    tracing::error!(
+                        dll = name,
+                        path = %crate::platform::redact_path_for_log(&path),
+                        win32 = code,
+                        "[EP] CUDA stack DLL failed to load — CUDA EP unusable, falling back to DirectML"
+                    );
+                    ok = false;
+                }
+            },
+            None => {
+                tracing::error!(
+                    dll = name,
+                    "[EP] CUDA stack DLL missing from every known location — CUDA EP unusable, falling back to DirectML. Reinstall the CUDA Performance Pack (Settings → Models → GPU acceleration)."
+                );
+                ok = false;
+            }
+        }
+    }
+    for name in CUDA_STACK_OPTIONAL {
+        match locate_stack_dll(name) {
+            Some(path) => {
+                let _ = crate::platform::preload_dll(&path);
+            }
+            None => {
+                tracing::info!(dll = name, "[EP] optional CUDA stack DLL not present");
+            }
+        }
+    }
+    // Pin the cuDNN sub-library identities to the same drop as the dispatch
+    // shim we just loaded — the shim LoadLibrary's them lazily by bare name,
+    // which would otherwise re-enter the unordered search set and could mix
+    // cuDNN versions across directories.
+    if ok {
+        if let Some(shim) = locate_stack_dll("cudnn64_9.dll") {
+            if let Some(dir) = shim.parent() {
+                if let Ok(rd) = std::fs::read_dir(dir) {
+                    for entry in rd.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("cudnn_") && name.ends_with("64_9.dll") {
+                            let _ = crate::platform::preload_dll(&entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// Deterministic per-DLL location preference for the CUDA math stack.
+#[cfg(windows)]
+fn locate_stack_dll(name: &str) -> Option<PathBuf> {
+    let root = crate::paths::models_dir().ok();
+    if let Some(root) = &root {
+        if let Some(p) =
+            crate::platform::find_file_under(&root.join("packs").join("cuda"), name, 4)
+        {
+            return Some(p);
+        }
+    }
+    if let Some(bin) = system_cuda_toolkit_dir() {
+        let p = bin.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(root) = &root {
+        let llama = root.join("llama.cpp-cuda").join(name);
+        if llama.is_file() {
+            return Some(llama);
+        }
+        if let Some(p) = newest_cudnn_dll(root, name) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Find `name` under the NEWEST versioned cuDNN drop in `Models/cudnn/`.
+/// A pin bump extracts a second `cudnn-windows-x86_64-<ver>_cudaN-archive`
+/// sibling next to the old one; a plain directory walk finds whichever
+/// `read_dir` yields first (lexicographic on NTFS — "9.5.1" sorts before
+/// "9.8.0", and would sort AFTER "9.10.0"). Parse the version numerically.
+#[cfg(windows)]
+fn newest_cudnn_dll(models_root: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let cudnn_root = models_root.join("cudnn");
+    let mut best: Option<(Vec<u32>, PathBuf)> = None;
+    for entry in std::fs::read_dir(&cudnn_root).ok()?.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name();
+        let dir_name = dir_name.to_string_lossy().to_string();
+        let version: Vec<u32> = dir_name
+            .strip_prefix("cudnn-windows-x86_64-")
+            .and_then(|rest| rest.split('_').next())
+            .map(|v| v.split('.').filter_map(|c| c.parse().ok()).collect())
+            .unwrap_or_default();
+        let candidate = entry.path().join("bin").join(name);
+        if candidate.is_file() && best.as_ref().is_none_or(|(v, _)| version > *v) {
+            best = Some((version, candidate));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 /// OpenVINO mirrors the CUDA gate: usable only when the pack's own provider

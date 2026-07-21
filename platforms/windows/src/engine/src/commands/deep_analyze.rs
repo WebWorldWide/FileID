@@ -653,7 +653,13 @@ async fn run_deep_analyze_batch(
         return;
     }
 
-    for (idx, file_id) in file_ids.iter().copied().enumerate() {
+    // Files run in WAVES sized to the persistent server's slot count
+    // (llama-server was started with a matching `-np`): with 2 slots, one
+    // request's GPU decode overlaps the other's CPU-side image preprocessing.
+    // The CLI fallback stays strictly sequential — each call spawns a fresh
+    // process that reloads the multi-GB model.
+    let mut cursor = 0usize;
+    while cursor < file_ids.len() {
         if crate::coordinator::process_gpu_device_removed() {
             send_gpu_failure_complete(
                 &sink,
@@ -679,138 +685,167 @@ async fn run_deep_analyze_batch(
             return;
         }
 
-        if skip_existing {
-            let already = {
-                let conn = db.lock();
-                skip_existing_done(&conn, file_id, model_kind)
-            };
-            if already {
-                let is_last = idx as u64 == total.saturating_sub(1);
-                if idx % 100 == 0 || is_last {
-                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-                        DeepAnalyzeProgress {
-                            processed: idx as u64,
-                            total,
-                            eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
-                            current_path: None,
-                            model_kind: model_kind.to_string(),
-                            current_caption: None,
-                        },
-                    ))))
-                    .await;
+        let wave_cap = if use_server {
+            server.as_ref().map(|s| s.slots.max(1)).unwrap_or(1)
+        } else {
+            1
+        };
+        let mut wave: Vec<(usize, i64, Option<String>)> = Vec::with_capacity(wave_cap);
+        while wave.len() < wave_cap && cursor < file_ids.len() {
+            let idx = cursor;
+            let file_id = file_ids[idx];
+            cursor += 1;
+            if skip_existing {
+                let already = {
+                    let conn = db.lock();
+                    skip_existing_done(&conn, file_id, model_kind)
+                };
+                if already {
+                    let is_last = idx as u64 == total.saturating_sub(1);
+                    if idx % 100 == 0 || is_last {
+                        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                            DeepAnalyzeProgress {
+                                processed: idx as u64,
+                                total,
+                                eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
+                                current_path: None,
+                                model_kind: model_kind.to_string(),
+                                current_caption: None,
+                            },
+                        ))))
+                        .await;
+                    }
+                    continue;
                 }
-                continue;
             }
+            let current_path: Option<String> = {
+                let conn = db.lock();
+                conn.query_row(
+                    "SELECT path_text FROM files WHERE id = ?1",
+                    rusqlite::params![file_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            wave.push((idx, file_id, current_path));
+        }
+        if wave.is_empty() {
+            continue;
         }
 
-        let current_path: Option<String> = {
-            let conn = db.lock();
-            conn.query_row(
-                "SELECT path_text FROM files WHERE id = ?1",
-                rusqlite::params![file_id],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-        };
-        // ETA from the rate of the files completed BEFORE this one. The IPC
+        // ETA from the rate of the files completed BEFORE this wave. The IPC
         // currentPath carries the real path (not redacted) for parity with the
         // macOS reference; we never log it here. (F-C2-008)
-        let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
-        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-            DeepAnalyzeProgress {
-                processed: idx as u64,
-                total,
-                eta_seconds,
-                current_path: current_path.clone(),
-                model_kind: model_kind.to_string(),
-                current_caption: None,
-            },
-        ))))
-        .await;
-
-        let sink_c = sink.clone();
-        let model_kind_c = model_kind.to_string();
-        // Carry ETA + the current file path onto the streamed caption frames too,
-        // so the Deep Analyze UI keeps showing both while a caption renders
-        // token-by-token (the macOS schema usage). (F-C2-008)
-        let current_path_cb = current_path.clone();
-        let caption_buf = Arc::new(Mutex::new(String::new()));
-        let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
-        let caption_buf_cb = caption_buf.clone();
-        let last_emit_cb = last_emit.clone();
-        let on_token = move |chunk: &str| {
-            append_caption_chunk(&caption_buf_cb, chunk);
-            let now = Instant::now();
-            let should_emit = {
-                let mut last = last_emit_cb.lock();
-                if now.duration_since(*last) >= Duration::from_millis(250) {
-                    *last = now;
-                    true
-                } else {
-                    false
-                }
-            };
-            if !should_emit {
-                return;
-            }
-            let snapshot = caption_buf_cb.lock().clone();
-            let kind = model_kind_c.clone();
-            let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
-                Wrap::new(DeepAnalyzeProgress {
-                    processed: idx as u64,
+        for (idx, _file_id, current_path) in &wave {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                DeepAnalyzeProgress {
+                    processed: *idx as u64,
                     total,
-                    eta_seconds,
-                    current_path: current_path_cb.clone(),
-                    model_kind: kind,
-                    current_caption: Some(snapshot),
-                }),
-            )));
-        };
+                    eta_seconds: batch_eta_seconds(rolling_fps, *idx as u64, total),
+                    current_path: current_path.clone(),
+                    model_kind: model_kind.to_string(),
+                    current_caption: None,
+                },
+            ))))
+            .await;
+        }
+
         // Persistent server while it's healthy (model already resident); else
         // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
-        let face_names = {
-            let conn = db.lock();
-            fetch_face_names(&conn, file_id)
-        };
-        let outcome = if let Some(srv) = server_active {
-            analyze_file_via_server(
-                db.clone(),
-                srv,
-                file_id,
-                model_kind,
-                mode,
-                cancel.clone(),
-                &face_names,
-                on_token,
-            )
-            .await
-        } else if let Some(r) = runner.as_ref() {
-            analyze_file(
-                db.clone(),
-                r,
-                file_id,
-                model_kind,
-                mode,
-                cancel.clone(),
-                &face_names,
-                on_token,
-            )
-            .await
-        } else {
-            // Neither backend available (server failed to start AND no CLI
-            // binary). Can't analyze this file — record a failure and move on.
-            Err(anyhow::anyhow!(
-                "no VLM backend available — server failed to start and the CLI binary is missing"
-            ))
-        };
+        let wave_futures = wave.iter().map(|(idx, file_id, current_path)| {
+            let idx = *idx;
+            let file_id = *file_id;
+            let sink_c = sink.clone();
+            let model_kind_c = model_kind.to_string();
+            // Carry ETA + the current file path onto the streamed caption
+            // frames too, so the Deep Analyze UI keeps showing both while a
+            // caption renders token-by-token (the macOS schema usage). (F-C2-008)
+            let current_path_cb = current_path.clone();
+            let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
+            let caption_buf = Arc::new(Mutex::new(String::new()));
+            let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
+            let caption_buf_cb = caption_buf.clone();
+            let last_emit_cb = last_emit.clone();
+            let db = db.clone();
+            let cancel = cancel.clone();
+            let runner = runner.as_ref();
+            async move {
+                let on_token = move |chunk: &str| {
+                    append_caption_chunk(&caption_buf_cb, chunk);
+                    let now = Instant::now();
+                    let should_emit = {
+                        let mut last = last_emit_cb.lock();
+                        if now.duration_since(*last) >= Duration::from_millis(250) {
+                            *last = now;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !should_emit {
+                        return;
+                    }
+                    let snapshot = caption_buf_cb.lock().clone();
+                    let kind = model_kind_c.clone();
+                    let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
+                        Wrap::new(DeepAnalyzeProgress {
+                            processed: idx as u64,
+                            total,
+                            eta_seconds,
+                            current_path: current_path_cb.clone(),
+                            model_kind: kind,
+                            current_caption: Some(snapshot),
+                        }),
+                    )));
+                };
+                let face_names = {
+                    let conn = db.lock();
+                    fetch_face_names(&conn, file_id)
+                };
+                let outcome = if let Some(srv) = server_active {
+                    analyze_file_via_server(
+                        db.clone(),
+                        srv,
+                        file_id,
+                        model_kind,
+                        mode,
+                        cancel.clone(),
+                        &face_names,
+                        on_token,
+                    )
+                    .await
+                } else if let Some(r) = runner {
+                    analyze_file(
+                        db.clone(),
+                        r,
+                        file_id,
+                        model_kind,
+                        mode,
+                        cancel.clone(),
+                        &face_names,
+                        on_token,
+                    )
+                    .await
+                } else {
+                    // Neither backend available (server failed to start AND no
+                    // CLI binary). Can't analyze this file — record a failure
+                    // and move on.
+                    Err(anyhow::anyhow!(
+                        "no VLM backend available — server failed to start and the CLI binary is missing"
+                    ))
+                };
+                (file_id, outcome)
+            }
+        });
+        let outcomes = futures_util::future::join_all(wave_futures).await;
 
-        // Fold this file's wall time into the rolling rate driving the next
-        // file's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
+        // Fold the wave's wall time into the rolling rate driving the next
+        // wave's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
         let dt = file_started.elapsed().as_secs_f64();
         if dt > 0.0 {
-            let instant = 1.0 / dt;
+            let instant = outcomes.len() as f64 / dt;
             rolling_fps = if rolling_fps <= 0.0 {
                 instant
             } else {
@@ -818,6 +853,7 @@ async fn run_deep_analyze_batch(
             };
         }
 
+        for (file_id, outcome) in outcomes {
         match outcome {
             Ok(out) => {
                 processed += 1;
@@ -887,6 +923,7 @@ async fn run_deep_analyze_batch(
                     }
                 }
             }
+        }
         }
     }
 

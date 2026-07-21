@@ -32,6 +32,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.Arcface.PropertyChanged += OnSlotChanged;
         Svc.RamPlus.PropertyChanged += OnSlotChanged;
         Svc.DeepVlm.PropertyChanged += OnSlotChanged;
+        Svc.Accelerator.PropertyChanged += OnAcceleratorChanged;
         Unloaded += (_, _) =>
         {
             _unloaded = true;
@@ -41,6 +42,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             Svc.Arcface.PropertyChanged -= OnSlotChanged;
             Svc.RamPlus.PropertyChanged -= OnSlotChanged;
             Svc.DeepVlm.PropertyChanged -= OnSlotChanged;
+            Svc.Accelerator.PropertyChanged -= OnAcceleratorChanged;
         };
         Loaded += (_, _) =>
         {
@@ -308,11 +310,20 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// </summary>
     private void SyncInstallButtonStates()
     {
+        // While the single Accelerator slot is mid-install, both NVIDIA buttons
+        // stay disabled so a second click can't dispatch a concurrent prewarm
+        // (they route to the same slot). Re-enabled below when nothing is in
+        // flight and the pack isn't already installed.
+        var acceleratorBusy = Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading;
         if (SentinelExists("llama_runtime_cuda_x64"))
         {
             InstallCudaLlamaButton.Content = "Installed";
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
+        }
+        else
+        {
+            InstallCudaLlamaButton.IsEnabled = !acceleratorBusy;
         }
         // Gate on the ORT CUDA provider (the pack that actually enables the
         // CUDA EP); cuDNN alone never flipped scanning off DirectML.
@@ -324,6 +335,10 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // already reflects whether the CUDA EP is actually active in
             // the current engine session (which depends on engine restart,
             // not just sentinel presence).
+        }
+        else
+        {
+            InstallCudnnButton.IsEnabled = !acceleratorBusy;
         }
         // ArcFace requires the "arcface" sentinel (the engine bundles
         // SCRFD + ArcFace as one install in registry.rs).
@@ -389,6 +404,17 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         if (_unloaded) return;
         DispatcherQueue.TryEnqueue(() => { if (!_unloaded) Bindings.Update(); });
+    }
+
+    // The NVIDIA acceleration buttons aren't x:Bound to the Accelerator slot —
+    // they're imperatively managed in SyncInstallButtonStates + the install
+    // handlers. Re-run that sync whenever the slot's state changes (an "Install
+    // all" or a peer button starting/finishing an accelerator install) so the
+    // CUDA/cuDNN buttons stay in step instead of only refreshing on page Loaded.
+    private void OnAcceleratorChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_unloaded) return;
+        DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncInstallButtonStates(); });
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -1061,6 +1087,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private async Task InstallCudaLlamaAsync(Button button)
     {
+        // Both NVIDIA buttons feed the one Accelerator slot; if a coordinated
+        // install is already in flight, don't dispatch a second prewarm.
+        if (Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading)
+        {
+            DebugLog.Info("[INSTALL] CUDA llama.cpp click ignored; an accelerator install is already in flight.");
+            return;
+        }
         if (!await Services.ModelLicenseGate
                 .EnsureAcceptedAsync(["llama_runtime_cuda_x64"])
                 .ConfigureAwait(true))
@@ -1098,6 +1131,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
+        // Both NVIDIA buttons feed the one Accelerator slot; if a coordinated
+        // install is already in flight, don't dispatch a second prewarm.
+        if (Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading)
+        {
+            DebugLog.Info("[INSTALL] CUDA pack click ignored; an accelerator install is already in flight.");
+            return;
+        }
         if (!await Services.ModelLicenseGate
                 .EnsureAcceptedAsync(["cudnn_runtime_x64"])
                 .ConfigureAwait(true))
