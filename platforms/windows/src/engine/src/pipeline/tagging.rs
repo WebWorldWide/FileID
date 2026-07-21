@@ -1620,6 +1620,66 @@ fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
     usize::try_from(decoder.total_bytes().checked_add(final_rgb)?).ok()
 }
 
+/// Keep at least this many pixels on the long edge when DCT-scaling a JPEG.
+/// Detection (640² letterbox), tagging (384²) and CLIP (224²) all downsample
+/// far below it; only SFace's 112² face crops read decode resolution, and a
+/// 2048 px floor keeps every face wider than ~5 % of the frame at full crop
+/// fidelity. Validated on-corpus 2026-07-21 (see DECISIONS): identical RAM++
+/// tags, identical face counts, embedding cosine ≥ 0.99 on affected files.
+const JPEG_SCALED_DECODE_FLOOR_EDGE: u32 = 2048;
+
+/// DCT-scaled decode for oversized JPEGs via jpeg-decoder (image-rs's
+/// zune-jpeg backend has no scaling API). Returns None — meaning "use the
+/// full decoder" — for small images, non-RGB/L8 outputs (CMYK etc.), or any
+/// decode error, so behavior for every non-oversized or unusual file is
+/// byte-identical to before.
+fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    // Diagnostic / bail-out switch: FILEID_JPEG_SCALED_DECODE=0 restores
+    // full-resolution decode for every file (also the A/B control lever).
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0")
+    });
+    if !enabled {
+        return None;
+    }
+    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    dec.read_info().ok()?;
+    let info = dec.info()?;
+    let (pw, ph) = (u32::from(info.width), u32::from(info.height));
+    let long = pw.max(ph);
+    // DCT scales are powers of two; below 2× the floor even 1/2 would land
+    // under it, so only genuinely oversized frames take this path.
+    if long < JPEG_SCALED_DECODE_FLOOR_EDGE * 2 {
+        return None;
+    }
+    let req = |d: u32| -> u16 {
+        ((u64::from(d) * u64::from(JPEG_SCALED_DECODE_FLOOR_EDGE)) / u64::from(long))
+            .clamp(1, u64::from(u16::MAX)) as u16
+    };
+    // jpeg-decoder picks the smallest DCT scale whose output covers the
+    // request, so the long edge stays >= the floor.
+    dec.scale(req(pw), req(ph)).ok()?;
+    let pixels = dec.decode().ok()?;
+    let out = dec.info()?;
+    let (w, h) = (u32::from(out.width), u32::from(out.height));
+    let rgb = match out.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels,
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut rgb = Vec::with_capacity(pixels.len() * 3);
+            for l in pixels {
+                rgb.extend_from_slice(&[l, l, l]);
+            }
+            rgb
+        }
+        _ => return None,
+    };
+    if rgb.len() != (w as usize) * (h as usize) * 3 {
+        return None;
+    }
+    Some((rgb, w, h))
+}
+
 fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
         use std::io::Cursor;
@@ -1652,6 +1712,17 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         let reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
+        // Oversized JPEGs decode at a DCT-reduced scale: full-resolution decode
+        // of 24-48 MP frames was the measured pipeline ceiling (~533 ms/file,
+        // memory-bandwidth-bound — thread count and storage provably didn't
+        // move it), while every vision consumer downsamples far below the
+        // scaled floor anyway (YuNet 640² letterbox, RAM++ 384², CLIP 224²).
+        // Any scaled-decode failure falls through to the full decoder.
+        if reader.format() == Some(image::ImageFormat::Jpeg) {
+            if let Some(out) = decode_jpeg_scaled(bytes) {
+                return Ok(out);
+            }
+        }
         let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
