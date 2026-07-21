@@ -19,9 +19,11 @@
 //   - count.fetch_add(1) fires BEFORE blocking_send, so the "Discovered"
 //     counter reflects what the FS walk has seen even when the downstream
 //     channel briefly fills.
-//   - Channel cap raised 1024 → 32768. On a typical user corpus of
-//     <50K files the channel never fills in practice; on multi-100K
-//     corpora the cap caps memory at ~32K × ~200 B path ≈ 6 MB.
+//   - Channel cap is memory-tier-scaled (32K / 256K / 1M — see
+//     discovery_channel_cap). A corpus that fits the cap walks to
+//     completion at filesystem speed, so `done`, the discovered total,
+//     and DiscoveryComplete are truthful within minutes even when the
+//     ML stage is orders of magnitude slower.
 //
 // Filters:
 //   - Hidden / system files: skipped (starts with `.`, OR matches
@@ -63,12 +65,29 @@ pub(crate) fn path_fingerprint_text(path: &str) -> SkipFingerprint {
 // Zero-byte files are skipped (no content to embed/hash). No size cap —
 // all sizes go through the same pipeline.
 
-/// Bounded mpsc capacity (Discovery → Tagging). At ~200 B per
-/// `DiscoveredFile` this caps queue memory at ~6 MB worst-case.
-/// Sized so that on typical user corpora (<50K files) the channel never
-/// fills, decoupling the discovery counter from ML throughput.
-const DISCOVERY_CHANNEL_CAP: usize = 32768;
+/// Bounded mpsc capacity (Discovery → Tagging), floor value (MemoryTier::Low).
+/// Once the channel fills, `blocking_send` stalls the walker — from that point
+/// the discovered counter, the `done` flag, and the DiscoveryComplete event all
+/// advance in lockstep with ML throughput instead of filesystem speed. On the
+/// 2026-07-20 overnight run (163k-file corpus, ML serialized to ~0.55 file/s)
+/// the old flat 32768 cap pinned "Discovered"/total at the channel capacity for
+/// 17 hours. Tier-scaled caps below let the walk of any realistically-sized
+/// library complete within minutes of scan start so totals/ETA are real; the
+/// per-entry cost is a `DiscoveredFile` (~300 B with its PathBuf), so even the
+/// High-tier worst case bounds queue memory at ~300 MB — and only while ML is
+/// genuinely that far behind.
+const DISCOVERY_CHANNEL_CAP_LOW: usize = 32_768;
+const DISCOVERY_CHANNEL_CAP_BALANCED: usize = 262_144;
+const DISCOVERY_CHANNEL_CAP_HIGH: usize = 1_048_576;
 const ZERO_BYTE_CHANNEL_CAP: usize = 512;
+
+fn discovery_channel_cap(tier: crate::platform::MemoryTier) -> usize {
+    match tier {
+        crate::platform::MemoryTier::Low => DISCOVERY_CHANNEL_CAP_LOW,
+        crate::platform::MemoryTier::Balanced => DISCOVERY_CHANNEL_CAP_BALANCED,
+        crate::platform::MemoryTier::High => DISCOVERY_CHANNEL_CAP_HIGH,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
@@ -218,7 +237,8 @@ impl Discovery {
     /// Closes the channel when traversal completes OR cancellation is
     /// requested.
     pub fn spawn(self) -> DiscoveryHandle {
-        let (tx, rx) = mpsc::channel(DISCOVERY_CHANNEL_CAP);
+        let channel_cap = discovery_channel_cap(crate::platform::memory_tier());
+        let (tx, rx) = mpsc::channel(channel_cap);
         let (zero_byte_tx, zero_byte_rx) = mpsc::channel(ZERO_BYTE_CHANNEL_CAP);
         let root = self.root.clone();
         let coordinator = self.coordinator.clone();
@@ -256,6 +276,7 @@ impl Discovery {
         tracing::info!(
             walk_threads,
             storage = storage.as_str(),
+            channel_cap,
             "[DISCOVERY] adaptive parallel walk"
         );
 
@@ -430,9 +451,11 @@ impl Discovery {
                 count_inner.fetch_add(1, Ordering::Relaxed);
 
                 // blocking_send applies backpressure when the channel fills
-                // (cap 32768 → roughly 6 MB queued path metadata). On
-                // typical corpora this never trips. Errors only happen if
-                // the receiver dropped (i.e. shutdown); break out cleanly.
+                // (tier-scaled cap, see discovery_channel_cap). On corpora
+                // that fit the cap this never trips, so the walk — and with
+                // it `done` + the true total — completes at filesystem speed
+                // regardless of ML throughput. Errors only happen if the
+                // receiver dropped (i.e. shutdown); break out cleanly.
                 if tx.blocking_send(discovered).is_err() {
                     break;
                 }

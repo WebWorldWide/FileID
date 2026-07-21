@@ -138,6 +138,19 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// </summary>
     public void Apply(ModelDownloadProgress p, Func<bool> sentinelExists)
     {
+        // A stale/redundant sub-100% event must not knock an already-Installed
+        // slot back to Downloading. The engine emits an unconditional "Queued"
+        // fraction=0 event before it discovers the model is already on disk and
+        // replies already_installed — honoring it flipped Installed→Downloading
+        // for a frame (the visible Settings/Welcome flicker). A genuine reinstall
+        // still works: ResetForRetry()/InstallAsync pre-stamp Downloading before
+        // the engine dispatches, so Status is no longer Installed when real
+        // progress lands.
+        if (Status == ModelInstallStatus.Installed && p.Fraction < 1.0 && sentinelExists())
+        {
+            return;
+        }
+
         // Clamp the displayed Fraction non-decreasing while Downloading. The
         // GPU (multi-pack) bundle runs as TWO sequential installs into ONE
         // slot (cuDNN pack, then the ORT-CUDA provider); the engine emits a

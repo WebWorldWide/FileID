@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## STATUS 2026-07-21 — CUDA/Blackwell perf recovery + discovery/ETA/install-truth landed on branch `perf-cuda-discovery-fixes`
+
+Tagging recovered from 0.55 img/s (silent CPU fallback) to ~21 img/s sustained on the RTX 5080 (see STATE top + DECISIONS 2026-07-21 ×4). All local gates green (engine Windows+WSL clippy/tests, app build/tests/format, license-policy + both egress modes). Resume in this order:
+
+1. **Land it:** PR `perf-cuda-discovery-fixes` → main; confirm windows-engine/windows-app/policy workflows green. The sentinel revision token changed for `ort_cuda_x64` + `cudnn_runtime_x64` — every existing install re-verifies/downloads the new archives on next launch (intended self-heal; ~2.4 GB for CUDA-pack users).
+2. **On-hardware follow-ups (this box):** (a) DONE — pool A/B measured (1→20.4, 2→23.4, 3→17.2, 4→4.6 f/s on identical 3000-file runs); CUDA pool now defaults to 2 (`CUDA_MODEL_POOL_MAX`). The remaining ceiling is large-JPEG decode (~533 ms/file avg on 24-48 MP photos; memory-bandwidth-bound — 18 SMT decoders changed nothing; NVMe vs USB source identical). Next real lever: reduced-resolution decode for oversized images (DCT-scaled JPEG), but it feeds YuNet/SFace inputs, so it needs an accuracy-validated pass against `scan_assertions.py` + face-quality comparisons before shipping. (b) Deep Analyze: verify `-np 2` wave parallelism + 1568 px downscale on a real VLM batch (Qwen2.5-VL) — throughput and output-quality spot-check. (c) Full app (WinUI) run on Adlon: welcome-modal install states, "Counting files" → real ETA handoff, no flicker.
+3. **Mirror the now-TEN release-blocking runtime archives** (was six): the four CUDA 12.9 redists (cudart/cublas/cufft/nvrtc) joined the approved off-policy baseline in `check_runtime_egress.py`. Strict release mode still (intentionally) blocks until byte-identical HF mirrors exist.
+4. **Dev-box env hygiene:** the terminal that launches Claude/dev shells exports `ORT_DYLIB_PATH` → Python's CPU-only ORT 1.27. Unset it (it silently bypasses the pack pin for any engine launched from that shell; the ort-tracing bridge now at least logs the mismatch loudly).
+5. Then the 2026-07-19 queue below (unchanged).
+
 ## STATUS 2026-07-19 — Linux People lifecycle and edit retention are source-closed
 
 Linux face grouping is now terminal-driven and generation-owned; timer/DB false terminals are removed, readiness/overlap/busy/exit state is explicit, and the shared engine releases its single-flight guard before terminal publication without permitting overlapping persistence. Person-detail rename and Mark Unknown keep the dialog and edits live until a matching terminal succeeds, preserving retry after gate contention or failure. Native WSL GTK fmt/clippy and 38/38 tests plus focused Windows/WSL engine ordering tests pass; final reviewers are clean.

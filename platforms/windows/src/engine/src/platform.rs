@@ -1294,6 +1294,35 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
     failed
 }
 
+/// Load a DLL by full path so its module identity is pinned before anything
+/// else (ORT's CUDA EP, cuDNN's dispatch shim) resolves the same name through
+/// the unordered AddDllDirectory search set. Windows resolves an import by
+/// name against already-loaded modules first, so whichever copy we load here
+/// is the one every later consumer binds. Returns the Win32 error code on
+/// failure (126 = a dependency of the DLL itself is missing).
+#[cfg(windows)]
+pub fn preload_dll(path: &std::path::Path) -> Result<(), u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::{
+        LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+    };
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    unsafe {
+        LoadLibraryExW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        )
+    }
+    .map(|_| ())
+    // HRESULT_FROM_WIN32 shape (0x8007xxxx) → surface the familiar Win32 code
+    // (126 ERROR_MOD_NOT_FOUND, 127 ERROR_PROC_NOT_FOUND) in logs.
+    .map_err(|e| (e.code().0 as u32) & 0xFFFF)
+}
+
 #[cfg(not(windows))]
 pub fn register_dll_dirs_under(_root: &std::path::Path) -> Vec<std::path::PathBuf> {
     Vec::new()

@@ -653,7 +653,13 @@ async fn run_deep_analyze_batch(
         return;
     }
 
-    for (idx, file_id) in file_ids.iter().copied().enumerate() {
+    // Files run in WAVES sized to the persistent server's slot count
+    // (llama-server was started with a matching `-np`): with 2 slots, one
+    // request's GPU decode overlaps the other's CPU-side image preprocessing.
+    // The CLI fallback stays strictly sequential — each call spawns a fresh
+    // process that reloads the multi-GB model.
+    let mut cursor = 0usize;
+    while cursor < file_ids.len() {
         if crate::coordinator::process_gpu_device_removed() {
             send_gpu_failure_complete(
                 &sink,
@@ -679,138 +685,183 @@ async fn run_deep_analyze_batch(
             return;
         }
 
-        if skip_existing {
-            let already = {
-                let conn = db.lock();
-                skip_existing_done(&conn, file_id, model_kind)
-            };
-            if already {
-                let is_last = idx as u64 == total.saturating_sub(1);
-                if idx % 100 == 0 || is_last {
-                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-                        DeepAnalyzeProgress {
-                            processed: idx as u64,
-                            total,
-                            eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
-                            current_path: None,
-                            model_kind: model_kind.to_string(),
-                            current_caption: None,
-                        },
-                    ))))
-                    .await;
+        let wave_cap = if use_server {
+            server.as_ref().map(|s| s.slots.max(1)).unwrap_or(1)
+        } else {
+            1
+        };
+        let mut wave: Vec<(usize, i64, Option<String>)> = Vec::with_capacity(wave_cap);
+        while wave.len() < wave_cap && cursor < file_ids.len() {
+            let idx = cursor;
+            let file_id = file_ids[idx];
+            cursor += 1;
+            if skip_existing {
+                let already = {
+                    let conn = db.lock();
+                    skip_existing_done(&conn, file_id, model_kind)
+                };
+                if already {
+                    let is_last = idx as u64 == total.saturating_sub(1);
+                    if idx % 100 == 0 || is_last {
+                        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                            DeepAnalyzeProgress {
+                                processed: idx as u64,
+                                total,
+                                eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
+                                current_path: None,
+                                model_kind: model_kind.to_string(),
+                                current_caption: None,
+                            },
+                        ))))
+                        .await;
+                    }
+                    continue;
                 }
-                continue;
             }
+            let current_path: Option<String> = {
+                let conn = db.lock();
+                conn.query_row(
+                    "SELECT path_text FROM files WHERE id = ?1",
+                    rusqlite::params![file_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()
+            };
+            wave.push((idx, file_id, current_path));
+        }
+        if wave.is_empty() {
+            continue;
         }
 
-        let current_path: Option<String> = {
-            let conn = db.lock();
-            conn.query_row(
-                "SELECT path_text FROM files WHERE id = ?1",
-                rusqlite::params![file_id],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-        };
-        // ETA from the rate of the files completed BEFORE this one. The IPC
+        // ETA from the rate of the files completed BEFORE this wave. The IPC
         // currentPath carries the real path (not redacted) for parity with the
         // macOS reference; we never log it here. (F-C2-008)
-        let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
-        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-            DeepAnalyzeProgress {
-                processed: idx as u64,
-                total,
-                eta_seconds,
-                current_path: current_path.clone(),
-                model_kind: model_kind.to_string(),
-                current_caption: None,
-            },
-        ))))
-        .await;
-
-        let sink_c = sink.clone();
-        let model_kind_c = model_kind.to_string();
-        // Carry ETA + the current file path onto the streamed caption frames too,
-        // so the Deep Analyze UI keeps showing both while a caption renders
-        // token-by-token (the macOS schema usage). (F-C2-008)
-        let current_path_cb = current_path.clone();
-        let caption_buf = Arc::new(Mutex::new(String::new()));
-        let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
-        let caption_buf_cb = caption_buf.clone();
-        let last_emit_cb = last_emit.clone();
-        let on_token = move |chunk: &str| {
-            append_caption_chunk(&caption_buf_cb, chunk);
-            let now = Instant::now();
-            let should_emit = {
-                let mut last = last_emit_cb.lock();
-                if now.duration_since(*last) >= Duration::from_millis(250) {
-                    *last = now;
-                    true
-                } else {
-                    false
-                }
-            };
-            if !should_emit {
-                return;
-            }
-            let snapshot = caption_buf_cb.lock().clone();
-            let kind = model_kind_c.clone();
-            let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
-                Wrap::new(DeepAnalyzeProgress {
-                    processed: idx as u64,
+        //
+        // The UI has exactly ONE "current file" slot (name, thumbnail, caption,
+        // N-of-M counter) and no monotonic guard, so only the wave's FIRST
+        // (lowest-idx) file may drive the live progress channel — emitting a
+        // frame per in-flight file made the counter tick backwards and the
+        // name/thumbnail/caption flip between concurrent files every wave.
+        // Terminal DeepAnalyzeFileDone events still fire for every file.
+        {
+            let (idx, _file_id, current_path) = &wave[0];
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
+                DeepAnalyzeProgress {
+                    processed: *idx as u64,
                     total,
-                    eta_seconds,
-                    current_path: current_path_cb.clone(),
-                    model_kind: kind,
-                    current_caption: Some(snapshot),
-                }),
-            )));
-        };
+                    eta_seconds: batch_eta_seconds(rolling_fps, *idx as u64, total),
+                    current_path: current_path.clone(),
+                    model_kind: model_kind.to_string(),
+                    current_caption: None,
+                },
+            ))))
+            .await;
+        }
+
         // Persistent server while it's healthy (model already resident); else
         // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
         let server_active = if use_server { server.as_ref() } else { None };
+        let wave_used_server = server_active.is_some();
+        let streamer_idx = wave[0].0;
         let file_started = Instant::now();
-        let face_names = {
-            let conn = db.lock();
-            fetch_face_names(&conn, file_id)
-        };
-        let outcome = if let Some(srv) = server_active {
-            analyze_file_via_server(
-                db.clone(),
-                srv,
-                file_id,
-                model_kind,
-                mode,
-                cancel.clone(),
-                &face_names,
-                on_token,
-            )
-            .await
-        } else if let Some(r) = runner.as_ref() {
-            analyze_file(
-                db.clone(),
-                r,
-                file_id,
-                model_kind,
-                mode,
-                cancel.clone(),
-                &face_names,
-                on_token,
-            )
-            .await
-        } else {
-            // Neither backend available (server failed to start AND no CLI
-            // binary). Can't analyze this file — record a failure and move on.
-            Err(anyhow::anyhow!(
-                "no VLM backend available — server failed to start and the CLI binary is missing"
-            ))
-        };
+        let wave_futures = wave.iter().map(|(idx, file_id, current_path)| {
+            let idx = *idx;
+            let file_id = *file_id;
+            let is_streamer = idx == streamer_idx;
+            let sink_c = sink.clone();
+            let model_kind_c = model_kind.to_string();
+            // Carry ETA + the current file path onto the streamed caption
+            // frames too, so the Deep Analyze UI keeps showing both while a
+            // caption renders token-by-token (the macOS schema usage). (F-C2-008)
+            let current_path_cb = current_path.clone();
+            let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
+            let caption_buf = Arc::new(Mutex::new(String::new()));
+            let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
+            let caption_buf_cb = caption_buf.clone();
+            let last_emit_cb = last_emit.clone();
+            let db = db.clone();
+            let cancel = cancel.clone();
+            let runner = runner.as_ref();
+            async move {
+                let on_token = move |chunk: &str| {
+                    // Non-streamer wave members stay silent on the live
+                    // progress channel (see the pre-wave frame comment).
+                    if !is_streamer {
+                        return;
+                    }
+                    append_caption_chunk(&caption_buf_cb, chunk);
+                    let now = Instant::now();
+                    let should_emit = {
+                        let mut last = last_emit_cb.lock();
+                        if now.duration_since(*last) >= Duration::from_millis(250) {
+                            *last = now;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if !should_emit {
+                        return;
+                    }
+                    let snapshot = caption_buf_cb.lock().clone();
+                    let kind = model_kind_c.clone();
+                    let _ = sink_c.try_send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(
+                        Wrap::new(DeepAnalyzeProgress {
+                            processed: idx as u64,
+                            total,
+                            eta_seconds,
+                            current_path: current_path_cb.clone(),
+                            model_kind: kind,
+                            current_caption: Some(snapshot),
+                        }),
+                    )));
+                };
+                let face_names = {
+                    let conn = db.lock();
+                    fetch_face_names(&conn, file_id)
+                };
+                let outcome = if let Some(srv) = server_active {
+                    analyze_file_via_server(
+                        db.clone(),
+                        srv,
+                        file_id,
+                        model_kind,
+                        mode,
+                        cancel.clone(),
+                        &face_names,
+                        on_token,
+                    )
+                    .await
+                } else if let Some(r) = runner {
+                    analyze_file(
+                        db.clone(),
+                        r,
+                        file_id,
+                        model_kind,
+                        mode,
+                        cancel.clone(),
+                        &face_names,
+                        on_token,
+                    )
+                    .await
+                } else {
+                    // Neither backend available (server failed to start AND no
+                    // CLI binary). Can't analyze this file — record a failure
+                    // and move on.
+                    Err(anyhow::anyhow!(
+                        "no VLM backend available — server failed to start and the CLI binary is missing"
+                    ))
+                };
+                (file_id, outcome)
+            }
+        });
+        let outcomes = futures_util::future::join_all(wave_futures).await;
 
-        // Fold this file's wall time into the rolling rate driving the next
-        // file's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
+        // Fold the wave's wall time into the rolling rate driving the next
+        // wave's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
         let dt = file_started.elapsed().as_secs_f64();
         if dt > 0.0 {
-            let instant = 1.0 / dt;
+            let instant = outcomes.len() as f64 / dt;
             rolling_fps = if rolling_fps <= 0.0 {
                 instant
             } else {
@@ -818,75 +869,156 @@ async fn run_deep_analyze_batch(
             };
         }
 
-        match outcome {
-            Ok(out) => {
-                processed += 1;
-                sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
-                    DeepAnalyzeFileDone {
-                        file_id: out.file_id,
-                        description: out.description.clone().unwrap_or_default(),
-                        proposed_name: out.proposed_name.clone(),
-                        model_kind: model_kind.to_string(),
-                    },
-                ))))
-                .await;
-            }
-            Err(err) => {
-                if crate::coordinator::process_gpu_device_removed()
-                    || crate::models::runtime::error_has_device_removed_marker(&err)
-                {
-                    send_gpu_failure_complete(
-                        &sink,
-                        model_kind,
-                        processed,
-                        failed.saturating_add(1),
-                        started_at.elapsed().as_secs_f64(),
-                    )
-                    .await;
-                    return;
-                }
-                if cancel.load(Ordering::Relaxed) {
-                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                        DeepAnalyzeComplete {
-                            processed,
-                            failed,
-                            total_seconds: started_at.elapsed().as_secs_f64(),
+        // Drain EVERY outcome before acting on a terminal condition: with
+        // `join_all` the sibling files of a wave have already run (and
+        // persisted their results), so returning mid-iteration on the first
+        // device-removed/cancel outcome would silently drop their FileDone
+        // events and undercount `processed` in the terminal event.
+        let mut wave_gpu_dead = false;
+        let mut wave_cancelled = false;
+        let mut server_probed_this_wave = false;
+        for (file_id, outcome) in outcomes {
+            match outcome {
+                Ok(out) => {
+                    processed += 1;
+                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
+                        DeepAnalyzeFileDone {
+                            file_id: out.file_id,
+                            description: out.description.clone().unwrap_or_default(),
+                            proposed_name: out.proposed_name.clone(),
                             model_kind: model_kind.to_string(),
-                            cancelled: true,
                         },
                     ))))
                     .await;
-                    return;
                 }
-                failed += 1;
-                tracing::warn!(?err, file_id, "deep analyze file failed");
-                // F-C1-021: a per-file error (unreadable image, decode failure,
-                // one rejected request) must NOT tear down a HEALTHY persistent
-                // server and downgrade the rest of the batch to the many-times
-                // slower per-file CLI. Only genuine server DEATH justifies the
-                // fallback. Re-probe the server with the same one-shot payload
-                // self-test used at startup; abandon it for the remaining files
-                // ONLY if that probe also fails (the server is actually gone).
-                if use_server && runner.is_some() {
-                    let server_dead = match server.as_ref() {
-                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
-                            .await
-                            .is_err(),
-                        None => true,
-                    };
-                    if server_dead {
-                        tracing::warn!(
-                            "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
-                        );
-                        use_server = false;
-                    } else {
-                        tracing::debug!(
-                            file_id,
-                            "[DEEP-ANALYZE] per-file error but server still healthy; keeping the persistent server"
-                        );
+                Err(err) => {
+                    if crate::coordinator::process_gpu_device_removed()
+                        || crate::models::runtime::error_has_device_removed_marker(&err)
+                    {
+                        failed += 1;
+                        wave_gpu_dead = true;
+                        continue;
                     }
+                    if cancel.load(Ordering::Relaxed) {
+                        wave_cancelled = true;
+                        continue;
+                    }
+                    tracing::warn!(?err, file_id, "deep analyze file failed");
+                    // F-C1-021: a per-file error (unreadable image, decode failure,
+                    // one rejected request) must NOT tear down a HEALTHY persistent
+                    // server and downgrade the rest of the batch to the many-times
+                    // slower per-file CLI. Only genuine server DEATH justifies the
+                    // fallback. Re-probe the server with the same one-shot payload
+                    // self-test used at startup (once per wave); abandon it for the
+                    // remaining files ONLY if that probe also fails.
+                    if use_server && runner.is_some() && !server_probed_this_wave {
+                        server_probed_this_wave = true;
+                        let server_dead = match server.as_ref() {
+                            Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
+                                .await
+                                .is_err(),
+                            None => true,
+                        };
+                        if server_dead {
+                            tracing::warn!(
+                                "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
+                            );
+                            use_server = false;
+                        } else {
+                            tracing::debug!(
+                                file_id,
+                                "[DEEP-ANALYZE] per-file error but server still healthy; keeping the persistent server"
+                            );
+                        }
+                    }
+                    // A dead server fails every in-flight file of the wave at
+                    // once — those are transport failures, not file failures.
+                    // The sequential code lost at most one file to a server
+                    // death; keep that bound by retrying each one on the CLI.
+                    if wave_used_server && !use_server {
+                        if let Some(r) = runner.as_ref() {
+                            let face_names = {
+                                let conn = db.lock();
+                                fetch_face_names(&conn, file_id)
+                            };
+                            match analyze_file(
+                                db.clone(),
+                                r,
+                                file_id,
+                                model_kind,
+                                mode,
+                                cancel.clone(),
+                                &face_names,
+                                |_| {},
+                            )
+                            .await
+                            {
+                                Ok(out) => {
+                                    processed += 1;
+                                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(
+                                        Wrap::new(DeepAnalyzeFileDone {
+                                            file_id: out.file_id,
+                                            description: out
+                                                .description
+                                                .clone()
+                                                .unwrap_or_default(),
+                                            proposed_name: out.proposed_name.clone(),
+                                            model_kind: model_kind.to_string(),
+                                        }),
+                                    )))
+                                    .await;
+                                    continue;
+                                }
+                                Err(retry_err) => {
+                                    if crate::coordinator::process_gpu_device_removed()
+                                        || crate::models::runtime::error_has_device_removed_marker(
+                                            &retry_err,
+                                        )
+                                    {
+                                        failed += 1;
+                                        wave_gpu_dead = true;
+                                        continue;
+                                    }
+                                    if cancel.load(Ordering::Relaxed) {
+                                        wave_cancelled = true;
+                                        continue;
+                                    }
+                                    tracing::warn!(
+                                        ?retry_err,
+                                        file_id,
+                                        "[DEEP-ANALYZE] CLI retry after server death also failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    failed += 1;
                 }
             }
+        }
+        if wave_gpu_dead {
+            send_gpu_failure_complete(
+                &sink,
+                model_kind,
+                processed,
+                failed,
+                started_at.elapsed().as_secs_f64(),
+            )
+            .await;
+            return;
+        }
+        if wave_cancelled {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+                DeepAnalyzeComplete {
+                    processed,
+                    failed,
+                    total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind: model_kind.to_string(),
+                    cancelled: true,
+                },
+            ))))
+            .await;
+            return;
         }
     }
 
