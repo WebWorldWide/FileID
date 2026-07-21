@@ -340,9 +340,16 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             InstallCudnnButton.IsEnabled = !acceleratorBusy;
         }
+        // Forward-only latches from sentinel presence. A slot that is actively
+        // Downloading must NOT be forced to Installed by a pre-existing
+        // sentinel (e.g. Qwen already on disk while Gemma streams into the
+        // same DeepVlm slot) — that clobbered the live download row to
+        // "100 % Installed" between progress events.
         // ArcFace requires the "arcface" sentinel (the engine bundles
         // SCRFD + ArcFace as one install in registry.rs).
-        if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
+        if (SentinelExists("arcface")
+            && Svc.Arcface.Status is not Services.ModelInstallStatus.Installed
+                and not Services.ModelInstallStatus.Downloading)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -352,7 +359,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         // CLIP requires BOTH halves on disk (image encoder + text encoder).
         if (SentinelExists("mobileclip_s2") && SentinelExists("clip_text")
-            && Svc.Clip.Status != Services.ModelInstallStatus.Installed)
+            && Svc.Clip.Status is not Services.ModelInstallStatus.Installed
+                and not Services.ModelInstallStatus.Downloading)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -363,7 +371,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
         if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
              || SentinelExists("mistral_small_3_2"))
-            && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
+            && Svc.DeepVlm.Status is not Services.ModelInstallStatus.Installed
+                and not Services.ModelInstallStatus.Downloading)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -408,12 +417,17 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     // The NVIDIA acceleration buttons aren't x:Bound to the Accelerator slot —
     // they're imperatively managed in SyncInstallButtonStates + the install
-    // handlers. Re-run that sync whenever the slot's state changes (an "Install
+    // handlers. Re-run that sync whenever the slot's STATUS changes (an "Install
     // all" or a peer button starting/finishing an accelerator install) so the
     // CUDA/cuDNN buttons stay in step instead of only refreshing on page Loaded.
+    // Status only: the sync runs SentinelProbe's recursive directory walks, and
+    // a download fires Fraction/BytesDone/EtaSeconds changes ~5× per 10 Hz
+    // progress event — unfiltered, that walked the ~2 GB packs tree on the UI
+    // thread up to 50×/s for the whole install.
     private void OnAcceleratorChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
+        if (e.PropertyName is not nameof(Services.ModelSlot.Status)) return;
         DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncInstallButtonStates(); });
     }
 
@@ -1139,7 +1153,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             return;
         }
         if (!await Services.ModelLicenseGate
-                .EnsureAcceptedAsync(["cudnn_runtime_x64"])
+                .EnsureAcceptedAsync(["cudnn_runtime_x64", "ort_cuda_x64"])
                 .ConfigureAwait(true))
         {
             return;
@@ -1149,7 +1163,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
+            CudnnStatusText.Text = "Downloading CUDA pack (~2.1 GB): cuDNN + ORT CUDA provider + CUDA math runtime…";
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
             await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
             await WaitForModelSentinelsAsync(["cudnn_runtime_x64", "ort_cuda_x64"]);
