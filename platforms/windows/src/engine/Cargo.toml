@@ -83,8 +83,15 @@ image            = { version = "0.25", default-features = false, features = ["jp
 kamadak-exif     = "0.5"
 # turbojpeg considered + dropped: requires a system libjpeg-turbo install
 # (no `vendored` feature upstream). The system-dep cost beats the JPEG-decode
-# speedup for the "user just downloads and runs" promise. Revisit when a
-# pure-Rust SIMD JPEG decoder lands.
+# speedup for the "user just downloads and runs" promise.
+# jpeg-decoder supplies the piece image-rs's zune-jpeg backend lacks: DCT-
+# scaled decode (1/2, 1/4, 1/8) for oversized JPEGs. Full-resolution decode of
+# 24-48 MP photos was the measured pipeline ceiling (~533 ms/file, memory-
+# bandwidth-bound) while every vision consumer is capped at ≤640 px input;
+# see decode_jpeg_scaled in pipeline/tagging.rs and DECISIONS 2026-07-21.
+# Pure Rust, no system deps; rayon feature off — the decoder pool owns
+# parallelism.
+jpeg-decoder     = { version = "0.3", default-features = false }
 
 # Memory mapping for large image reads.
 memmap2 = "0.9"
