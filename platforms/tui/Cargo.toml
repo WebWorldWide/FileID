@@ -38,7 +38,7 @@ fileid-engine = { path = "../windows/src/engine", default-features = false }
 # "user just downloads and runs" promise and CI builds with no extra apt
 # packages. These are the only genuinely new dependencies this crate
 # introduces; justified in shared/docs/DECISIONS.md.
-ratatui   = "0.29"
+ratatui   = "0.30"
 crossterm = "0.28"
 
 # Already an engine dependency; declaring it here at the same version means
