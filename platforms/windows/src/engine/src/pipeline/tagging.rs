@@ -390,6 +390,10 @@ const VRAM_PER_POOL_INSTANCE_MB: u64 = 2000;
 /// 4 slots on a 10 GB card (~15 GB demand) and wedge it.
 const VRAM_PER_POOL_INSTANCE_CUDA_MB: u64 = 3500;
 
+/// Measured CUDA session-parallelism ceiling — see the A/B table at the
+/// `resolve_pool_size` clamp site.
+const CUDA_MODEL_POOL_MAX: usize = 2;
+
 fn vram_per_pool_instance_mb(ep: crate::models::runtime::ExecutionProvider) -> u64 {
     use crate::models::runtime::ExecutionProvider as Ep;
     match ep {
@@ -464,6 +468,21 @@ fn resolve_pool_size(worker_count: usize) -> usize {
         .and_then(|s| s.parse::<usize>().ok());
     let mut cap = env_override.unwrap_or(MODEL_POOL_SIZE);
     let active_ep = crate::models::runtime::active_provider();
+    // CUDA/TensorRT sessions parallelize poorly beyond two: measured on the
+    // RTX 5080 16 GB (2026-07-21, identical 3000-file Adlon A/B via
+    // FILEID_MODEL_POOL_SIZE): pool 1 → 20.4 f/s, 2 → 23.4, 3 → 17.2,
+    // 4 → 4.6 (VRAM saturation at 15.9 GB → WDDM thrash). Matches the
+    // RTX 2060 HW-4 finding that pool 3 regressed. The env override skips
+    // this so future A/Bs stay possible.
+    if env_override.is_none()
+        && matches!(
+            active_ep,
+            crate::models::runtime::ExecutionProvider::Cuda
+                | crate::models::runtime::ExecutionProvider::TensorRt
+        )
+    {
+        cap = cap.min(CUDA_MODEL_POOL_MAX);
+    }
     match crate::platform::dedicated_vram_mb() {
         Some(vram_mb) => {
             let usable = vram_mb.saturating_sub(VRAM_RESERVED_MB);
@@ -893,6 +912,14 @@ impl Tagger {
         // Stage 1b — decoder pool: M sync OS threads. Sized by physical
         // CPU topology (p+e cores), clamped to the [2, 12] range so we
         // don't oversaturate the GPU side or starve the WinUI 3 app.
+        // Decode of large JPEGs is the measured pipeline ceiling on a GPU box
+        // (2026-07-21, RTX 5080 + 9900X, 3000-file 24-48 MP Adlon A/B:
+        // ~533 ms/file avg → 12/0.533 ≈ 22 f/s wall) and it is memory-
+        // bandwidth-bound, not thread-bound: raising to 18 SMT decoders
+        // inflated per-decode latency to ~786 ms for identical wall throughput
+        // (22.9 f/s). Do not chase this with thread count — the remaining
+        // lever is reduced-resolution decode for oversized images, which needs
+        // an accuracy-validated pass first (see NEXT.md).
         let topo = crate::platform::cpu_topology();
         let decoder_count = ((topo.p_cores + topo.e_cores) as usize).clamp(2, 12);
         // Low tier: each decoder blocked on a full byte budget still owns one
