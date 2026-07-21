@@ -468,17 +468,21 @@ impl ScanSession {
         // events during tagging report the real discovered total — else
         // the sidebar progress bar pegs at 100 % during tagging.
         let discovered_count_for_batch = discovered_count.clone();
+        let discovered_done_for_batch = discovered_done_post.clone();
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
                 emit_batch_summary(&sink_for_batch, &stats);
                 let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
+                let walk_done =
+                    discovered_done_for_batch.load(std::sync::atomic::Ordering::Acquire);
                 maybe_emit_progress(
                     &sink_for_batch,
                     &progress_state_for_batch,
                     &session_id_for_batch,
                     &stats,
                     discovered,
+                    walk_done,
                 );
             })
             .await;
@@ -996,6 +1000,7 @@ fn maybe_emit_progress(
     session_id: &str,
     stats: &BatchStats,
     discovered_total: u64,
+    discovery_done: bool,
 ) {
     let now = Instant::now();
     let should_emit = {
@@ -1015,16 +1020,24 @@ fn maybe_emit_progress(
         st.observe_rate(stats.processed_total, now)
     };
     // Progress payload fields:
-    //   total            = discovered file count (from Discovery's atomic
-    //                      counter; persisted through tagging so the
-    //                      progress bar shows correct fill, not 100%).
+    //   total            = 0 until the discovery walk completes (the IPC
+    //                      schema contract: "0 until discovery completes"),
+    //                      then the final discovered count. Emitting the
+    //                      still-climbing counter as `total` made both the
+    //                      progress-bar denominator and the ETA moving
+    //                      targets — the overnight "17.0h → 16.4h after 10
+    //                      hours" symptom.
     //   files_per_second = the ROLLING wall-clock rate (real end-to-end
     //                      throughput), NOT the per-batch DB-flush rate.
     //   eta_seconds      = (total - processed) / rolling_fps when known;
-    //                      None during ramp-up (first ~0.5 s, or total==0).
+    //                      None during ramp-up or while total is unknown.
     //   failed           = cumulative failed-file count from DBWriter.
     //   resident_mb      = process RSS via Win32 GetProcessMemoryInfo.
-    let total = discovered_total.max(stats.processed_total);
+    let total = if discovery_done {
+        discovered_total.max(stats.processed_total)
+    } else {
+        0
+    };
     let remaining = total.saturating_sub(stats.processed_total);
     let eta_seconds = if fps > 0.01 && remaining > 0 && total > 0 {
         Some(remaining as f64 / fps)

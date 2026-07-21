@@ -90,7 +90,7 @@ fn registry_matches_manifest_exactly() {
         "manifest lists windows artifacts the registry doesn't serve: {:?}",
         manifest_entries.keys().collect::<Vec<_>>()
     );
-    assert_eq!(registry_urls.len(), 31, "expected 31 pinned artifacts");
+    assert_eq!(registry_urls.len(), 35, "expected 35 pinned artifacts");
 }
 
 #[test]

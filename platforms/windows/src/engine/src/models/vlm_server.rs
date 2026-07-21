@@ -29,6 +29,9 @@ pub struct VlmServer {
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    /// Inference slots the server was started with (`-np`); the batch driver
+    /// bounds its in-flight request count to this.
+    pub slots: usize,
 }
 
 /// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
@@ -95,6 +98,27 @@ impl VlmServer {
         Err(last_err.unwrap_or_else(|| anyhow!("no VLM server binary could start")))
     }
 
+    /// Server inference slots. Two concurrent requests keep the GPU busy while
+    /// the other request is in CPU-side mtmd image preprocessing; more mostly
+    /// grows KV/context VRAM for no wall-clock win at our short 30-80 token
+    /// generations. 1 on small-VRAM cards and under forced-CPU. Overridable via
+    /// `FILEID_VLM_PARALLEL` (clamped 1..=4) for on-hardware tuning.
+    fn parallel_slots(forced_cpu: bool) -> usize {
+        let default = if forced_cpu {
+            1
+        } else {
+            match crate::platform::dedicated_vram_mb() {
+                Some(vram_mb) if vram_mb >= 12_000 => 2,
+                _ => 1,
+            }
+        };
+        std::env::var("FILEID_VLM_PARALLEL")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map(|v| v.clamp(1, 4))
+            .unwrap_or(default)
+    }
+
     async fn start_with_binary(
         bin: &Path,
         gguf: &Path,
@@ -107,6 +131,7 @@ impl VlmServer {
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
         // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
         let forced_cpu = crate::models::runtime::user_forced_cpu();
+        let slots = Self::parallel_slots(forced_cpu);
         let mut cmd = Command::new(bin);
         cmd.arg("-m")
             .arg(gguf)
@@ -122,8 +147,13 @@ impl VlmServer {
             // back to CPU layers if VRAM is short — llama.cpp handles the spill.
             .arg("-ngl")
             .arg(if forced_cpu { "0" } else { "99" })
+            // -c is the TOTAL context, divided across slots by llama-server —
+            // keep 4096 per slot. Continuous batching is default-on in this
+            // build; flash attention defaults to 'auto'.
+            .arg("-np")
+            .arg(slots.to_string())
             .arg("-c")
-            .arg("4096");
+            .arg((4096 * slots).to_string());
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
         if !forced_cpu {
@@ -196,6 +226,7 @@ impl VlmServer {
             base_url,
             api_key,
             client,
+            slots,
         })
     }
 

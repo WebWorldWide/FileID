@@ -366,11 +366,16 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     // containing `cudnn64_9.dll` + friends. NVIDIA hosts
                     // each release under a stable filename pattern, so
                     // URL drift is unlikely between point releases.
-                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip"
+                    // 9.8.0 is the floor for consumer-Blackwell (sm_120)
+                    // kernels: measured on an RTX 5080, cuDNN 9.5.1 ran
+                    // Swin-L convolutions through arch-fallback kernels at
+                    // ~2 s/image with the GPU pinned at 100 % — the
+                    // 2026-07-20 overnight tagging regression.
+                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.8.0.87_cuda12-archive.zip"
                         .to_string(),
                     dest: dir.join("cudnn-runtime.zip"),
-                    sha256: Some("3a4cecc8b6d6aa7f6777620e6f2c129b76be635357c4506f2c4ccdbe0e2a1641".into()),
-                    approx_bytes: 430_000_000,
+                    sha256: Some("d8a23705e3884b137b7e05449fb2b61bfa524e7cfc3fda80743d633f423c6ce4".into()),
+                    approx_bytes: 675_349_654,
                 }],
             })
         }
@@ -384,23 +389,61 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // VERSION MUST MATCH the pyke ort-sys build (1.22.0 — read off the
         // shipped onnxruntime.dll ProductVersion); a mismatch silently fails to
         // bind. ORT is MIT and Microsoft hosts it on github.com (CI-allowlisted),
-        // so no HF hosting needed. cudart/cublas come from the llama.cpp-cuda
-        // pack (CUDA 12.4) or the system CUDA toolkit; cuDNN auto-installs.
-        // The zip extracts to packs/cuda/onnxruntime-win-x64-gpu-1.22.0/lib/*.dll;
+        // so no HF hosting needed.
+        // The pack also carries the CUDA math runtime the CUDA EP hard-imports
+        // (cudart / cublas+cublasLt / cuFFT) plus NVRTC for cuDNN's
+        // runtime-compiled engines, from NVIDIA's redistributable archives
+        // (CUDA 12.9 line — first with native consumer-Blackwell sm_120
+        // kernels; the llama.cpp-cuda pack's 12.4 line predates them and its
+        // set omits cuFFT entirely, which made the provider DLL unloadable and
+        // silently stranded ML on CPU). cuDNN auto-installs separately.
+        // The zips extract under packs/cuda/…-archive/bin/ and lib/;
         // main.rs registers packs/cuda for DLL search AND pins ORT_DYLIB_PATH to
-        // the pack's onnxruntime.dll so the provider binds against the same build.
+        // the pack's onnxruntime.dll so the provider binds against the same
+        // build; models::runtime::preload_cuda_math_stack loads this exact set
+        // by full path before any session build.
         "ort_cuda_x64" => {
             let dir = models_root.join("packs").join("cuda");
             LookupResult::Found(Model {
                 id: "ort_cuda_x64",
                 display_name: "ONNX Runtime CUDA pack",
-                files: vec![FileEntry {
-                    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
-                        .to_string(),
-                    dest: dir.join("ort-cuda.zip"),
-                    sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
-                    approx_bytes: 312_700_000,
-                }],
+                files: vec![
+                    FileEntry {
+                        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
+                            .to_string(),
+                        dest: dir.join("ort-cuda.zip"),
+                        sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
+                        approx_bytes: 312_700_000,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip"
+                            .to_string(),
+                        dest: dir.join("cudart-redist.zip"),
+                        sha256: Some("179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8".into()),
+                        approx_bytes: 3_521_238,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip"
+                            .to_string(),
+                        dest: dir.join("cublas-redist.zip"),
+                        sha256: Some("d534d98b0b453a98914dbf3adf47d7e84b55037abf02f87466439e1dcef581ed".into()),
+                        approx_bytes: 549_755_186,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.4.1.4-archive.zip"
+                            .to_string(),
+                        dest: dir.join("cufft-redist.zip"),
+                        sha256: Some("f26f80bb9abff3269c548e1559e8c2b4ba58ccb8acc6095bbc6404fc962d4b80".into()),
+                        approx_bytes: 198_361_265,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.9.86-archive.zip"
+                            .to_string(),
+                        dest: dir.join("nvrtc-redist.zip"),
+                        sha256: Some("1aa0644fa53c8ca34cdc73db17bcc73530557bdd3f582c7bfdbd7916c8b48f65".into()),
+                        approx_bytes: 314_608_748,
+                    },
+                ],
             })
         }
 
@@ -668,6 +711,14 @@ fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str
             &["onnxruntime.dll"],
             &["onnxruntime_providers_cuda.dll"],
         ]),
+        // CUDA math runtime the CUDA EP hard-imports (see
+        // models::runtime::CUDA_STACK_REQUIRED) + NVRTC for cuDNN's
+        // runtime-compiled engines. One marker per archive, mirroring the
+        // preload set — a zip that extracted without its DLL is not installed.
+        "cudart-redist.zip" => Some(&[&["cudart64_12.dll"]]),
+        "cublas-redist.zip" => Some(&[&["cublas64_12.dll"], &["cublasLt64_12.dll"]]),
+        "cufft-redist.zip" => Some(&[&["cufft64_11.dll"]]),
+        "nvrtc-redist.zip" => Some(&[&["nvrtc64_120_0.dll"]]),
         "ort-openvino.zip" => Some(&[
             &["onnxruntime.dll"],
             &["onnxruntime_providers_openvino.dll"],
@@ -781,6 +832,40 @@ mod tests {
     /// (the privacy posture CI's source-URL allowlist also enforces). Only
     /// asserts on kinds that resolve, so guessing a wrong kind here can't
     /// false-fail.
+    /// The CUDA pack must declare the EP's full native dependency closure —
+    /// every archive with a `runtime_required_names` marker list. Shipping
+    /// the provider DLL without its math libraries (the pre-2026-07-21 shape:
+    /// no cuFFT anywhere) let the pack pass every install check while the
+    /// provider was unloadable, silently stranding ML inference on CPU.
+    #[test]
+    fn ort_cuda_pack_declares_math_runtime() {
+        let LookupResult::Found(m) = lookup_full("ort_cuda_x64") else {
+            panic!("ort_cuda_x64 not found");
+        };
+        let dests: Vec<String> = m
+            .files
+            .iter()
+            .filter_map(|f| f.dest.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        for expected in [
+            "ort-cuda.zip",
+            "cudart-redist.zip",
+            "cublas-redist.zip",
+            "cufft-redist.zip",
+            "nvrtc-redist.zip",
+        ] {
+            assert!(dests.iter().any(|d| d == expected), "pack missing {expected}");
+            assert!(
+                runtime_required_names(expected).is_some(),
+                "no runtime_required_names marker list for {expected}"
+            );
+        }
+        for f in &m.files {
+            assert!(f.sha256.is_some(), "unpinned pack file: {}", f.url);
+        }
+    }
+
     #[test]
     fn all_model_urls_are_huggingface() {
         // NOTE: the runtime/EP packs are intentionally NOT all on HF — cuDNN is

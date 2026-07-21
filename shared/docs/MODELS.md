@@ -197,7 +197,7 @@ Optional. Settings → Performance → "Get faster on this hardware". Auto-sugge
 
 | Pack | Size | Activates EP | Hardware target |
 |---|---|---|---|
-| NVIDIA CUDA Pack | ~600 MB | ORT CUDA EP + cuDNN runtime + llama.cpp CUDA backend | NVIDIA GPUs (any RTX-class) |
+| NVIDIA CUDA Pack | ~2.1 GB | ORT CUDA EP + full CUDA 12.9 math runtime (cudart/cublas/cuFFT/NVRTC) + cuDNN 9.8 + llama.cpp CUDA backend | NVIDIA GPUs (any RTX-class incl. Blackwell/RTX 50) |
 | Intel OpenVINO Pack | ~300 MB | ORT OpenVINO EP | Intel iGPU + Arc dGPU |
 | Snapdragon NPU Pack | ~150 MB | ORT QNN EP + (when available) llama.cpp QNN backend | Snapdragon X Elite (Hexagon NPU) on WoA |
 
