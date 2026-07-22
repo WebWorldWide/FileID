@@ -516,6 +516,10 @@ async fn run_deep_analyze_batch(
             model_kind: Some(model_kind.to_string()),
         }))))
         .await;
+        // Terminal Complete so the app's command slot is released — the client's
+        // Error handler doesn't clear DeepAnalyze* state, so an Error alone would
+        // strand the tab forever. Matches the sibling setup-failure branches. (M7)
+        send_early_failure_complete(&sink, model_kind, &cancel).await;
         return;
     }
     // The CLI binary (llama-mtmd-cli.exe) is OPTIONAL: the persistent server only
@@ -913,10 +917,30 @@ async fn run_deep_analyze_batch(
                     // remaining files ONLY if that probe also fails.
                     if use_server && runner.is_some() && !server_probed_this_wave {
                         server_probed_this_wave = true;
+                        // Bound the liveness re-probe. vlm_server_payload_ok runs a
+                        // real completion that blocks on the HTTP client's 300s
+                        // timeout when the server is wedged — which would ignore the
+                        // user's cancel and stall the whole batch. Race it against the
+                        // cancel flag (like the startup self-test above) AND cap it
+                        // with a short wall-clock timeout; a cancelled or timed-out
+                        // probe means we stop trusting the server and abort promptly
+                        // (fall back / honor cancel) instead of hanging. (M5)
                         let server_dead = match server.as_ref() {
-                            Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
-                                .await
-                                .is_err(),
+                            Some(srv) => tokio::select! {
+                                biased;
+                                _ = async {
+                                    while !cancel.load(Ordering::Relaxed) {
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+                                } => true,
+                                probe = tokio::time::timeout(
+                                    Duration::from_secs(15),
+                                    crate::pipeline::deep_analyze::vlm_server_payload_ok(srv),
+                                ) => match probe {
+                                    Ok(r) => r.is_err(),
+                                    Err(_) => true,
+                                },
+                            },
                             None => true,
                         };
                         if server_dead {

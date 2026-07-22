@@ -71,6 +71,15 @@ public sealed partial class RestructureView : UserControl
     private static int _applyingSpawnGen;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
+    // H2: the exact plan instance SyncPlan rendered the reviewed rows from.
+    // EngineClient sets LastRestructurePlan synchronously but SyncPlan is only
+    // ENQUEUED, so a background re-plan (user re-plan / DeepAnalyzeComplete auto
+    // re-plan) can swap LastRestructurePlan out from under the on-screen rows.
+    // ApplyAsync refuses to apply when the live plan is no longer the one on
+    // screen and re-renders instead, so a destructive apply can never target
+    // destinations the user never reviewed. Paired with _allFileRows (both are
+    // repopulated together by SyncPlan), so it is instance-scoped like them.
+    private RestructurePlan? _renderedPlan;
     // R6-05: static (like _applying / _applyingPlan) so "the completion we've
     // already surfaced" survives this view's per-tab-switch recreation, so a
     // reload-time replay can't re-alert a completion an earlier instance already
@@ -266,6 +275,11 @@ public sealed partial class RestructureView : UserControl
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null) return;
+
+        // H2: record the exact plan the rows below are built from. ApplyAsync
+        // compares the live plan against this to detect a background re-plan
+        // that landed between review and click (see _renderedPlan).
+        _renderedPlan = plan;
 
         // R6-04: a GENUINELY fresh plan supersedes any in-flight apply — release the
         // single-flight guard (F-C5-003). But the view is recreated on every tab
@@ -746,12 +760,34 @@ public sealed partial class RestructureView : UserControl
         if (_applying) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
+
+        // H2: the on-screen rows were rendered from _renderedPlan. If a background
+        // re-plan has since replaced LastRestructurePlan (EngineClient sets it
+        // synchronously; SyncPlan only re-renders on a later dispatcher turn), the
+        // reviewed rows no longer match the live plan — applying now would send
+        // moves the user never saw. Refuse, re-render the current plan, and make
+        // the user re-review + re-click. This also guards the truncated
+        // apply-by-plan_id path: a plan_id whose rendered plan changed is stale.
+        if (!ReferenceEquals(plan, _renderedPlan))
+        {
+            SyncPlan();
+            ApplyStatusText.Text = "The plan changed since you reviewed it — review the updated moves, then apply.";
+            _ = ShowAlertAsync("Plan updated",
+                "The reorganization plan changed while you were reviewing it. The updated moves are on screen now — review them, then apply again.");
+            return;
+        }
+
+        // Build the move set from the REVIEWED rows themselves — the exact Move
+        // records rendered on screen — not by re-reading the live plan's Moves.
+        // The two are the same set here (the reference check above proved plan ==
+        // _renderedPlan), but sourcing from the rows makes the applied set, by
+        // construction, precisely what the user approved.
         var sel = new List<RestructureMove>();
         if (!plan.Truncated)
         {
-            foreach (var m in plan.Moves)
+            foreach (var row in _allFileRows.Values)
             {
-                if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
+                if (row.IsSelected) sel.Add(row.Move);
             }
         }
         if (plan.Truncated && string.IsNullOrWhiteSpace(plan.PlanId)) return;
@@ -847,6 +883,50 @@ public sealed partial class RestructureView : UserControl
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (!IsUnhandledCompletion(r, _lastHandledApplyResult)) return;
         _lastHandledApplyResult = r;
+
+        // M4: an Undo reply lands on the SAME LastRestructureApplyResult slot as an
+        // Apply reply. EngineClient captured whether this terminal was an undo (from
+        // UndoRestructureInFlight, before clearing it) and paired it with the result,
+        // so present "undone" — not "applied" — and don't push a fresh undo-stack
+        // entry for an undo. Undo never engages the apply single-flight guard, so
+        // this branch leaves _applying / _applyInFlight untouched.
+        if (EngineClient.Instance.LastRestructureApplyResultWasUndo)
+        {
+            SyncUndoAffordance();   // CanUndoRestructure was just cleared by the engine
+            // The undo moved files back, so the on-screen plan is stale — refresh
+            // it, mirroring the post-apply regenerate. Fire-and-forget; log a
+            // faulted send instead of stranding (PlanRestructureAsync faults its
+            // Task rather than throwing synchronously).
+            var undoFolder = AppViewModel.Instance.FolderPath;
+            if (!string.IsNullOrEmpty(undoFolder))
+            {
+                _ = EngineClient.Instance.PlanRestructureAsync(undoFolder!).ContinueWith(t =>
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded) return;
+                        DebugLog.Warn("Restructure post-undo re-plan failed: "
+                            + t.Exception?.GetBaseException().Message);
+                    }), TaskContinuationOptions.OnlyOnFaulted);
+            }
+            if (!string.IsNullOrEmpty(r.PrivilegeError))
+            {
+                ApplyStatusText.Text = r.PrivilegeError;
+                _ = ShowAlertAsync("Couldn't undo changes", r.PrivilegeError!);
+                return;
+            }
+            ApplyStatusText.Text = r.Failed == 0
+                ? $"Undid the last restructure - {r.Applied:N0} file{(r.Applied == 1 ? "" : "s")} moved back to where they were."
+                : $"Undo finished with problems - {r.Applied:N0} moved back, {r.Failed:N0} couldn't be restored. Check %LOCALAPPDATA%\\FileID\\logs\\.";
+            if (r.Failed > 0)
+            {
+                _ = ShowAlertAsync("Some items couldn't be restored",
+                    $"Undo moved back {r.Applied:N0}, but {r.Failed:N0} couldn't be returned to their original location. " +
+                    "This usually means a file was open, already moved, or the original folder is gone. " +
+                    "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+            }
+            return;
+        }
+
         _applyInFlight = false;
 
         // Anything actually moved -> the current plan is stale (real moves
@@ -932,9 +1012,13 @@ public sealed partial class RestructureView : UserControl
         {
             // Partial/total failure must be a dismissible, actionable surface -
             // not a status line the user can scroll past thinking it worked.
+            // L3: do NOT claim the originals are unchanged — the engine can count a
+            // file as failed that WAS physically moved (move succeeded, DB path
+            // update failed). Point the user at rescan/Undo to reconcile instead.
             _ = ShowAlertAsync("Some changes couldn't be applied",
-                $"Applied {r.Applied:N0}, but {r.Failed:N0} failed. The originals for the failed items are unchanged.\n\n" +
-                "This usually means a file was open, moved, or you don't have permission to write the destination. " +
+                $"Applied {r.Applied:N0}, but {r.Failed:N0} couldn't be fully applied. A few of those may have been moved but not fully recorded - " +
+                "run a rescan to reconcile, or Undo to restore.\n\n" +
+                "This usually means a file was open, already moved, or you don't have permission to write the destination. " +
                 "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
         }
     }

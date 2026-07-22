@@ -181,6 +181,14 @@ impl VlmServer {
         cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn().context("spawn bundled llama-server")?;
+        // Tie the server to the engine job so an ungraceful engine death
+        // (fast-fail / taskkill) can't orphan a multi-GB-VRAM llama-server that
+        // would wedge the next run and the next scan's GPU. Belt-and-suspenders
+        // with kill_on_drop, which only covers graceful drop. (L4)
+        #[cfg(windows)]
+        if let Some(h) = child.raw_handle() {
+            crate::platform::assign_child_to_engine_job(h);
+        }
         let base_url = format!("http://127.0.0.1:{port}");
         let client = build_loopback_client()?;
 
