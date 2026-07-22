@@ -408,6 +408,36 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _phase, value);
     }
 
+    /// <summary>Discovering/Tagging/PostScan — a scan actively holds the
+    /// engine's mutation gate. A Deep Analyze command issued now queues behind
+    /// it. (Fix A)</summary>
+    internal static bool IsActiveScanPhase(ScanPhase? phase)
+        => phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
+
+    /// <summary>True while a Deep Analyze command is waiting on the engine's
+    /// mutation gate behind a running scan (or any other job). In that window
+    /// the engine emits only QueueState — no DeepAnalyzeStarting/Progress — so
+    /// the Deep Analyze view must show "queued" and must NOT arm its 45 s
+    /// warm-up watchdog (which would false-fire "model took too long to load"
+    /// on a healthy, merely-waiting job). Detected from the live scan phase
+    /// and from a deepAnalyze job sitting in the QueueState pending list. (Fix A)</summary>
+    public bool DeepAnalyzeQueuedBehindScan
+    {
+        get
+        {
+            if (IsActiveScanPhase(_phase)) return true;
+            var qs = _queueState;
+            if (qs?.Pending is { } pending)
+            {
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    if (pending[i].Category == JobCategory.DeepAnalyze) return true;
+                }
+            }
+            return false;
+        }
+    }
+
     /// <summary>Hot stream of every IPC event. Used by tests + the optional
     /// transcript log. Subscribe via System.Reactive.</summary>
     public IObservable<IpcEvent> Events => _events;

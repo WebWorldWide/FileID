@@ -281,6 +281,24 @@ impl ScanSession {
                     }
                 }
             }
+
+            // Crash self-heal: face crops are written post-commit outside the
+            // writer tx, so a mid-scan kill can leave committed face_prints
+            // rows with no on-disk crop JPEG. Those files are size+mtime
+            // unchanged, so they'd be skipped forever and show gray faces in
+            // the People tab. Only after an unclean prior shutdown, pull the
+            // affected files back out of the skip set so they reprocess and
+            // re-emit their crops. Bounded to face-bearing files under the
+            // scan root; clean shutdowns skip this entirely.
+            if crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                let removed = reconcile_missing_face_crops(&conn, &mut set, &lo, hi.as_deref());
+                if removed > 0 {
+                    tracing::info!(
+                        removed,
+                        "[SCAN] crash self-heal: reprocessing files with missing face crops"
+                    );
+                }
+            }
             tracing::info!(
                 already_current = set.len(),
                 files_total = total_files,
@@ -877,6 +895,71 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
 /// placeholder, whose content read is skipped to avoid a network hydration).
 /// Because hydration doesn't bump `modified_at`, this is the only durable
 /// signal that a now-local file still needs ML processing.
+/// Crash self-heal (only after an unclean shutdown — see `UNCLEAN_PRIOR_SHUTDOWN`).
+/// Face-crop JPEGs are written post-commit outside the writer tx, so a kill can
+/// leave committed `face_prints` rows with no on-disk crop. Such a file is
+/// size+mtime unchanged, so the skip set would drop it forever and the People
+/// tab shows gray faces. This pulls every affected file (any face missing its
+/// `<face_id>.jpg`) back OUT of `set` so the next scan reprocesses it and
+/// re-emits the crops. Bounded to face-bearing files under the scan root;
+/// returns how many files were reopened for reprocessing. Best-effort: a query
+/// or FS error just leaves the skip set as-is (the file stays gray, no worse
+/// than before).
+fn reconcile_missing_face_crops(
+    conn: &rusqlite::Connection,
+    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
+    lo: &str,
+    hi: Option<&str>,
+) -> usize {
+    let Ok(faces_dir) = crate::paths::faces_dir() else {
+        return 0;
+    };
+    reconcile_missing_face_crops_in(conn, set, lo, hi, &faces_dir)
+}
+
+fn reconcile_missing_face_crops_in(
+    conn: &rusqlite::Connection,
+    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
+    lo: &str,
+    hi: Option<&str>,
+    faces_dir: &std::path::Path,
+) -> usize {
+    let sql = if hi.is_some() {
+        "SELECT f.path_text, fp.id FROM face_prints fp \
+         JOIN files f ON f.id = fp.file_id \
+         WHERE f.path_text >= ?1 AND f.path_text < ?2"
+    } else {
+        "SELECT f.path_text, fp.id FROM face_prints fp \
+         JOIN files f ON f.id = fp.file_id"
+    };
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return 0;
+    };
+    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
+    let rows = match hi {
+        Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row),
+        None => stmt.query_map([], row),
+    };
+    let Ok(rows) = rows else { return 0 };
+    let mut missing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in rows.flatten() {
+        let (path, face_id) = entry;
+        if missing.contains(&path) {
+            continue;
+        }
+        if !faces_dir.join(format!("{face_id}.jpg")).is_file() {
+            missing.insert(path);
+        }
+    }
+    let mut removed = 0;
+    for path in &missing {
+        if set.remove(&path_fingerprint_text(path)).is_some() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
@@ -1372,6 +1455,51 @@ mod tests {
         let _ = st.observe_rate(10, 0, t0 + Duration::from_secs(1)); // seeds ~10/s
         let held = st.observe_rate(1000, 0, t0 + Duration::from_millis(1100)); // only +0.1 s
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
+    }
+
+    /// Crash self-heal: after an unclean shutdown, a file with committed
+    /// face_prints rows but a missing crop JPEG must be pulled OUT of the skip
+    /// set (so it reprocesses), while a file whose crops all exist stays in it.
+    #[test]
+    fn reconcile_missing_face_crops_reopens_only_crop_missing_files() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL UNIQUE);
+             CREATE TABLE face_prints (id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO files (id, path_text) VALUES (1, 'C:\\Lib\\a.jpg')", [])
+            .unwrap();
+        conn.execute("INSERT INTO files (id, path_text) VALUES (2, 'C:\\Lib\\b.jpg')", [])
+            .unwrap();
+        // a.jpg: two faces (10, 11). b.jpg: one face (20).
+        for (fid, file) in [(10, 1), (11, 1), (20, 2)] {
+            conn.execute(
+                "INSERT INTO face_prints (id, file_id) VALUES (?1, ?2)",
+                rusqlite::params![fid, file],
+            )
+            .unwrap();
+        }
+        let tmp = std::env::temp_dir().join(format!("fileid-crop-test-{}", std::process::id()));
+        let faces = tmp.join("face_crops");
+        std::fs::create_dir_all(&faces).unwrap();
+        // b.jpg's crop exists; a.jpg is missing crop 11 (killed mid-crop-write).
+        std::fs::write(faces.join("20.jpg"), b"x").unwrap();
+        std::fs::write(faces.join("10.jpg"), b"x").unwrap();
+
+        let mut set = std::collections::HashMap::new();
+        set.insert(path_fingerprint_text("C:\\Lib\\a.jpg"), (1i64, None));
+        set.insert(path_fingerprint_text("C:\\Lib\\b.jpg"), (2i64, None));
+
+        let lo = "C:\\Lib\\";
+        let hi = prefix_upper_bound(lo);
+        let removed =
+            reconcile_missing_face_crops_in(&conn, &mut set, lo, hi.as_deref(), &faces);
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert_eq!(removed, 1, "only a.jpg (missing a crop) should be reopened");
+        assert!(!set.contains_key(&path_fingerprint_text("C:\\Lib\\a.jpg")), "a.jpg reopened");
+        assert!(set.contains_key(&path_fingerprint_text("C:\\Lib\\b.jpg")), "b.jpg stays skipped");
     }
 
     /// C1-013: the incremental skip-set must NOT skip a file whose

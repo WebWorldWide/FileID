@@ -165,7 +165,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/windows/src/engine/src/shell/mod.rs": "27cdf3ea0265ff207c63e3d95c13cae89664e7ab367adfc89e34a6fc00e80c78",
     "platforms/windows/src/FileID.App/Program.cs": "5b21dbe44f38977e0bab05e856f6c8c866d33efab138188e9c5c0f17252b68d0",
     "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
-    "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "7e30e3457c6aceba8108b6dd254dce84cc6a55c0548290072114ddb3c524a2ec",
+    "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "4376aa982c38bbea7b4b7b98d108347530c1059bed11178d227491ca36ec58f3",
     "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "346ec117d0e35e25ebcaee7be553a32015d3594df49ba82dae3278b8483a6ef4",
     "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "8230668edde2f896d5270452d08c6a730f42555517a2dac0534c4efd7de94164",
     "platforms/windows/src/FileID.App/App.xaml.cs": "4b5a9c0362071943362ac085e302a39196be22918b3459df97204b235184e381",

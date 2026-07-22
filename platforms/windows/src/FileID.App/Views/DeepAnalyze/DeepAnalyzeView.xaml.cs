@@ -37,6 +37,15 @@ public sealed partial class DeepAnalyzeView : UserControl
     // still the latest, so a stale thumbnail never overwrites the current file's.
     private int _streamThumbGeneration;
 
+    // Last file path shown in the stream card. The engine emits a
+    // DeepAnalyzeProgress every ~250 ms (4 Hz) carrying the SAME CurrentPath for
+    // the whole time a file is being captioned; reloading the shell thumbnail on
+    // every one of those frames re-hits the shell thumbnail provider needlessly.
+    // Track the displayed path and only reload the thumb + reset the caption
+    // accumulator when the path actually changes. Reset on teardown / new run so
+    // re-running the same file reloads its preview. (Fix B)
+    private string? _lastStreamPath;
+
     // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
     // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
     // VLM loads (~5-30 s first run). If the load stalls there's no failure
@@ -64,6 +73,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
+        _lastStreamPath = null;
         CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -219,10 +229,23 @@ public sealed partial class DeepAnalyzeView : UserControl
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeLast):
                 case nameof(EngineClient.DeepAnalyzeComplete):
+                // QueueState drives the "queued behind a scan" branch of
+                // SyncStream: the pending deepAnalyze job can land after the
+                // command-in-flight flip, so re-sync to disarm the warm-up
+                // watchdog once the queued state becomes known. (Fix A)
+                case nameof(EngineClient.QueueState):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
                 case nameof(EngineClient.Phase):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    _ = RefreshNamePeopleGateAsync();
+                    // Phase is the immediate signal that a Deep Analyze command is
+                    // queued behind a scan (or that the scan just finished and the
+                    // job can now load); re-sync so the queued/prepare state and the
+                    // warm-up watchdog track it. (Fix A)
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
+                    break;
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
@@ -412,20 +435,38 @@ public sealed partial class DeepAnalyzeView : UserControl
                     _localPreparingAttemptId = attemptId;
                     _proposedNameCount = 0;
                     _lastConsumedFileDone = null;
+                    _lastStreamPath = null;
                     SyncProposedNamesPill();
                 }
                 StreamCard.Visibility = Visibility.Visible;
                 OverallProgress.Value = 0;
                 OverallProgress.IsIndeterminate = true;
-                OverallProgressText.Text = "Preparing…";
-                StreamFileNameText.Text = "Preparing Deep Analyze…";
-                StreamCaptionText.Text = string.Empty;
                 StreamProposedNameText.Text = string.Empty;
-                ArmWarmupTimer(attemptId);
+                StreamCaptionText.Text = string.Empty;
+                if (ec.DeepAnalyzeQueuedBehindScan)
+                {
+                    // Queued behind a running scan on the engine's mutation gate.
+                    // While queued the engine emits only QueueState — no
+                    // DeepAnalyzeStarting/Progress — so arming the warm-up watchdog
+                    // would false-fire "Model took too long to load" at 45 s on a
+                    // healthy job that is merely waiting. Show the truth and disarm;
+                    // the DeepAnalyzeStarting that fires when the job actually begins
+                    // loading re-arms the watchdog via the branch below. (Fix A)
+                    CancelWarmupTimer();
+                    OverallProgressText.Text = "Queued";
+                    StreamFileNameText.Text = "Queued — waiting for the current scan to finish…";
+                }
+                else
+                {
+                    OverallProgressText.Text = "Preparing…";
+                    StreamFileNameText.Text = "Preparing Deep Analyze…";
+                    ArmWarmupTimer(attemptId);
+                }
             }
             else if (_localPreparingAttemptId != 0)
             {
                 _localPreparingAttemptId = 0;
+                _lastStreamPath = null;
                 CancelWarmupTimer();
                 StreamCard.Visibility = Visibility.Collapsed;
                 OverallProgress.IsIndeterminate = false;
@@ -457,6 +498,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // reflects only THIS run, not a cumulative count across runs. (audit A13)
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
+            _lastStreamPath = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
@@ -481,8 +523,10 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : string.Empty;
             OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files{etaSuffix}";
 
-            if (!string.IsNullOrEmpty(prog.CurrentPath))
+            if (!string.IsNullOrEmpty(prog.CurrentPath)
+                && !string.Equals(prog.CurrentPath, _lastStreamPath, StringComparison.Ordinal))
             {
+                _lastStreamPath = prog.CurrentPath;
                 StreamFileNameText.Text = Path.GetFileName(prog.CurrentPath);
                 _ = LoadStreamThumbAsync(prog.CurrentPath);
                 _captionAccumulator = string.Empty;
