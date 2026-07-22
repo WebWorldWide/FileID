@@ -150,7 +150,18 @@ internal static class DebugLog
             else
             {
                 sb.Append($"type:    {exception.GetType().FullName}\n");
-                sb.Append($"message: {exception.Message}\n\n");
+                sb.Append($"message: {exception.Message}\n");
+                // HResult of the exception AND every inner exception, in hex.
+                // A native stowed exception surfaces as 0xc000027b with a stowed
+                // HRESULT (E_UNEXPECTED = 0x8000FFFF, RPC_E_WRONG_THREAD =
+                // 0x8001010E, etc.); logging the HResult chain here is what lets
+                // the next occurrence's origin be identified from the dump alone,
+                // since a native fast-fail may never reach a managed sink.
+                for (var hr = exception; hr is not null; hr = hr.InnerException)
+                {
+                    sb.Append($"hresult: 0x{hr.HResult:X8} ({hr.GetType().Name})\n");
+                }
+                sb.Append('\n');
                 sb.Append("stack:\n");
                 sb.Append(exception.ToString());
                 sb.Append('\n');
