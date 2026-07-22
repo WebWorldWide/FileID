@@ -305,6 +305,7 @@ impl ScanSession {
         );
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
+        let discovered_heavy = handle.heavy_count.clone();
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
@@ -468,12 +469,14 @@ impl ScanSession {
         // events during tagging report the real discovered total — else
         // the sidebar progress bar pegs at 100 % during tagging.
         let discovered_count_for_batch = discovered_count.clone();
+        let discovered_heavy_for_batch = discovered_heavy.clone();
         let discovered_done_for_batch = discovered_done_post.clone();
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
                 emit_batch_summary(&sink_for_batch, &stats);
                 let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
+                let heavy = discovered_heavy_for_batch.load(std::sync::atomic::Ordering::Relaxed);
                 let walk_done =
                     discovered_done_for_batch.load(std::sync::atomic::Ordering::Acquire);
                 maybe_emit_progress(
@@ -482,6 +485,7 @@ impl ScanSession {
                     &session_id_for_batch,
                     &stats,
                     discovered,
+                    heavy,
                     walk_done,
                 );
             })
@@ -721,6 +725,14 @@ struct ProgressState {
     rate_anchor: Instant,
     rate_anchor_total: u64,
     rolling_fps: f64,
+    // Split heavy (Image/Video/Model — the vision path) vs light rates for
+    // the ETA. The blended rate swings an order of magnitude between photo
+    // bursts (~tens/s) and hash-only stretches (hundreds/s) on mixed
+    // libraries, so an ETA computed from it oscillated wildly; each class
+    // rate is stable, and remaining work is estimated per class.
+    rate_anchor_heavy: u64,
+    rolling_heavy_fps: f64,
+    rolling_light_fps: f64,
 }
 
 impl ProgressState {
@@ -735,6 +747,9 @@ impl ProgressState {
             rate_anchor: now,
             rate_anchor_total: 0,
             rolling_fps: 0.0,
+            rate_anchor_heavy: 0,
+            rolling_heavy_fps: 0.0,
+            rolling_light_fps: 0.0,
         }
     }
 
@@ -742,21 +757,52 @@ impl ProgressState {
     /// it. Re-samples only after `MIN_RATE_DT` so a burst of file-triggered
     /// emits a few ms apart can't divide by a near-zero interval; between
     /// re-samples it returns the last rolling value unchanged.
-    fn observe_rate(&mut self, processed_total: u64, now: Instant) -> f64 {
+    fn observe_rate(&mut self, processed_total: u64, processed_heavy: u64, now: Instant) -> f64 {
         const MIN_RATE_DT: f64 = 0.5;
         let dt = now.duration_since(self.rate_anchor).as_secs_f64();
         if dt >= MIN_RATE_DT {
             let delta = processed_total.saturating_sub(self.rate_anchor_total) as f64;
-            let instant = delta / dt;
-            self.rolling_fps = if self.rolling_fps <= 0.0 {
-                instant
-            } else {
-                0.7 * self.rolling_fps + 0.3 * instant
+            let delta_heavy = processed_heavy.saturating_sub(self.rate_anchor_heavy) as f64;
+            let ema = |rolling: f64, instant: f64| {
+                if rolling <= 0.0 { instant } else { 0.7 * rolling + 0.3 * instant }
             };
+            self.rolling_fps = ema(self.rolling_fps, delta / dt);
+            // Only fold a class sample when that class made progress this
+            // window — an all-light stretch must not decay the heavy rate
+            // toward zero (that's the oscillation this split exists to fix).
+            if delta_heavy > 0.0 {
+                self.rolling_heavy_fps = ema(self.rolling_heavy_fps, delta_heavy / dt);
+            }
+            let delta_light = delta - delta_heavy;
+            if delta_light > 0.0 {
+                self.rolling_light_fps = ema(self.rolling_light_fps, delta_light / dt);
+            }
             self.rate_anchor = now;
             self.rate_anchor_total = processed_total;
+            self.rate_anchor_heavy = processed_heavy;
         }
         self.rolling_fps
+    }
+
+    /// Kind-aware ETA: seconds for the remaining heavy (vision-path) files at
+    /// the heavy rate plus the remaining light files at the light rate.
+    /// Falls back to the blended rate for any class whose own rate is still
+    /// unknown, and to a plain blended estimate before any split data exists.
+    fn eta_seconds(&self, remaining_heavy: u64, remaining_light: u64) -> Option<f64> {
+        let blended = self.rolling_fps;
+        if remaining_heavy + remaining_light == 0 {
+            return None;
+        }
+        let rate_or = |own: f64| if own > 0.01 { own } else { blended };
+        let (rh, rl) = (rate_or(self.rolling_heavy_fps), rate_or(self.rolling_light_fps));
+        if rh <= 0.01 || rl <= 0.01 {
+            return if blended > 0.01 {
+                Some((remaining_heavy + remaining_light) as f64 / blended)
+            } else {
+                None
+            };
+        }
+        Some(remaining_heavy as f64 / rh + remaining_light as f64 / rl)
     }
 }
 
@@ -1000,6 +1046,7 @@ fn maybe_emit_progress(
     session_id: &str,
     stats: &BatchStats,
     discovered_total: u64,
+    discovered_heavy: u64,
     discovery_done: bool,
 ) {
     let now = Instant::now();
@@ -1013,11 +1060,21 @@ fn maybe_emit_progress(
         return;
     }
     // Fold the new sample into the rolling wall-clock throughput under one lock.
-    let fps = {
+    let (fps, eta_kind_aware) = {
         let mut st = state.lock();
         st.last_emit = now;
         st.last_total = stats.processed_total;
-        st.observe_rate(stats.processed_total, now)
+        let fps = st.observe_rate(stats.processed_total, stats.processed_heavy, now);
+        let eta = if discovery_done {
+            let total_now = discovered_total.max(stats.processed_total);
+            let remaining = total_now.saturating_sub(stats.processed_total);
+            let remaining_heavy = discovered_heavy.saturating_sub(stats.processed_heavy);
+            let remaining_light = remaining.saturating_sub(remaining_heavy);
+            st.eta_seconds(remaining_heavy, remaining_light)
+        } else {
+            None
+        };
+        (fps, eta)
     };
     // Progress payload fields:
     //   total            = 0 until the discovery walk completes (the IPC
@@ -1038,12 +1095,7 @@ fn maybe_emit_progress(
     } else {
         0
     };
-    let remaining = total.saturating_sub(stats.processed_total);
-    let eta_seconds = if fps > 0.01 && remaining > 0 && total > 0 {
-        Some(remaining as f64 / fps)
-    } else {
-        None
-    };
+    let eta_seconds = if total > 0 { eta_kind_aware } else { None };
     let progress = ScanProgress {
         session_id: session_id.into(),
         phase: ScanPhase::Tagging,
@@ -1066,6 +1118,29 @@ fn maybe_emit_progress(
 mod tests {
     use super::*;
 
+    /// Kind-aware ETA: the heavy and light classes each use their own rate,
+    /// so a hash-only stretch (light files flying by at hundreds/s) must not
+    /// collapse the ETA for tens of thousands of remaining images — the
+    /// "ETA jumping everywhere" regression on mixed libraries.
+    #[test]
+    fn eta_uses_per_class_rates() {
+        let mut st = ProgressState::new();
+        let t0 = Instant::now();
+        st.rate_anchor = t0;
+        // Window 1: 10 heavy in 1s → heavy rate ~10/s.
+        let _ = st.observe_rate(10, 10, t0 + Duration::from_secs(1));
+        // Window 2: 400 light in 1s → light rate ~400/s, heavy rate HELD.
+        let _ = st.observe_rate(410, 10, t0 + Duration::from_secs(2));
+        assert!((st.rolling_heavy_fps - 10.0).abs() < 1.0, "heavy rate held: {}", st.rolling_heavy_fps);
+        assert!(st.rolling_light_fps > 100.0, "light rate: {}", st.rolling_light_fps);
+        // 1000 heavy + 1000 light remaining: ETA is ~100s of images plus a
+        // few seconds of light files — NOT (2000 / blended≈210) ≈ 9.5s.
+        let eta = st.eta_seconds(1000, 1000).unwrap();
+        assert!(eta > 90.0 && eta < 130.0, "eta: {eta}");
+        // No remaining work → no ETA.
+        assert!(st.eta_seconds(0, 0).is_none());
+    }
+
     /// The rolling fps must measure real wall-clock throughput, not the
     /// per-batch DB-flush rate — the regression that produced "13s" ETAs for
     /// an hour of work.
@@ -1079,11 +1154,11 @@ mod tests {
 
         // 5 files in the first second → ~5 files/s (the real pipeline rate),
         // NOT the thousands/s a DB-flush measurement reports.
-        let fps1 = st.observe_rate(5, t0 + Duration::from_secs(1));
+        let fps1 = st.observe_rate(5, 0, t0 + Duration::from_secs(1));
         assert!((fps1 - 5.0).abs() < 0.01, "first-interval rate should be 5/s, got {fps1}");
 
         // Sustained 5/s → EMA stays ~5.
-        let fps2 = st.observe_rate(10, t0 + Duration::from_secs(2));
+        let fps2 = st.observe_rate(10, 0, t0 + Duration::from_secs(2));
         assert!((fps2 - 5.0).abs() < 0.01, "sustained rate ~5/s, got {fps2}");
 
         // An ETA built on this rate is hours for tens of thousands remaining,
@@ -1294,8 +1369,8 @@ mod tests {
         st.rate_anchor_total = 0;
         st.rolling_fps = 0.0;
 
-        let _ = st.observe_rate(10, t0 + Duration::from_secs(1)); // seeds ~10/s
-        let held = st.observe_rate(1000, t0 + Duration::from_millis(1100)); // only +0.1 s
+        let _ = st.observe_rate(10, 0, t0 + Duration::from_secs(1)); // seeds ~10/s
+        let held = st.observe_rate(1000, 0, t0 + Duration::from_millis(1100)); // only +0.1 s
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
     }
 
