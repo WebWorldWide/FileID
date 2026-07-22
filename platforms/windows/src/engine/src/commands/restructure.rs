@@ -549,8 +549,14 @@ const PLAN_FILES_PAGE_SQL: &str = "SELECT
  LIMIT ?5";
 
 fn plan_root_bounds(root: &str) -> (String, String, String) {
-    let root = root.trim_end_matches(['/', '\\']).to_string();
+    // Pick the separator from the ORIGINAL root, before trimming. A Windows
+    // drive-root like "C:\" trims to "C:" — which contains no backslash — so
+    // deriving the separator from the trimmed string chose '/', built the
+    // prefix "C:/", and produced a range that matched ZERO backslash-stored
+    // files (every real "C:\Users\..." path sorts past the '/'-based upper
+    // bound). Result: an empty/incorrect plan scope for a whole-drive library.
     let separator = if root.contains('\\') { '\\' } else { '/' };
+    let root = root.trim_end_matches(['/', '\\']).to_string();
     let prefix = format!("{root}{separator}");
     let mut bytes = prefix.as_bytes().to_vec();
     for index in (0..bytes.len()).rev() {
@@ -1232,8 +1238,24 @@ pub(crate) async fn handle_apply_restructure(
                 }
                 result
             } else {
+                // D3: the inline (≤5000-move) path must apply the SAME
+                // server-authoritative ask-tier exclusion the paged path does
+                // — "ask" = the butler was unsure and wants per-file consent,
+                // so it must never ride a bulk apply regardless of what the
+                // client sent. This is the engine-side backstop behind the
+                // app's default-deselect of ask rows; the two together mean an
+                // ask move can only apply via an explicit single-move request.
                 let total = moves.len();
-                apply.apply_iter(moves.into_iter().map(Ok), Some(total))
+                let mut skipped_ask = 0usize;
+                let filtered = exclude_ask_tier(moves.into_iter().map(Ok), &mut skipped_ask);
+                let result = apply.apply_iter(filtered, Some(total));
+                if skipped_ask > 0 {
+                    tracing::info!(
+                        skipped_ask,
+                        "[RESTRUCTURE] excluded ask-tier moves from inline apply"
+                    );
+                }
+                result
             }
         },
     )
@@ -1277,6 +1299,27 @@ pub(crate) async fn handle_apply_restructure(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// A Windows drive-root library ("C:\") must produce a backslash-based
+    /// range that actually brackets backslash-stored paths. The old code
+    /// trimmed the trailing '\' first, leaving "C:" with no separator, chose
+    /// '/', and built a range matching ZERO real files (empty plan scope).
+    #[test]
+    fn plan_root_bounds_handles_drive_root_backslash() {
+        let (root, prefix, upper) = plan_root_bounds("C:\\");
+        assert_eq!(root, "C:");
+        assert_eq!(prefix, "C:\\", "prefix must use the backslash separator");
+        // A real stored path must fall within [prefix, upper).
+        let sample = "C:\\Users\\me\\a.jpg";
+        assert!(
+            sample.starts_with(&prefix) && sample < upper.as_str(),
+            "drive-root range must bracket backslash paths: prefix={prefix} upper={upper}"
+        );
+        // A nested root keeps working too.
+        let (_, p2, u2) = plan_root_bounds("D:\\Photos\\");
+        assert_eq!(p2, "D:\\Photos\\");
+        assert!("D:\\Photos\\2020\\x.jpg" >= p2.as_str() && "D:\\Photos\\2020\\x.jpg" < u2.as_str());
+    }
 
     /// The planner SQL must prepare AND run — the old
     /// `GROUP_CONCAT(DISTINCT name, char(31))` form prepared but failed at run

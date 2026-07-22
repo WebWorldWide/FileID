@@ -242,7 +242,7 @@ fn claimed_destination_key(path: &Path) -> ClaimedDestination {
 use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    CreateSymbolicLinkW, MoveFileExW, MOVEFILE_COPY_ALLOWED,
+    CreateSymbolicLinkW, MoveFileExW, MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH,
     SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, SYMBOLIC_LINK_FLAGS,
 };
 
@@ -338,6 +338,26 @@ impl RestructureApply {
         // and an unopenable journal aborts before ANY file moves — undo
         // protection is a precondition now, not best-effort.
         let mut journal: Option<UndoJournal> = None;
+        // L1: a recorded SYMLINK run journals nothing (it creates links, not
+        // move-based inverses), but a prior REAL-move run's journal would
+        // survive — so "Undo last run" after a symlink run would reverse that
+        // older, unrelated real run (data movement the user didn't ask to
+        // undo). Clear any stale journal at the start of a recorded symlink
+        // run so undo_last is a truthful no-op afterward. Best-effort: a
+        // failure to remove it only risks the pre-existing mis-undo, so it
+        // must not abort the symlink apply.
+        if record_undo && self.use_symlinks {
+            if let Some(path) = self.undo_journal_path() {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "[RESTRUCTURE] could not clear stale undo journal before symlink run"
+                    ),
+                }
+            }
+        }
         // (source, final destination) of every successful real move, fed to the
         // learn-from-corrections memory in ONE lock acquisition after the loop so a
         // future plan can boost a move toward a folder the user has filed here
@@ -415,6 +435,30 @@ impl RestructureApply {
                 {
                     continue;
                 }
+                // Undo fallback on journal evidence: the forward apply can
+                // succeed the on-disk move but FAIL update_path_in_db (a live
+                // UNIQUE path_text conflict, or a kill in the move→update
+                // window). Then the file is physically at the journaled
+                // final_dest (= this undo move's `source`) while path_text
+                // still names the original (= this undo move's `destination`),
+                // so neither DB-derived arm above matches and the file would
+                // be stale-skipped and stranded forever. Trust the journal: if
+                // the file is physically at `source` and `destination` is
+                // free, and the file identity still matches the DB row, move
+                // it back. Undo-only (record_undo=false) so a forward apply
+                // never takes this path.
+                Ok(Some((db_path, db_ref)))
+                    if !record_undo
+                        && paths_equal(&db_path, &m.destination)
+                        && Path::new(&m.source).try_exists().unwrap_or(false)
+                        && !Path::new(&m.destination).try_exists().unwrap_or(false)
+                        && !file_ref_swapped(
+                            db_ref,
+                            crate::platform::file_ref(Path::new(&m.source)),
+                        ) =>
+                {
+                    db_ref
+                }
                 _ => {
                     tracing::warn!(
                         file_id = m.file_id,
@@ -447,10 +491,24 @@ impl RestructureApply {
             // Path-traversal guard. The destination's parent must exist
             // OR be createable under library_root. Canonicalize the
             // closest existing ancestor and verify containment.
-            if let Err(err) = ensure_inside_root(&dest, &canonical_root) {
-                tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
-                failed += 1;
-                continue;
+            //
+            // D1: skip this on an UNDO replay (record_undo=false). Undo
+            // destinations are the ORIGINAL scanned paths the engine itself
+            // journaled at apply time — inherently trusted, and not
+            // necessarily under the caller-supplied library_root (undo carries
+            // whatever root the app currently has selected, which may differ
+            // from the applied root). Re-gating journaled restores by that
+            // root made undo reject EVERY file and silently no-op, leaving the
+            // library reorganized with the journal retained. The traversal
+            // guard exists to contain forward, plan-generated destinations
+            // (possibly VLM-named); it must not block reversal of the engine's
+            // own recorded moves.
+            if record_undo {
+                if let Err(err) = ensure_inside_root(&dest, &canonical_root) {
+                    tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
+                    failed += 1;
+                    continue;
+                }
             }
 
             if let Some(parent) = dest.parent() {
@@ -600,6 +658,12 @@ impl RestructureApply {
                     );
                     if let (Some(j), Some(prev)) = (journal.as_mut(), journal_entry_offset) {
                         j.rollback_to(prev);
+                    }
+                    // D4: the move never happened, so release the reservation —
+                    // otherwise a later move whose natural destination equals
+                    // this (now-free) path is needlessly uniquified to " (2)".
+                    if !self.use_symlinks {
+                        claimed.remove(&claimed_destination_key(&final_dest));
                     }
                     failed += 1;
                 }
@@ -775,10 +839,21 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
         // caller has already resolved a collision-free `dst`, so a remaining
         // collision here means an unexpected race — fail safe rather than
         // destroy data. MOVEFILE_COPY_ALLOWED still permits cross-volume moves.
+        //
+        // MOVEFILE_WRITE_THROUGH: for a cross-volume move Windows performs a
+        // copy-to-destination + delete-source. Without WRITE_THROUGH the call
+        // can return (and the source delete become durable) before the
+        // destination bytes are flushed to disk — a crash/power-loss in that
+        // window leaves the source gone and the destination absent/partial,
+        // an unrecoverable loss the write-ahead undo journal cannot restore
+        // (it recorded the move as done). WRITE_THROUGH flushes the copy
+        // before the source is deleted, restoring the source-intact-XOR-
+        // destination-durable invariant every recovery path assumes. No-op
+        // for same-volume moves (an atomic metadata rename).
         MoveFileExW(
             PCWSTR(src_w.as_ptr()),
             PCWSTR(dst_w.as_ptr()),
-            MOVEFILE_COPY_ALLOWED,
+            MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH,
         )
         .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))
     }
@@ -859,9 +934,23 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
                 .create_new(true)
                 .open(dst)
                 .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+            // Flush the destination FILE, then its PARENT DIRECTORY, before
+            // unlinking the source. fsync of a file does not make its new
+            // dirent durable; without the parent-dir fsync a crash after the
+            // source unlink can leave the file in neither location (the source
+            // unlink committed, the never-flushed destination dirent lost) —
+            // an unrecoverable loss the write-ahead journal cannot restore.
+            // Mirrors the Trash cross-filesystem path (shell/mod.rs
+            // copy_claimed_external) and MOVEFILE_WRITE_THROUGH on Windows.
             let copied = std::io::copy(&mut source, &mut destination)
                 .and_then(|_| std::fs::set_permissions(dst, permissions))
-                .and_then(|_| destination.sync_all());
+                .and_then(|_| destination.sync_all())
+                .and_then(|_| {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::File::open(parent)?.sync_all()?;
+                    }
+                    Ok(())
+                });
             if let Err(error) = copied {
                 let _ = std::fs::remove_file(dst);
                 return Err(ApplyError::Other(anyhow::Error::msg(error.to_string())));
@@ -1029,11 +1118,81 @@ fn record_feedback_batch(
     pairs.clear();
 }
 
+/// Consume `restructure_recover.ndjson` once at engine startup: for each
+/// recorded (file_id → dst) whose file is physically present at `dst`, realign
+/// the stale `path_text` to `dst` (fail-closed via `update_path_in_db`'s
+/// UPDATE OR ABORT, so a live conflicting row is never clobbered). This is the
+/// reader the record's "recoverable even if the next scan never runs" contract
+/// promised — without it, the durable record was inert and a moved-but-DB-
+/// update-failed file with no `file_ref`/`content_hash` (exFAT/network volumes)
+/// would strand its tags on the next scan. The file is cleared after one pass;
+/// records that can't heal (file gone, or a conflict) are dropped as
+/// best-effort, leaving rename-heal / undo as the remaining recovery routes.
+/// Returns the number of rows realigned.
+pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
+    let Ok(trash) = crate::paths::trash_log_path() else {
+        return 0;
+    };
+    let Some(dir) = trash.parent() else {
+        return 0;
+    };
+    let path = dir.join("restructure_recover.ndjson");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return 0; // no record file → nothing to do
+    };
+    let mut healed = 0usize;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue; // torn/partial line — skip
+        };
+        let (Some(file_id), Some(dst)) = (
+            rec.get("file_id").and_then(|v| v.as_i64()),
+            rec.get("dst").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        // Only heal when the file is actually where the record says it is.
+        if !Path::new(dst).is_file() {
+            continue;
+        }
+        // Already aligned? (a prior scan's rename-heal beat us here) — skip.
+        let current: Option<String> = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT path_text FROM files WHERE id = ?1",
+                rusqlite::params![file_id],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        match current {
+            Some(p) if paths_equal(&p, dst) => continue,
+            None => continue, // row gone
+            Some(_) => {}
+        }
+        if update_path_in_db(db, file_id, Path::new(dst)).is_ok() {
+            healed += 1;
+        }
+    }
+    // Best-effort single-pass consumption: clear the record file regardless so
+    // it can't grow unbounded or re-heal a since-moved file.
+    let _ = std::fs::remove_file(&path);
+    if healed > 0 {
+        tracing::info!(healed, "[RESTRUCTURE] reconciled stale path_text from recovery record");
+    }
+    healed
+}
+
 /// B5: best-effort durable record of a successful on-disk move whose DB
 /// path-update failed, so the stale `path_text` is recoverable even if the
 /// next scan (which self-heals via rename-heal on the NTFS `file_ref`) never
-/// runs. NDJSON, append-only; a recovery hint, not a restore authority like
-/// `trash_log`, so no HMAC. Written beside the trash log.
+/// runs — reconciled at startup by [`reconcile_pending_path_updates`]. NDJSON,
+/// append-only; a recovery hint, not a restore authority like `trash_log`, so
+/// no HMAC. Written beside the trash log.
 fn record_path_update_failure(file_id: i64, src: &str, dst: &Path) {
     let Ok(trash) = crate::paths::trash_log_path() else {
         return;
@@ -1344,6 +1503,63 @@ mod tests {
             .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(stored_path, source.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// M2: after an apply moves the file on disk but FAILS the DB path update
+    /// (a live UNIQUE conflict, as in the test above), undo must still restore
+    /// the file to its original location using the journal's physical evidence
+    /// — the DB-derived arms can't, because path_text still names the original.
+    /// Before the fix, undo stale-skipped the entry and stranded the file.
+    #[test]
+    fn undo_restores_a_moved_but_db_update_failed_file() {
+        let root = undo_fixture_root("undo-db-update-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.jpg");
+        let destination = root.join("Sorted").join("source.jpg");
+        std::fs::write(&source, b"source").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &source.to_string_lossy());
+        // A live row already occupies the destination path → apply's
+        // update_path_in_db(1, destination) aborts on the UNIQUE conflict.
+        insert_file_row(&conn, 2, &destination.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+
+        // Forward apply: on-disk move succeeds, DB update fails.
+        let fwd = apply
+            .apply(&[move_fixture(
+                1,
+                &source.to_string_lossy(),
+                &destination.to_string_lossy(),
+            )])
+            .unwrap();
+        assert_eq!((fwd.applied, fwd.failed), (0, 1));
+        assert!(!source.exists() && destination.exists());
+
+        // The destination row (id 2) was only a fixture to force the conflict;
+        // drop it so undo's move-back to `source` isn't itself blocked, then
+        // undo the run.
+        db.lock()
+            .execute("DELETE FROM files WHERE id = 2", [])
+            .unwrap();
+        let undo = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_undo_journal_path(journal.clone())
+            .undo_last()
+            .unwrap();
+
+        assert_eq!(undo.applied, 1, "undo must restore the stranded file");
+        assert!(source.exists(), "file is back at its original path");
+        assert!(!destination.exists(), "file left the post-move location");
+        let restored: String = db
+            .lock()
+            .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(restored, source.to_string_lossy(), "DB path realigned to disk");
         let _ = std::fs::remove_dir_all(&root);
     }
 

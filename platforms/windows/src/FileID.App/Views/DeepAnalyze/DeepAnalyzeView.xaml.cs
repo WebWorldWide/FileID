@@ -30,6 +30,15 @@ public sealed partial class DeepAnalyzeView : UserControl
     // queuing files 2..N after the user pressed Cancel.
     private bool _selectedRunCancelled;
 
+    // L5: set the moment Cancel is clicked while a Deep Analyze command is still
+    // in flight (most importantly while it's QUEUED behind a running scan, where
+    // the engine can't act on the cancel until the scan releases the mutation
+    // gate). Without it Cancel stayed enabled with no feedback for the whole scan.
+    // While set, Cancel is disabled and the stream card shows a 'Cancelling…'
+    // state; cleared once the command leaves flight (terminal Complete / slot
+    // release), re-arming Cancel for the next run.
+    private bool _cancelRequested;
+
     // Monotonic generation for the streamed-thumbnail load. Each progress event
     // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
     // file can resolve after a later one's. We bump this at the start of every
@@ -142,8 +151,13 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (_unloaded) return;
         var inFlight = EngineClient.Instance.DeepAnalyzeCommandInFlight;
+        // L5: once the command leaves flight (terminal reached / slot released),
+        // re-arm Cancel for the next run.
+        if (!inFlight) _cancelRequested = false;
         AnalyzeAllButton.IsEnabled = !inFlight;
-        CancelButton.IsEnabled = inFlight;
+        // L5: a pending cancel (esp. while queued behind a scan) disables Cancel so
+        // the user gets feedback and can't spam it while the engine can't yet act.
+        CancelButton.IsEnabled = inFlight && !_cancelRequested;
         SyncSelectionButtons();
     }
 
@@ -453,8 +467,27 @@ public sealed partial class DeepAnalyzeView : UserControl
                     // the DeepAnalyzeStarting that fires when the job actually begins
                     // loading re-arms the watchdog via the branch below. (Fix A)
                     CancelWarmupTimer();
-                    OverallProgressText.Text = "Queued";
-                    StreamFileNameText.Text = "Queued — waiting for the current scan to finish…";
+                    if (_cancelRequested)
+                    {
+                        // L5: Cancel was pressed while queued — the engine can't act
+                        // until the scan releases the gate, so show that we heard it.
+                        OverallProgressText.Text = "Cancelling…";
+                        StreamFileNameText.Text = "Cancelling — will stop when the current scan finishes…";
+                    }
+                    else
+                    {
+                        OverallProgressText.Text = "Queued";
+                        StreamFileNameText.Text = "Queued — waiting for the current scan to finish…";
+                    }
+                }
+                else if (_cancelRequested)
+                {
+                    // L5: cancelled during the pre-load prepare window — don't arm
+                    // the warm-up watchdog (a cancelled job that never loads must not
+                    // trip "model took too long").
+                    CancelWarmupTimer();
+                    OverallProgressText.Text = "Cancelling…";
+                    StreamFileNameText.Text = "Cancelling…";
                 }
                 else
                 {
@@ -1065,6 +1098,16 @@ public sealed partial class DeepAnalyzeView : UserControl
         // Also stop the per-file "Analyze Selected" send loop — the engine
         // cancel below only stops the file currently in flight.
         _selectedRunCancelled = true;
+        // L5: latch a 'Cancelling…' state + disable Cancel now. When the command
+        // is queued behind a scan the engine can't act until the scan releases the
+        // gate, so without this the button stayed enabled with no feedback for the
+        // whole scan. SyncStream reflects the state; SyncDeepAnalyzeControls clears
+        // the latch once the command leaves flight.
+        if (EngineClient.Instance.DeepAnalyzeCommandInFlight)
+        {
+            _cancelRequested = true;
+            SyncStream();
+        }
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
     }

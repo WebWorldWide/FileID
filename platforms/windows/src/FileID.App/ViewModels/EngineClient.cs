@@ -326,6 +326,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastRestructureApplyResult, value);
     }
 
+    /// <summary>M4: true when the current <see cref="LastRestructureApplyResult"/>
+    /// is the reply to an Undo (not an Apply). Undo and Apply replies share the
+    /// same slot; this is captured from <see cref="UndoRestructureInFlight"/> as
+    /// the terminal arrives and paired with the result, so a view reading it on a
+    /// later dispatcher turn (or an OnLoaded replay) still tells the two apart and
+    /// can say "undone" instead of "applied".</summary>
+    public bool LastRestructureApplyResultWasUndo { get; private set; }
+
     private bool _canUndoRestructure;
     /// <summary>True once an applyRestructure moved files and they haven't been
     /// undone yet — drives the "Undo last run" button. (R2)</summary>
@@ -1502,6 +1510,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
+                        // M7: a terminal Deep Analyze error that arrives with NO
+                        // accompanying DeepAnalyzeComplete (vlm_model_missing) would
+                        // otherwise strand the command slot for the rest of the
+                        // session and wedge the Deep Analyze view — release it here
+                        // as belt-and-suspenders (idempotent with any Complete).
+                        if (IsTerminalDeepAnalyzeErrorWithoutComplete(e.Error.Kind))
+                        {
+                            ReleaseDeepAnalyzeCommandOnTerminalError(generation);
+                        }
                         // PAR-111: a clustering FAILURE must release the auto gate,
                         // else auto-clustering stays suppressed for the rest of the
                         // session. Match the EXACT failure kind — not a broad
@@ -1595,6 +1612,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastRestructurePlan = rp.Plan;
                         break;
                     case RestructureApplyResultEvent rar:
+                        // M4: capture whether this terminal is an Undo reply BEFORE
+                        // UndoRestructureInFlight is cleared below, and set it before
+                        // the result so it is already correct when the result's
+                        // PropertyChanged enqueues the view's SyncApplyResult.
+                        LastRestructureApplyResultWasUndo = UndoRestructureInFlight;
                         LastRestructureApplyResult = rar.Result;
                         // Toggle the "Undo last run" affordance: an apply that
                         // moved files makes the run undoable; the undo's own reply

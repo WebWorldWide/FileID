@@ -246,27 +246,63 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
     // Spawning --version trips on dyld errors so we can emit an
     // actionable "reinstall the runtime" message instead of letting
     // caption() fail later with STATUS_DLL_NOT_FOUND.
-    let out = std::process::Command::new(p)
+    //
+    // BOUNDED: a missing/mismatched CUDA DLL can make this probe hang rather
+    // than exit — historically forever, wedging Deep Analyze. Spawn (not
+    // `.output()`), tie the child to the engine job so it can't outlive us, and
+    // poll a bounded wall-clock window, killing a wedged probe. The process-wide
+    // error mode set at startup (main.rs) keeps a missing-DLL load from popping a
+    // modal dialog that would otherwise defeat this timeout. (M6)
+    let mut child = match std::process::Command::new(p)
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => bail!(
-            "{}: --version exited with status {:?}. The binary is present but \
-             likely missing dependent DLLs (a Performance Pack install probably \
-             didn't finish). Re-install from Settings -> Performance.",
-            safe_path,
-            o.status.code()
-        ),
+        .spawn()
+    {
+        Ok(c) => c,
         Err(err) => bail!(
             "{}: could not spawn for --version probe ({err}). Likely \
              missing dependent DLLs — re-install the runtime from \
              Settings -> Performance.",
             safe_path
         ),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        crate::platform::assign_child_to_engine_job(child.as_raw_handle());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => bail!(
+                "{}: --version exited with status {:?}. The binary is present but \
+                 likely missing dependent DLLs (a Performance Pack install probably \
+                 didn't finish). Re-install from Settings -> Performance.",
+                safe_path,
+                status.code()
+            ),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(
+                        "{}: --version probe did not return within 20s — likely a \
+                         missing/mismatched dependent DLL blocking load. Re-install \
+                         the runtime from Settings -> Performance.",
+                        safe_path
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => bail!(
+                "{}: failed waiting on --version probe ({err}). Re-install the \
+                 runtime from Settings -> Performance.",
+                safe_path
+            ),
+        }
     }
 }
 
@@ -336,6 +372,12 @@ pub async fn caption(
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {safe_binary}"))?;
+        // Tie the CLI child to the engine job so an ungraceful engine death
+        // can't orphan it (belt-and-suspenders with kill_on_drop). (L4)
+        #[cfg(windows)]
+        if let Some(h) = child.raw_handle() {
+            crate::platform::assign_child_to_engine_job(h);
+        }
         // Drain stderr concurrently. llama.cpp is extremely verbose on stderr
         // (backend init, full model/mmproj metadata, sampling params, timings —
         // tens of KB, emitted during load BEFORE any stdout token). With the
@@ -501,6 +543,12 @@ async fn probe_discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
     let child = cmd.spawn().ok()?;
+    // Tie the device probe to the engine job so a hung probe can't outlive an
+    // ungraceful engine death. (L4)
+    #[cfg(windows)]
+    if let Some(h) = child.raw_handle() {
+        crate::platform::assign_child_to_engine_job(h);
+    }
     let out = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
         .await
         .ok()? // probe timed out

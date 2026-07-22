@@ -87,6 +87,14 @@ fn main() -> Result<()> {
         ));
     }
 
+    // Suppress hard-error dialogs process-wide (headless engine). A llama.cpp
+    // binary that loads against a missing/mismatched CUDA DLL would otherwise
+    // pop a modal message box that blocks Deep Analyze forever waiting on a
+    // click. Children inherit this mode, so it also covers the CLI/server/probe
+    // spawns. No-op on non-Windows (called unconditionally so the stub isn't
+    // dead code). (M6)
+    platform::suppress_hard_error_dialogs();
+
     // Pin the COM MTA for the life of the process. Shell/WinRT call sites
     // (OCR, HEIC, video) each CoInitializeEx/CoUninitialize around their
     // work on tokio blocking-pool threads; when the LAST uninit dropped the
@@ -128,6 +136,13 @@ async fn async_main() -> Result<()> {
     logging::install_panic_hook();
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
+
+    // Create the process-lifetime Job Object now, so every llama.cpp child
+    // (server/CLI/probe) assigned to it is force-killed by the OS if the engine
+    // dies ungracefully (fast-fail / taskkill) and leaves a multi-GB-VRAM
+    // llama-server orphaned. Belt-and-suspenders alongside the parent-PID
+    // watchdog + kill_on_drop, which only cover graceful shutdown. (L4)
+    platform::init_engine_job();
 
     // macOS: the engine's `load-dynamic` ORT build `dlopen`s
     // `libonnxruntime.dylib`, but `download-binaries` ships only a STATIC
@@ -284,6 +299,16 @@ async fn async_main() -> Result<()> {
                 None
             }
         };
+
+    // Consume any restructure path-update recovery record left by a prior
+    // apply that moved a file on disk but couldn't update its DB row (a live
+    // UNIQUE conflict, or a kill in the move→update window). Realigns the
+    // stale path_text before the app reads the library, so the file's tags
+    // aren't stranded when rename-heal can't fire (exFAT/network volumes with
+    // no file_ref). Runs even if no scan follows.
+    if let Some(db) = db_conn.as_ref() {
+        pipeline::restructure_apply::reconcile_pending_path_updates(db);
+    }
 
     let (sink, sink_writer) = Sink::spawn();
 

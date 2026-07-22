@@ -1437,6 +1437,111 @@ pub fn set_worker_background_priority() {
 #[cfg(not(windows))]
 pub fn set_worker_background_priority() {}
 
+/// Suppress Windows hard-error dialogs process-wide. A headless engine must
+/// never block on a modal error box: a llama.cpp binary that loads against a
+/// missing/mismatched CUDA DLL raises a critical-error message box
+/// (STATUS_DLL_NOT_FOUND) that would otherwise wait forever for a click that
+/// can never come, wedging Deep Analyze. `SEM_FAILCRITICALERRORS` turns that
+/// into an ordinary load failure the child reports via its exit code;
+/// `SEM_NOGPFAULTERRORBOX` suppresses the WER crash dialog on a native fault.
+/// Spawned children inherit this mode by default (no `CREATE_DEFAULT_ERROR_MODE`),
+/// so setting it once at startup covers the CLI, server, and device probes.
+/// `SetErrorMode` *replaces* the mode, so we OR onto whatever the loader set.
+#[cfg(windows)]
+pub fn suppress_hard_error_dialogs() {
+    use windows::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
+    };
+    let want = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
+    unsafe {
+        let prev = SetErrorMode(want);
+        let _ = SetErrorMode(prev | want);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn suppress_hard_error_dialogs() {}
+
+/// Process-lifetime Win32 Job Object that every spawned llama.cpp child
+/// (persistent server, per-file CLI, device probe, `--version` probe) is
+/// assigned to. Created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so when the
+/// engine process dies — including a non-unwinding fast-fail or an external
+/// `taskkill`, which the parent-PID watchdog and `kill_on_drop` cannot cover —
+/// the OS terminates the children instead of leaving a 9-14 GB-VRAM
+/// llama-server orphaned to wedge the next run and the next scan's GPU.
+///
+/// The handle is memoized as a `usize` in a `OnceLock` and never closed for the
+/// life of the process: closing it would trip KILL_ON_JOB_CLOSE and reap the
+/// children early. The OS closes it on process exit — exactly when we want the
+/// children reaped. Returns None if the job can't be created (best-effort: the
+/// watchdog + kill_on_drop remain the graceful-death cleanup path).
+#[cfg(windows)]
+fn engine_job_handle() -> Option<windows::Win32::Foundation::HANDLE> {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    static JOB: OnceLock<Option<usize>> = OnceLock::new();
+    let addr = *JOB.get_or_init(|| unsafe {
+        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
+            Ok(h) if !h.is_invalid() => h,
+            _ => {
+                tracing::warn!("[JOB] CreateJobObjectW failed; llama.cpp children not tied to engine lifetime");
+                return None;
+            }
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_err()
+        {
+            tracing::warn!("[JOB] SetInformationJobObject failed; closing job (children stay un-tied)");
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(job.0 as usize)
+    });
+    addr.map(|a| HANDLE(a as *mut core::ffi::c_void))
+}
+
+/// Warm the engine job at startup so it exists (and any creation failure is
+/// logged once) before the first child is spawned. See [`engine_job_handle`].
+#[cfg(windows)]
+pub fn init_engine_job() {
+    let _ = engine_job_handle();
+}
+
+#[cfg(not(windows))]
+pub fn init_engine_job() {}
+
+/// Assign a freshly spawned child process to the engine job (see
+/// [`engine_job_handle`]) so it is force-killed if the engine dies ungracefully.
+/// Call immediately after spawn. Best-effort — a failure just leaves the child
+/// to the existing `kill_on_drop` + watchdog cleanup. Nested jobs are supported
+/// on Windows 8+, so this succeeds even when the engine itself runs inside a job.
+#[cfg(windows)]
+pub fn assign_child_to_engine_job(child: std::os::windows::io::RawHandle) {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+    if child.is_null() {
+        return;
+    }
+    if let Some(job) = engine_job_handle() {
+        let child_handle = HANDLE(child);
+        if let Err(err) = unsafe { AssignProcessToJobObject(job, child_handle) } {
+            tracing::warn!(?err, "[JOB] could not assign llama.cpp child to engine job object");
+        }
+    }
+}
+
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
