@@ -520,10 +520,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 restrictedKinds.AddRange(_acceleratorInstallKinds);
             }
-            if (!await ModelLicenseGate.EnsureAcceptedAsync(restrictedKinds).ConfigureAwait(true))
-            {
-                return;
-            }
+            // Declining a license must NOT abort the whole batch. Prompt for every
+            // required policy, then skip ONLY the slots whose kinds are tied to a
+            // declined policy — the license-free core models (CLIP / RAM++ / faces
+            // / Whisper / BGE, and an un-gated VLM like Qwen/Mistral) still install.
+            var declinedPolicies = await ModelLicenseGate
+                .RequestDeclinedPoliciesAsync(restrictedKinds).ConfigureAwait(true);
 
             // pre-stamp every not-yet-installed slot to
             // Downloading + "Queued — starting download…" BEFORE awaiting.
@@ -559,6 +561,22 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             if (includeAccelerator)
             {
                 slotsToInstall.Add(Accelerator);
+            }
+            // Drop slots that need a declined license. They stay NotInstalled (so
+            // AllInstalled / the Welcome auto-dismiss can't falsely report success)
+            // with a non-blocking "skipped" message rather than a red Failed row.
+            if (declinedPolicies.Count > 0)
+            {
+                slotsToInstall.RemoveAll(slot =>
+                {
+                    if (!SlotHasDeclinedKind(slot, declinedPolicies)) return false;
+                    if (slot.Status != ModelInstallStatus.Installed)
+                    {
+                        slot.Message = "License not accepted — skipped";
+                    }
+                    DebugLog.Info($"[INSTALL] InstallAllAsync skipping {slot.DisplayLabel}: license declined");
+                    return true;
+                });
             }
             foreach (var slot in slotsToInstall)
             {
@@ -656,6 +674,33 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         if (ReferenceEquals(slot, DeepVlm)) return _deepVlmModelKind;
         if (ReferenceEquals(slot, Accelerator)) return _acceleratorInstallKinds.FirstOrDefault();
         return null;
+    }
+
+    /// <summary>Every model kind a slot's installAction downloads. Used by
+    /// InstallAllAsync to decide whether a declined license policy affects the
+    /// slot (skip it) or leaves it fully un-gated (install it).</summary>
+    private IReadOnlyList<string> InstallKindsForSlot(ModelSlot slot)
+    {
+        if (ReferenceEquals(slot, Clip)) return new[] { "mobileclip_s2", "clip_text" };
+        if (ReferenceEquals(slot, Arcface)) return new[] { "arcface_default" };
+        if (ReferenceEquals(slot, RamPlus)) return new[] { "ram_plus" };
+        if (ReferenceEquals(slot, Whisper)) return new[] { "whisper" };
+        if (ReferenceEquals(slot, Bge)) return new[] { "bge_text" };
+        if (ReferenceEquals(slot, DeepVlm)) return new[] { "llama_runtime_x64", _deepVlmModelKind };
+        if (ReferenceEquals(slot, Accelerator)) return _acceleratorInstallKinds;
+        return Array.Empty<string>();
+    }
+
+    /// <summary>True when any kind this slot installs is gated by a license
+    /// policy the user just declined.</summary>
+    private bool SlotHasDeclinedKind(ModelSlot slot, IReadOnlySet<string> declinedPolicies)
+    {
+        foreach (var kind in InstallKindsForSlot(slot))
+        {
+            var policyKey = ModelLicenseGate.PolicyKeyForModelKind(kind);
+            if (policyKey is not null && declinedPolicies.Contains(policyKey)) return true;
+        }
+        return false;
     }
 
     /// Cancel a single slot's in-flight download(s) (the per-row Cancel button), so

@@ -760,6 +760,41 @@ internal sealed partial class EngineClient
         NotifyDeepAnalyzeCommandOwnershipChanged();
     }
 
+    // Belt-and-suspenders (M7): a terminal Deep Analyze error that arrives with NO
+    // accompanying DeepAnalyzeComplete strands the command slot reserved for the
+    // rest of the session — DeepAnalyzeCommandInFlight stuck true wedges the view
+    // (Analyze All disabled, Cancel enabled forever). vlm_model_missing is emitted
+    // (deep_analyze.rs) BEFORE DeepAnalyzeStarting and returns without a Complete,
+    // so it needs an explicit slot release. llama_cpp_missing / deep_analyze_failed
+    // already send their own terminal Complete (which releases via
+    // CompleteDeepAnalyzeCommand), so they are deliberately EXCLUDED — releasing on
+    // them would preempt and drop that completion presentation.
+    internal static bool IsTerminalDeepAnalyzeErrorWithoutComplete(string? kind)
+        => kind == "vlm_model_missing";
+
+    private void ReleaseDeepAnalyzeCommandOnTerminalError(int generation)
+    {
+        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner? owner;
+        lock (_deepAnalyzeTerminalLock)
+        {
+            owner = _deepAnalyzeCommandSlot.Current;
+            // Idempotent: the TerminalState CAS makes a racing Complete (or a
+            // second error) a no-op, so this never double-releases.
+            if (owner is null
+                || owner.Generation != generation
+                || Interlocked.CompareExchange(ref owner.Payload.TerminalState, 1, 0) != 0)
+            {
+                return;
+            }
+            DeepAnalyzeStarting = null;
+            DeepAnalyzeProgress = null;
+            if (!_deepAnalyzeCommandSlot.Release(owner)) return;
+        }
+        owner.Payload.Completion?.TrySetException(
+            new InvalidOperationException("Deep Analyze couldn't start."));
+        NotifyDeepAnalyzeCommandOwnershipChanged();
+    }
+
     private void HandleDeepAnalyzeSendFailure(
         GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner, Exception error)
     {

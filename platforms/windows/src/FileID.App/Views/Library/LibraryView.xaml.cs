@@ -26,10 +26,18 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
     // whenever a new BatchSummary lands, but throttled so a fast scan
-    // doesn't issue 30+ DB reads per second.
+    // doesn't issue a grid requery + full ItemsRepeater re-realization
+    // burst several times a second. At the post-perf-work cadence the
+    // engine emits a batch every ~200 ms (~35 files/s); a 1 s throttle
+    // still drove a recycle/thumbnail-cancel storm sustained for the
+    // whole scan, which is the churn window the ~1h40m stowed-exception
+    // fast-fail surfaced in. 2 s halves the reload/recycle rate while
+    // keeping the grid visibly live; scan-complete still refreshes
+    // immediately (Phase==Completed → RequestLibraryRefresh(force:true),
+    // which bypasses this throttle).
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
-    private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(2);
     private bool _unloaded;
     // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
     // LoadThumbAsync's finally-block .Remove can resume on a worker thread
@@ -469,6 +477,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // off-screen tiles don't hold visible BitmapImage refs that block GC.
     private void OnRepeaterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnRepeaterElementPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         // x:Bind in the ItemsRepeater ItemTemplate does NOT populate the
@@ -521,7 +530,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             return;
         }
         _ = LoadThumbAsync(tile, cts);
-    }
+    });
 
     /// <summary>macOS-parity tile-entry animation — a scale-in "pop"
     /// (0.96 → 1, Tight tokens 0.35/0.78). Runs at most once per element
@@ -604,6 +613,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnRepeaterElementClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
+        => DebugLog.SafeRun(nameof(OnRepeaterElementClearing), () =>
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
         // Release the bound bitmap BEFORE detaching. The Image binds
@@ -630,7 +640,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // (not a stale bitmap) until its own thumbnail reloads. With the
         // identity-stable merge, on-screen tiles are no longer recycled on every
         // refresh — only on real scroll — so this fires far less often now.
-    }
+    });
 
     private async Task LoadThumbAsync(FileTile tile, CancellationTokenSource cts)
     {

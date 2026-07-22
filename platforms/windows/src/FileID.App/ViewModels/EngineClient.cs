@@ -326,6 +326,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastRestructureApplyResult, value);
     }
 
+    /// <summary>M4: true when the current <see cref="LastRestructureApplyResult"/>
+    /// is the reply to an Undo (not an Apply). Undo and Apply replies share the
+    /// same slot; this is captured from <see cref="UndoRestructureInFlight"/> as
+    /// the terminal arrives and paired with the result, so a view reading it on a
+    /// later dispatcher turn (or an OnLoaded replay) still tells the two apart and
+    /// can say "undone" instead of "applied".</summary>
+    public bool LastRestructureApplyResultWasUndo { get; private set; }
+
     private bool _canUndoRestructure;
     /// <summary>True once an applyRestructure moved files and they haven't been
     /// undone yet — drives the "Undo last run" button. (R2)</summary>
@@ -406,6 +414,36 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         get => _phase;
         private set => Set(ref _phase, value);
+    }
+
+    /// <summary>Discovering/Tagging/PostScan — a scan actively holds the
+    /// engine's mutation gate. A Deep Analyze command issued now queues behind
+    /// it. (Fix A)</summary>
+    internal static bool IsActiveScanPhase(ScanPhase? phase)
+        => phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
+
+    /// <summary>True while a Deep Analyze command is waiting on the engine's
+    /// mutation gate behind a running scan (or any other job). In that window
+    /// the engine emits only QueueState — no DeepAnalyzeStarting/Progress — so
+    /// the Deep Analyze view must show "queued" and must NOT arm its 45 s
+    /// warm-up watchdog (which would false-fire "model took too long to load"
+    /// on a healthy, merely-waiting job). Detected from the live scan phase
+    /// and from a deepAnalyze job sitting in the QueueState pending list. (Fix A)</summary>
+    public bool DeepAnalyzeQueuedBehindScan
+    {
+        get
+        {
+            if (IsActiveScanPhase(_phase)) return true;
+            var qs = _queueState;
+            if (qs?.Pending is { } pending)
+            {
+                for (int i = 0; i < pending.Count; i++)
+                {
+                    if (pending[i].Category == JobCategory.DeepAnalyze) return true;
+                }
+            }
+            return false;
+        }
     }
 
     /// <summary>Hot stream of every IPC event. Used by tests + the optional
@@ -1472,6 +1510,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
+                        // M7: a terminal Deep Analyze error that arrives with NO
+                        // accompanying DeepAnalyzeComplete (vlm_model_missing) would
+                        // otherwise strand the command slot for the rest of the
+                        // session and wedge the Deep Analyze view — release it here
+                        // as belt-and-suspenders (idempotent with any Complete).
+                        if (IsTerminalDeepAnalyzeErrorWithoutComplete(e.Error.Kind))
+                        {
+                            ReleaseDeepAnalyzeCommandOnTerminalError(generation);
+                        }
                         // PAR-111: a clustering FAILURE must release the auto gate,
                         // else auto-clustering stays suppressed for the rest of the
                         // session. Match the EXACT failure kind — not a broad
@@ -1565,6 +1612,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastRestructurePlan = rp.Plan;
                         break;
                     case RestructureApplyResultEvent rar:
+                        // M4: capture whether this terminal is an Undo reply BEFORE
+                        // UndoRestructureInFlight is cleared below, and set it before
+                        // the result so it is already correct when the result's
+                        // PropertyChanged enqueues the view's SyncApplyResult.
+                        LastRestructureApplyResultWasUndo = UndoRestructureInFlight;
                         LastRestructureApplyResult = rar.Result;
                         // Toggle the "Undo last run" affordance: an apply that
                         // moved files makes the run undoable; the undo's own reply
