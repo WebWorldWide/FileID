@@ -50,6 +50,44 @@ internal static class ModelLicenseGate
         }
     }
 
+    /// <summary>Prompt (once, sequentially) for every distinct license policy the
+    /// given model kinds require, and return the set of policy keys the user
+    /// DECLINED. Unlike <see cref="EnsureAcceptedAsync"/> — which aborts the whole
+    /// batch on the first decline — this keeps prompting the remaining policies so
+    /// the caller can install the slots the user DID accept (and the un-gated ones)
+    /// while skipping only those tied to a declined policy. An empty result means
+    /// nothing was declined. (Install-all no longer aborts the free core models
+    /// when a gated model's license is declined.)</summary>
+    internal static async Task<IReadOnlySet<string>> RequestDeclinedPoliciesAsync(IEnumerable<string> modelKinds)
+    {
+        var declined = new HashSet<string>();
+        var policies = modelKinds
+            .Select(PolicyForModelKind)
+            .Where(policy => policy is not null)
+            .Cast<Policy>()
+            .DistinctBy(policy => policy.Key)
+            .ToArray();
+        if (policies.Length == 0) return declined;
+
+        await Gate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            foreach (var policy in policies)
+            {
+                if (IsAccepted(policy)) continue;
+                if (!await ShowTermsAsync(policy).ConfigureAwait(true) || !RememberAcceptance(policy))
+                {
+                    declined.Add(policy.Key);
+                }
+            }
+        }
+        finally
+        {
+            Gate.Release();
+        }
+        return declined;
+    }
+
     private static Policy? PolicyForModelKind(string modelKind) => PolicyKeyForModelKind(modelKind) switch
     {
         "Gemma" => new Policy(
