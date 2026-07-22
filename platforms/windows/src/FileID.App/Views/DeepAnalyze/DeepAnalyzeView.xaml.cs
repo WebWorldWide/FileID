@@ -30,12 +30,30 @@ public sealed partial class DeepAnalyzeView : UserControl
     // queuing files 2..N after the user pressed Cancel.
     private bool _selectedRunCancelled;
 
+    // L5: set the moment Cancel is clicked while a Deep Analyze command is still
+    // in flight (most importantly while it's QUEUED behind a running scan, where
+    // the engine can't act on the cancel until the scan releases the mutation
+    // gate). Without it Cancel stayed enabled with no feedback for the whole scan.
+    // While set, Cancel is disabled and the stream card shows a 'Cancelling…'
+    // state; cleared once the command leaves flight (terminal Complete / slot
+    // release), re-arming Cancel for the next run.
+    private bool _cancelRequested;
+
     // Monotonic generation for the streamed-thumbnail load. Each progress event
     // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
     // file can resolve after a later one's. We bump this at the start of every
     // load and only commit StreamImage.Source if our captured generation is
     // still the latest, so a stale thumbnail never overwrites the current file's.
     private int _streamThumbGeneration;
+
+    // Last file path shown in the stream card. The engine emits a
+    // DeepAnalyzeProgress every ~250 ms (4 Hz) carrying the SAME CurrentPath for
+    // the whole time a file is being captioned; reloading the shell thumbnail on
+    // every one of those frames re-hits the shell thumbnail provider needlessly.
+    // Track the displayed path and only reload the thumb + reset the caption
+    // accumulator when the path actually changes. Reset on teardown / new run so
+    // re-running the same file reloads its preview. (Fix B)
+    private string? _lastStreamPath;
 
     // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
     // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
@@ -64,6 +82,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
+        _lastStreamPath = null;
         CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -132,8 +151,13 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (_unloaded) return;
         var inFlight = EngineClient.Instance.DeepAnalyzeCommandInFlight;
+        // L5: once the command leaves flight (terminal reached / slot released),
+        // re-arm Cancel for the next run.
+        if (!inFlight) _cancelRequested = false;
         AnalyzeAllButton.IsEnabled = !inFlight;
-        CancelButton.IsEnabled = inFlight;
+        // L5: a pending cancel (esp. while queued behind a scan) disables Cancel so
+        // the user gets feedback and can't spam it while the engine can't yet act.
+        CancelButton.IsEnabled = inFlight && !_cancelRequested;
         SyncSelectionButtons();
     }
 
@@ -219,10 +243,23 @@ public sealed partial class DeepAnalyzeView : UserControl
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeLast):
                 case nameof(EngineClient.DeepAnalyzeComplete):
+                // QueueState drives the "queued behind a scan" branch of
+                // SyncStream: the pending deepAnalyze job can land after the
+                // command-in-flight flip, so re-sync to disarm the warm-up
+                // watchdog once the queued state becomes known. (Fix A)
+                case nameof(EngineClient.QueueState):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
                 case nameof(EngineClient.Phase):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    _ = RefreshNamePeopleGateAsync();
+                    // Phase is the immediate signal that a Deep Analyze command is
+                    // queued behind a scan (or that the scan just finished and the
+                    // job can now load); re-sync so the queued/prepare state and the
+                    // warm-up watchdog track it. (Fix A)
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
+                    break;
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
@@ -412,20 +449,57 @@ public sealed partial class DeepAnalyzeView : UserControl
                     _localPreparingAttemptId = attemptId;
                     _proposedNameCount = 0;
                     _lastConsumedFileDone = null;
+                    _lastStreamPath = null;
                     SyncProposedNamesPill();
                 }
                 StreamCard.Visibility = Visibility.Visible;
                 OverallProgress.Value = 0;
                 OverallProgress.IsIndeterminate = true;
-                OverallProgressText.Text = "Preparing…";
-                StreamFileNameText.Text = "Preparing Deep Analyze…";
-                StreamCaptionText.Text = string.Empty;
                 StreamProposedNameText.Text = string.Empty;
-                ArmWarmupTimer(attemptId);
+                StreamCaptionText.Text = string.Empty;
+                if (ec.DeepAnalyzeQueuedBehindScan)
+                {
+                    // Queued behind a running scan on the engine's mutation gate.
+                    // While queued the engine emits only QueueState — no
+                    // DeepAnalyzeStarting/Progress — so arming the warm-up watchdog
+                    // would false-fire "Model took too long to load" at 45 s on a
+                    // healthy job that is merely waiting. Show the truth and disarm;
+                    // the DeepAnalyzeStarting that fires when the job actually begins
+                    // loading re-arms the watchdog via the branch below. (Fix A)
+                    CancelWarmupTimer();
+                    if (_cancelRequested)
+                    {
+                        // L5: Cancel was pressed while queued — the engine can't act
+                        // until the scan releases the gate, so show that we heard it.
+                        OverallProgressText.Text = "Cancelling…";
+                        StreamFileNameText.Text = "Cancelling — will stop when the current scan finishes…";
+                    }
+                    else
+                    {
+                        OverallProgressText.Text = "Queued";
+                        StreamFileNameText.Text = "Queued — waiting for the current scan to finish…";
+                    }
+                }
+                else if (_cancelRequested)
+                {
+                    // L5: cancelled during the pre-load prepare window — don't arm
+                    // the warm-up watchdog (a cancelled job that never loads must not
+                    // trip "model took too long").
+                    CancelWarmupTimer();
+                    OverallProgressText.Text = "Cancelling…";
+                    StreamFileNameText.Text = "Cancelling…";
+                }
+                else
+                {
+                    OverallProgressText.Text = "Preparing…";
+                    StreamFileNameText.Text = "Preparing Deep Analyze…";
+                    ArmWarmupTimer(attemptId);
+                }
             }
             else if (_localPreparingAttemptId != 0)
             {
                 _localPreparingAttemptId = 0;
+                _lastStreamPath = null;
                 CancelWarmupTimer();
                 StreamCard.Visibility = Visibility.Collapsed;
                 OverallProgress.IsIndeterminate = false;
@@ -457,6 +531,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // reflects only THIS run, not a cumulative count across runs. (audit A13)
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
+            _lastStreamPath = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
@@ -481,8 +556,10 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : string.Empty;
             OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files{etaSuffix}";
 
-            if (!string.IsNullOrEmpty(prog.CurrentPath))
+            if (!string.IsNullOrEmpty(prog.CurrentPath)
+                && !string.Equals(prog.CurrentPath, _lastStreamPath, StringComparison.Ordinal))
             {
+                _lastStreamPath = prog.CurrentPath;
                 StreamFileNameText.Text = Path.GetFileName(prog.CurrentPath);
                 _ = LoadStreamThumbAsync(prog.CurrentPath);
                 _captionAccumulator = string.Empty;
@@ -1021,6 +1098,16 @@ public sealed partial class DeepAnalyzeView : UserControl
         // Also stop the per-file "Analyze Selected" send loop — the engine
         // cancel below only stops the file currently in flight.
         _selectedRunCancelled = true;
+        // L5: latch a 'Cancelling…' state + disable Cancel now. When the command
+        // is queued behind a scan the engine can't act until the scan releases the
+        // gate, so without this the button stayed enabled with no feedback for the
+        // whole scan. SyncStream reflects the state; SyncDeepAnalyzeControls clears
+        // the latch once the command leaves flight.
+        if (EngineClient.Instance.DeepAnalyzeCommandInFlight)
+        {
+            _cancelRequested = true;
+            SyncStream();
+        }
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
     }

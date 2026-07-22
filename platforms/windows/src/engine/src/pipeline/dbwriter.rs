@@ -65,6 +65,11 @@ pub struct BatchStats {
     pub batch_index: u32,
     pub files_in_batch: u32,
     pub processed_total: u64,
+    /// Cumulative processed files whose kind runs the expensive vision path
+    /// (Image/Video/Model). Feeds the kind-aware ETA: a blended files/sec
+    /// oscillates an order of magnitude between photo bursts and hash-only
+    /// stretches on mixed libraries.
+    pub processed_heavy: u64,
     /// Cumulative failed-file count. Plumbed through Progress events so
     /// the sidebar "Failures" stat updates during scan instead of waiting
     /// for ScanComplete.
@@ -103,6 +108,7 @@ impl DbWriter {
         let mut buffer: Vec<TaggedFile> = Vec::with_capacity(BATCH_SIZE_FALLBACK);
         let mut deadline: Option<Instant> = None;
         let mut total: u64 = 0;
+        let mut heavy: u64 = 0;
         let mut failed: u64 = 0;
         let mut batch_index: u32 = 0;
         let mut current_target = current_batch_size();
@@ -137,7 +143,7 @@ impl DbWriter {
                     }
                     buffer.push(file);
                     if buffer.len() >= current_target {
-                        let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         batch_index += 1;
                         deadline = None;
                         on_batch(stats);
@@ -145,14 +151,14 @@ impl DbWriter {
                 }
                 Ok(None) => {
                     if !buffer.is_empty() {
-                        let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         on_batch(stats);
                     }
                     break;
                 }
                 Err(_) => {
                     if !buffer.is_empty() {
-                        let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         batch_index += 1;
                         deadline = None;
                         on_batch(stats);
@@ -166,7 +172,7 @@ impl DbWriter {
                 // fully re-processed on the next scan. Mirrors the Ok(None)/Err
                 // drain arms above.
                 if !buffer.is_empty() {
-                    let stats = self.flush(&mut buffer, &mut total, &mut failed, batch_index)?;
+                    let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                     on_batch(stats);
                 }
                 break;
@@ -180,6 +186,7 @@ impl DbWriter {
         &self,
         buffer: &mut Vec<TaggedFile>,
         total: &mut u64,
+        heavy: &mut u64,
         failed: &mut u64,
         batch_index: u32,
     ) -> Result<BatchStats> {
@@ -619,6 +626,14 @@ impl DbWriter {
                     *failed += 1;
                 }
                 *total += 1;
+                if matches!(
+                    f.kind,
+                    crate::pipeline::discovery::FileKind::Image
+                        | crate::pipeline::discovery::FileKind::Video
+                        | crate::pipeline::discovery::FileKind::Model
+                ) {
+                    *heavy += 1;
+                }
                 vision.push(f.vision_ms);
                 clip.push(f.clip_ms);
                 let insert_ms = insert_started.elapsed().as_secs_f64() * 1000.0;
@@ -692,6 +707,7 @@ impl DbWriter {
             batch_index,
             files_in_batch,
             processed_total: *total,
+            processed_heavy: *heavy,
             failed_total: *failed,
             wall_seconds: wall,
             files_per_second: if wall > 0.0 { f64::from(files_in_batch) / wall } else { 0.0 },
@@ -2073,7 +2089,7 @@ mod tests {
         let mut buffer = vec![incoming];
         let mut total = 0u64;
         let mut failed = 0u64;
-        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+        writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).unwrap();
 
         // Exactly one row, re-bound to the new path — proves the legacy digest
         // was read (pre-lock) and consumed by the heal.
@@ -2136,7 +2152,7 @@ mod tests {
         let mut buffer = vec![incoming];
         let mut total = 0u64;
         let mut failed = 0u64;
-        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+        writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).unwrap();
 
         let c = conn.lock();
         let row_count: i64 = c
@@ -2201,7 +2217,7 @@ mod tests {
         let mut buffer = vec![incoming];
         let mut total = 0u64;
         let mut failed = 0u64;
-        writer.flush(&mut buffer, &mut total, &mut failed, 0).unwrap();
+        writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).unwrap();
 
         let c = conn.lock();
         let row_count: i64 = c

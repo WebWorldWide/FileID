@@ -197,6 +197,12 @@ pub struct DiscoveryHandle {
     pub rx: mpsc::Receiver<DiscoveredFile>,
     pub zero_byte_rx: mpsc::Receiver<ZeroByteObservation>,
     pub count: Arc<AtomicU64>,
+    /// Subset of `count` whose kind runs the expensive vision path
+    /// (Image/Video/Model — `needed_gpu` in tagging). Kind-aware ETA math
+    /// needs the remaining-heavy denominator; a blended files/sec swings an
+    /// order of magnitude between photo bursts and hash-only stretches, so
+    /// ETA computed from it oscillated wildly on mixed libraries.
+    pub heavy_count: Arc<AtomicU64>,
     pub done: Arc<AtomicBool>,
     /// Stable path hashes of every physically present eligible or skipped file
     /// observed during the walk, including zero-byte files.
@@ -245,10 +251,12 @@ impl Discovery {
         let skip_paths = self.skip_paths.clone();
         let exclusions = self.exclusions.clone();
         let count = Arc::new(AtomicU64::new(0));
+        let heavy_count = Arc::new(AtomicU64::new(0));
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
         let count_inner = count.clone();
+        let heavy_count_inner = heavy_count.clone();
         let done_inner = done.clone();
         let error_count_inner = error_count.clone();
         let seen_paths_inner = seen_paths.clone();
@@ -449,6 +457,12 @@ impl Discovery {
                 // send stay on this single consumer thread so the counter is
                 // monotonic and the test_file_cap stop condition is exact.
                 count_inner.fetch_add(1, Ordering::Relaxed);
+                if matches!(
+                    discovered.kind,
+                    FileKind::Image | FileKind::Video | FileKind::Model
+                ) {
+                    heavy_count_inner.fetch_add(1, Ordering::Relaxed);
+                }
 
                 // blocking_send applies backpressure when the channel fills
                 // (tier-scaled cap, see discovery_channel_cap). On corpora
@@ -468,6 +482,7 @@ impl Discovery {
             rx,
             zero_byte_rx,
             count,
+            heavy_count,
             done,
             seen_paths,
             error_count,

@@ -54,16 +54,36 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     // exits abnormally the row stays stale forever, polluting Settings →
     // Recent scans. Mark them all as 'failed' on startup; new scans
     // overwrite this when they finish cleanly.
-    if let Err(e) = conn.execute(
+    match conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
         [],
     ) {
-        tracing::warn!(error = %e, "open_writer: sweeping orphaned 'running' scan_sessions failed");
+        // A swept 'running' row means the previous engine died mid-scan, so
+        // the last committed batch may have durable face_prints rows whose
+        // crop JPEGs (written post-commit, outside the tx) never landed. Flag
+        // it so the next incremental scan reconciles missing crops instead of
+        // skipping those now-unchanged files forever. Clean shutdowns sweep 0
+        // rows and pay nothing.
+        Ok(swept) if swept > 0 => {
+            UNCLEAN_PRIOR_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(swept, "open_writer: swept orphaned 'running' scan_sessions (unclean prior shutdown)");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "open_writer: sweeping orphaned 'running' scan_sessions failed");
+        }
     }
 
     Ok(conn)
 }
+
+/// Set true when `open_writer` sweeps a stale `running` scan_sessions row —
+/// i.e. the previous engine process died mid-scan. Read once by the next
+/// incremental scan to decide whether to reconcile face crops that a
+/// post-commit write may have missed (see scan_session skip-set preload).
+pub static UNCLEAN_PRIOR_SHUTDOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Open an ephemeral READ-ONLY connection. Query handlers use these so they
 /// never contend on the single writer mutex — WAL lets readers run concurrent
