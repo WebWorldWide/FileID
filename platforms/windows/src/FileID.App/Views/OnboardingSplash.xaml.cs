@@ -32,7 +32,8 @@ public sealed partial class OnboardingSplash : UserControl
         ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e) => UpdateShimmer();
+    private void OnLoaded(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnLoaded), UpdateShimmer);
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
@@ -42,7 +43,7 @@ public sealed partial class OnboardingSplash : UserControl
 
     private void OnReducedMotionChanged(object? sender, PropertyChangedEventArgs e)
     {
-        DispatcherQueue.TryEnqueue(UpdateShimmer);
+        DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(nameof(OnReducedMotionChanged) + ".Enqueue", UpdateShimmer));
     }
 
     private void UpdateShimmer()

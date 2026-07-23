@@ -816,7 +816,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private void OnOpenLogsClicked(object sender, RoutedEventArgs e) => RevealInExplorer(AppPaths.LogsDir);
     private void OnShowDbFolderClicked(object sender, RoutedEventArgs e)
-        => RevealInExplorer(System.IO.Path.GetDirectoryName(DbPathText) ?? AppPaths.LogsDir);
+        => DebugLog.SafeRun(nameof(OnShowDbFolderClicked),
+            () => RevealInExplorer(System.IO.Path.GetDirectoryName(DbPathText) ?? AppPaths.LogsDir));
     private void OnShowThumbCacheClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ThumbCachePathText);
     private void OnShowModelsFolderClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ModelsPathText);
 
@@ -890,6 +891,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
 
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnInstallModelClicked), () =>
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
             return;
@@ -925,7 +927,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             try { await slot.InstallAsync().ConfigureAwait(true); }
             finally { _installInFlight.Remove(slot); }
         }, "Install " + slot.DisplayLabel);
-    }
+    });
 
     // Drive the cancel and surface failure. If CancelAllAsync throws (engine
     // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
@@ -1094,10 +1096,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// prewarm. Engine downloads, extracts, then VlmRunner::find prefers
     /// the CUDA build automatically on the next Deep Analyze.</summary>
     private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnInstallCudaLlamaClicked), async () =>
     {
         if (sender is not Button button) return;
         await InstallCudaLlamaAsync(button).ConfigureAwait(true);
-    }
+    });
 
     private async Task InstallCudaLlamaAsync(Button button)
     {
@@ -1143,6 +1146,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// "Verify install" (or restarts the engine) to flip scanning from DirectML
     /// to the CUDA EP (~3-5x faster).</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnInstallCudnnClicked), async () =>
     {
         if (sender is not Button button) return;
         // Both NVIDIA buttons feed the one Accelerator slot; if a coordinated
@@ -1177,7 +1181,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";
         }
-    }
+    });
 
     private static async Task WaitForModelSentinelsAsync(string[] modelKinds)
     {

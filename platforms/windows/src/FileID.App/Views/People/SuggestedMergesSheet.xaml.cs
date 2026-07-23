@@ -35,7 +35,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += OnUnloaded;
-        Loaded += async (_, _) =>
+        Loaded += async (_, _) => await Services.DebugLog.SafeRunAsync("SuggestedMergesSheet.Loaded", async () =>
         {
             // Trigger a fresh suggestion fetch whenever the sheet opens, and
             // bound-wait the engine's reply so the sheet doesn't sit forever on
@@ -57,7 +57,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
                 Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
                 HeaderText.Text = "Couldn't fetch suggestions — see logs.";
             }
-        };
+        });
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -95,6 +95,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
     }
 
     private async void OnMergeClicked(object sender, RoutedEventArgs e)
+        => await Services.DebugLog.SafeRunAsync(nameof(OnMergeClicked), async () =>
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
         if (vm.IsResolved || vm.IsBusy) return;
@@ -141,7 +142,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             vm.IsBusy = false;
         }
-    }
+    });
 
     private static string? FirstFailureMessage(FileID.IpcSchema.BulkActionResult r)
     {
@@ -156,6 +157,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
     }
 
     private async void OnDifferentClicked(object sender, RoutedEventArgs e)
+        => await Services.DebugLog.SafeRunAsync(nameof(OnDifferentClicked), async () =>
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
         if (vm.IsResolved || vm.IsBusy) return;
@@ -168,7 +170,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             vm.IsBusy = false;
         }
-    }
+    });
 
     private async Task MarkDifferentAsync(MergeSuggestionVm vm)
     {

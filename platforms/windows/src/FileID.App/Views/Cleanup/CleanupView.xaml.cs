@@ -224,6 +224,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     // ElementClearing so off-screen tiles don't pin BitmapImages.
     private void OnMemberPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                   Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnMemberPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         // x:Bind doesn't populate a realized element's DataContext, so resolve
@@ -241,16 +242,17 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var cts = new CancellationTokenSource();
         if (!_inflightThumbs.TryAdd(member, cts)) { cts.Dispose(); return; }
         _ = LoadMemberThumbAsync(member, cts);
-    }
+    });
 
     private void OnMemberClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                   Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
+        => DebugLog.SafeRun(nameof(OnMemberClearing), () =>
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not DuplicateMember member) return;
         member.IsDetached = true;
         member.ClearThumbnailForRecycle();
         if (_inflightThumbs.TryRemove(member, out var cts)) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
-    }
+    });
 
     private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationTokenSource ownCts)
     {
@@ -375,7 +377,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         });
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
-        => await ViewModel.RefreshAsync(CancellationToken.None);
+        => await DebugLog.SafeRunAsync(nameof(OnRefreshClicked), async () =>
+            await ViewModel.RefreshAsync(CancellationToken.None));
 
     // Resets every group's keeper back to the first member. Useful after
     // the user has been clicking around and wants to start over without
@@ -395,11 +398,12 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         });
 
     private async void OnTrashNonKeepersClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnTrashNonKeepersClicked), async () =>
     {
         if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
         try { await TrashNonKeepersAsync(); }
         finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
-    }
+    });
 
     private System.Threading.Tasks.Task TrashNonKeepersAsync()
     {
@@ -431,12 +435,13 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private string? _lastRightTappedHash;
 
     private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupRightTapped), () =>
     {
         if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
         {
             _lastRightTappedHash = g.ContentHash;
         }
-    }
+    });
 
     // Resolve the live group by the cached ContentHash so every per-group action
     // hits the instance currently in ViewModel.Groups, not a snapshot a mid-flyout
@@ -447,6 +452,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             : ViewModel.Groups.FirstOrDefault(g => g.ContentHash == _lastRightTappedHash);
 
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupKeepFirst), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
@@ -454,9 +460,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             grp.Members[i].IsKeeper = (i == 0);
         }
-    }
+    });
 
     private void OnGroupKeepShallowest(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupKeepShallowest), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
@@ -484,9 +491,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             grp.Members[i].IsKeeper = (i == bestIdx);
         }
-    }
+    });
 
     private void OnGroupInvert(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupInvert), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null || grp.Members.Count == 0) return;
@@ -503,26 +511,29 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             grp.Members[i].IsKeeper = (i == nextIdx);
         }
-    }
+    });
 
     private void OnGroupSkip(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupSkip), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp != null) grp.IsSkipped = true;
-    }
+    });
 
     private void OnGroupUnskip(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupUnskip), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp != null) grp.IsSkipped = false;
-    }
+    });
 
     private async void OnGroupTrashNow(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnGroupTrashNow), async () =>
     {
         if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
         try { await TrashGroupAsync(sender); }
         finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
-    }
+    });
 
     private System.Threading.Tasks.Task TrashGroupAsync(object sender)
     {

@@ -347,12 +347,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             ? Visibility.Visible : Visibility.Collapsed;
 
     private async void OnContextOpenDetails(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnContextOpenDetails), async () =>
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not int cid) return;
         var cluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
         if (cluster is null) return;
         await OpenDetailSheetAsync(cluster);
-    }
+    });
 
     private void OnContextSuggestedMerges(object sender, RoutedEventArgs e)
         => OnSuggestedMergesClicked(sender, e);
@@ -428,8 +429,15 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // OnClusterDoubleTapped has no Tag fallback, so without this bridge a
     // double-tap silently returns and the person-detail sheet never opens.
     // Mirrors LibraryView.OnRepeaterElementPrepared.
+    // SafeRun-wrapped: ItemsRepeater raises ElementPrepared from the native
+    // realization pass, so a synchronous throw here (an index race when
+    // ViewModel.Clusters was rebuilt by a post-tagging refresh, a VisualTreeHelper
+    // walk over a torn subtree) fast-fails the process across the ABI instead of
+    // being catchable — the exact V15.4/Library-twin stowed-crash class. Wrap the
+    // body AND the deferred tree-walk. Mirrors LibraryView.OnRepeaterElementPrepared.
     private void OnClusterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                           Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnClusterElementPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         var cluster = (args.Index >= 0 && args.Index < ViewModel.Clusters.Count)
@@ -444,7 +452,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // never appears (or a recycled card keeps a stale Visible). Apply the
         // CURRENT mode to this freshly-prepared card. Deferred to Low priority
         // so the card template (incl. the tagged CheckBox) is realized first.
-        el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => DebugLog.SafeRun("OnClusterElementPrepared.applyMode", () =>
         {
             // Read the live mode at drain time, not a prepare-time snapshot: a
             // Select toggle can land between this card's prepare and the Low
@@ -457,8 +466,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 if (FindCheckBoxInTree(d) is { } cb) cb.Visibility = selectVisible;
             }
-        });
-    }
+        }));
+    });
 
     private static System.Collections.Generic.IEnumerable<DependencyObject> EnumerateDescendants(DependencyObject root)
     {
@@ -477,21 +486,25 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
+    // SafeRun-wrapped: DataPackagePropertySet.Add throws ArgumentException on a
+    // duplicate key, and this fires on the native drag-start ABI callback.
     private void OnClusterDragStarting(UIElement sender, DragStartingEventArgs args)
+        => DebugLog.SafeRun(nameof(OnClusterDragStarting), () =>
     {
         if (sender is FrameworkElement el && el.DataContext is PersonCluster pc)
         {
-            args.Data.Properties.Add(MergeFormatId, (long)pc.ClusterId);
+            args.Data.Properties[MergeFormatId] = (long)pc.ClusterId;
             args.Data.RequestedOperation = DataPackageOperation.Move;
         }
         else if (sender is FrameworkElement el2 && el2.Tag is long pid)
         {
-            args.Data.Properties.Add(MergeFormatId, pid);
+            args.Data.Properties[MergeFormatId] = pid;
             args.Data.RequestedOperation = DataPackageOperation.Move;
         }
-    }
+    });
 
     private void OnClusterDragOver(object sender, DragEventArgs args)
+        => DebugLog.SafeRun(nameof(OnClusterDragOver), () =>
     {
         if (args.DataView.Properties.ContainsKey(MergeFormatId))
         {
@@ -508,20 +521,30 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             args.AcceptedOperation = DataPackageOperation.None;
         }
-    }
+    });
 
     private void OnClusterDragLeave(object sender, DragEventArgs args)
+        => DebugLog.SafeRun(nameof(OnClusterDragLeave), () =>
     {
         if (sender is Grid g)
         {
             g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
             g.BorderThickness = new Thickness(1);
         }
-    }
+    });
 
+    // SafeRunAsync-wrapped: the whole handler, INCLUDING the synchronous
+    // prologue (new PersonDetailSheet() runs XamlReader.Load of the sheet
+    // template, which can throw synchronously on a resource-resolution failure).
+    // A DoubleTapped handler is invoked across the XAML input ABI, so an
+    // unguarded synchronous throw here fast-fails the process — the "click a
+    // face to open the person" stowed-crash path. XamlRoot may be null on a
+    // detached element; ShowAsync then throws, already caught below.
     private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClusterDoubleTapped), async () =>
     {
         if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
+        if (XamlRoot is null) return;
 
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
@@ -543,9 +566,10 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
-    }
+    });
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
+        => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>
     {
         if (sender is not Grid g) return;
         // Restore styling first so a failure mid-drop doesn't leave the gold ring.
@@ -616,11 +640,12 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
-    }
+    });
 
     // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
 
     private void OnToggleSelectMode(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnToggleSelectMode), () =>
     {
         ViewModel.IsSelectMode = !ViewModel.IsSelectMode;
         SelectButtonText.Text = ViewModel.IsSelectMode ? "Done" : "Select";
@@ -648,7 +673,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 c.IsSelected = false;
             }
         }
-    }
+    });
 
     private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
     {

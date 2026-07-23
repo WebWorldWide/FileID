@@ -316,36 +316,42 @@ public sealed partial class WelcomeSheet : UserControl
     // ─── Per-row action handlers ────────────────────────────────────────
 
     private void OnClipActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnClipActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] CLIP per-row button clicked.");
         HandleAction(Svc.Clip);
-    }
+    });
 
     private void OnArcfaceActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnArcfaceActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] ArcFace per-row button clicked.");
         HandleAction(Svc.Arcface);
-    }
+    });
 
     private void OnRamPlusActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRamPlusActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] RAM++ per-row button clicked.");
         HandleAction(Svc.RamPlus);
-    }
+    });
 
     private void OnBgeActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnBgeActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] BGE document understanding per-row button clicked.");
         HandleAction(Svc.Bge);
-    }
+    });
 
     private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnDeepVlmActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] Deep Analyze (Qwen) per-row button clicked.");
         HandleAction(Svc.DeepVlm);
-    }
+    });
 
     private void OnVlmSelectionChanged(object sender, SelectionChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnVlmSelectionChanged), () =>
     {
         if (_syncingVlmPicker || sender is not ComboBox combo
             || combo.SelectedItem is not ComboBoxItem item
@@ -359,7 +365,7 @@ public sealed partial class WelcomeSheet : UserControl
             return;
         }
         Svc.SelectDeepVlmModel(kind);
-    }
+    });
 
     private void SyncVlmPicker()
     {
@@ -389,16 +395,18 @@ public sealed partial class WelcomeSheet : UserControl
     // vendors the button isn't shown (ShowAcceleratorButton returns
     // Collapsed) so this handler can't fire.
     private void OnWhisperActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnWhisperActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] Whisper (speech) per-row button clicked.");
         HandleAction(Svc.Whisper);
-    }
+    });
 
     private void OnAcceleratorActionClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAcceleratorActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] GPU Acceleration Pack per-row button clicked.");
         HandleAction(Svc.Accelerator);
-    }
+    });
 
     // XAML binding helpers for the Accelerator row.
     internal Visibility ShowAcceleratorButton(ModelInstallStatus status, bool isRealInstall)
@@ -531,15 +539,17 @@ public sealed partial class WelcomeSheet : UserControl
     }
 
     private void OnInstallAllClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnInstallAllClicked), () =>
     {
         DebugLog.Info("[INSTALL] 'Install all' button clicked.");
         _ = SafeRunAsync(() => Svc.InstallAllAsync(), "Install all");
-    }
+    });
 
     private void OnSkipClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnSkipClicked), () =>
     {
         RaiseDismissed();
-    }
+    });
 
     /// <summary>Persist welcomeSheetSeen and raise the Dismissed event.
     /// { welcomeSheetSeen = true }
