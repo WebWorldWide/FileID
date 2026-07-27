@@ -1025,17 +1025,9 @@ fn move_file(
     dst: &Path,
     expected: crate::platform::FileIdentity,
 ) -> std::result::Result<(), ApplyError> {
-    // Portable (Linux/macOS) mirror of the Windows MoveFileExW path. The caller
-    // already created the destination parent and resolved a collision-free name;
-    // we re-assert both guarantees here so a standalone call is just as safe:
-    //   • parent created on demand (mirrors the create_dir_all the Windows path
-    //     relies on the caller for),
-    //   • NEVER clobber — an occupied destination fails the move (parity with
-    //     MoveFileExW dropping MOVEFILE_REPLACE_EXISTING); a remaining collision
-    //     means an unexpected race, so fail safe rather than destroy data,
-    //   • cross-device (EXDEV — std::fs::rename can't span filesystems, common
-    //     with a NAS mount → local disk) falls back to copy + delete so the file
-    //     is preserved, like MOVEFILE_COPY_ALLOWED.
+    // Unix moves are no-replace and identity-bound. Cross-filesystem moves fail
+    // closed because copy/delete cannot preserve every source filesystem's
+    // metadata and atomicity guarantees.
     let src_path = Path::new(src);
     let source_handle = File::open(src_path)
         .map_err(|error| ApplyError::Other(anyhow::Error::msg(error.to_string())))?;
@@ -1051,42 +1043,9 @@ fn move_file(
     match crate::util::rename_no_replace(src_path, dst) {
         Ok(()) => Ok(()),
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-            let mut source = source_handle;
-            let permissions = source
-                .metadata()
-                .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?
-                .permissions();
-            let mut destination = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(dst)
-                .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
-            // Flush the destination FILE, then its PARENT DIRECTORY, before
-            // unlinking the source. fsync of a file does not make its new
-            // dirent durable; without the parent-dir fsync a crash after the
-            // source unlink can leave the file in neither location (the source
-            // unlink committed, the never-flushed destination dirent lost) —
-            // an unrecoverable loss the write-ahead journal cannot restore.
-            // Mirrors the Trash cross-filesystem path (shell/mod.rs
-            // copy_claimed_external) and MOVEFILE_WRITE_THROUGH on Windows.
-            let copied = std::io::copy(&mut source, &mut destination)
-                .and_then(|_| std::fs::set_permissions(dst, permissions))
-                .and_then(|_| destination.sync_all())
-                .and_then(|_| {
-                    if let Some(parent) = dst.parent() {
-                        std::fs::File::open(parent)?.sync_all()?;
-                    }
-                    Ok(())
-                });
-            if let Err(error) = copied {
-                let _ = std::fs::remove_file(dst);
-                return Err(ApplyError::Other(anyhow::Error::msg(error.to_string())));
-            }
-            if let Err(error) = std::fs::remove_file(src_path) {
-                let _ = std::fs::remove_file(dst);
-                return Err(ApplyError::Other(anyhow::Error::msg(error.to_string())));
-            }
-            Ok(())
+            Err(ApplyError::Other(anyhow::anyhow!(
+                "cross-filesystem restructure moves are not supported; source left unchanged"
+            )))
         }
         Err(error) => Err(ApplyError::Other(anyhow::Error::msg(error.to_string()))),
     }
@@ -2492,6 +2451,50 @@ mod tests {
         assert!(src2.exists(), "source preserved when the move is refused");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cross_filesystem_move_fails_without_touching_source() {
+        use std::os::unix::fs::MetadataExt;
+
+        let source_root = std::env::temp_dir().join(format!(
+            "fileid-exdev-source-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let destination_root = PathBuf::from("/dev/shm").join(format!(
+            "fileid-exdev-destination-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        if std::fs::create_dir_all(&source_root).is_err()
+            || std::fs::create_dir_all(&destination_root).is_err()
+            || std::fs::metadata(&source_root).unwrap().dev()
+                == std::fs::metadata(&destination_root).unwrap().dev()
+        {
+            let _ = std::fs::remove_dir_all(&source_root);
+            let _ = std::fs::remove_dir_all(&destination_root);
+            return;
+        }
+
+        let source = source_root.join("source.bin");
+        let destination = destination_root.join("nested/destination.bin");
+        std::fs::write(&source, b"source-payload").unwrap();
+        let expected = crate::platform::file_identity(&source).unwrap();
+        let tags = vec!["important".to_string()];
+        let tags_written = crate::shell::tags::write_tags(&source, &tags).is_ok();
+
+        assert!(move_file(&source.to_string_lossy(), &destination, expected).is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"source-payload");
+        assert_eq!(crate::platform::file_identity(&source), Some(expected));
+        assert!(!destination.exists());
+        if tags_written {
+            assert_eq!(crate::shell::tags::read_tags(&source).unwrap(), tags);
+        }
+
+        let _ = std::fs::remove_dir_all(source_root);
+        let _ = std::fs::remove_dir_all(destination_root);
     }
 
     /// Portable coverage for the symlink ("use shortcuts instead of moving")

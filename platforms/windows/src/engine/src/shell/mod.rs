@@ -45,7 +45,7 @@
 mod linux_util {
     use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
 
     /// Absolute form of `path` without resolving symlinks (canonicalize would).
     pub fn absolute(path: &Path) -> PathBuf {
@@ -171,20 +171,111 @@ mod linux_util {
         read_with_limit(file, max_bytes, initial)
     }
 
-    /// Run a command with all stdio discarded; true iff it exited 0. A missing
-    /// binary (ENOENT) is a clean `false`, never an error.
+    pub fn terminate_process_group(child: &mut Child) {
+        crate::platform::terminate_child_tree(child);
+    }
+
+    pub fn run_output_bounded(
+        cmd: &mut Command,
+        max_stdout_bytes: usize,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Vec<u8>> {
+        crate::platform::configure_child_lifetime(cmd);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn()?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_process_group(&mut child);
+            return Err(std::io::Error::other("child stdout unavailable"));
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let _ = tx.send(read_stream_bounded(stdout, max_stdout_bytes));
+        });
+        let deadline = std::time::Instant::now() + timeout;
+        let mut output = None;
+        let mut status = None;
+
+        loop {
+            if output.is_none() {
+                match rx.try_recv() {
+                    Ok(result) => output = Some(result),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        terminate_process_group(&mut child);
+                        let _ = reader.join();
+                        return Err(std::io::Error::other("child output reader stopped"));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if output.as_ref().is_some_and(Result::is_err) {
+                terminate_process_group(&mut child);
+                let _ = reader.join();
+                return output.expect("output result present");
+            }
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(current) => status = current,
+                    Err(error) => {
+                        terminate_process_group(&mut child);
+                        let _ = reader.join();
+                        return Err(error);
+                    }
+                }
+            }
+            if let (Some(output), Some(status)) = (output.take(), status) {
+                let _ = reader.join();
+                if !status.success() {
+                    return Err(std::io::Error::other(format!(
+                        "child exited with status {status}"
+                    )));
+                }
+                return output;
+            }
+            if std::time::Instant::now() >= deadline {
+                terminate_process_group(&mut child);
+                let _ = reader.join();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "child process timed out",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Run a command with discarded output and a finite deadline. A missing or
+    /// failed binary is a clean `false`.
     pub fn run_silent(cmd: &mut Command) -> bool {
+        crate::platform::configure_child_lifetime(cmd);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .stderr(Stdio::null());
+        let Ok(mut child) = cmd.spawn() else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) | Err(_) => {
+                    terminate_process_group(&mut child);
+                    return false;
+                }
+            }
+        }
     }
 
     #[cfg(test)]
     mod tests {
-        use super::{read_bounded, read_stream_bounded, temp_file};
+        use super::{read_bounded, read_stream_bounded, run_output_bounded, run_silent, temp_file};
+        use std::io::Write;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
 
         #[test]
         fn bounded_reader_rejects_cap_plus_one_without_reading_past_it() {
@@ -194,6 +285,110 @@ mod linux_util {
             assert!(read_bounded(&path, 4).is_err());
             assert!(read_stream_bounded(std::io::Cursor::new([1, 2, 3, 4, 5]), 4).is_err());
             let _ = std::fs::remove_file(path);
+        }
+
+        #[test]
+        fn child_output_is_bounded_and_silent_children_time_out() {
+            let output = run_output_bounded(
+                Command::new("sh").args(["-c", "printf 1234"]),
+                4,
+                Duration::from_secs(2),
+            )
+            .expect("bounded child output");
+            assert_eq!(output, b"1234");
+            assert!(run_output_bounded(
+                Command::new("sh").args(["-c", "printf 12345"]),
+                4,
+                Duration::from_secs(2),
+            )
+            .is_err());
+
+            let started = Instant::now();
+            let error = run_output_bounded(
+                Command::new("sh").args(["-c", "sleep 30"]),
+                4,
+                Duration::from_millis(100),
+            )
+            .expect_err("silent child must time out");
+            assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
+        fn silent_child_may_write_output() {
+            assert!(run_silent(Command::new("sh").args(["-c", "printf output; printf error >&2"])));
+        }
+
+        #[test]
+        fn process_group_termination_kills_helper_descendants() {
+            use std::io::BufRead as _;
+
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "sleep 30 & echo $!; wait"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            crate::platform::configure_child_lifetime(&mut command);
+            let mut child = command.spawn().expect("spawn process tree");
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let descendant = line.trim().parse::<i32>().expect("descendant pid");
+            crate::platform::terminate_child_tree(&mut child);
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let result = unsafe { libc::kill(descendant, 0) };
+                if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "helper descendant survived group termination");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
+        fn pdeath_signal_kills_helper_when_engine_parent_exits() {
+            const HELPER_ENV: &str = "FILEID_TEST_PDEATH_HELPER";
+            if std::env::var_os(HELPER_ENV).is_some() {
+                let mut command = Command::new("sleep");
+                command.arg("30");
+                crate::platform::configure_child_lifetime(&mut command);
+                let child = command.spawn().expect("spawn lifetime-bound child");
+                let pid = child.id();
+                std::mem::forget(child);
+                println!("FILEID_PDEATH_PID={pid}");
+                std::io::stdout().flush().unwrap();
+                return;
+            }
+
+            let output = Command::new(std::env::current_exe().unwrap())
+                .arg("pdeath_signal_kills_helper_when_engine_parent_exits")
+                .arg("--nocapture")
+                .arg("--test-threads=1")
+                .env(HELPER_ENV, "1")
+                .output()
+                .expect("spawn isolated helper parent");
+            assert!(output.status.success());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let pid = stdout
+                .split("FILEID_PDEATH_PID=")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<i32>().ok())
+                .expect("isolated parent must report helper pid");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let result = unsafe { libc::kill(pid, 0) };
+                if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "helper survived its engine parent");
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
@@ -1554,11 +1749,12 @@ pub mod trash {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod ocr {
-    use super::linux_util::temp_file;
+    use super::linux_util::{run_output_bounded, temp_file};
     use anyhow::Result;
     use std::io::Write;
     use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+    use std::time::Duration;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
@@ -1598,17 +1794,16 @@ pub mod ocr {
             return Ok(empty());
         }
 
-        let output = Command::new("tesseract")
-            .arg(&img)
-            .arg("stdout")
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
+        let output = run_output_bounded(
+            Command::new("tesseract").arg(&img).arg("stdout"),
+            16 * 1024 * 1024,
+            Duration::from_secs(60),
+        );
         let _ = std::fs::remove_file(&img);
 
         let text = match output {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-            _ => return Ok(empty()),
+            Ok(stdout) => String::from_utf8_lossy(&stdout).into_owned(),
+            Err(_) => return Ok(empty()),
         };
 
         let lines = text
@@ -1651,13 +1846,16 @@ pub mod ocr {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod video {
-    use super::linux_util::read_stream_bounded;
+    use super::linux_util::run_output_bounded;
     use anyhow::{Context, Result};
     use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
+    use std::time::Duration;
 
-    const MAX_VIDEO_PIXELS: u64 = 64_000_000;
+    const MAX_VIDEO_EDGE: u64 = 1_280;
+    const MAX_VIDEO_PIXELS: u64 = MAX_VIDEO_EDGE * MAX_VIDEO_EDGE;
     const MAX_PPM_BYTES: u64 = MAX_VIDEO_PIXELS * 3 + 64 * 1024;
+    pub(crate) const VIDEO_DECODE_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
 
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
@@ -1674,70 +1872,48 @@ pub mod video {
     /// more than one bounded frame.
     pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         let seconds = probe_duration(path).map(|d| (d * 0.25).max(0.0)).unwrap_or(0.0);
-        let child = Command::new("ffmpeg")
-            .arg("-nostdin")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-ss")
-            .arg(format!("{seconds:.3}"))
-            .arg("-i")
-            .arg(path)
-            .arg("-frames:v")
-            .arg("1")
-            .arg("-vf")
-            .arg("scale=w='min(iw,8000)':h='min(ih,8000)':force_original_aspect_ratio=decrease")
-            .arg("-f")
-            .arg("image2pipe")
-            .arg("-vcodec")
-            .arg("ppm")
-            .arg("pipe:1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-
-        let read = match child {
-            Ok(mut child) => {
-                let bytes = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| std::io::Error::other("ffmpeg stdout unavailable"))
-                    .and_then(|stdout| read_stream_bounded(stdout, MAX_PPM_BYTES as usize));
-                match bytes {
-                    Ok(bytes) if child.wait().is_ok_and(|status| status.success()) => Some(bytes),
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        None
-                    }
-                }
-            }
-            Err(_) => None,
-        };
-
-        let bytes = read.context("ffmpeg unavailable or produced no keyframe")?;
+        let bytes = run_output_bounded(
+            Command::new("ffmpeg")
+                .arg("-nostdin")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-ss")
+                .arg(format!("{seconds:.3}"))
+                .arg("-i")
+                .arg(path)
+                .arg("-frames:v")
+                .arg("1")
+                .arg("-vf")
+                .arg("scale=1280:1280:force_original_aspect_ratio=decrease")
+                .arg("-f")
+                .arg("image2pipe")
+                .arg("-vcodec")
+                .arg("ppm")
+                .arg("pipe:1"),
+            MAX_PPM_BYTES as usize,
+            Duration::from_secs(60),
+        )
+        .context("ffmpeg unavailable or produced no keyframe")?;
         let (width, height, rgb) =
             parse_ppm(&bytes).context("parse PPM keyframe emitted by ffmpeg")?;
         Ok(VideoFrame { width, height, rgb, time_seconds: seconds })
     }
 
     fn probe_duration(path: &Path) -> Option<f64> {
-        let output = Command::new("ffprobe")
-            .arg("-v")
-            .arg("quiet")
-            .arg("-show_entries")
-            .arg("format=duration")
-            .arg("-of")
-            .arg("csv=p=0")
-            .arg(path)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8_lossy(&output.stdout)
+        let output = run_output_bounded(
+            Command::new("ffprobe")
+                .arg("-v")
+                .arg("quiet")
+                .arg("-show_entries")
+                .arg("format=duration")
+                .arg("-of")
+                .arg("csv=p=0")
+                .arg(path),
+            4 * 1024,
+            Duration::from_secs(10),
+        )
+        .ok()?;
+        String::from_utf8_lossy(&output)
             .trim()
             .parse::<f64>()
             .ok()
@@ -1757,8 +1933,8 @@ pub mod video {
         let pixels = w.checked_mul(h)?;
         if w == 0
             || h == 0
-            || w > u32::MAX as u64
-            || h > u32::MAX as u64
+            || w > MAX_VIDEO_EDGE
+            || h > MAX_VIDEO_EDGE
             || pixels > MAX_VIDEO_PIXELS
             || maxval != 255
             || !bytes
@@ -1822,6 +1998,7 @@ pub mod video {
 pub mod video {
     use anyhow::Result;
     use std::path::Path;
+    pub(crate) const VIDEO_DECODE_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     pub struct VideoFrame {
@@ -1841,11 +2018,12 @@ pub mod video {
 // ────────────────────────────────────────────────────────────────────
 #[cfg(target_os = "linux")]
 pub mod heic {
-    use super::linux_util::{read_bounded, temp_file};
+    use super::linux_util::{read_bounded, temp_file, terminate_process_group};
     use anyhow::{Context, Result};
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     const MAX_HEIC_PIXELS: u64 = 50_000_000;
     const MAX_CONVERTED_PNG_BYTES: u64 = 256 * 1024 * 1024;
@@ -1925,30 +2103,31 @@ pub mod heic {
     }
 
     fn run_converter_bounded(tool: &str, input: &Path, out: &Path, dir: &Path) -> bool {
-        let child = Command::new(tool)
+        let mut command = Command::new(tool);
+        command
             .arg(input)
             .arg(out)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        crate::platform::configure_child_lifetime(&mut command);
+        let child = command.spawn();
         let Ok(mut child) = child else {
             return false;
         };
+        let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            if !output_dir_within_limits(dir) {
-                let _ = child.kill();
-                let _ = child.wait();
+            if !output_dir_within_limits(dir) || Instant::now() >= deadline {
+                terminate_process_group(&mut child);
                 return false;
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     return status.success() && output_dir_within_limits(dir);
                 }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
                 Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    terminate_process_group(&mut child);
                     return false;
                 }
             }

@@ -65,6 +65,23 @@ public class DebugLogTraceGateTests
         }
     }
 
+    [Fact]
+    public void CrashDumpReadsTailWhilePersistentWriterIsOpen()
+    {
+        var marker = $"[ENGINE-SUB] crash-tail-{Guid.NewGuid():N}";
+        DebugLog.Error(marker);
+        var dump = DebugLog.WriteCrashDump("DebugLogTraceGateTests", null, terminating: false);
+        try
+        {
+            Assert.False(string.IsNullOrWhiteSpace(dump));
+            Assert.Contains(marker, File.ReadAllText(dump, Encoding.UTF8));
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(dump)) File.Delete(dump);
+        }
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

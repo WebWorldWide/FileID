@@ -29,31 +29,35 @@ prepare() {
   # Vendor crates offline against the committed lockfile (reproducible, and the
   # cargo crate fetch is the only build step that needs network — makepkg has it).
   export CARGO_HOME="${srcdir}/cargo-home"
-  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+  local rust_target="$(rustc -vV | sed -n 's/host: //p')"
+  cargo fetch --locked --target "${rust_target}"
+  cargo fetch --locked --target "${rust_target}" \
+    --manifest-path ../windows/src/engine/Cargo.toml
 }
 
 build() {
   cd "${srcdir}/FileID-${pkgver}/platforms/linux"
   export CARGO_HOME="${srcdir}/cargo-home"
+  export CARGO_TARGET_DIR="${PWD}/target"
   export RUSTUP_TOOLCHAIN=stable
   # Point ort at Arch's shared ONNX Runtime so `download-binaries` does not
   # fetch/link the portable static archive.
   export ORT_LIB_LOCATION=/usr/lib
   export ORT_PREFER_DYNAMIC_LINK=1
 
-  # The GTK app + the engine binary it spawns. -p selects the engine
-  # path-dependency package from the workspace graph.
+  # The GTK app and the engine binary it spawns.
   cargo build --release --frozen
-  cargo build --release --frozen -p fileid-engine --bin FileIDEngine
+  cargo build --release --frozen --manifest-path ../windows/src/engine/Cargo.toml --bin FileIDEngine
 }
 
 check() {
   cd "${srcdir}/FileID-${pkgver}/platforms/linux"
   export CARGO_HOME="${srcdir}/cargo-home"
+  export CARGO_TARGET_DIR="${PWD}/target"
   export RUSTUP_TOOLCHAIN=stable
   export ORT_LIB_LOCATION=/usr/lib
   export ORT_PREFER_DYNAMIC_LINK=1
-  cargo test --frozen -p fileid-engine --lib
+  cargo test --frozen --manifest-path ../windows/src/engine/Cargo.toml --lib
 }
 
 package() {

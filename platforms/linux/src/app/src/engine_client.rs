@@ -26,8 +26,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use fileid_engine::ipc::{
     CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanPhase, ScanProgress, StartScanPayload,
@@ -104,6 +105,61 @@ pub struct QuerySpec {
     pub limit: i64,
 }
 
+struct QueryJob {
+    spec: QuerySpec,
+    reply: Sender<(Vec<FileRow>, i64)>,
+}
+
+struct QueryWorkerState {
+    latest: Mutex<Option<QueryJob>>,
+    ready: Condvar,
+    stopping: AtomicBool,
+}
+
+impl QueryWorkerState {
+    fn submit(&self, job: QueryJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            return;
+        }
+        *self.latest.lock().expect("query queue poisoned") = Some(job);
+        self.ready.notify_one();
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        self.latest.lock().expect("query queue poisoned").take();
+        self.ready.notify_all();
+    }
+}
+
+fn spawn_query_worker() -> Arc<QueryWorkerState> {
+    let state = Arc::new(QueryWorkerState {
+        latest: Mutex::new(None),
+        ready: Condvar::new(),
+        stopping: AtomicBool::new(false),
+    });
+    let worker_state = state.clone();
+    thread::spawn(move || loop {
+        let job = {
+            let mut latest = worker_state.latest.lock().expect("query queue poisoned");
+            while latest.is_none() && !worker_state.stopping.load(Ordering::Acquire) {
+                latest = worker_state
+                    .ready
+                    .wait(latest)
+                    .expect("query queue poisoned");
+            }
+            if worker_state.stopping.load(Ordering::Acquire) {
+                return;
+            }
+            latest.take()
+        };
+        let Some(job) = job else { continue };
+        let result = run_query(&job.spec).unwrap_or_default();
+        let _ = job.reply.send_blocking(result);
+    });
+    state
+}
+
 const RESPAWN_CAP: u32 = 5;
 const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
@@ -124,6 +180,7 @@ pub struct EngineClient {
     subscribers: Vec<Sender<EngineEvent>>,
     /// Thumbnail worker request channel.
     thumb_tx: Option<Sender<ThumbJob>>,
+    query_worker: Arc<QueryWorkerState>,
     next_id: u64,
     respawns: u32,
     models_busy: bool,
@@ -146,6 +203,7 @@ impl EngineClient {
             raw_rx: Some(raw_rx),
             subscribers: Vec::new(),
             thumb_tx: None,
+            query_worker: spawn_query_worker(),
             next_id: 0,
             respawns: 0,
             models_busy: false,
@@ -170,9 +228,20 @@ impl EngineClient {
         self.ready = false;
         self.subscribers.clear();
         self.thumb_tx.take();
+        self.query_worker.stop();
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
             thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(36);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) if Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
                 let _ = child.kill();
                 let _ = child.wait();
             });
@@ -295,17 +364,10 @@ impl EngineClient {
         Ok(())
     }
 
-    /// Run a Library query off the main loop. Returns a oneshot receiver the
-    /// caller awaits via `spawn_local`; the payload is `(rows, total_matches)`
-    /// so the UI can say "showing N of M" when the LIMIT truncates. Each query
-    /// opens a fresh read-only connection (cheap, WAL-safe, and tolerant of
-    /// the DB not existing yet).
+    /// Queue a Library read on the single latest-request-wins query worker.
     pub fn query_files(&self, spec: QuerySpec) -> Receiver<(Vec<FileRow>, i64)> {
-        let (tx, rx) = async_channel::bounded::<(Vec<FileRow>, i64)>(1);
-        thread::spawn(move || {
-            let result = run_query(&spec).unwrap_or_default();
-            let _ = tx.send_blocking(result);
-        });
+        let (reply, rx) = async_channel::bounded::<(Vec<FileRow>, i64)>(1);
+        self.query_worker.submit(QueryJob { spec, reply });
         rx
     }
 
@@ -937,6 +999,38 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    #[test]
+    fn shutdown_allows_engine_to_exit_after_stdin_eof() {
+        let marker = std::env::temp_dir().join(format!(
+            "fileid-linux-graceful-shutdown-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let mut child = Command::new("sh")
+            .args(["-c", "cat >/dev/null; printf graceful > \"$FILEID_MARKER\""])
+            .env("FILEID_MARKER", &marker)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut client = EngineClient::new();
+        client.stdin = Some(Arc::new(Mutex::new(stdin)));
+        client.child = Some(child);
+
+        client.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            marker.exists(),
+            "shutdown killed the engine before graceful EOF handling"
+        );
+        let _ = std::fs::remove_file(marker);
+    }
+
     fn no_op_job(path: String) -> (ThumbJob, Receiver<Option<DecodedImage>>) {
         let (reply, rx) = async_channel::bounded(1);
         (
@@ -976,6 +1070,40 @@ mod tests {
             BoundedLine::Oversize
         ));
         assert!(frame.is_empty());
+    }
+
+    #[test]
+    fn query_queue_is_bounded_and_latest_request_wins() {
+        let state = QueryWorkerState {
+            latest: Mutex::new(None),
+            ready: Condvar::new(),
+            stopping: AtomicBool::new(false),
+        };
+        let (first_reply, first_rx) = async_channel::bounded(1);
+        state.submit(QueryJob {
+            spec: QuerySpec {
+                search: "first".into(),
+                kind: None,
+                limit: 10,
+            },
+            reply: first_reply,
+        });
+        let (second_reply, _second_rx) = async_channel::bounded(1);
+        state.submit(QueryJob {
+            spec: QuerySpec {
+                search: "second".into(),
+                kind: None,
+                limit: 10,
+            },
+            reply: second_reply,
+        });
+
+        assert!(matches!(
+            first_rx.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        ));
+        let latest = state.latest.lock().unwrap();
+        assert_eq!(latest.as_ref().unwrap().spec.search, "second");
     }
 
     #[test]

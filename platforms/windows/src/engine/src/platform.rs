@@ -1042,6 +1042,59 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // it no matter which Tokio worker runs Drop.
 
 /// RAII guard. While alive, prevents Windows from sleeping the system.
+/// Configure a Linux helper as a process-group leader and have the kernel kill
+/// it if the engine disappears before normal cleanup can run.
+#[cfg(target_os = "linux")]
+pub(crate) fn configure_child_lifetime(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    let parent_pid = unsafe { libc::getpid() };
+    command.process_group(0);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn configure_child_lifetime(_command: &mut std::process::Command) {}
+
+pub(crate) fn terminate_child_tree(child: &mut std::process::Child) {
+    #[cfg(target_os = "linux")]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn start_kill_tokio_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.start_kill();
+}
+
+pub(crate) async fn terminate_tokio_child_tree(child: &mut tokio::process::Child) {
+    start_kill_tokio_child_tree(child);
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+}
+
 /// Drop = release the assertion. The set and clear both run on a dedicated
 /// owned thread so the thread-scoped assertion is released on the same thread
 /// that armed it, independent of which Tokio worker polls/drops the guard.
@@ -1056,6 +1109,8 @@ pub struct SleepGuard {
     // the shell/* backends — a headless box without logind just isn't inhibited).
     #[cfg(target_os = "linux")]
     child: Option<std::process::Child>,
+    #[cfg(target_os = "linux")]
+    inhibit_stdin: Option<std::process::ChildStdin>,
 }
 
 impl SleepGuard {
@@ -1101,7 +1156,7 @@ impl SleepGuard {
     }
 
     // Linux: hold a logind sleep+idle inhibitor for the guard's lifetime by
-    // keeping a `systemd-inhibit … sleep infinity` child alive. This is the
+    // keeping a `systemd-inhibit … cat` child alive over a private stdin pipe. This is the
     // documented, dependency-free way to block suspend without linking libsystemd
     // (mirrors the shell/* subprocess backends). Best-effort: if systemd-inhibit
     // is missing or spawn fails (no logind, e.g. a bare container), the guard is
@@ -1110,24 +1165,24 @@ impl SleepGuard {
     #[cfg(target_os = "linux")]
     pub fn acquire() -> Self {
         use std::process::{Command, Stdio};
-        let child = Command::new("systemd-inhibit")
+        let mut command = Command::new("systemd-inhibit");
+        command
             .args([
                 "--what=sleep:idle",
                 "--who=FileID",
                 "--why=Scanning your library",
                 "--mode=block",
-                // The held command: sleep forever. Killing this child on drop
-                // releases the inhibitor lock. `sleep infinity` is coreutils
-                // (always present); systemd-inhibit waits on it.
-                "sleep",
-                "infinity",
+                // The held command exits on pipe EOF, including abrupt engine
+                // death, so no infinite descendant can be orphaned.
+                "cat",
             ])
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok();
-        Self { child }
+            .stderr(Stdio::null());
+        configure_child_lifetime(&mut command);
+        let mut child = command.spawn().ok();
+        let inhibit_stdin = child.as_mut().and_then(|process| process.stdin.take());
+        Self { child, inhibit_stdin }
     }
 
     #[cfg(all(not(windows), not(target_os = "linux")))]
@@ -1141,9 +1196,9 @@ impl Drop for SleepGuard {
         // lets the machine sleep normally again. Best-effort — if the child
         // already exited there's nothing to release. `wait` reaps the zombie so
         // long-running engines don't leak defunct children across many scans.
+        drop(self.inhibit_stdin.take());
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child_tree(&mut child);
         }
     }
 }

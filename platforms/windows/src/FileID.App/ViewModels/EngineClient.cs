@@ -632,12 +632,26 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     return;
                 }
             }
-            // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
-            // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
-            // the startup (UI) thread before the first frame, and again on every
-            // crash-respawn. await Task.Run keeps the security gate (the spawn still
-            // waits for the verdict) while unblocking first paint; the continuation
-            // resumes on the UI thread. (audit Pc / H11)
+            FileStream? spawnPin = null;
+            try
+            {
+                if (requireSignedEngine)
+                {
+                    spawnPin = await Task.Run(() =>
+                        new FileStream(enginePath, FileMode.Open, FileAccess.Read, FileShare.Read));
+                }
+            }
+            catch (Exception ex)
+            {
+                CrashReason = "Engine binary could not be pinned for signature verification: " + ex.Message;
+                State = LifecycleState.Crashed;
+                DebugLog.Error("EngineClient: engine pin failed — refusing to verify or spawn.");
+                return;
+            }
+            using var spawnPinLease = spawnPin;
+
+            // The deny-write/delete lease is acquired before path verification and
+            // kept until Process.Start has opened the same image.
             var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
                 enginePath,
                 expectedThumbprintHex: expectedThumb,
@@ -673,62 +687,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     break;
             }
 
-            // SEC: TOCTOU mitigation. Hash the binary AFTER WinVerifyTrust
-            // returned its verdict, then re-hash + compare immediately
-            // before Process.Start. If a privileged adversary swaps the
-            // engine binary between Verify and spawn, the post-spawn hash
-            // diverges and we abort. Skipped in dev because Visual Studio
-            // rebuilds change the hash legitimately.
-            byte[]? preSpawnHash = null;
-            if (requireSignedEngine)
-            {
-                try
-                {
-                    // Off the UI thread — hashing a ~95 MB engine binary inline
-                    // would stutter the UI.
-                    preSpawnHash = await Task.Run(() =>
-                    {
-                        using var sha = System.Security.Cryptography.SHA256.Create();
-                        using var fs = System.IO.File.OpenRead(enginePath);
-                        return sha.ComputeHash(fs);
-                    });
-                }
-                catch (Exception ex)
-                {
-                    CrashReason = "Pre-spawn binary hash failed: " + ex.Message;
-                    State = LifecycleState.Crashed;
-                    DebugLog.Error("EngineClient: pre-spawn hash failed — refusing to spawn.");
-                    return;
-                }
-            }
-
+            Process? p = null;
             try
             {
-                // Re-hash + compare immediately before Process.Start.
-                if (preSpawnHash is not null)
-                {
-                    try
-                    {
-                        using var sha = System.Security.Cryptography.SHA256.Create();
-                        using var fs = System.IO.File.OpenRead(enginePath);
-                        var nowHash = sha.ComputeHash(fs);
-                        if (!System.Linq.Enumerable.SequenceEqual(preSpawnHash, nowHash))
-                        {
-                            CrashReason = "Engine binary changed between Verify and spawn — refusing.";
-                            State = LifecycleState.Crashed;
-                            DebugLog.Error("EngineClient: TOCTOU detected on engine binary — refusing to spawn.");
-                            return;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        CrashReason = "Post-verify hash failed: " + ex.Message;
-                        State = LifecycleState.Crashed;
-                        DebugLog.Error("EngineClient: post-verify hash failed — refusing to spawn.");
-                        return;
-                    }
-                }
-
                 var psi = new ProcessStartInfo
                 {
                     FileName = enginePath,
@@ -737,14 +698,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     CreateNoWindow = true,
-                    // `System.Text.Encoding.UTF8` is the
-                    // BOM-prefixing variant. On first write its
-                    // StreamWriter pushes three bytes (`EF BB BF`) into
-                    // the engine's stdin, which trips serde_json with
-                    // "expected value at line 1 column 1" and used to
-                    // surface as a red toast on every cold launch. The
-                    // explicit `new UTF8Encoding(false)` is identical
-                    // UTF-8 minus the preamble.
+                    // Engine stdin is BOM-free NDJSON.
                     StandardInputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     StandardOutputEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
                     StandardErrorEncoding = new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
@@ -765,8 +719,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     psi.Environment["FILEID_RESTRUCTURE_GRANULARITY"] = granularity;
                 }
 
-                var p = Process.Start(psi)
-                        ?? throw new InvalidOperationException("Process.Start returned null");
+                p = Process.Start(psi)
+                    ?? throw new InvalidOperationException("Process.Start returned null");
                 _process = p;
                 _stdin = p.StandardInput;
 
@@ -776,15 +730,32 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, generation, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
-                // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
-                // events — otherwise a process that exits in the gap between
-                // these two statements raises (and drops) Exited before the
-                // handler is attached, and the crash respawn never fires.
+                // Subscribe before enabling events so an immediate exit is observed.
                 p.Exited += OnProcessExited;
                 p.EnableRaisingEvents = true;
             }
             catch (Exception ex)
             {
+                if (p is not null)
+                {
+                    try
+                    {
+                        if (!p.HasExited)
+                        {
+                            p.Kill(entireProcessTree: true);
+                            p.WaitForExit(5_000);
+                        }
+                    }
+                    catch { }
+                    if (ReferenceEquals(_process, p))
+                    {
+                        Cleanup();
+                    }
+                    else
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
                 DebugLog.Error("EngineClient.StartAsync failed: " + ex.Message);
                 CrashReason = ex.Message;
                 State = LifecycleState.Crashed;
@@ -1172,6 +1143,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         LastError = null;
         IsPaused = false;
         _scanStartedAt = null;
+        Interlocked.Increment(ref _scanControlRevision);
         _shownPhaseRank = -1;
         _lastProgressEmit = DateTime.MinValue;
         _lastProgressPhase = null;
@@ -1254,6 +1226,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // (RestructureView's apply single-flight) compare generations to detect
         // that the owning engine is gone and its result will never arrive.
         Interlocked.Increment(ref _spawnGeneration);
+        _ui.TryEnqueue(() => PropertyChanged?.Invoke(
+            this, new PropertyChangedEventArgs(nameof(SpawnGeneration))));
     }
 
     public void Dispose()
@@ -1484,6 +1458,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // numbers linger after the user hits Cancel mid-scan.
                         if (pc.Phase == ScanPhase.Cancelled)
                         {
+                            Interlocked.Increment(ref _scanControlRevision);
                             IsPaused = false;
                             _scanStartedAt = null;
                             LastProgress = null;
@@ -1518,6 +1493,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case ScanCompleteEvent sce:
                         ObserveAuthoritativeScanEvent(generation);
+                        Interlocked.Increment(ref _scanControlRevision);
                         // Authoritative final count for the completed-scan summary
                         // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;

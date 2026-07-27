@@ -145,10 +145,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeStarting):
+                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
                 case nameof(EngineClient.LastFaceClustering):
                 case nameof(EngineClient.FaceClusteringInFlight):
+                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
             }

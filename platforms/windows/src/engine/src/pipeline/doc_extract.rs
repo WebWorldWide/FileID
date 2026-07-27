@@ -2,8 +2,6 @@
 //! docx, pptx, xlsx) and — when the `pdf-analyze` feature is on — text-layer
 //! PDFs via pdfium. Image-only PDFs (no text layer) continue to flow through
 //! the existing `shell::ocr` path for OCR.
-#![allow(dead_code)] // wired into run_decoder_thread for FileKind::Doc / FileKind::Pdf.
-
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 

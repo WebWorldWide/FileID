@@ -17,12 +17,14 @@ internal static class DebugLog
 {
     private const long MaxLogBytes = 10 * 1024 * 1024;
     private static readonly object s_writeLock = new();
-    // NOTE: writes are intentionally SYNCHRONOUS. An async/batched sink was tried
-    // (audit P2) but the fix re-audit caught that it loses the last <200 ms of
-    // lines on a NATIVE fast-fail — exactly the [APPLY:N]/[ENGINE-SUB] tail this
-    // log exists to capture (CLAUDE.md marks it load-bearing). Any future
-    // off-thread sink MUST preserve per-line durability (e.g. a persistent
-    // flushed StreamWriter), verified on hardware. Do not re-batch naively.
+    private static readonly Encoding s_utf8NoBom = new UTF8Encoding(false);
+    private static FileStream? s_logStream;
+    private static StreamWriter? s_logWriter;
+    private static string? s_openPath;
+    private static long s_logBytes;
+
+    // Writes stay synchronous and per-line flushed because the final
+    // [APPLY:N]/[ENGINE-SUB] record is load-bearing after a native fast-fail.
 
     // Trace is the per-frame/per-tile firehose (e.g. [THUMB] on every scroll
     // realization). It is the ONE class of line whose SYNCHRONOUS locked file I/O
@@ -87,32 +89,66 @@ internal static class DebugLog
     {
         try
         {
-            AppPaths.EnsureDirectories();
-            var path = AppPaths.AppLogPath;
             var stamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
             var line = $"{stamp} {level} [tid {Environment.CurrentManagedThreadId}] {message}\n";
-            // Synchronous + flushed: a native fast-fail must not lose the last
-            // forensic line (see the field note above). The oversize-truncation
-            // check + rewrite MUST share s_writeLock with the append — when run
-            // outside the lock they race a concurrent locked append and, once the
-            // log passes the cap, silently drop the very forensic tail this log
-            // exists to capture.
             lock (s_writeLock)
             {
-                // Bound disk usage by truncating when oversized.
-                var info = new FileInfo(path);
-                if (info.Exists && info.Length > MaxLogBytes)
+                AppPaths.EnsureDirectories();
+                var path = AppPaths.AppLogPath;
+                EnsureWriter(path);
+                var lineBytes = s_utf8NoBom.GetByteCount(line);
+                if (s_logBytes > MaxLogBytes)
                 {
-                    File.WriteAllText(path, "[log truncated; oversized]\n");
+                    ResetWriter();
+                    using (var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                    using (var writer = new StreamWriter(stream, s_utf8NoBom))
+                    {
+                        writer.Write("[log truncated; oversized]\n");
+                        writer.Flush();
+                    }
+                    EnsureWriter(path);
                 }
-                File.AppendAllText(path, line, Encoding.UTF8);
+                s_logWriter!.Write(line);
+                s_logWriter.Flush();
+                s_logBytes += lineBytes;
             }
         }
         catch
         {
-            // Logging must never throw upstream. Disk-full / permission /
-            // antivirus quarantine all silently swallowed.
+            lock (s_writeLock)
+            {
+                ResetWriter();
+            }
         }
+    }
+
+    private static void EnsureWriter(string path)
+    {
+        if (s_logWriter is not null && string.Equals(s_openPath, path, StringComparison.Ordinal))
+        {
+            return;
+        }
+        ResetWriter();
+        s_logStream = new FileStream(
+            path,
+            FileMode.Append,
+            FileAccess.Write,
+            FileShare.ReadWrite,
+            bufferSize: 16 * 1024,
+            FileOptions.SequentialScan);
+        s_logWriter = new StreamWriter(s_logStream, s_utf8NoBom, bufferSize: 16 * 1024, leaveOpen: true);
+        s_openPath = path;
+        s_logBytes = s_logStream.Length;
+    }
+
+    private static void ResetWriter()
+    {
+        try { s_logWriter?.Dispose(); } catch { }
+        try { s_logStream?.Dispose(); } catch { }
+        s_logWriter = null;
+        s_logStream = null;
+        s_openPath = null;
+        s_logBytes = 0;
     }
 
     /// <summary>
@@ -169,19 +205,26 @@ internal static class DebugLog
             sb.Append("\n--- Last 50 lines of app.log ---\n");
             try
             {
-                if (File.Exists(AppPaths.AppLogPath))
+                var lines = new List<string>();
+                lock (s_writeLock)
                 {
-                    var lines = File.ReadAllLines(AppPaths.AppLogPath, Encoding.UTF8);
-                    var start = Math.Max(0, lines.Length - 50);
-                    for (int i = start; i < lines.Length; i++)
+                    s_logWriter?.Flush();
+                    using var stream = new FileStream(
+                        AppPaths.AppLogPath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    while (reader.ReadLine() is { } line)
                     {
-                        sb.Append(lines[i]);
-                        sb.Append('\n');
+                        lines.Add(line);
                     }
                 }
-                else
+                var start = Math.Max(0, lines.Count - 50);
+                for (int i = start; i < lines.Count; i++)
                 {
-                    sb.Append("(app.log not present)\n");
+                    sb.Append(lines[i]);
+                    sb.Append('\n');
                 }
             }
             catch (Exception readEx)

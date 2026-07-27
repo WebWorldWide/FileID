@@ -50,6 +50,10 @@ impl JobQueue {
         inner.on_change.push(Box::new(listener));
     }
 
+    pub fn clear_listeners(&self) {
+        self.inner.lock().on_change.clear();
+    }
+
     /// Append a job to the pending list. Returns the job's ID.
     pub fn push(&self, category: JobCategory, title: impl Into<String>, eta_seconds: Option<f64>) -> JobId {
         let job = QueuedJob {

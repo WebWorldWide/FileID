@@ -8,9 +8,9 @@
 // TaggedFile with the missing fields = None).
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use sha2::Digest;
@@ -826,6 +826,27 @@ where
     }
 }
 
+static ACTIVE_DECODER_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn active_decoder_threads() -> usize {
+    ACTIVE_DECODER_THREADS.load(Ordering::Acquire)
+}
+
+struct DecoderThreadGuard;
+
+impl DecoderThreadGuard {
+    fn enter() -> Self {
+        ACTIVE_DECODER_THREADS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for DecoderThreadGuard {
+    fn drop(&mut self) {
+        ACTIVE_DECODER_THREADS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub struct Tagger {
     coordinator: ScanCoordinator,
     worker_count: usize,
@@ -869,7 +890,10 @@ impl Tagger {
     /// decoder threads saturate available cores ahead of inference,
     /// keeping a warm buffer of pre-decoded frames so workers never wait
     /// on the CPU-bound path.
-    pub fn spawn(self, mut input: mpsc::Receiver<DiscoveredFile>) -> mpsc::Receiver<TaggedFile> {
+    pub fn spawn(
+        self,
+        mut input: mpsc::Receiver<DiscoveredFile>,
+    ) -> (mpsc::Receiver<TaggedFile>, tokio::task::JoinHandle<()>) {
         // Reset per-scan stats so each session's [STATS] log reflects only
         // that session — not a running blend across multiple scans this process
         // has performed. All STATS_* are process-global AtomicU64s.
@@ -899,12 +923,21 @@ impl Tagger {
         let (raw_tx, raw_rx) = async_channel::bounded::<DiscoveredFile>(TAGGING_CHANNEL_CAP);
         let coordinator_pump = self.coordinator.clone();
         tokio::spawn(async move {
-            while let Some(file) = input.recv().await {
-                if coordinator_pump.is_cancelled() {
-                    break;
-                }
-                if raw_tx.send(file).await.is_err() {
-                    break;
+            loop {
+                let file = tokio::select! {
+                    value = input.recv() => match value {
+                        Some(value) => value,
+                        None => break,
+                    },
+                    _ = coordinator_pump.wait_cancelled() => break,
+                };
+                tokio::select! {
+                    result = raw_tx.send(file) => {
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    _ = coordinator_pump.wait_cancelled() => break,
                 }
             }
         });
@@ -972,6 +1005,7 @@ impl Tagger {
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
         let byte_budget = PredecodeBudget::new(predecode_budget_mb * 1024 * 1024);
+        let mut decoder_handles = Vec::with_capacity(decoder_count);
         for decoder_idx in 0..decoder_count {
             let rx = raw_rx.clone();
             let tx = predecoded_tx.clone();
@@ -980,18 +1014,24 @@ impl Tagger {
             let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
                 .spawn(move || run_decoder_thread(rx, tx, coord, budget));
-            if let Err(e) = spawn_result {
-                // Don't panic mid-scan if the OS refuses a new thread (handle or
-                // memory pressure on a very large library). Log and continue with
-                // the decoders that did start; rx/tx/coord drop here, which is
-                // safe (the channels just have one fewer consumer/producer).
-                tracing::warn!(
-                    "fileid-decode-{decoder_idx} failed to spawn ({e}); continuing with fewer decode threads"
-                );
+            match spawn_result {
+                Ok(handle) => decoder_handles.push(handle),
+                Err(e) => {
+                    tracing::warn!(
+                        "fileid-decode-{decoder_idx} failed to spawn ({e}); continuing with fewer decode threads"
+                    );
+                }
             }
         }
         drop(raw_rx);
         drop(predecoded_tx);
+        let decoder_join = tokio::task::spawn_blocking(move || {
+            for handle in decoder_handles {
+                if let Err(payload) = handle.join() {
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        });
 
         // P3: derive the GPU-inference concurrency caps from the active EP. On
         // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
@@ -1044,7 +1084,14 @@ impl Tagger {
                 // multi-hour scans friendly to an actively-used desktop.
                 const YIELD_AFTER: u64 = 500;
                 let mut files_done: u64 = 0;
-                while let Ok(predecoded) = rx.recv().await {
+                loop {
+                    let predecoded = tokio::select! {
+                        received = rx.recv() => match received {
+                            Ok(value) => value,
+                            Err(_) => break,
+                        },
+                        _ = coord.wait_cancelled() => break,
+                    };
                     if coord.check().await.is_err() {
                         break;
                     }
@@ -1053,8 +1100,8 @@ impl Tagger {
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
                     let timeout_created = predecoded.file.created_unix;
-                    // Per-file timeout — image decoders or network UNC reads
-                    // can hang indefinitely.
+                    // Bounds async inference after decoding; platform decoder
+                    // calls enforce their own limits where the OS permits.
                     let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
                     let tagged = match tokio::time::timeout(
                         std::time::Duration::from_secs(60),
@@ -1120,7 +1167,7 @@ impl Tagger {
         }
 
         drop(out_tx);
-        out_rx
+        (out_rx, decoder_join)
     }
 }
 
@@ -1245,22 +1292,30 @@ fn decode_reserved<T>(
 
 /// Decoder-pool worker. Sync OS thread (not a tokio task) so the
 /// blocking JPEG/PNG decode doesn't tie up tokio's runtime threads.
-/// Pulls from the raw discovery channel via `recv_blocking()` and pushes
-/// into the pre-decoded channel via `send_blocking()`. Exits cleanly
-/// when the input channel closes or the coordinator is cancelled.
+/// Polls the raw discovery channel so cancellation wakes idle workers, then
+/// pushes into the pre-decoded channel via `send_blocking()`.
 fn run_decoder_thread(
     rx: async_channel::Receiver<DiscoveredFile>,
     tx: async_channel::Sender<PreDecoded>,
     coord: ScanCoordinator,
     budget: Arc<PredecodeBudget>,
 ) {
+    let _thread_guard = DecoderThreadGuard::enter();
     loop {
         if coord.is_cancelled() {
             return;
         }
-        let file = match rx.recv_blocking() {
-            Ok(f) => f,
-            Err(_) => return,
+        let file = loop {
+            match rx.try_recv() {
+                Ok(file) => break file,
+                Err(async_channel::TryRecvError::Closed) => return,
+                Err(async_channel::TryRecvError::Empty) => {
+                    if coord.is_cancelled() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         };
         // Trace-gated forensics: a native crash never reaches the log as a
         // Rust panic, so the last "decode start" lines name the in-flight
@@ -1485,7 +1540,7 @@ fn run_decoder_thread(
             // reservation immediately instead of riding the channel.
             budget_guard = None;
         }
-        let item = PreDecoded {
+        let mut item = PreDecoded {
             file,
             decoded,
             doc_text,
@@ -1494,8 +1549,18 @@ fn run_decoder_thread(
             exif: exif_data,
             budget: budget_guard,
         };
-        if tx.send_blocking(item).is_err() {
-            return;
+        loop {
+            if coord.is_cancelled() {
+                return;
+            }
+            match tx.try_send(item) {
+                Ok(()) => break,
+                Err(async_channel::TrySendError::Closed(_)) => return,
+                Err(async_channel::TrySendError::Full(returned)) => {
+                    item = returned;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }
@@ -2767,7 +2832,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let models = Arc::new(ModelStack::empty());
         let tagger = Tagger::new(coord, 2, models);
-        let mut out = tagger.spawn(rx);
+        let (mut out, decoder_join) = tagger.spawn(rx);
 
         tx.send(DiscoveredFile {
             path: PathBuf::from("C:/tmp/a.jpg"),
@@ -2791,6 +2856,8 @@ mod tests {
         assert_eq!(got.kind, FileKind::Image);
         // File doesn't exist, decode failed → marked failed.
         assert!(got.failed);
+        drop(out);
+        decoder_join.await.unwrap();
     }
 
     #[test]
@@ -2925,6 +2992,61 @@ mod tests {
         coord.request_cancel();
         let budget = PredecodeBudget::new(100);
         assert!(budget.acquire(50, &coord).is_none());
+    }
+
+    #[test]
+    fn decoder_blocked_on_full_output_exits_on_cancel() {
+        let (raw_tx, raw_rx) = async_channel::bounded(2);
+        let (predecoded_tx, _predecoded_rx) = async_channel::bounded(1);
+        let coord = ScanCoordinator::new();
+        let worker_coord = coord.clone();
+        let budget = PredecodeBudget::new(1024);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget);
+            let _ = done_tx.send(());
+        });
+        for index in 0..2 {
+            raw_tx
+                .send_blocking(DiscoveredFile {
+                    path: PathBuf::from(format!("missing-{index}.bin")),
+                    kind: FileKind::Other,
+                    size_bytes: 0,
+                    modified_unix: 0.0,
+                    created_unix: None,
+                    online_only: true,
+                    file_ref: None,
+                })
+                .unwrap();
+        }
+
+        std::thread::sleep(Duration::from_millis(30));
+        coord.request_cancel();
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("full decoder output queue must remain cancellation-aware");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn idle_decoder_exits_on_cancel_while_discovery_sender_stays_open() {
+        let (_raw_tx, raw_rx) = async_channel::bounded(1);
+        let (predecoded_tx, _predecoded_rx) = async_channel::bounded(1);
+        let coord = ScanCoordinator::new();
+        let worker_coord = coord.clone();
+        let budget = PredecodeBudget::new(1024);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget);
+            let _ = done_tx.send(());
+        });
+
+        std::thread::sleep(Duration::from_millis(20));
+        coord.request_cancel();
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("idle decoder must observe cancellation without channel closure");
+        worker.join().unwrap();
     }
 
     #[test]

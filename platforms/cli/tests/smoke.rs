@@ -79,6 +79,27 @@ fn runtime_install_json_abort_and_no_source_are_machine_safe() {
 }
 
 #[test]
+fn restricted_model_json_mode_is_single_result_and_noninteractive() {
+    let models = unique_dir("restricted-json").join("Models");
+    let out = Command::new(bin())
+        .args(["--json", "models", "download", "gemma_3_4b", "--yes"])
+        .env("FILEID_MODELS_DIR", &models)
+        .output()
+        .expect("spawn restricted model command");
+
+    assert!(!out.status.success());
+    let value = json(&out);
+    assert_eq!(value["error"], "license_acceptance_required");
+    assert_eq!(value["policy"], "Gemma");
+    assert!(!models
+        .parent()
+        .unwrap()
+        .join("model-licenses.json")
+        .exists());
+    let _ = std::fs::remove_dir_all(models.parent().unwrap());
+}
+
+#[test]
 fn scan_then_search_then_info_model_free() {
     let corpus = unique_dir("corpus");
     let dbdir = unique_dir("db");

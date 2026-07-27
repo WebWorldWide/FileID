@@ -33,7 +33,7 @@
 //   - Unsupported file kinds: skipped early so tagging workers don't
 //     waste work
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -184,7 +184,7 @@ pub struct Discovery {
     /// User-excluded folders in `normalize_for_exclusion` form. The walk
     /// prunes an excluded directory at its parent's read_dir, so equality
     /// matching suffices — nothing beneath it is ever visited.
-    exclusions: Arc<Vec<String>>,
+    exclusions: Arc<HashSet<String>>,
 }
 
 /// Handle returned from `Discovery::spawn`. `count` is a live counter the
@@ -237,7 +237,7 @@ impl Discovery {
             root: root.into(),
             coordinator,
             skip_paths,
-            exclusions,
+            exclusions: Arc::new(exclusions.iter().cloned().collect()),
         }
     }
 

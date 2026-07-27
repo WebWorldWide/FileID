@@ -17,6 +17,17 @@ Flatpak is primary because it carries a stable GTK/libadwaita runtime while the
 application remains native GTK4. The current GNOME 49 runtime is backward
 compatible with the app's GTK 4.14/libadwaita 1.5 API floor.
 
+## Deep Analyze runtime
+
+The packages install FileID's engine and model downloader, but they do not yet
+bundle a reviewed llama.cpp executable. Scan tags, faces, CLIP search, Cleanup,
+and Restructure are unaffected. Deep Analyze is currently unavailable in the
+Flatpak because a host executable is not visible inside the sandbox. AppImage,
+AUR, Nix, and source builds require a compatible `llama-mtmd-cli` on the
+launched process's `PATH`. No optional package dependency is declared until a
+package providing the required executable/version is verified. The GTK model
+picker discloses this before users download VLM weights.
+
 ## Flatpak source integrity
 
 `flatpak/io.github.fileid.FileID.yaml` gives the build sandbox no network

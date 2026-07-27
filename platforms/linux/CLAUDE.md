@@ -57,11 +57,12 @@ Packaging (Flatpak / AppImage / Nix manifests) lives at the repo-root
 
 ## App structure (current)
 
-**All six tabs are implemented and runtime-verified** (Library · People · Cleanup ·
-Deep Analyze · Restructure · Settings) — 1:1 ports of the macOS views over the shared
-engine, walked end-to-end under WSLg (+ an earlier on-hardware pass). The **`fileid`
-CLI and `fileid-tui`** (sibling crates `platforms/cli`, `platforms/tui`) run the same
-engine headlessly on Linux, including full-ML `scan --models`.
+**All six tabs are implemented and exercised under WSLg** (Library · People · Cleanup ·
+Deep Analyze · Restructure · Settings) as ports of the macOS views over the shared
+engine. Deep Analyze VLMs require a compatible `llama-mtmd-cli` on `PATH`; current
+AUR/Nix packages do not bundle it. The **`fileid` CLI and `fileid-tui`** (sibling
+crates `platforms/cli`, `platforms/tui`) run the same engine headlessly on Linux,
+including full-ML `scan --models`.
 
 - **Design system** (`theme.rs`): one `gtk::CssProvider` carries the brand
   palette as `@define-color` tokens + the reusable classes — `.glass-card`
@@ -135,13 +136,13 @@ finds it). The repo-root `build.sh -linux` delegates here.
 - **Engine crate**: `platforms/windows/src/engine/` is the canonical location today. The Linux app references it via Cargo `path = "../../windows/src/engine"`. **TODO**: move to `shared/engine/` so neither platform "owns" the engine. Captured in `shared/docs/NEXT.md`.
 - **IPC schema**: `shared/ipc-schema/ipc.schema.json` is the contract. Both the engine and the GTK app generate types from it (engine via existing `IpcCommand`/`IpcEvent` enums; GTK app via `serde_json` against schema-shaped Rust structs).
 
-## Linux-specific TODOs (open work)
+## Linux-specific release status
 
-These are blockers for full feature parity on Linux but not for the scaffold. See `shared/docs/NEXT.md` for the schedule.
+See `shared/docs/NEXT.md` for native packaging and hardware validation gates.
 
 | Module | Linux implementation | Status |
 |---|---|---|
-| `shell/trash` | freedesktop Trash spec via `std::fs` (move to `$XDG_DATA_HOME/Trash/files/` + `.trashinfo`, collision suffixing, `EXDEV` copy-fallback) | **Done** (no crate) |
+| `shell/trash` | freedesktop Trash spec via `std::fs` (move to `$XDG_DATA_HOME/Trash/files/` + `.trashinfo`, collision suffixing); `EXDEV` fails closed with the source untouched | **Done with filesystem boundary** (no crate) |
 | `shell/reveal` | DBus `org.freedesktop.FileManager1.ShowItems` via `dbus-send`/`gdbus`, `xdg-open` parent-dir fallback | **Done** (no crate) |
 | `shell/tags` | xattr `user.xdg.tags` (XDG standard) via libc `{set,get,list,remove}xattr` | **Done** (no crate) |
 | `shell/ocr` | `tesseract` CLI on a temp PPM, best-effort (empty when absent) | **Done** (no crate) |
@@ -154,7 +155,7 @@ The five "Done" backends are gated `#[cfg(target_os = "linux")]` in `platforms/w
 
 ### Done
 
-- **Restructure apply file-move + symlink fallback** — `pipeline/restructure_apply.rs` `move_file`/`make_symlink` now have a portable `#[cfg(not(windows))]` implementation (was previously a `requires Windows` bail). Real moves use `std::fs::rename` with a copy + `remove_file` fallback on `EXDEV` (cross-device, e.g. a NAS mount → local disk); the symlink ("use shortcuts") option uses `std::os::unix::fs::symlink`. Both create the destination parent on demand and refuse to clobber an existing destination (parity with the Windows `MoveFileExW`/`CreateSymbolicLinkW` path). cargo-verified on the macOS host (the not-windows arm compiles there); portable tests `move_file_relocates_creates_parent_and_refuses_clobber` + `make_symlink_creates_link_to_original` cover it.
+- **Restructure apply file-move + symlink fallback** — `pipeline/restructure_apply.rs` `move_file`/`make_symlink` have portable `#[cfg(not(windows))]` implementations. Same-filesystem moves use no-replace rename semantics; `EXDEV` fails closed with the source untouched because copy/delete cannot preserve every filesystem's metadata and atomicity guarantees. The symlink option uses `std::os::unix::fs::symlink`. Tests cover same-filesystem relocation/no-clobber, Linux cross-filesystem source preservation, and symlink creation.
 
 ## Working principles
 

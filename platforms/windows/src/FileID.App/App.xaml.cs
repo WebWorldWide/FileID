@@ -249,32 +249,70 @@ public partial class App : Application
             }
             AppViewModel.Instance.FolderPath = folderPath;
             DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
-            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay,
-                excludedPaths: AppViewModel.Instance.Settings.ExcludedFolders);
-            if (!exitAfterScan) return;
 
-            // Wait for ScanComplete by watching Phase transition to Completed
-            // (or Failed). PropertyChanged fires on whatever thread the
-            // engine event arrived on — don't touch XAML in the handler.
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+            var scanGeneration = EngineClient.Instance.SpawnGeneration;
+            TaskCompletionSource<bool>? terminal = null;
+            System.ComponentModel.PropertyChangedEventHandler? phaseHandler = null;
+            if (exitAfterScan)
             {
-                if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
-                var phase = EngineClient.Instance.Phase;
-                if (phase == FileID.IpcSchema.ScanPhase.Completed || phase == FileID.IpcSchema.ScanPhase.Failed)
+                terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                void ObserveTerminalPhase()
                 {
-                    tcs.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
+                    if (EngineClient.Instance.SpawnGeneration != scanGeneration
+                        || EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed)
+                    {
+                        terminal!.TrySetResult(false);
+                        return;
+                    }
+                    var phase = EngineClient.Instance.Phase;
+                    if (phase is FileID.IpcSchema.ScanPhase.Completed
+                        or FileID.IpcSchema.ScanPhase.Failed
+                        or FileID.IpcSchema.ScanPhase.Cancelled)
+                    {
+                        terminal!.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
+                    }
                 }
+                phaseHandler = (_, e) => DebugLog.SafeRun("App.AutoScan.TerminalChanged", () =>
+                {
+                    if (e.PropertyName is not nameof(ViewModels.EngineClient.Phase)
+                        and not nameof(ViewModels.EngineClient.State)
+                        and not nameof(ViewModels.EngineClient.SpawnGeneration))
+                    {
+                        return;
+                    }
+
+                    DebugLog.Debug($"[ENGINE-SUB:App.AutoScan] {e.PropertyName}");
+                    ObserveTerminalPhase();
+                });
+                EngineClient.Instance.PropertyChanged += phaseHandler;
             }
-            EngineClient.Instance.PropertyChanged += OnEngineChanged;
+
             try
             {
-                var ok = await tcs.Task;
+                await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay,
+                    excludedPaths: AppViewModel.Instance.Settings.ExcludedFolders);
+                if (!exitAfterScan) return;
+
+                var phase = EngineClient.Instance.Phase;
+                if (EngineClient.Instance.SpawnGeneration != scanGeneration
+                    || EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed
+                    || phase is FileID.IpcSchema.ScanPhase.Failed or FileID.IpcSchema.ScanPhase.Cancelled)
+                {
+                    terminal!.TrySetResult(false);
+                }
+                else if (phase == FileID.IpcSchema.ScanPhase.Completed)
+                {
+                    terminal!.TrySetResult(true);
+                }
+                var ok = await terminal!.Task.WaitAsync(TimeSpan.FromHours(12));
                 DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok}; closing window.");
             }
             finally
             {
-                EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+                if (phaseHandler is not null)
+                {
+                    EngineClient.Instance.PropertyChanged -= phaseHandler;
+                }
             }
             window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } });
         }

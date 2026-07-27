@@ -32,7 +32,7 @@
 
 Point FileID at a folder. It reads every file inside — images, video, PDFs, docs — and builds one searchable library that understands what's *in* them. Faces cluster into named cards. Duplicates group by perceptual hash. A local vision-language model writes captions and proposes filenames. Folder reorganization previews before anything moves on disk.
 
-**No cloud, no telemetry, ever.** The only network egress is user-initiated model downloads from HuggingFace. Apache-2.0, and every default model weight is permissively licensed — so FileID is free to be open-sourced *and* commercialized.
+**No cloud and no telemetry.** Model downloads are explicit user actions and the release policy requires Hugging Face-only egress; remaining runtime-mirror blockers are tracked in [`shared/docs/SHIP.md`](shared/docs/SHIP.md). FileID itself is Apache-2.0. Default weights are commercially usable under their upstream terms (mostly Apache-2.0/MIT; Gemma requires separate acceptance).
 
 ---
 
@@ -46,24 +46,24 @@ One command, every platform — from the repo root in any bash shell (Git Bash o
 ./build.sh -linux                      # Linux:   build + launch the GTK4 app
 ```
 
-Defaults build Release, stage a runnable copy at `~/Desktop/FileID/`, and launch. `./build.sh -windows` wipes your local install (including multi-GB model weights) — pass `--no-wipe` to iterate. Full build steps, flag tables, release packaging, and troubleshooting live in [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
+The platform scripts build Release and launch by default; Windows also stages a runnable copy at `~/Desktop/FileID/`. `./build.sh -windows` wipes your local install (including multi-GB model weights) — pass `--no-wipe` to iterate. Full build outputs, flags, packaging, and troubleshooting live in [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
 
 ---
 
 ## Features
 
-Six tabs, shared across every front-end:
+Six tabs across the three desktop apps:
 
 - **Library** — FTS5 search over filenames + OCR, semantic CLIP search ("a dog at the beach"), RAM++ auto-tagging, thumbnail grid + preview.
 - **People** — face clusters from on-device SFace embeddings; drag to merge, name a cluster once, and Deep Analyze captions use real names.
 - **Cleanup** — duplicate groups by perceptual hash; trashed files stay recoverable.
-- **Deep Analyze** — a local VLM (Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail.
+- **Deep Analyze** — a local VLM (Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. Linux packages do not yet bundle `llama-mtmd-cli`; Deep Analyze is unavailable in the Flatpak and requires a compatible runner visible on `PATH` for unsandboxed builds.
 - **Restructure** — folder reorganization with a Sankey flow diagram; apply as reversible shortcuts, then convert to real moves when you're happy.
 - **Settings** — model downloads, GPU acceleration picker, engine info, logs, privacy.
 
 On macOS, FileID writes **real Finder tags** (the system-wide `tagNamesKey` xattrs, not a private database), so they show up in the Finder sidebar, Smart Folders, and Spotlight — and "Undo last tags" removes only the tags FileID added, never your own.
 
-On first launch a **Welcome sheet** offers to install the on-device models (RAM++, CLIP ViT-B/32, YuNet + SFace, and a VLM for Deep Analyze). Every default weight is permissively licensed (Apache-2.0 / MIT) and downloads directly from its upstream HuggingFace repo — FileID never redistributes weights. Defer with "Skip for now" and install later from Settings → AI Models.
+On first launch a **Welcome sheet** offers the on-device scan/search models (RAM++, CLIP ViT-B/32, YuNet + SFace). macOS/Windows also offer a Deep Analyze VLM; Linux points to its separate VLM/runtime setup. Weights download from pinned upstream Hugging Face repositories and are never redistributed by FileID. Most use Apache-2.0/MIT; restricted models such as Gemma require explicit acceptance of separate upstream terms.
 
 ---
 
@@ -81,7 +81,7 @@ One engine, five clients — three native desktop GUIs and two terminal front-en
 
 The `fileid` CLI and `fileid-tui` read and write the *same* library as the desktop apps — no app required. See [**Using the CLI and TUI**](#using-the-cli-and-tui) for build, scan, and explore steps.
 
-macOS is the canonical visual + behavioral reference and ships every tab end-to-end; the Windows and Linux apps are feature-complete on the same six tabs and CI-green, with on-hardware polish ongoing. A library scanned on one platform opens on another (migrations are byte-faithful across engines). Per-phase status: [`shared/docs/SHIP.md`](shared/docs/SHIP.md).
+macOS is the canonical visual + behavioral reference. The Windows and Linux apps implement the same six tabs; platform hardware, packaging, signing, and hosted-CI release gates remain tracked in [`shared/docs/SHIP.md`](shared/docs/SHIP.md). A library scanned on one platform opens on another (migrations are byte-faithful across engines).
 
 ---
 
@@ -110,7 +110,7 @@ fileid dedupe --similar --db ~/fileid-test.sqlite
 fileid restructure --plan --db ~/fileid-test.sqlite
 ```
 
-> **Full ML scanning** (tags + faces + CLIP) via `--models` works on **all three platforms** (native Rust engine). Install the engine's own models once with **`fileid models download --all`** — on **macOS** these install under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML set. (Scanning with full ML in the FileID desktop app and exploring that library here also works.)
+> **Full ML scanning** (tags + faces + CLIP) via `--models` uses the native Rust engine on all three platforms. Install the two required models with **`fileid models download mobileclip_s2 arcface`**. `--all` also installs optional multi-GB Deep Analyze models and is not required for scanning. On **macOS** CLI weights live under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML set.
 
 On macOS, omit `--db` to browse your desktop app's library automatically — the primary CLI use there. Add `--json` for machine-readable output or `--quiet` to silence progress.
 
@@ -122,9 +122,9 @@ fileid-tui --db ~/fileid-test.sqlite
 
 Keys: **s** scan a folder (type the path, `Enter`) · **r** reload after a scan · **Tab** switch tabs · **/** search · **↑↓**/**jk** navigate · **q** quit. The TUI paints its own dark theme, so it stays readable on light terminals.
 
-The **s** scan drives the same full-ML engine as the CLI's `--models` on every platform: install the models once (press **D** on the Settings tab, or run `fileid models download --all`) and full-ML scanning works on **macOS too**. You can also index model-free with `fileid scan <folder>` (CLI), or browse an existing desktop-app library by pointing at it with `--db`.
+The **s** scan drives the same full-ML engine as the CLI's `--models`: install the required models once (press **D** on the Settings tab, or run `fileid models download mobileclip_s2 arcface`). You can also index model-free with `fileid scan <folder>` (CLI), or browse an existing desktop-app library by pointing at it with `--db`.
 
-**Safety.** Read-only by default. Destructive actions are gated behind explicit flags: `dedupe --apply` and `restructure --apply` only touch disk with that flag (add `--dry-run` to preview), and `dedupe --similar --apply` additionally requires `--yes`.
+**Safety.** Read-only by default. Destructive actions are gated behind explicit flags: `dedupe --apply` and `restructure --apply` only touch disk with that flag (add `--dry-run` to preview), and `dedupe --similar --apply` additionally requires `--yes`. On non-Windows systems, real Restructure moves must stay on one filesystem; cross-filesystem moves fail closed with the source untouched.
 
 Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`platforms/tui/README.md`](platforms/tui/README.md).
 
@@ -134,7 +134,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 > Clearly labeled unsigned prerelease artifacts are available on [GitHub Releases](https://github.com/WebWorldWide/FileID/releases). They are not public-trust signed. Build from source with the [Quickstart](#quickstart), or use the recipes in [`packaging/`](packaging/) ([`packaging/README.md`](packaging/README.md)).
 
-- **Linux** — Flatpak (primary; bundles a pinned GNOME runtime, so one build runs on Debian / Ubuntu / Arch / NixOS / Fedora), plus AppImage, a Nix flake, and an AUR `PKGBUILD`.
+- **Linux** — Flatpak and AppImage manifests, plus a Nix flake and AUR `PKGBUILD`; native clean-sandbox/ARM64 validation remains a release gate in `SHIP.md`.
 - **Windows** — `FileIDSetup.exe` embeds per-arch **.msi** installers (x64 + ARM64) and auto-picks the right one at install; build it with `publish-bundle.ps1`.
 - **macOS** — a `FileID.app` bundle for Apple Silicon; build it with `./build.sh -mac`.
 
@@ -144,7 +144,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 Each desktop app ships **two processes** that talk newline-delimited JSON over stdio: a native **UI** (SwiftUI / WinUI 3 / GTK4) and an engine (Swift on macOS, Rust on Windows/Linux) that owns the SQLite WAL database, scan pipeline, and ML inference. The split buys crash isolation — a panic in the ML pipeline restarts the engine, not the UI. CLI/TUI share the Rust engine library for local operations and spawn the engine for full-ML scans. The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), mirrored by hand-maintained Swift, Rust, and C# DTOs that per-language schema-conformance suites hold to the canonical schema.
 
-FileID picks the best GPU/NPU path per machine: DirectML across every Windows vendor, CUDA / OpenVINO / QNN Performance Packs opt-in, CoreML + ANE on Apple Silicon, and an AVX2/NEON CPU floor. Full design, the GPU matrix, and the ML-model stack: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md). Build, CI, and troubleshooting detail: [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
+FileID's release-approved Windows GPU path is DirectML across every vendor, with an AVX2/NEON CPU floor; CUDA / OpenVINO / QNN remain owner-provisioned development paths, not product Performance Packs. Apple Silicon uses CoreML + ANE. Full design, the GPU matrix, and the ML-model stack: [`shared/docs/ARCHITECTURE.md`](shared/docs/ARCHITECTURE.md). Build, CI, and troubleshooting detail: [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md).
 
 ---
 
@@ -183,7 +183,7 @@ Start with [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md) — setu
 
 ## License
 
-**Apache-2.0** — see [`LICENSE`](LICENSE). Every default model weight is permissively licensed (Apache-2.0 / MIT), so the project is free to be open-sourced *and* commercialized — no non-commercial weights in the shipped feature set. FileID downloads model weights at runtime and never redistributes them; they remain governed by their upstream licenses.
+**Apache-2.0** — see [`LICENSE`](LICENSE). Default model weights are commercially usable and contain no non-commercial-only set; most are Apache-2.0/MIT, while Gemma is governed by separately accepted Gemma terms. FileID downloads weights at runtime and never redistributes them; every weight remains governed by its upstream license or terms.
 
 ---
 

@@ -18,7 +18,7 @@ FileID/
 └── README.md
 ```
 
-All three desktop apps are feature-complete across six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings). macOS remains the **visual + behavioral reference**; the commercial-clean model stack is wired on every platform, with remaining on-hardware parity gates documented in `shared/docs/NEXT.md`.
+All three desktop apps implement six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings). macOS remains the **visual + behavioral reference**; the commercial-clean model stack is wired on every platform, with native hardware, packaging, signing, and hosted-CI release gates documented in `shared/docs/NEXT.md` and `shared/docs/SHIP.md`.
 
 ## Per-platform dev guides
 
@@ -30,7 +30,7 @@ Read the one for the work in front of you:
 ## Cross-platform principles (apply everywhere)
 
 - **No telemetry, ever.** No analytics, crash-reporting, update pings, or download instrumentation. The only network egress is user-initiated model downloads from `huggingface.co`. CI scans every shipped binary for telemetry strings as a release blocker. Never propose a feature that violates this.
-- **Commercial-clean, Apache-2.0.** The project is Apache-2.0 (root `LICENSE`); every default model weight is permissively licensed (Apache-2.0 / MIT) so the app can be open-sourced *and* commercialized. No non-commercial weights in the shipped set. New models go through `shared/docs/MODELS.md` with the license vetted.
+- **Commercial-clean, Apache-2.0 project.** FileID is Apache-2.0 (root `LICENSE`); the core weight stack is Apache-2.0/MIT, and no non-commercial-only weights may ship. Optional restricted models such as Gemma are commercially usable under separately accepted upstream terms. New models go through `shared/docs/MODELS.md` with the license and acceptance policy vetted.
 - **Performance is a feature.** Match or beat the macOS pipeline (≥140 files/s on comparable mid-tier hardware). Use the GPU/NPU when present; degrade gracefully to CPU.
 - **The IPC contract is the contract.** Anything new lands in `shared/ipc-schema/ipc.schema.json` first; the per-platform DTOs mirror it. Schema drift = build break.
 - **macOS is the visual reference; ports are 1:1.** Same palette (gold `#FFCC00`, lavender `#B19BCE`, cyan `#A0E2EA`, pink `#F2A6C0`), same springs (response 0.35–0.4 / dampingFraction 0.78–0.8), same `LavaLampBackground`. Native primitives per platform — never web tech.

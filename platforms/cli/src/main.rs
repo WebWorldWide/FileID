@@ -35,7 +35,7 @@ const HELP_FOOTER: &str = "\
 Examples:
   fileid scan ~/Pictures              fast index — names + text, no models needed
   fileid search \"invoice 2023\"        keyword-search the library
-  fileid models download --all        install the AI models (from huggingface.co)
+  fileid models download mobileclip_s2 arcface   install the required scan models
   fileid scan ~/Pictures --models     full AI scan — tags · faces · visual search
 
 AI scans need two models (mobileclip_s2 + arcface); see `fileid models list`.
@@ -298,7 +298,7 @@ fn intro() -> &'static str {
      fileid scan ~/Pictures            index a folder fast (names + text; no models)\n  \
      fileid search \"invoice 2023\"       keyword-search what you indexed\n  \
      fileid models list                see the AI models and what's installed\n  \
-     fileid models download --all      install them once (from huggingface.co)\n  \
+     fileid models download mobileclip_s2 arcface   install required scan models\n  \
      fileid scan ~/Pictures --models   full AI scan: image tags, faces, visual search\n\
      \n\
      More\n  \

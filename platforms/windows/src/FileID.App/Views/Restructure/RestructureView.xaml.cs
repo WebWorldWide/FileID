@@ -266,11 +266,13 @@ public sealed partial class RestructureView : UserControl
                     break;
                 case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeProgress):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
                     break;
                 case nameof(EngineClient.DeepAnalyzeComplete):
                     {
                         if (EngineClient.Instance.DeepAnalyzeComplete is null) break;
+                        DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                         // macOS parity: re-plan when Deep Analyze finishes so the
                         // People/<name> buckets reflect newly-captioned files.
                         var folder = AppViewModel.Instance.FolderPath;
@@ -320,6 +322,13 @@ public sealed partial class RestructureView : UserControl
         if (plan is null)
         {
             ClearPlanPresentation();
+            return;
+        }
+        if (!RootsMatch(plan.LibraryRoot, AppViewModel.Instance.FolderPath))
+        {
+            EngineClient.Instance.InvalidateRestructurePlan();
+            ClearPlanPresentation();
+            PlanStatusText.Text = "This plan was superseded. Generate a plan for the current library.";
             return;
         }
 

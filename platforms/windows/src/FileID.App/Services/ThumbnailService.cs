@@ -1,17 +1,6 @@
-﻿// ThumbnailService — IShellItemImageFactory-driven shell thumbnails with
-// an in-process LRU cache and a disk-backed cache under thumbs.cache/.
-//
-// Mirror of the macOS app's QLThumbnailGenerator-backed `ThumbnailService.swift`.
-// Same behavior:
-//   - Render at 256×256 device-independent pixels (DIPs).
-//   - Cache by path+modified-time hash so a file edit invalidates its thumb.
-//   - Background queue drains a request channel so the UI thread never
-//     pays the shell-thumbnail cost.
-//   - Returns a SoftwareBitmapSource the WinUI grid binds directly into.
-//
-// Implements the cache + render orchestration. The actual interop call
-// either routes through the engine's shell::thumbnail helper or uses a
-// direct CsWinRT IShellItemImageFactory binding.
+﻿// ThumbnailService — bounded Windows thumbnails with
+// 192 px BitmapImage output with bounded background admission, an in-memory
+// LRU, and a modified-time-keyed disk cache under thumbs.cache/.
 
 using System;
 using System.Collections.Generic;

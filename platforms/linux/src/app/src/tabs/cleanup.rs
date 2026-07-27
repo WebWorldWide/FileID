@@ -1865,16 +1865,6 @@ fn build_group(
     }
 }
 
-/// Recompute keeper flags + totals after an optimistic member removal. Members
-/// stay in rank order, so element 0 is the best surviving keeper.
-#[allow(dead_code)] // kept for the in-place group refresh not yet wired to the UI
-fn recompute_group(g: &mut DupGroup) {
-    g.keeper_bytes = g.members.first().map(|m| m.size).unwrap_or(0);
-    for (i, m) in g.members.iter_mut().enumerate() {
-        m.is_keeper = i == 0;
-    }
-}
-
 /// Keeper rank (macOS / Windows parity): aesthetic DESC, size DESC, earliest
 /// created_at ASC, shortest path ASC, then path ordinal as a stable tiebreak.
 fn rank_indices(raw: &[RawRow], indices: &mut [usize]) {

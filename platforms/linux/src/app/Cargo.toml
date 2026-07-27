@@ -20,16 +20,12 @@ adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 glib = "0.20"
 gio  = "0.20"
 
-# Async + IPC plumbing — the GTK app spawns the engine as a child
-# process and reads NDJSON from its stdout. async_channel bridges the
-# engine reader thread → GTK main context for UI updates.
+# The GTK app reads engine NDJSON on a worker thread; async-channel bridges
+# parsed events to the GLib main context.
 async-channel = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync"] }
 
-# IPC payloads. Reuse the engine's IpcCommand / IpcEvent types directly
-# so the contract can never drift between the GTK app and the engine.
+# Reuse the engine's IPC types so the wire contract cannot drift.
 fileid-engine = { path = "../../../windows/src/engine" }
-serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # SQLite read path. There is NO file-listing IPC command — the engine is the

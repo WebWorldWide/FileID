@@ -72,10 +72,15 @@
           ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
           ORT_PREFER_DYNAMIC_LINK = "1";
 
-          # GTK interaction tests need a display, but the shared engine's
-          # model-free library suite is safe inside the sandbox.
+          # GTK interaction tests need a display. Exercise the headless Linux
+          # app suite here; the engine's standalone dev-dependency graph is
+          # validated in engine CI rather than mixed into this lockfile vendor.
           doCheck = true;
-          cargoTestFlags = [ "-p" "fileid-engine" "--lib" ];
+          checkPhase = ''
+            runHook preCheck
+            cargo test --frozen -p fileid-linux
+            runHook postCheck
+          '';
 
           postInstall = ''
             install -Dm644 platforms/linux/data/io.github.fileid.FileID.desktop \

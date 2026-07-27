@@ -138,8 +138,19 @@ impl ScanCoordinator {
 
     pub fn request_cancel(&self) {
         self.inner.cancelled.store(true, Ordering::Relaxed);
-        // Wake any pause-waiting worker so they observe the cancel and exit.
         self.inner.resume_notify.notify_waiters();
+    }
+
+    pub async fn wait_cancelled(&self) {
+        loop {
+            let notified = self.inner.resume_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     /// Reset for a new scan session. Must only be called when no tasks are
@@ -213,6 +224,24 @@ mod tests {
 
         assert!(coordinator.mark_gpu_dead());
         assert!(!coordinator.mark_gpu_dead());
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_receivers_waiting_for_work() {
+        let coordinator =
+            ScanCoordinator::with_gpu_failure_latch(Arc::new(GpuFailureLatch::default()));
+        let waiting = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_cancelled().await }
+        });
+        tokio::task::yield_now().await;
+
+        coordinator.request_cancel();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("cancel waiter must wake")
+            .expect("cancel waiter must not panic");
     }
 
     #[tokio::test]

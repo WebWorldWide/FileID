@@ -168,13 +168,11 @@ pub fn ensure_state_dirs() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // `std::env` is process-global; serialize env-mutating tests so parallel
-    // `cargo test` threads can't observe each other's writes.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn restore(key: &str, val: Option<std::ffi::OsString>) {
         match val {
@@ -190,7 +188,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn root_empty_localappdata_falls_back_to_userprofile() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("LOCALAPPDATA");
         let profile = std::env::var_os("USERPROFILE")
             .expect("USERPROFILE must be set to exercise the fallback");
@@ -220,7 +218,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn root_empty_xdg_data_home_falls_back_to_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("XDG_DATA_HOME");
         let home = std::env::var_os("HOME")
             .expect("HOME must be set to exercise the fallback");
@@ -244,7 +242,7 @@ mod tests {
 
     #[test]
     fn db_override_is_exact_and_empty_value_falls_back() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_DB");
         let default = {
             std::env::remove_var("FILEID_DB");
@@ -262,7 +260,7 @@ mod tests {
 
     #[test]
     fn model_override_also_owns_the_huggingface_cache() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let custom = std::env::temp_dir().join("fileid-model-root");
         std::env::set_var("FILEID_MODELS_DIR", &custom);
