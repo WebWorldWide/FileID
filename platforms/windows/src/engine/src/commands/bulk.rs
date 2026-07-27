@@ -61,9 +61,11 @@ fn no_clobber_rename_bound(
 
     let destination_parent = dst.parent().context("rename destination has no parent")?;
     let parent_handle = super::trash::open_windows_directory_lock(destination_parent)?;
+    let held_source = super::trash::windows_handle_path(&source_file)?;
+    let held_source_parent = held_source.parent().context("rename source has no parent")?;
     let held_parent = super::trash::windows_handle_path(&parent_handle)?;
     if crate::util::path_safety::normalize_for_exclusion(&held_parent)
-        != crate::util::path_safety::normalize_for_exclusion(destination_parent)
+        != crate::util::path_safety::normalize_for_exclusion(held_source_parent)
     {
         anyhow::bail!("rename destination parent changed during validation");
     }

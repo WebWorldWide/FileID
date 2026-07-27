@@ -652,7 +652,7 @@ impl RestructureApply {
             let result = if self.use_symlinks {
                 make_symlink(&m.source, &final_dest)
             } else {
-                move_file(&m.source, &final_dest, source_identity)
+                move_file(&m.source, &final_dest, source_identity, &canonical_root)
             };
             match result {
                 Ok(()) => {
@@ -908,6 +908,7 @@ fn move_file(
     src: &str,
     dst: &Path,
     expected: crate::platform::FileIdentity,
+    canonical_root: &Path,
 ) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -940,12 +941,18 @@ fn move_file(
         );
 
         let destination_parent = dst.parent().context("restructure destination has no parent")?;
+        let expected_parent = crate::platform::file_identity(destination_parent)
+            .context("read restructure destination parent identity")?;
         let parent_handle = crate::commands::trash::open_windows_directory_lock(destination_parent)?;
+        anyhow::ensure!(
+            crate::platform::file_identity_from_file(&parent_handle) == Some(expected_parent)
+                && crate::platform::file_identity(destination_parent) == Some(expected_parent),
+            "restructure destination parent changed during validation"
+        );
         let held_parent = crate::commands::trash::windows_handle_path(&parent_handle)?;
         anyhow::ensure!(
-            crate::util::path_safety::normalize_for_exclusion(&held_parent)
-                == crate::util::path_safety::normalize_for_exclusion(destination_parent),
-            "restructure destination parent changed during validation"
+            ci_starts_with(&held_parent, canonical_root),
+            "restructure destination parent escaped the authorized library root"
         );
         let destination_wide: Vec<u16> = dst
             .file_name()
@@ -1024,6 +1031,7 @@ fn move_file(
     src: &str,
     dst: &Path,
     expected: crate::platform::FileIdentity,
+    _canonical_root: &Path,
 ) -> std::result::Result<(), ApplyError> {
     // Unix moves are no-replace and identity-bound. Cross-filesystem moves fail
     // closed because copy/delete cannot preserve every source filesystem's
@@ -2308,10 +2316,11 @@ mod tests {
             file: identity.file,
         };
 
-        assert!(move_file(&source.to_string_lossy(), &destination, wrong).is_err());
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        assert!(move_file(&source.to_string_lossy(), &destination, wrong, &canonical_root).is_err());
         assert!(source.exists());
         assert!(!destination.exists());
-        move_file(&source.to_string_lossy(), &destination, identity).unwrap();
+        move_file(&source.to_string_lossy(), &destination, identity, &canonical_root).unwrap();
         assert!(!source.exists());
         assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
         let _ = std::fs::remove_dir_all(&root);
@@ -2434,7 +2443,7 @@ mod tests {
         // Parent ("nested") does not exist yet — move_file must create it.
         let dst = root.join("nested").join("out.bin");
         let identity = crate::platform::file_identity(&src).unwrap();
-        move_file(&src.to_string_lossy(), &dst, identity).expect("move succeeds");
+        move_file(&src.to_string_lossy(), &dst, identity, &root).expect("move succeeds");
         assert!(!src.exists(), "source removed after a successful move");
         assert_eq!(std::fs::read(&dst).unwrap(), b"PAYLOAD");
 
@@ -2444,7 +2453,7 @@ mod tests {
         std::fs::write(&src2, b"OTHER").unwrap();
         let identity2 = crate::platform::file_identity(&src2).unwrap();
         assert!(
-            move_file(&src2.to_string_lossy(), &dst, identity2).is_err(),
+            move_file(&src2.to_string_lossy(), &dst, identity2, &root).is_err(),
             "an occupied destination must not be clobbered"
         );
         assert_eq!(std::fs::read(&dst).unwrap(), b"PAYLOAD", "existing file preserved");
@@ -2485,7 +2494,7 @@ mod tests {
         let tags = vec!["important".to_string()];
         let tags_written = crate::shell::tags::write_tags(&source, &tags).is_ok();
 
-        assert!(move_file(&source.to_string_lossy(), &destination, expected).is_err());
+        assert!(move_file(&source.to_string_lossy(), &destination, expected, &source_root).is_err());
         assert_eq!(std::fs::read(&source).unwrap(), b"source-payload");
         assert_eq!(crate::platform::file_identity(&source), Some(expected));
         assert!(!destination.exists());
