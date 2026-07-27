@@ -317,6 +317,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
             model_kind: "qwen2_5_vl_7b".into(),
             skip_existing: true,
+            file_ids: Some(vec![42, 99]),
             tags_only: true,
             propose_renames: true,
         }),

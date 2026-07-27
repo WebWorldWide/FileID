@@ -13,7 +13,7 @@ namespace FileID.ViewModels;
 internal sealed partial class EngineClient
 {
     // 64 MiB, symmetric with the engine's command-read cap (main.rs MAX_FRAME_BYTES)
-    // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
+    // and the inbound read cap (MaxFrameBytes). The old 1 MiB cap rejected a large
     // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
     // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
@@ -760,41 +760,6 @@ internal sealed partial class EngineClient
         NotifyDeepAnalyzeCommandOwnershipChanged();
     }
 
-    // Belt-and-suspenders (M7): a terminal Deep Analyze error that arrives with NO
-    // accompanying DeepAnalyzeComplete strands the command slot reserved for the
-    // rest of the session — DeepAnalyzeCommandInFlight stuck true wedges the view
-    // (Analyze All disabled, Cancel enabled forever). vlm_model_missing is emitted
-    // (deep_analyze.rs) BEFORE DeepAnalyzeStarting and returns without a Complete,
-    // so it needs an explicit slot release. llama_cpp_missing / deep_analyze_failed
-    // already send their own terminal Complete (which releases via
-    // CompleteDeepAnalyzeCommand), so they are deliberately EXCLUDED — releasing on
-    // them would preempt and drop that completion presentation.
-    internal static bool IsTerminalDeepAnalyzeErrorWithoutComplete(string? kind)
-        => kind == "vlm_model_missing";
-
-    private void ReleaseDeepAnalyzeCommandOnTerminalError(int generation)
-    {
-        GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner? owner;
-        lock (_deepAnalyzeTerminalLock)
-        {
-            owner = _deepAnalyzeCommandSlot.Current;
-            // Idempotent: the TerminalState CAS makes a racing Complete (or a
-            // second error) a no-op, so this never double-releases.
-            if (owner is null
-                || owner.Generation != generation
-                || Interlocked.CompareExchange(ref owner.Payload.TerminalState, 1, 0) != 0)
-            {
-                return;
-            }
-            DeepAnalyzeStarting = null;
-            DeepAnalyzeProgress = null;
-            if (!_deepAnalyzeCommandSlot.Release(owner)) return;
-        }
-        owner.Payload.Completion?.TrySetException(
-            new InvalidOperationException("Deep Analyze couldn't start."));
-        NotifyDeepAnalyzeCommandOwnershipChanged();
-    }
-
     private void HandleDeepAnalyzeSendFailure(
         GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner, Exception error)
     {
@@ -909,7 +874,8 @@ internal sealed partial class EngineClient
         }
     }
 
-    public async Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true)
+    public async Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false,
+        bool proposeRenames = true, IReadOnlyList<long>? fileIds = null)
     {
         if (!TryReserveDeepAnalyzeCommand(modelKind, awaitCompletion: false, out var owner))
         {
@@ -918,7 +884,7 @@ internal sealed partial class EngineClient
         try
         {
             await SendCommandAsync(
-                new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames),
+                new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames, fileIds),
                 () => Volatile.Write(ref owner.Payload.SendBegan, 1));
         }
         catch (Exception ex)
@@ -1119,13 +1085,30 @@ internal sealed partial class EngineClient
         bool useSymlinks, string? planId = null)
     {
         LastError = null;
-        await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks, planId));
+        _pendingRestructureApplyRoot = libraryRoot;
+        _pendingRestructureApplyUndoable = !useSymlinks;
+        try
+        {
+            await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks, planId));
+        }
+        catch
+        {
+            if (string.Equals(_pendingRestructureApplyRoot, libraryRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                _pendingRestructureApplyRoot = null;
+                _pendingRestructureApplyUndoable = false;
+            }
+            throw;
+        }
     }
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
-    /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
-    /// CanUndoRestructure. (R2)</summary>
+    /// on-disk undo journal. A partial result stays retryable. (R2)</summary>
     public async Task UndoRestructureAsync(string libraryRoot)
     {
+        if (UndoRestructureInFlight)
+        {
+            throw new InvalidOperationException("A Restructure undo is already running.");
+        }
         // Clear the prior terminal error so a value-identical retry still raises
         // PropertyChanged when its new error arrives.
         LastError = null;
@@ -1134,12 +1117,66 @@ internal sealed partial class EngineClient
         UndoRestructureInFlight = true;
         try
         {
-            await SendCommandAsync(new UndoRestructureCommand(libraryRoot)).ConfigureAwait(false);
+            var undoRoot = UndoRestructureRoot ?? libraryRoot;
+            await SendCommandAsync(new UndoRestructureCommand(undoRoot)).ConfigureAwait(false);
         }
         catch
         {
             UndoRestructureInFlight = false;
             throw;
+        }
+    }
+
+    /// <summary>Send Undo and wait for its terminal engine result. A command-frame
+    /// write is not success: partial, rejected, crashed, and timed-out undos return
+    /// false so ChangeLog keeps the entry retryable.</summary>
+    public async Task<bool> UndoRestructureAndWaitAsync(
+        string libraryRoot,
+        TimeSpan? timeout = null,
+        CancellationToken ct = default)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ownerGeneration = SpawnGeneration;
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, e) =>
+        {
+            if (e.PropertyName == nameof(LastRestructureApplyResult)
+                && LastRestructureApplyResultWasUndo
+                && LastRestructureApplyResult is { } result)
+            {
+                tcs.TrySetResult(result.Failed == 0 && string.IsNullOrWhiteSpace(result.PrivilegeError));
+            }
+            else if (e.PropertyName == nameof(LastError)
+                     && LastError?.Kind == "undo_restructure")
+            {
+                tcs.TrySetResult(false);
+            }
+            else if (e.PropertyName == nameof(State)
+                     && (State == LifecycleState.Crashed || SpawnGeneration != ownerGeneration))
+            {
+                tcs.TrySetResult(false);
+            }
+        };
+
+        PropertyChanged += handler;
+        try
+        {
+            await UndoRestructureAsync(libraryRoot).ConfigureAwait(false);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(timeout ?? TimeSpan.FromMinutes(30));
+            try
+            {
+                return await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                DebugLog.Warn("Restructure undo timed out while awaiting its terminal engine result.");
+                return false;
+            }
+        }
+        finally
+        {
+            PropertyChanged -= handler;
         }
     }
 

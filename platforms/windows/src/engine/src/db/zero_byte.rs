@@ -17,7 +17,7 @@ pub struct ZeroByteObservation {
 pub struct ValidatedZeroByteObservation {
     path: PathBuf,
     created_unix: Option<f64>,
-    modified_unix: f64,
+    modified_unix: Option<f64>,
     file_ref: Option<u64>,
 }
 
@@ -61,11 +61,10 @@ pub fn validate_zero_byte_files(observations: &[ZeroByteObservation]) -> ZeroByt
         validation.observations.push(ValidatedZeroByteObservation {
             path: observation.path.clone(),
             created_unix: metadata.created().ok().and_then(system_time_to_unix),
-            modified_unix: metadata
-                .modified()
-                .ok()
-                .and_then(system_time_to_unix)
-                .unwrap_or_else(now_unix),
+            // None (→ SQL NULL → COALESCE preserves the stored value) when the
+            // FS modified-time is unreadable, rather than fabricating `now` and
+            // silently discarding the true timestamp (pre-1970 / FAT media).
+            modified_unix: metadata.modified().ok().and_then(system_time_to_unix),
             file_ref: current_ref,
         });
     }
@@ -87,7 +86,7 @@ pub fn apply_validated_zero_byte_files(
     let mut update_file = conn
         .prepare_cached(
             "UPDATE files SET \
-             size_bytes = 0, created_at = COALESCE(?2, created_at), modified_at = ?3, \
+             size_bytes = 0, created_at = COALESCE(?2, created_at), modified_at = COALESCE(?3, modified_at), \
              scanned_at = ?4, file_ref = ?5, failed = 1, error_message = ?6, \
              phash = NULL, aesthetic = NULL, has_faces = 0, has_text = 0, \
              camera_model = NULL, location_lat = NULL, location_lon = NULL, \

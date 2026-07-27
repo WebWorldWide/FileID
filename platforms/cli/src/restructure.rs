@@ -28,7 +28,7 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use crate::context::{print_json, Ctx};
+use crate::context::{print_json, strip_extended_length, Ctx};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;
@@ -169,11 +169,8 @@ pub fn run(
     if plan && apply {
         anyhow::bail!("--plan and --apply are mutually exclusive; choose one");
     }
-    if !plan && !apply {
-        anyhow::bail!(
-            "specify --plan (read-only) or --apply (execute). See `fileid restructure --help`."
-        );
-    }
+    // Neither flag → the read-only plan (as `--help` documents): every branch
+    // below keys off `apply`, so an absent `--apply` already means "plan only".
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
 
@@ -363,7 +360,8 @@ fn absorb_chunk(
 
 fn resolve_library_root(conn: &rusqlite::Connection, root: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(root) = root {
-        return Ok(std::fs::canonicalize(&root).unwrap_or(root));
+        let canon = std::fs::canonicalize(&root).unwrap_or(root);
+        return Ok(PathBuf::from(strip_extended_length(&canon.to_string_lossy())));
     }
 
     let mut stmt = conn.prepare("SELECT path_text FROM files WHERE failed = 0")?;

@@ -22,6 +22,12 @@ const MARGIN: f32 = 0.10;
 const BG: [u8; 3] = [236, 236, 239];
 /// Default surface colour when a face has no `.mtl` material (mid neutral grey).
 const DEFAULT_KD: [f32; 3] = [0.60, 0.60, 0.63];
+const MAX_OBJ_VERTICES: usize = 1_000_000;
+const MAX_OBJ_TRIANGLES: usize = 1_000_000;
+const MAX_FACE_VERTICES: usize = 4_096;
+const MAX_MTL_FILES: usize = 32;
+const MAX_MTL_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MATERIALS: usize = 50_000;
 
 /// A triangle ready to rasterize: the three positions and its flat surface colour.
 struct Tri {
@@ -62,6 +68,8 @@ fn parse_obj(obj_path: &Path) -> Result<(Vec<[f32; 3]>, Vec<Tri>)> {
     let mut verts: Vec<[f32; 3]> = Vec::new();
     let mut tris: Vec<Tri> = Vec::new();
     let mut cur_kd = DEFAULT_KD;
+    let mut loaded_mtls = std::collections::HashSet::new();
+    let mut remaining_mtl_bytes = MAX_MTL_TOTAL_BYTES;
 
     for line in text.lines() {
         let line = line.trim();
@@ -70,12 +78,25 @@ fn parse_obj(obj_path: &Path) -> Result<(Vec<[f32; 3]>, Vec<Tri>)> {
             Some("v") => {
                 let c: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).collect();
                 if c.len() == 3 {
+                    if verts.len() >= MAX_OBJ_VERTICES {
+                        bail!("obj vertex count exceeds safety cap");
+                    }
                     verts.push([c[0], c[1], c[2]]);
                 }
             }
             Some("mtllib") => {
                 if let Some(name) = it.next() {
-                    load_mtl(obj_path, name, &mut materials);
+                    if !crate::util::path_safety::is_safe_filename(name) {
+                        tracing::warn!(
+                            obj = %crate::platform::redact_path_for_log(obj_path),
+                            "skipping unsafe mtllib reference in .obj (not a plain sibling filename)"
+                        );
+                    } else if loaded_mtls.insert(name.to_ascii_lowercase()) {
+                        if loaded_mtls.len() > MAX_MTL_FILES {
+                            bail!("obj material-library count exceeds safety cap");
+                        }
+                        load_mtl(obj_path, name, &mut materials, &mut remaining_mtl_bytes);
+                    }
                 }
             }
             Some("usemtl") => {
@@ -84,11 +105,24 @@ fn parse_obj(obj_path: &Path) -> Result<(Vec<[f32; 3]>, Vec<Tri>)> {
             Some("f") => {
                 // Each token is `pos[/tex[/norm]]`; we only need the position index,
                 // which may be negative (relative to the end). Fan-triangulate.
-                let idx: Vec<usize> = it
-                    .filter_map(|tok| tok.split('/').next())
-                    .filter_map(|s| s.parse::<i64>().ok())
-                    .filter_map(|i| resolve_index(i, verts.len()))
-                    .collect();
+                let mut idx: Vec<usize> = Vec::with_capacity(16);
+                for token in it {
+                    if idx.len() >= MAX_FACE_VERTICES {
+                        bail!("obj face vertex count exceeds safety cap");
+                    }
+                    if let Some(index) = token
+                        .split('/')
+                        .next()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .and_then(|i| resolve_index(i, verts.len()))
+                    {
+                        idx.push(index);
+                    }
+                }
+                let triangle_count = idx.len().saturating_sub(2);
+                if tris.len().saturating_add(triangle_count) > MAX_OBJ_TRIANGLES {
+                    bail!("obj triangle count exceeds safety cap");
+                }
                 // Fan-triangulate: (v0, vk, vk+1) for k in 1..=n-2.
                 for k in 1..idx.len().saturating_sub(1) {
                     tris.push(Tri {
@@ -116,17 +150,46 @@ fn resolve_index(i: i64, count: usize) -> Option<usize> {
 
 /// Parse `Kd r g b` lines from the `.obj`'s sibling `.mtl` into `out` (material → colour).
 /// Best-effort: a missing/garbled `.mtl` just leaves faces at the default colour.
-fn load_mtl(obj_path: &Path, mtl_name: &str, out: &mut std::collections::HashMap<String, [f32; 3]>) {
+fn load_mtl(
+    obj_path: &Path,
+    mtl_name: &str,
+    out: &mut std::collections::HashMap<String, [f32; 3]>,
+    remaining_bytes: &mut u64,
+) {
+    // SEC: the `mtllib` value is untrusted `.obj` content. Accept it ONLY as a
+    // safe single-component filename inside the `.obj`'s own folder. An absolute
+    // or UNC value (`mtllib \\attacker\share\bait.mtl`, `mtllib C:\secret`) would
+    // otherwise REPLACE `dir` via join() and redirect the read to an arbitrary /
+    // UNC target — an outbound SMB forced-auth (NTLM leak) or arbitrary local
+    // file read, violating the no-network-egress invariant. Mirrors the guard in
+    // the sibling `deep_analyze::parse_obj_names`.
+    if !crate::util::path_safety::is_safe_filename(mtl_name) {
+        tracing::warn!(
+            obj = %crate::platform::redact_path_for_log(obj_path),
+            "skipping unsafe mtllib reference in .obj (not a plain sibling filename)"
+        );
+        return;
+    }
     let mtl_path = match obj_path.parent() {
         Some(dir) => dir.join(mtl_name),
         None => return,
     };
-    let Ok(text) = read_text(&mtl_path) else { return };
+    if *remaining_bytes == 0 {
+        return;
+    }
+    let Ok((text, bytes_read)) = read_text_bounded(&mtl_path, *remaining_bytes) else { return };
+    *remaining_bytes = remaining_bytes.saturating_sub(bytes_read);
     let mut cur: Option<String> = None;
     for line in text.lines() {
         let mut it = line.split_whitespace();
         match it.next() {
-            Some("newmtl") => cur = it.next().map(|s| s.to_string()),
+            Some("newmtl") => {
+                if out.len() >= MAX_MATERIALS {
+                    cur = None;
+                } else {
+                    cur = it.next().map(|s| s.to_string());
+                }
+            }
             Some("Kd") => {
                 let c: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).collect();
                 if c.len() == 3 {
@@ -141,21 +204,23 @@ fn load_mtl(obj_path: &Path, mtl_name: &str, out: &mut std::collections::HashMap
 }
 
 fn read_text(path: &Path) -> Result<String> {
-    // Cap the read so a pathological multi-GB or newline-sparse `.obj`/`.mtl`
-    // can't exhaust memory — or abort the engine on an allocation failure — on
-    // the decoder pool (up to 12 threads). A partial parse still renders a
-    // recognizable shape, and the sibling `deep_analyze::parse_obj_names` caps
-    // its read the same way. `.obj`/`.mtl` are ASCII, so a byte-bounded read
-    // never splits a UTF-8 char.
     const MAX_OBJ_BYTES: u64 = 64 * 1024 * 1024;
+    read_text_bounded(path, MAX_OBJ_BYTES).map(|(text, _)| text)
+}
+
+fn read_text_bounded(path: &Path, limit: u64) -> Result<(String, u64)> {
     use std::io::Read;
     let p = crate::util::path_safety::to_extended_length(path);
     let f = std::fs::File::open(&p).with_context(|| format!("open {}", path.display()))?;
-    let mut s = String::new();
-    f.take(MAX_OBJ_BYTES)
-        .read_to_string(&mut s)
+    let mut bytes = Vec::new();
+    f.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read {}", path.display()))?;
-    Ok(s)
+    if bytes.len() as u64 > limit {
+        bail!("text asset exceeds safety byte budget");
+    }
+    let len = bytes.len() as u64;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), len))
 }
 
 /// Project, shade, and z-buffer the triangles into a `SIZE×SIZE` RGB buffer.
@@ -322,5 +387,49 @@ mod tests {
     fn empty_geometry_is_an_error() {
         let p = write_tmp("empty.obj", "# just a comment\nvn 0 0 1\n");
         assert!(render_obj_to_png(&p, &p.with_extension("png")).is_err());
+    }
+
+    /// SEC: an unsafe `mtllib` value (UNC, absolute, or `..` traversal) must be
+    /// rejected before any filesystem read — no outbound SMB, no arbitrary read.
+    /// A plain sibling filename is still read. We assert on the OUT map: an
+    /// unsafe reference leaves it untouched (load_mtl returns early); a safe
+    /// sibling populates it.
+    #[test]
+    fn load_mtl_rejects_unsafe_mtllib_paths() {
+        let obj = write_tmp("model.obj", "v 0 0 0\n");
+        for unsafe_ref in [
+            r"\\attacker-host\share\bait.mtl",
+            r"C:\Windows\System32\config\SAM",
+            "/etc/passwd",
+            "../../secret.mtl",
+            "sub/dir/nested.mtl",
+        ] {
+            let mut out = std::collections::HashMap::new();
+            let mut remaining = MAX_MTL_TOTAL_BYTES;
+            load_mtl(&obj, unsafe_ref, &mut out, &mut remaining);
+            assert!(out.is_empty(), "unsafe mtllib was not rejected: {unsafe_ref}");
+        }
+        // A real sibling .mtl IS read.
+        write_tmp("model.mtl", "newmtl red\nKd 1 0 0\n");
+        let mut out = std::collections::HashMap::new();
+        let mut remaining = MAX_MTL_TOTAL_BYTES;
+        load_mtl(&obj, "model.mtl", &mut out, &mut remaining);
+        assert_eq!(out.get("red"), Some(&[1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn obj_rejects_excessive_unique_material_libraries() {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for i in 0..=MAX_MTL_FILES {
+            writeln!(body, "mtllib material-{i}.mtl").unwrap();
+        }
+        body.push_str("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");
+        let obj = write_tmp("many-materials.obj", &body);
+        let err = match parse_obj(&obj) {
+            Ok(_) => panic!("material-library amplification must be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("material-library count"));
     }
 }

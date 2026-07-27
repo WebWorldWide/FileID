@@ -13,7 +13,7 @@ use crate::paths;
 /// `%LOCALAPPDATA%/FileID/logs/` plus stderr layer. Local-only; PII
 /// redaction happens at call sites.
 pub(crate) fn init() -> Result<()> {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
     let logs_dir = paths::logs_dir().context("resolving logs dir")?;
     std::fs::create_dir_all(&logs_dir).context("creating logs dir")?;
@@ -34,7 +34,8 @@ pub(crate) fn init() -> Result<()> {
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(false)
-        .with_target(true);
+        .with_target(true)
+        .with_filter(LevelFilter::WARN);
 
     // `ort=warn`: ORT's native logger (bridged via the ort crate's `tracing`
     // feature) is VERBOSE-grade — per-inference CUDA arena lines would swamp

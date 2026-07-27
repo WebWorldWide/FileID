@@ -575,18 +575,29 @@ public sealed partial class MainWindow : Window
 
     private async Task RunCloseSequenceAsync()
     {
+        bool proceed;
         try
         {
-            if (!await ConfirmCloseWithPendingChangesAsync())
-            {
-                return; // user chose Review or Cancel — stay open
-            }
+            proceed = await ConfirmCloseWithPendingChangesAsync();
         }
         catch (Exception ex)
         {
             // The confirm dialog is best-effort; a failure to show it must
             // never make the window unclosable. Fall through to shutdown.
             DebugLog.Warn("Close-confirm dialog failed: " + ex.Message);
+            proceed = true;
+        }
+
+        if (!proceed)
+        {
+            // User chose Review or Cancel — stay open. The whole confirm
+            // sequence (including any nested review-changes sheet await) has
+            // now completed, so release the latch to allow a fresh close later.
+            // The latch stayed TRUE for the entire review-dialog await, so a
+            // second close click while it was in flight was a no-op — it could
+            // not start a second teardown that closes the window mid-await.
+            _closeSequenceRunning = false;
+            return;
         }
 
         // Stop the engine and WAIT so the WAL checkpoint lands before
@@ -605,8 +616,13 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>Returns true when the close should proceed; false to stay
-    /// open (the user picked Review or Cancel). Resets
-    /// _closeSequenceRunning on the stay-open paths.</summary>
+    /// open (the user picked Review or Cancel). The caller
+    /// (RunCloseSequenceAsync) owns the _closeSequenceRunning latch and clears
+    /// it only after this whole sequence — including the nested review-changes
+    /// sheet await — completes. Keeping the latch TRUE across the review-sheet
+    /// await is deliberate: a second close attempt in flight then no-ops in
+    /// OnAppWindowClosing instead of starting a second teardown whose second
+    /// ContentDialog.ShowAsync throws and tears the window down mid-await.</summary>
     private async Task<bool> ConfirmCloseWithPendingChangesAsync()
     {
         {
@@ -643,7 +659,6 @@ public sealed partial class MainWindow : Window
                 }
                 if (choice == ContentDialogResult.Primary)
                 {
-                    _closeSequenceRunning = false;
                     var sheet = new ContentDialog
                     {
                         XamlRoot = (Content as FrameworkElement)?.XamlRoot,
@@ -657,7 +672,6 @@ public sealed partial class MainWindow : Window
                 }
                 if (choice == ContentDialogResult.None)
                 {
-                    _closeSequenceRunning = false;
                     return false; // Cancel — abort the close entirely
                 }
                 // Secondary (Close anyway) proceeds.

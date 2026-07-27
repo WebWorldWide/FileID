@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use anyhow::Context;
+
 use crate::ipc::{
     self, sink::Sink, BulkActionItem, BulkActionResult, EngineError, EventPayload, IpcEvent,
     MergeSuggestion, MergeSuggestions, TagMode, Wrap,
@@ -13,11 +15,94 @@ use crate::pipeline::face_clustering::{MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
-fn no_clobber_rename(
+#[cfg(windows)]
+fn no_clobber_rename_bound(
     src: &std::path::Path,
     dst: &std::path::Path,
-) -> std::io::Result<()> {
-    crate::util::rename_no_replace(src, dst)
+    expected: crate::platform::FileIdentity,
+) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
+        FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let source = crate::util::path_safety::to_extended_length(src);
+    let mut source_wide: Vec<u16> = source.as_os_str().encode_wide().collect();
+    source_wide.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(source_wide.as_ptr()),
+            DELETE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )?
+    };
+    if handle.is_invalid() {
+        return Err(std::io::Error::last_os_error()).context("open rename source");
+    }
+    let source_file = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(source_file.as_raw_handle()), &mut info)? };
+    let actual = crate::platform::FileIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    };
+    if actual != expected {
+        anyhow::bail!("source was replaced after rename validation");
+    }
+
+    let destination_parent = dst.parent().context("rename destination has no parent")?;
+    let parent_handle = super::trash::open_windows_directory_lock(destination_parent)?;
+    let held_parent = super::trash::windows_handle_path(&parent_handle)?;
+    if crate::util::path_safety::normalize_for_exclusion(&held_parent)
+        != crate::util::path_safety::normalize_for_exclusion(destination_parent)
+    {
+        anyhow::bail!("rename destination parent changed during validation");
+    }
+    let destination_wide: Vec<u16> = dst
+        .file_name()
+        .context("rename destination has no filename")?
+        .encode_wide()
+        .collect();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let byte_len = header + destination_wide.len() * std::mem::size_of::<u16>();
+    let mut storage = vec![0u64; byte_len.div_ceil(std::mem::size_of::<u64>())];
+    let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: BOOLEAN(0) };
+        (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
+        (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
+        std::ptr::copy_nonoverlapping(
+            destination_wide.as_ptr(),
+            std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(),
+            destination_wide.len(),
+        );
+        super::trash::nt_rename_relative(
+            HANDLE(source_file.as_raw_handle()),
+            rename.cast(),
+            u32::try_from(byte_len)?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn no_clobber_rename_bound(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    expected: crate::platform::FileIdentity,
+) -> anyhow::Result<()> {
+    let actual = crate::platform::file_identity(src).context("read rename source identity")?;
+    anyhow::ensure!(actual == expected, "source was replaced after rename validation");
+    crate::util::rename_no_replace(src, dst).map_err(Into::into)
 }
 
 /// C1-012: best-effort durable record of an on-disk rename whose DB row is
@@ -58,6 +143,55 @@ fn write_rename_recovery_line(dir: &std::path::Path, line: &str) {
     }
 }
 
+fn apply_tags_row(
+    tx: &mut rusqlite::Transaction<'_>,
+    file_id: i64,
+    tags: &[String],
+    mode: &TagMode,
+) -> rusqlite::Result<Vec<String>> {
+    let mut savepoint = tx.savepoint()?;
+    let result = (|| -> rusqlite::Result<Vec<String>> {
+        if matches!(mode, TagMode::Replace) {
+            savepoint
+                .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'user'")?
+                .execute(rusqlite::params![file_id])?;
+        }
+        for tag in tags {
+            let trimmed = tag.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match mode {
+                TagMode::Remove => savepoint
+                    .prepare_cached(
+                        "DELETE FROM tags WHERE file_id = ?1 AND tag = ?2 AND source = 'user'",
+                    )?
+                    .execute(rusqlite::params![file_id, trimmed])?,
+                _ => savepoint
+                    .prepare_cached(
+                        "INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'user', NULL)",
+                    )?
+                    .execute(rusqlite::params![file_id, trimmed])?,
+            };
+        }
+        let mut stmt = savepoint.prepare_cached(
+            "SELECT tag FROM tags WHERE file_id = ?1 AND source = 'user' ORDER BY tag",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![file_id], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    })();
+    match result {
+        Ok(tags) => {
+            savepoint.commit()?;
+            Ok(tags)
+        }
+        Err(err) => {
+            savepoint.rollback()?;
+            Err(err)
+        }
+    }
+}
+
 /// Bulk-apply tags to a set of files. Updates DB `tags` table + writes the
 /// sidecar JSON so Explorer + future scans see the same set.
 pub(crate) async fn handle_apply_tags(
@@ -95,7 +229,7 @@ pub(crate) async fn handle_apply_tags(
         // AFTER the tx commits and the writer lock drops — never inside it. (audit P0)
         let mut sidecar_writes: Vec<(String, Vec<String>)> = Vec::new();
         let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
+        let mut tx = conn.unchecked_transaction()?;
         // Cache prepared statements outside the per-file loop. Raw
         // `tx.execute(sql, ...)` re-parses SQL on every call;
         // `prepare_cached` keeps the parsed statement on the connection
@@ -116,59 +250,24 @@ pub(crate) async fn handle_apply_tags(
                     continue;
                 }
             };
-            if matches!(payload.mode, TagMode::Replace) {
-                let _ = tx
-                    .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'user'")?
-                    .execute(rusqlite::params![fid]);
-            }
-            let mut row_ok = true;
-            for tag in &payload.tags {
-                let trimmed = tag.trim();
-                if trimmed.is_empty() {
-                    continue;
+            match apply_tags_row(&mut tx, *fid, &payload.tags, &payload.mode) {
+                Ok(tags) => {
+                    sidecar_writes.push((path, tags));
+                    succeeded += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(*fid),
+                        ok: true,
+                        message: None,
+                    });
                 }
-                let exec_res = match payload.mode {
-                    TagMode::Remove => tx
-                        .prepare_cached(
-                            "DELETE FROM tags WHERE file_id = ?1 AND tag = ?2 AND source = 'user'",
-                        )?
-                        .execute(rusqlite::params![fid, trimmed]),
-                    _ => tx
-                        .prepare_cached(
-                            "INSERT OR REPLACE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'user', NULL)",
-                        )?
-                        .execute(rusqlite::params![fid, trimmed]),
-                };
-                if let Err(err) = exec_res {
+                Err(err) => {
                     failed += 1;
-                    row_ok = false;
                     messages.push(BulkActionItem {
                         file_id: Some(*fid),
                         ok: false,
                         message: Some(format!("tag write failed: {err}")),
                     });
-                    break;
                 }
-            }
-            if row_ok {
-                let mut stmt = tx.prepare_cached(
-                    "SELECT tag FROM tags WHERE file_id = ?1 AND source = 'user' ORDER BY tag",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![fid], |r| r.get::<_, String>(0))?;
-                let tags: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-                // Defer the sidecar JSON + IPropertyStore COM write to AFTER the tx
-                // commits (see loop past tx.commit). Doing per-file fs+COM (1-10 ms
-                // each) inside the open tx held the engine's only writer lock for the
-                // whole bulk op and grew the WAL; the sidecar has no transactional
-                // coupling to the DB rows (failures only log), so deferring is
-                // behavior-preserving. (audit P0)
-                sidecar_writes.push((path, tags));
-                succeeded += 1;
-                messages.push(BulkActionItem {
-                    file_id: Some(*fid),
-                    ok: true,
-                    message: None,
-                });
             }
         }
         tx.commit()?;
@@ -215,6 +314,7 @@ pub(crate) async fn handle_rename_files(
             file_id: i64,
             src: PathBuf,
             dest: PathBuf,
+            identity: crate::platform::FileIdentity,
         }
         let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
         {
@@ -233,13 +333,18 @@ pub(crate) async fn handle_rename_files(
                     });
                     continue;
                 }
-                let path: Result<String, _> = conn.query_row(
-                    "SELECT path_text FROM files WHERE id = ?1",
+                let identity: Result<(String, Option<u64>), _> = conn.query_row(
+                    "SELECT path_text, file_ref FROM files WHERE id = ?1",
                     rusqlite::params![entry.file_id],
-                    |r| r.get::<_, String>(0),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                        ))
+                    },
                 );
-                let path = match path {
-                    Ok(p) => PathBuf::from(p),
+                let (path, file_ref) = match identity {
+                    Ok((path, file_ref)) => (PathBuf::from(path), file_ref),
                     Err(err) => {
                         failed += 1;
                         messages.push(BulkActionItem {
@@ -262,11 +367,39 @@ pub(crate) async fn handle_rename_files(
                         continue;
                     }
                 };
+                let Some(expected_ref) = file_ref else {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: false,
+                        message: Some("source identity is unavailable; rescan before renaming".into()),
+                    });
+                    continue;
+                };
+                let Some(identity) = crate::platform::file_identity(&path) else {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: false,
+                        message: Some("source identity could not be verified; retry or rescan".into()),
+                    });
+                    continue;
+                };
+                if identity.file != expected_ref {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(entry.file_id),
+                        ok: false,
+                        message: Some("source was replaced after indexing; rescan before renaming".into()),
+                    });
+                    continue;
+                }
                 let dest = dir.join(&entry.new_name);
                 planned.push(PlannedRename {
                     file_id: entry.file_id,
                     src: path,
                     dest,
+                    identity,
                 });
             }
         }
@@ -284,7 +417,7 @@ pub(crate) async fn handle_rename_files(
         // per-move DB UPDATEs) can be reconciled via the recovery sidecar.
         let mut on_disk_moves: Vec<(i64, String, String)> = Vec::new();
         for p in &planned {
-            if let Err(err) = no_clobber_rename(&p.src, &p.dest) {
+            if let Err(err) = no_clobber_rename_bound(&p.src, &p.dest, p.identity) {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(p.file_id),
@@ -1004,9 +1137,32 @@ pub(crate) async fn handle_merge_clusters(
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
         let src = payload.source_person_id;
         let dst = payload.destination_person_id;
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        let source_exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+            rusqlite::params![src],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let destination_exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+            rusqlite::params![dst],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !source_exists || !destination_exists {
+            return Ok(BulkActionResult {
+                action: "mergeClusters".into(),
+                succeeded: 0,
+                failed: 1,
+                messages: vec![BulkActionItem {
+                    file_id: None,
+                    ok: false,
+                    message: Some("One or both people no longer exist; refresh People and try again.".into()),
+                }],
+            });
+        }
         // Self-merge guard: moving a person's faces onto itself then deleting
         // its row would orphan every face (person_id points at a deleted row).
-        // Return a no-op success so any caller passing src == dst is safe.
         if src == dst {
             return Ok(BulkActionResult {
                 action: "mergeClusters".into(),
@@ -1019,8 +1175,6 @@ pub(crate) async fn handle_merge_clusters(
                 }],
             });
         }
-        let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
@@ -1034,7 +1188,7 @@ pub(crate) async fn handle_merge_clusters(
         // destination is NULL, so merging two differently-named people never
         // grafts the source's sub-fields onto an already-named destination
         // (R4-07 delta). is_unknown clears once the carried name lands.
-        let _ = tx.execute(
+        tx.execute(
             "UPDATE persons SET
                  name        = COALESCE(name,        (SELECT name        FROM persons WHERE id = ?2)),
                  title       = COALESCE(title,       (SELECT title       FROM persons WHERE id = ?2)),
@@ -1047,8 +1201,11 @@ pub(crate) async fn handle_merge_clusters(
                AND name IS NULL AND title IS NULL AND first_name IS NULL
                AND middle_name IS NULL AND last_name IS NULL AND suffix IS NULL",
             rusqlite::params![dst, src],
+        )?;
+        anyhow::ensure!(
+            tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src])? == 1,
+            "source person disappeared during merge"
         );
-        let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
         // Clean up face-verification verdicts referencing the merged-away source
         // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
         // row and surfaces stale suggestions (orphan rows that never GC). The
@@ -1060,27 +1217,33 @@ pub(crate) async fn handle_merge_clusters(
         // user-confirmed-different people re-merge. A row whose faces now land in
         // one cluster is auto-inert (find_merge_suggestions `pa != pb`, consolidate
         // `ca != cb`).
-        let _ = tx.execute(
+        tx.execute(
             "DELETE FROM face_verifications WHERE (person_a = ?1 OR person_b = ?1) \
              AND (face_a IS NULL OR face_b IS NULL)",
             rusqlite::params![src],
-        );
+        )?;
         // Recompute the destination's file_count AND representative_face_id
         // (highest-quality embedded face now in the cluster) so the People
         // card + suggestion anchor reflect the combined membership rather than
         // a stale rep. COALESCE keeps the old rep if no embedded face survives.
-        let _ = tx.execute(
-            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
-            rusqlite::params![dst],
+        anyhow::ensure!(
+            tx.execute(
+                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+                rusqlite::params![dst],
+            )? == 1,
+            "destination person disappeared during merge"
         );
-        let _ = tx.execute(
-            "UPDATE persons SET representative_face_id = COALESCE(
+        anyhow::ensure!(
+            tx.execute(
+                "UPDATE persons SET representative_face_id = COALESCE(
                  (SELECT fp.id FROM face_prints fp
                   WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
                   ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
                  representative_face_id)
              WHERE id = ?1",
-            rusqlite::params![dst],
+                rusqlite::params![dst],
+            )? == 1,
+            "destination person disappeared during representative refresh"
         );
         tx.commit()?;
         Ok(BulkActionResult {
@@ -1168,10 +1331,22 @@ pub(crate) async fn handle_rename_person(
             (None, Some(l)) => Some(l.to_string()),
             _ => None,
         };
-        tx.execute(
+        let affected = tx.execute(
             "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name) WHERE id=?7",
             rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
         )?;
+        if affected == 0 {
+            return Ok(BulkActionResult {
+                action: "renamePerson".into(),
+                succeeded: 0,
+                failed: 1,
+                messages: vec![BulkActionItem {
+                    file_id: Some(payload.person_id),
+                    ok: false,
+                    message: Some("This person no longer exists; refresh People and try again.".into()),
+                }],
+            });
+        }
         tx.commit()?;
         Ok(BulkActionResult {
             action: "renamePerson".into(),
@@ -1213,12 +1388,20 @@ pub(crate) async fn handle_mark_persons_as_unknown(
                 "UPDATE persons SET is_unknown = 1, name = NULL, title = NULL, first_name = NULL, middle_name = NULL, last_name = NULL, suffix = NULL WHERE id = ?1",
                 rusqlite::params![id],
             ) {
-                Ok(_) => {
+                Ok(1) => {
                     succeeded += 1;
                     messages.push(BulkActionItem {
                         file_id: Some(*id),
                         ok: true,
                         message: None,
+                    });
+                }
+                Ok(_) => {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(*id),
+                        ok: false,
+                        message: Some("This person no longer exists; refresh People and try again.".into()),
                     });
                 }
                 Err(e) => {
@@ -1589,6 +1772,38 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn tag_replace_rolls_back_the_entire_file_on_insert_failure() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                 file_id INTEGER NOT NULL,
+                 tag TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 score REAL,
+                 UNIQUE(file_id, tag, source)
+             );
+             INSERT INTO tags(file_id, tag, source) VALUES (1, 'original', 'user');
+             CREATE TRIGGER reject_tag BEFORE INSERT ON tags
+             WHEN NEW.tag = 'reject'
+             BEGIN
+                 SELECT RAISE(FAIL, 'injected tag failure');
+             END;",
+        )
+        .unwrap();
+        let mut tx = conn.transaction().unwrap();
+        let tags = vec!["accepted".to_string(), "reject".to_string()];
+        assert!(apply_tags_row(&mut tx, 1, &tags, &TagMode::Replace).is_err());
+        let stored: Vec<String> = tx
+            .prepare("SELECT tag FROM tags WHERE file_id = 1 ORDER BY tag")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(stored, ["original"]);
+    }
+
     // C1-012: the recovery line carries the file_id + src + dst so disk vs DB
     // can be reconciled. Pure wire-shape check (no filesystem).
     #[test]
@@ -1628,6 +1843,29 @@ mod tests {
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(second["file_id"], 2);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn held_rename_requires_exact_volume_qualified_identity() {
+        let dir = unique_temp_dir("rename-identity");
+        let source = dir.join("source.bin");
+        let destination = dir.join("destination.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let identity = crate::platform::file_identity(&source).unwrap();
+        let wrong = crate::platform::FileIdentity {
+            volume: identity.volume.wrapping_add(1),
+            file: identity.file,
+        };
+
+        assert!(no_clobber_rename_bound(&source, &destination, wrong).is_err());
+        assert!(source.exists());
+        assert!(!destination.exists());
+
+        no_clobber_rename_bound(&source, &destination, identity).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
         std::fs::remove_dir_all(&dir).ok();
     }
 

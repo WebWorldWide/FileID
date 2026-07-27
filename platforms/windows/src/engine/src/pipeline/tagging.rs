@@ -959,16 +959,19 @@ impl Tagger {
         // count alone priced every frame at TYPICAL_FRAME_MB while
         // MAX_DECODED_PIXELS admits ~150 MB frames, a ~6x per-slot
         // underestimate that let 45 MP libraries pin gigabytes of read-ahead.
-        const PREDECODE_BUDGET_MB: usize = 256;
         const TYPICAL_FRAME_MB: usize = 24; // ~8 MP RGB8
-        let budget_cap = PREDECODE_BUDGET_MB / TYPICAL_FRAME_MB;
+        let predecode_budget_mb = match crate::platform::memory_tier() {
+            crate::platform::MemoryTier::Low => 192,
+            _ => 768,
+        };
+        let budget_cap = predecode_budget_mb / TYPICAL_FRAME_MB;
         let predecoded_cap = match crate::platform::memory_tier() {
             crate::platform::MemoryTier::Low => budget_cap.max(1),
             _ => budget_cap.max(self.worker_count),
         };
         let (predecoded_tx, predecoded_rx) =
             async_channel::bounded::<PreDecoded>(predecoded_cap);
-        let byte_budget = PredecodeBudget::new(PREDECODE_BUDGET_MB * 1024 * 1024);
+        let byte_budget = PredecodeBudget::new(predecode_budget_mb * 1024 * 1024);
         for decoder_idx in 0..decoder_count {
             let rx = raw_rx.clone();
             let tx = predecoded_tx.clone();
@@ -1382,9 +1385,12 @@ fn run_decoder_thread(
                     Some(result)
                 }
                 FileKind::Video => {
+                    // Media Foundation negotiates a <=1280px RGB32 working frame;
+                    // its bounded fallback rejects native BGRA + RGB peaks above
+                    // this shared reservation before allocating the retained RGB.
                     let Some((result, guard)) = decode_reserved(
                         &budget,
-                        budget.capacity(),
+                        crate::shell::video::VIDEO_DECODE_RESERVATION_BYTES,
                         &coord,
                         || decode_video_keyframe_sync(&file.path),
                     ) else {
@@ -1406,7 +1412,7 @@ fn run_decoder_thread(
                     if is_obj {
                         let Some((result, guard)) = decode_reserved(
                             &budget,
-                            512 * 512 * 3,
+                            budget.capacity(),
                             &coord,
                             || crate::pipeline::obj_render::render_obj_to_rgb(&file.path),
                         ) else {
@@ -2207,7 +2213,7 @@ async fn process_file_predecoded(
                                     );
                                     tagged.tags.push((label, Some(score)));
                                 }
-                                tracing::info!(
+                                tracing::debug!(
                                     target: "FileIDEngine::tagging",
                                     path = %redacted,
                                     ram_emit_count,

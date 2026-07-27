@@ -716,7 +716,7 @@ internal sealed class ThumbnailService : IDisposable
     {
         var tcs = new TaskCompletionSource<BitmapImage?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        var ok = TryEnqueueWithRetry(dispatcher, () => RunBytesSetSource(bytes, tcs, ct));
+        var ok = await TryEnqueueWithRetryAsync(dispatcher, () => RunBytesSetSource(bytes, tcs, ct)).ConfigureAwait(false);
         if (!ok)
         {
             Interlocked.Increment(ref _droppedDispatcher);
@@ -762,14 +762,17 @@ internal sealed class ThumbnailService : IDisposable
         }
     }
 
-    /// <summary>try once, then sleep 50 ms and retry once. TryEnqueue
+    /// <summary>try once, then wait 50 ms and retry once. TryEnqueue
     /// can return false during compositor shutdown races. A single retry
-    /// covers the transient case without spinning.</summary>
-    private static bool TryEnqueueWithRetry(
+    /// after a short delay covers the transient case without spinning — the
+    /// delay was previously documented but missing, so the retry fired
+    /// immediately and rarely outlasted the transient stall.</summary>
+    private static async Task<bool> TryEnqueueWithRetryAsync(
         Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
         Microsoft.UI.Dispatching.DispatcherQueueHandler action)
     {
         if (dispatcher.TryEnqueue(action)) return true;
+        await Task.Delay(50).ConfigureAwait(false);
         return dispatcher.TryEnqueue(action);
     }
 

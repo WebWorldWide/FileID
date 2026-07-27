@@ -103,6 +103,7 @@ public sealed partial class RestructureView : UserControl
         _idleTileStroke = new SolidColorBrush(Windows.UI.Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF));
 
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        AppViewModel.Instance.PropertyChanged += OnAppChanged;
         Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
         WireApplyBarHoverSprings();
         Loaded += OnLoaded;
@@ -110,9 +111,45 @@ public sealed partial class RestructureView : UserControl
         {
             _unloaded = true;
             EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+            AppViewModel.Instance.PropertyChanged -= OnAppChanged;
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
         };
     }
+
+    // Normalized library-root equality (trailing-separator- and case-
+    // insensitive, matching Windows path semantics). A null/empty either side
+    // never matches — no active folder means no plan may apply.
+    private static bool RootsMatch(string? planRoot, string? currentRoot)
+    {
+        if (string.IsNullOrEmpty(planRoot) || string.IsNullOrEmpty(currentRoot)) return false;
+        static string Norm(string p) => p.TrimEnd('\\', '/');
+        return string.Equals(Norm(planRoot), Norm(currentRoot), StringComparison.OrdinalIgnoreCase);
+    }
+
+    // CRITICAL: a plan is computed for one library root and never invalidated
+    // when the active folder changes/clears/wipes. Without this, switching the
+    // library after planning left the stale plan on screen with a live Apply
+    // that would move files in the OLD folder. Drop the cached plan the moment
+    // the active folder changes so the tab clears and re-plans for the new one.
+    private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("RestructureView.OnAppChanged", () =>
+        {
+            if (_unloaded) return;
+            if (e.PropertyName != nameof(AppViewModel.FolderPath)) return;
+            DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
+                "RestructureView.OnAppChanged.Dispatch",
+                () =>
+                {
+                    if (_unloaded) return;
+                    if (EngineClient.Instance.LastRestructurePlan is not null)
+                    {
+                        EngineClient.Instance.InvalidateRestructurePlan();
+                    }
+                    SyncPlan();
+                    SyncUndoAffordance();
+                    ApplyStatusText.Text = string.Empty;
+                }));
+        });
 
     // macOS parity (RestructureApplyBar.swift): gold primary + outline secondary
     // scale to 1.02x on hover with a response 0.28 / dampingFraction 0.7 spring.
@@ -162,12 +199,18 @@ public sealed partial class RestructureView : UserControl
                 // can't release the guard — the generation check can.
                 SyncEngineLifecycle();
             }
-            if (EngineClient.Instance.LastRestructurePlan is not null)
+            var folder = AppViewModel.Instance.FolderPath;
+            var cachedPlan = EngineClient.Instance.LastRestructurePlan;
+            if (cachedPlan is not null && RootsMatch(cachedPlan.LibraryRoot, folder))
             {
                 SyncPlan();
                 return;
             }
-            var folder = AppViewModel.Instance.FolderPath;
+            if (cachedPlan is not null)
+            {
+                EngineClient.Instance.InvalidateRestructurePlan();
+                SyncPlan();
+            }
             if (string.IsNullOrEmpty(folder))
             {
                 PlanStatusText.Text = "Pick a library folder in the sidebar to plan a reorganization.";
@@ -274,7 +317,11 @@ public sealed partial class RestructureView : UserControl
     private void SyncPlan()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null) return;
+        if (plan is null)
+        {
+            ClearPlanPresentation();
+            return;
+        }
 
         // H2: record the exact plan the rows below are built from. ApplyAsync
         // compares the live plan against this to detect a background re-plan
@@ -403,6 +450,36 @@ public sealed partial class RestructureView : UserControl
 
         ApplyBarTotalCount.Text = moveCount.ToString("N0");
         RecomputeSelection();
+    }
+
+    private void ClearPlanPresentation()
+    {
+        _renderedPlan = null;
+        _allFileRows.Clear();
+        _filesByOutcome.Clear();
+        _recByOutcome.Clear();
+        _recommendations.Clear();
+        KeepValue.Text = "0";
+        KeepHint.Text = string.Empty;
+        TidyValue.Text = "0";
+        TidyHint.Text = string.Empty;
+        ReorgValue.Text = "0";
+        ReorgHint.Text = string.Empty;
+        SankeyHeroStat.Text = string.Empty;
+        StatHero.Visibility = Visibility.Collapsed;
+        ViewModeToggle.Visibility = Visibility.Collapsed;
+        UnifiedSurface.Visibility = Visibility.Collapsed;
+        NothingToMoveCard.Visibility = Visibility.Collapsed;
+        StayingPutCard.Visibility = Visibility.Collapsed;
+        ApplyBarSelectedCount.Text = "0";
+        ApplyBarTotalCount.Text = "0";
+        ApplyBarHint.Text = "Generate a plan to enable Apply.";
+        ApplySymlinkButtonText.Text = "Apply as shortcuts";
+        ApplySymlinkButton.IsEnabled = false;
+        ApplyMovesButton.IsEnabled = false;
+        PlanStatusText.Text = string.IsNullOrEmpty(AppViewModel.Instance.FolderPath)
+            ? "Pick a library folder in the sidebar to plan a reorganization."
+            : "No current plan for this library — generate a new plan.";
     }
 
     private void AddRec(RestructureOutcome outcome, string headline, string body,
@@ -761,6 +838,21 @@ public sealed partial class RestructureView : UserControl
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
 
+        // CRITICAL: hard guard — the plan's own library root MUST equal the
+        // currently active library. If the folder was switched/cleared/wiped
+        // since planning (and the invalidation-on-change signal was somehow
+        // missed), applying would move files in the OLD folder the user has
+        // moved on from. Refuse, drop the stale plan, and require a re-plan.
+        if (!RootsMatch(plan.LibraryRoot, AppViewModel.Instance.FolderPath))
+        {
+            EngineClient.Instance.InvalidateRestructurePlan();
+            SyncPlan();
+            ApplyStatusText.Text = "The active folder changed since this plan was made — re-plan for the current library.";
+            _ = ShowAlertAsync("Folder changed",
+                "This reorganization plan was made for a different folder than the one now open. Re-plan for the current library before applying.");
+            return;
+        }
+
         // H2: the on-screen rows were rendered from _renderedPlan. If a background
         // re-plan has since replaced LastRestructurePlan (EngineClient sets it
         // synchronously; SyncPlan only re-renders on a later dispatcher turn), the
@@ -830,7 +922,8 @@ public sealed partial class RestructureView : UserControl
     // undone). Mirrors macOS RestructureView's canUndoRestructure affordance.
     private void SyncUndoAffordance()
     {
-        var canUndo = EngineClient.Instance.CanUndoRestructure;
+        var canUndo = EngineClient.Instance.CanUndoRestructure
+            && RootsMatch(EngineClient.Instance.UndoRestructureRoot, AppViewModel.Instance.FolderPath);
         UndoButton.Visibility = canUndo ? Visibility.Visible : Visibility.Collapsed;
         UndoButton.IsEnabled = canUndo;
     }
@@ -838,7 +931,8 @@ public sealed partial class RestructureView : UserControl
     private async void OnUndoClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnUndoClicked), async () =>
         {
-            var root = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
+            var root = EngineClient.Instance.UndoRestructureRoot
+                       ?? EngineClient.Instance.LastRestructurePlan?.LibraryRoot
                        ?? AppViewModel.Instance.FolderPath;
             if (string.IsNullOrEmpty(root)) return;
             UndoButton.IsEnabled = false;
@@ -892,7 +986,7 @@ public sealed partial class RestructureView : UserControl
         // this branch leaves _applying / _applyInFlight untouched.
         if (EngineClient.Instance.LastRestructureApplyResultWasUndo)
         {
-            SyncUndoAffordance();   // CanUndoRestructure was just cleared by the engine
+            SyncUndoAffordance();
             // The undo moved files back, so the on-screen plan is stale — refresh
             // it, mirroring the post-apply regenerate. Fire-and-forget; log a
             // faulted send instead of stranding (PlanRestructureAsync faults its
@@ -921,7 +1015,7 @@ public sealed partial class RestructureView : UserControl
             {
                 _ = ShowAlertAsync("Some items couldn't be restored",
                     $"Undo moved back {r.Applied:N0}, but {r.Failed:N0} couldn't be returned to their original location. " +
-                    "This usually means a file was open, already moved, or the original folder is gone. " +
+                    "Close any app using those files or restore the missing folder, then click Undo again. " +
                     "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
             }
             return;
@@ -944,7 +1038,8 @@ public sealed partial class RestructureView : UserControl
             // journal is truncate-per-batch — only the latest replays).
             var undoRoot = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
                            ?? AppViewModel.Instance.FolderPath;
-            if (!string.IsNullOrEmpty(undoRoot))
+            if (!string.IsNullOrEmpty(undoRoot)
+                && EngineClient.Instance.CanUndoRestructure)
             {
                 Services.UndoStack.Instance.Push(
                     $"reorganize {r.Applied:N0} file{(r.Applied == 1 ? "" : "s")}",
@@ -953,8 +1048,8 @@ public sealed partial class RestructureView : UserControl
                     {
                         try
                         {
-                            await EngineClient.Instance.UndoRestructureAsync(undoRoot!);
-                            return true;
+                            return await EngineClient.Instance
+                                .UndoRestructureAndWaitAsync(undoRoot!);
                         }
                         catch (Exception ex)
                         {

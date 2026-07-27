@@ -40,8 +40,10 @@ public struct IPCCommand: Codable, Sendable {
         /// still decodes on macOS (Swift's enum Codable synthesis uses
         /// `decodeIfPresent` for optional associated values). Consumers apply
         /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
+        /// `fileIDs` optionally scopes the persistent batch to one bounded
+        /// selection; nil retains whole-library behavior.
         /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.)
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?)
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet

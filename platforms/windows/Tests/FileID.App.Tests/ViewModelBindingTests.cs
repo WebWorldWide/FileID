@@ -785,6 +785,53 @@ public class PeopleSelectionReprojectTests
     }
 }
 
+public class RestructureUndoAvailabilityTests
+{
+    [Fact]
+    public void FreshApplyWithNoWork_PreservesExistingUndoState()
+    {
+        Assert.Null(EngineClient.NextCanUndoRestructure(
+            wasUndo: false, new RestructureApplyResult(0, 0)));
+    }
+
+    [Fact]
+    public void FailedOnlyApply_PreservesExistingUndoState()
+    {
+        Assert.Null(EngineClient.NextCanUndoRestructure(
+            wasUndo: false, new RestructureApplyResult(0, 1)));
+    }
+
+    [Fact]
+    public void ApplyThatMovedAFile_OffersRecoveryUndo()
+    {
+        Assert.True(EngineClient.NextCanUndoRestructure(
+            wasUndo: false, new RestructureApplyResult(1, 1)));
+    }
+
+    [Fact]
+    public void SymlinkApplyNeverOffersMoveJournalUndo()
+    {
+        Assert.False(EngineClient.NextCanUndoRestructure(
+            wasUndo: false,
+            new RestructureApplyResult(10, 0),
+            forwardRunWasUndoable: false));
+    }
+
+    [Fact]
+    public void PartialUndo_RemainsRetryable()
+    {
+        Assert.True(EngineClient.NextCanUndoRestructure(
+            wasUndo: true, new RestructureApplyResult(3, 1)));
+    }
+
+    [Fact]
+    public void CompletedUndo_ClearsUndoAvailability()
+    {
+        Assert.False(EngineClient.NextCanUndoRestructure(
+            wasUndo: true, new RestructureApplyResult(3, 0)));
+    }
+}
+
 /// <summary>
 /// F-C5-006: PersonDetailSheet must validate the target person still exists
 /// before sending renamePerson. A background re-cluster can merge the person

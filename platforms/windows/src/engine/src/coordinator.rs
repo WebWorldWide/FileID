@@ -31,7 +31,16 @@ impl GpuFailureLatch {
 
     async fn wait_dead(&self) {
         loop {
+            // Arm the Notified future (register as a waiter) BEFORE re-checking
+            // the flag. `Notify::notify_waiters()` only wakes ALREADY-registered
+            // waiters and stores no permit, so an unenabled future misses a
+            // notify that lands between construction and the first poll — a lost
+            // wakeup that would block wait_dead forever while the GPU is already
+            // gone. enable() closes that window: a notify after enable() but
+            // before await is captured and the await returns immediately.
             let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_dead() {
                 return;
             }

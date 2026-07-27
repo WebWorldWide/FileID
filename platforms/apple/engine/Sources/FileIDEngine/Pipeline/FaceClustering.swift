@@ -506,7 +506,8 @@ public enum FaceClustering {
 
         // PHASE 1 — extract any pending ArcFace embeddings. Idempotent.
         await extractPendingPrints(database: database, sink: sink,
-                                    skipFaceIDs: unknownFaceIDs)
+                                    skipFaceIDs: unknownFaceIDs,
+                                    cancelBaseline: cancelBaseline)
 
         // PHASE 2 — load every face_prints row with an ArcFace embedding
         // and not excluded by the quality filter. Unknown-person face_ids
@@ -1725,10 +1726,16 @@ public enum FaceClustering {
     /// pass the face_ids of unknown-person rows so we don't waste ANE
     /// inference on faces the user has explicitly opted out of clustering.
     /// Idempotent. Skips work silently if the model isn't loaded —
-    /// runClustering surfaces that upstream.
+    /// runClustering surfaces that upstream. `cancelBaseline` is the enclosing
+    /// run's snapshot of the sticky scan-cancel mirror; the per-file task loop
+    /// polls `clusterShouldCancel` against it so a mid-pass Cancel/shutdown aborts
+    /// this ~60 s embedding phase at a file boundary instead of holding the
+    /// single-job engine hostage until every face is extracted. (audit R-07,
+    /// F-C3-042 parity)
     static func extractPendingPrints(
         database: Database, sink: IPCSink,
-        skipFaceIDs: Set<Int64> = []
+        skipFaceIDs: Set<Int64> = [],
+        cancelBaseline: Bool = false
     ) async {
         guard ArcFaceService.shared.isReady else { return }
         let permanentlyFailed = permanentlyFailedExtractions()
@@ -1785,6 +1792,15 @@ public enum FaceClustering {
                 group.addTask {
                     await limiter.wait()
                     defer { Task { await limiter.signal() } }
+                    // Cooperative cancel at the file boundary: once Cancel/shutdown
+                    // fires, every file still waiting on the limiter skips its ANE
+                    // inference here and drains fast, so a queued command isn't
+                    // blocked for the whole extraction window. (audit R-07)
+                    if Self.clusterShouldCancel(
+                        baseline: cancelBaseline,
+                        current: ScanCoordinator.isCancelledSync(),
+                        shuttingDown: ScanCoordinator.isShuttingDownSync()
+                    ) { return [] }
                     return await Self.extractOneFile(path: path, rows: rows)
                 }
             }
@@ -1794,11 +1810,20 @@ public enum FaceClustering {
         }
 
         let extractedSnapshot = extracted   // Sendable capture
+        let cancelled = Self.clusterShouldCancel(
+            baseline: cancelBaseline,
+            current: ScanCoordinator.isCancelledSync(),
+            shuttingDown: ScanCoordinator.isShuttingDownSync())
+        let succeeded = Set(extractedSnapshot.map { $0.id })
         // Tally which attempted rows produced no embedding so a row that keeps
         // failing drops out of future windows instead of blocking newer faces.
-        // (F-C3-033)
-        let succeeded = Set(extractedSnapshot.map { $0.id })
-        recordExtractionOutcomes(attempted: pending.map { $0.id }, succeeded: succeeded)
+        // (F-C3-033) — but NOT on cancel: the queued files skipped their ANE pass,
+        // so recording them as failed attempts would push otherwise-fine faces
+        // past maxExtractionAttempts and permanently retire them after a few
+        // cancels. Embeddings that DID complete are still persisted below.
+        if !cancelled {
+            recordExtractionOutcomes(attempted: pending.map { $0.id }, succeeded: succeeded)
+        }
         do {
             try await database.pool.write { db in
                 for face in extractedSnapshot {
@@ -1808,12 +1833,19 @@ public enum FaceClustering {
                     )
                 }
             }
-            JSONLog.shared.info(ev: "face_print_extract_done",
-                                extra: ["pending": AnyCodable(pending.count),
-                                        "extracted": AnyCodable(extractedSnapshot.count),
-                                        "failed": AnyCodable(pending.count - extractedSnapshot.count),
-                                        "files": AnyCodable(byPath.count),
-                                        "seconds": AnyCodable(Date().timeIntervalSince(start))])
+            if cancelled {
+                JSONLog.shared.info(ev: "face_print_extract_cancelled",
+                                    extra: ["pending": AnyCodable(pending.count),
+                                            "extracted": AnyCodable(extractedSnapshot.count),
+                                            "files": AnyCodable(byPath.count)])
+            } else {
+                JSONLog.shared.info(ev: "face_print_extract_done",
+                                    extra: ["pending": AnyCodable(pending.count),
+                                            "extracted": AnyCodable(extractedSnapshot.count),
+                                            "failed": AnyCodable(pending.count - extractedSnapshot.count),
+                                            "files": AnyCodable(byPath.count),
+                                            "seconds": AnyCodable(Date().timeIntervalSince(start))])
+            }
         } catch {
             JSONLog.shared.error(ev: "face_print_persist_failed", error: "\(error)")
             await sink.emit(.error(EngineError(

@@ -204,6 +204,10 @@ struct DeepAnalyzeView: View {
     // actual files. Single in-flight gate + a short result line.
     @State private var applyInFlight = false
     @State private var applyStatus: String? = nil
+    // "Apply all" renames every pending file on disk in one tap with no review
+    // list (unlike BulkRenameSheet). The rename is the irreversible part, so gate
+    // it behind a confirmation that states the count. (HIGH #5)
+    @State private var confirmApplyAll = false
 
     // R6-02: cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
@@ -390,7 +394,16 @@ struct DeepAnalyzeView: View {
                     secondaryApplyButton("Apply people as tags", systemImage: "person.crop.square",
                                          disabled: applyInFlight || !hasNamedAnyone) { runApply(.people) }
                 }
-                Button { runApply(.all) } label: {
+                Button {
+                    // Rename-on-disk is the destructive step; confirm first when
+                    // there are files to rename. A tag-only apply (no pending
+                    // renames) is additive/reversible, so let it run straight away.
+                    if pendingRenameCount > 0 {
+                        confirmApplyAll = true
+                    } else {
+                        runApply(.all)
+                    }
+                } label: {
                     Label("Apply all", systemImage: "checkmark.circle.fill")
                         .font(.callout.bold())
                         .frame(maxWidth: .infinity)
@@ -400,6 +413,18 @@ struct DeepAnalyzeView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(applyInFlight)
+                .confirmationDialog(
+                    "Apply smart names to \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")?",
+                    isPresented: $confirmApplyAll,
+                    titleVisibility: .visible
+                ) {
+                    Button("Rename \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")", role: .destructive) {
+                        runApply(.all)
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("This renames \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s") on disk and writes tags and people as Finder tags. Library's \"Undo last rename\" can revert the renames; tag writes are additive and can be removed individually.")
+                }
                 if let applyStatus {
                     Text(applyStatus).font(.caption).foregroundStyle(.secondary)
                 }
@@ -433,11 +458,18 @@ struct DeepAnalyzeView: View {
         Task { @MainActor in
             var summary: [String] = []
             if scope == .all {
-                let renamed = await Task.detached(priority: .userInitiated) {
+                let renamed: [ReadStore.RenameOutcome] = await Task.detached(priority: .userInitiated) {
                     let pending = store.filesWithProposedNames()
-                    return pending.isEmpty ? 0 : store.applyProposedNamesBulk(pending).renamed.count
+                    guard !pending.isEmpty else { return [] }
+                    let result = store.applyProposedNamesBulk(pending)
+                    // Journal THIS batch so Library's "Undo last rename" reverts it,
+                    // not some older batch — matching every other rename call site
+                    // (BulkRenameSheet, per-file rename). saveLastBatch is
+                    // nonisolated, so it's safe to call from this detached task.
+                    BulkRenameSheet.saveLastBatch(result.renamed)
+                    return result.renamed
                 }.value
-                if renamed > 0 { summary.append("\(renamed) renamed") }
+                if !renamed.isEmpty { summary.append("\(renamed.count) renamed") }
             }
             if scope == .tags || scope == .all {
                 let n = await Task.detached(priority: .userInitiated) {

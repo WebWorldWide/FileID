@@ -628,7 +628,10 @@ pub(crate) async fn rasterize_for_vlm(
     };
     let source_path = std::path::PathBuf::from(&path_text);
     if !source_path.exists() {
-        anyhow::bail!("source file missing: {}", source_path.display());
+        anyhow::bail!(
+            "source file missing: {}",
+            crate::platform::redact_path_for_log(&source_path)
+        );
     }
     match kind.as_str() {
         "image" => {
@@ -720,12 +723,13 @@ async fn transcode_image_to_jpeg(
 }
 
 fn validate_vlm_image_dimensions(path: &std::path::Path) -> anyhow::Result<(u32, u32)> {
+    let redacted = crate::platform::redact_path_for_log(path);
     let (width, height) = image::ImageReader::open(path)
-        .map_err(|e| anyhow::anyhow!("open {}: {e}", path.display()))?
+        .map_err(|e| anyhow::anyhow!("open {redacted}: {e}"))?
         .with_guessed_format()
-        .map_err(|e| anyhow::anyhow!("guess format {}: {e}", path.display()))?
+        .map_err(|e| anyhow::anyhow!("guess format {redacted}: {e}"))?
         .into_dimensions()
-        .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", path.display()))?;
+        .map_err(|e| anyhow::anyhow!("dimensions {redacted}: {e}"))?;
     validate_vlm_pixel_count(width, height)?;
     Ok((width, height))
 }

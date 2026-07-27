@@ -103,6 +103,8 @@ if ($Arm64) { $Release = $true }
 $RustTarget    = if ($Arm64) { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $DotnetRid     = if ($Arm64) { "win-arm64" } else { "win-x64" }
 $ArchLabel     = if ($Arm64) { "arm64" } else { "x64" }
+$HostArch      = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$CanRunTargetTests = (-not $Arm64) -or $HostArch -eq "arm64"
 
 # --- Paths ------------------------------------------------------------------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -127,10 +129,10 @@ $AppRid      = $DotnetRid
 $Configuration = if ($Release) { "Release" } else { "Debug" }
 # Pick the cargo profile. -Fast = release-fast (thin LTO + parallel codegen)
 # is dramatically faster on a multi-core box and the perf delta vs
-# fat-LTO release is small for our hot paths. The plain `release`
-# profile stays the default for ship builds.
+# fat-LTO release is small for our hot paths. Ship builds use the identical
+# optimized release-debuginfo profile so native crash PDBs are retained.
 $RustProfile   = if ($Fast -and $Release) { "release-fast" }
-                  elseif ($Release)         { "release" }
+                  elseif ($Release)         { "release-debuginfo" }
                   else                       { "debug" }
 $RustFlag      = if ($Release) { "--release" } else { "" }
 
@@ -297,13 +299,15 @@ if (-not $SkipEngine) {
         if ($Fast -and $Release) {
             & cargo build --profile release-fast --target $($RustTarget) @featureArgs @jobsArg
         } elseif ($Release) {
-            & cargo build --release --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --profile release-debuginfo --target $($RustTarget) @featureArgs @jobsArg
         } else {
             & cargo build --target $($RustTarget) @featureArgs @jobsArg
         }
-        if ($RunTests) {
+        if ($RunTests -and $CanRunTargetTests) {
             Write-Host "Running cargo tests..." -ForegroundColor Cyan
             & cargo test --target $($RustTarget) @featureArgs @jobsArg
+        } elseif ($RunTests) {
+            Write-Host "Skipping ARM64 Rust test execution on $HostArch; run build-arm64.ps1 tests on native ARM64 hardware." -ForegroundColor Yellow
         }
     } finally {
         Pop-Location
@@ -332,7 +336,7 @@ if (-not $SkipEngine) {
     $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
     if (Test-Path $fetchScript) {
         Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
-        $runtimeOutput = & $fetchScript
+        $runtimeOutput = & $fetchScript -Architecture $ArchLabel
         $runtimeDlls = @{}
         foreach ($line in $runtimeOutput) {
             if ($line -match '^RUNTIME_DLL=(.+)$') {
@@ -391,7 +395,9 @@ if (-not $SkipApp) {
     if ($RunTests) {
         Write-Host "Running xUnit tests..." -ForegroundColor Cyan
         & dotnet test (Join-Path $PlatformDir "Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj") `
-            --nologo --no-build -c $Configuration
+            --nologo -c $Configuration
+        & dotnet test (Join-Path $PlatformDir "Tests/FileID.App.Tests/FileID.App.Tests.csproj") `
+            --nologo -c $Configuration -p:Platform=x64
     }
 }
 
@@ -432,6 +438,15 @@ if (-not $SkipApp) {
         }
     }
 
+    if (-not $SkipEngine) {
+        foreach ($required in @("FileIDEngine.exe", "onnxruntime.dll", "DirectML.dll")) {
+            $requiredPath = Join-Path $AppOutDir $required
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+                throw "Publish output is incomplete: missing $requiredPath"
+            }
+        }
+    }
+
     # --- Sign (optional) ----------------------------------------------------
     if ($Sign) {
         $signScript = Join-Path $ScriptDir "sign.ps1"
@@ -458,6 +473,35 @@ if (-not $SkipApp) {
     } else {
         Write-Host "  WARN: Microsoft.WindowsAppRuntime.Bootstrap.dll not found beside FileID.exe." -ForegroundColor Yellow
         Write-Host "        The unpackaged app needs this bootstrap DLL to activate Windows App Runtime 1.7." -ForegroundColor Yellow
+    }
+}
+
+# Retain native and managed symbols outside the installed payload. Release
+# incidents otherwise produce WER minidumps that cannot be resolved to source.
+if ($Release) {
+    $SymbolsDir = Join-Path $DistDir "symbols"
+    New-Item -ItemType Directory -Force -Path $SymbolsDir | Out-Null
+    $symbolCount = 0
+    if (-not $SkipEngine -and $EngineBuildExe) {
+        $enginePdb = [System.IO.Path]::ChangeExtension($EngineBuildExe, ".pdb")
+        if (Test-Path -LiteralPath $enginePdb -PathType Leaf) {
+            Copy-Item -LiteralPath $enginePdb -Destination $SymbolsDir -Force
+            $symbolCount++
+        }
+    }
+    if (-not $SkipApp) {
+        Get-ChildItem -LiteralPath (Resolve-AppOutputDir) -Filter "*.pdb" -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $SymbolsDir -Force
+            $symbolCount++
+        }
+    }
+    if (-not $SkipEngine -and -not (Test-Path -LiteralPath (Join-Path $SymbolsDir "FileIDEngine.pdb") -PathType Leaf)) {
+        throw "Release engine PDB was not produced; crash dumps would be unsymbolizable."
+    }
+    if ($symbolCount -eq 0) {
+        Write-Host "WARN: no release PDBs were retained; crash dumps will not be symbolizable." -ForegroundColor Yellow
+    } else {
+        Write-Host "  Retained $symbolCount release symbol file(s) in $SymbolsDir" -ForegroundColor Green
     }
 }
 

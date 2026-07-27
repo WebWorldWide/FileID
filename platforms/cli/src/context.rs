@@ -207,7 +207,7 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
         }
     }
     let canon = std::fs::canonicalize(target)
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| strip_extended_length(&p.to_string_lossy()))
         .unwrap_or_else(|_| target.to_string());
     for candidate in [canon.as_str(), target] {
         if let Ok(Some(id)) = conn
@@ -299,10 +299,31 @@ pub fn stable_path_hash(path: &str) -> i64 {
 
 /// Best-effort absolute, lexically-normalized path string for `path_text`.
 pub fn canonical_path_text(p: &Path) -> String {
-    std::fs::canonicalize(p)
+    let raw = std::fs::canonicalize(p)
         .unwrap_or_else(|_| p.to_path_buf())
         .to_string_lossy()
-        .into_owned()
+        .into_owned();
+    strip_extended_length(&raw)
+}
+
+/// Strip a Windows extended-length ("\\?\" / "\\?\UNC\") verbatim prefix from a
+/// path string. `std::fs::canonicalize` returns the verbatim form on Windows,
+/// but the engine stores the stripped, user-facing form — so without this the
+/// same folder scanned via the CLI and via the engine would key two distinct
+/// `path_text` rows (the unique key), silently duplicating the library. Mirrors
+/// the engine's crate-private `util::path_safety::strip_extended_length`. A
+/// no-op on every non-verbatim string, so it never alters a canonicalized POSIX
+/// path (those begin with `/`, never `\\?\`).
+///   `\\?\C:\a\b`             → `C:\a\b`
+///   `\\?\UNC\srv\sh\x`       → `\\srv\sh\x`
+pub fn strip_extended_length(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +345,17 @@ mod tests {
             .unwrap();
         }
         conn
+    }
+
+    #[test]
+    fn strip_extended_length_removes_verbatim_prefix() {
+        assert_eq!(strip_extended_length(r"\\?\C:\a\b"), r"C:\a\b");
+        assert_eq!(strip_extended_length(r"\\?\UNC\srv\sh\x"), r"\\srv\sh\x");
+        // UNC prefix must win over the shorter `\\?\` prefix it contains.
+        assert_eq!(strip_extended_length(r"\\?\UNC\server\share"), r"\\server\share");
+        // Non-verbatim strings pass through unchanged on every OS.
+        assert_eq!(strip_extended_length(r"C:\a\b"), r"C:\a\b");
+        assert_eq!(strip_extended_length("/home/alice/pic.jpg"), "/home/alice/pic.jpg");
     }
 
     #[test]

@@ -234,11 +234,16 @@ final class HNSWIndex {
             liveVectors.append(node.vec)
         }
 
-        // Reset and reinsert.
+        // Reset and reinsert. Rewind the level-draw RNG to its fixed seed so the
+        // rebuilt topology is identical to building fresh from these survivors —
+        // otherwise compact() would keep drawing from the advanced stream and the
+        // determinism contract above (stable cluster IDs / inherited names across
+        // re-clusters) would silently break. (audit F-C3-006)
         nodes = []
         entryPoint = -1
         entryLevel = 0
         deletedCount = 0
+        rngState = HNSWIndex.levelSeed
         for vec in liveVectors {
             insert(vec)
         }

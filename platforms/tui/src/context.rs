@@ -125,7 +125,13 @@ pub fn collapse_home(p: &str) -> String {
         if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
             let home = home.to_string_lossy();
             if let Some(rest) = p.strip_prefix(home.as_ref()) {
-                return format!("~{rest}");
+                // Only collapse at a path boundary so a `HOME` of `/home/alice`
+                // doesn't swallow the `2` in `/home/alice2/...` (→ a bogus
+                // `~2/...`): the char after the prefix must be a separator or
+                // the end of the string.
+                if rest.is_empty() || rest.starts_with(['/', '\\']) {
+                    return format!("~{rest}");
+                }
             }
         }
     }

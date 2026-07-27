@@ -23,6 +23,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
+    private readonly Func<bool> _hideUnknown;
     private bool _isLoading;
     private string? _errorMessage;
     // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
@@ -41,10 +42,11 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private long _refreshGen;
     private int _activeLoads;
 
-    public PeopleViewModel(string dbPath, DispatcherQueue ui)
+    public PeopleViewModel(string dbPath, DispatcherQueue ui, Func<bool>? hideUnknown = null)
     {
         _dbPath = dbPath;
         _ui = ui;
+        _hideUnknown = hideUnknown ?? (() => false);
     }
 
     public void Dispose()
@@ -148,7 +150,11 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so they
             // must be marshaled to the captured UI thread — else a native fast-fail
             // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
+            //
+            // Guard the write with the generation token: a slow FAILING refresh
+            // must not overwrite a newer SUCCESSFUL refresh's cleared (null) error
+            // with a stale banner.
+            OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; });
         }
         finally
         {
@@ -190,10 +196,11 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 )                                                       AS anchor_face_id
             FROM persons p
             JOIN face_prints fp ON fp.person_id = p.id
-            WHERE COALESCE(p.is_unknown, 0) = 0
+            WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
             GROUP BY p.id
             ORDER BY member_count DESC
             """;
+        cmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -215,18 +222,18 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
         // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi (audit A4).
-        void Apply()
+        void ApplySafely() => DebugLog.SafeRun("PeopleViewModel.ApplyOnUi", () =>
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             Replace(rows);
-        }
+        });
         if (_ui.HasThreadAccess)
         {
-            Apply();
+            ApplySafely();
         }
         else
         {
-            _ui.TryEnqueue(Apply);
+            _ui.TryEnqueue(ApplySafely);
         }
     }
 

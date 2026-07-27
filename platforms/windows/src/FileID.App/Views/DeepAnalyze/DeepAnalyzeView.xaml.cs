@@ -24,12 +24,6 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
 
-    // Trips when Cancel is clicked during an "Analyze Selected" batch so the
-    // per-file send loop stops dispatching the remaining files. The engine
-    // cancel only stops the in-flight file; without this the loop would keep
-    // queuing files 2..N after the user pressed Cancel.
-    private bool _selectedRunCancelled;
-
     // L5: set the moment Cancel is clicked while a Deep Analyze command is still
     // in flight (most importantly while it's QUEUED behind a running scan, where
     // the engine can't act on the cancel until the scan releases the mutation
@@ -86,6 +80,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+        EngineClient.Instance.DeepAnalyzeFileDoneReceived -= OnDeepAnalyzeFileDoneReceived;
         SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
         Loaded -= OnLoadedHandler;
         Unloaded -= OnUnloadedHandler;
@@ -95,6 +90,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        EngineClient.Instance.DeepAnalyzeFileDoneReceived += OnDeepAnalyzeFileDoneReceived;
         SelectionRegistry.Instance.PropertyChanged += OnSelectionRegistryChanged;
         SyncCards();
         UpdateActiveModelLabel();
@@ -230,6 +226,15 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (_unloaded) return;
         DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
+    }
+
+    private void OnDeepAnalyzeFileDoneReceived(DeepAnalyzeFileDone fileDone)
+    {
+        if (_unloaded) return;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!_unloaded) ConsumeFileDone(fileDone);
+        });
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -429,6 +434,15 @@ public sealed partial class DeepAnalyzeView : UserControl
     // already consumed so the last-result effects run exactly once per file and
     // a later file's progress tick can't re-process the previous file's result.
     private FileID.IpcSchema.DeepAnalyzeFileDone? _lastConsumedFileDone;
+    // Count of FileDone events consumed since the live card's streamer file last
+    // changed. The engine streams only the wave's lowest-idx (streamer) file on
+    // the live current_path/current_caption channel, but fires a terminal
+    // FileDone for EVERY concurrent wave member — and FileDone carries no path,
+    // so a sibling's FileDone can't be matched to the displayed streamer. In a
+    // sequential run (one file per wave) exactly one FileDone lands per streamer,
+    // so only the FIRST FileDone since the streamer changed may write the live
+    // card's caption/proposed-name; later siblings only feed the pill tally.
+    private int _fileDonesThisStreamer;
 
     private void SyncStream()
     {
@@ -449,6 +463,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                     _localPreparingAttemptId = attemptId;
                     _proposedNameCount = 0;
                     _lastConsumedFileDone = null;
+                    _fileDonesThisStreamer = 0;
                     _lastStreamPath = null;
                     SyncProposedNamesPill();
                 }
@@ -500,6 +515,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             {
                 _localPreparingAttemptId = 0;
                 _lastStreamPath = null;
+                _fileDonesThisStreamer = 0;
                 CancelWarmupTimer();
                 StreamCard.Visibility = Visibility.Collapsed;
                 OverallProgress.IsIndeterminate = false;
@@ -531,6 +547,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // reflects only THIS run, not a cumulative count across runs. (audit A13)
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
+            _fileDonesThisStreamer = 0;
             _lastStreamPath = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
@@ -564,6 +581,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                 _ = LoadStreamThumbAsync(prog.CurrentPath);
                 _captionAccumulator = string.Empty;
                 StreamCaptionText.Text = string.Empty;
+                // New streamer file: clear the prior file's proposed name and
+                // re-open the single-FileDone window so this file's own terminal
+                // caption/proposed-name may render (and a concurrent sibling's
+                // may not).
+                StreamProposedNameText.Text = string.Empty;
+                _fileDonesThisStreamer = 0;
             }
             // live caption stream. Engine emits the partial
             // accumulated text at 4 Hz; show it directly in the caption
@@ -575,25 +598,12 @@ public sealed partial class DeepAnalyzeView : UserControl
             }
         }
 
-        // Only act on a genuinely new FileDone. DeepAnalyzeLast stays latched
-        // across every subsequent progress tick for the *next* file; without
-        // this reference guard those ticks would re-increment _proposedNameCount
-        // (inflated pill) and clobber the current file's live caption / proposed
-        // name with the previous file's finished text. (audit A13 follow-up)
-        if (last is not null && !ReferenceEquals(last, _lastConsumedFileDone))
+        // PropertyChanged remains a compatibility/replay path. The hot
+        // DeepAnalyzeFileDoneReceived event carries every back-to-back payload
+        // into the dispatcher; the reference guard prevents double consumption.
+        if (last is not null)
         {
-            _lastConsumedFileDone = last;
-            StreamCaptionText.Text = last.Description ?? string.Empty;
-            if (!string.IsNullOrEmpty(last.ProposedName))
-            {
-                StreamProposedNameText.Text = $"Proposed name: {last.ProposedName}";
-                _proposedNameCount++;
-                SyncProposedNamesPill();
-            }
-            else
-            {
-                StreamProposedNameText.Text = string.Empty;
-            }
+            ConsumeFileDone(last);
         }
 
         if (complete is not null)
@@ -604,6 +614,26 @@ public sealed partial class DeepAnalyzeView : UserControl
                 ? $"Cancelled ({complete.Processed} done, {complete.Failed} failed)"
                 : $"Done — {complete.Processed} captioned in {complete.TotalSeconds:0.#}s ({complete.Failed} failed)";
             SyncProposedNamesPill();
+        }
+    }
+
+    private void ConsumeFileDone(DeepAnalyzeFileDone fileDone)
+    {
+        if (ReferenceEquals(fileDone, _lastConsumedFileDone)) return;
+        _lastConsumedFileDone = fileDone;
+        _fileDonesThisStreamer++;
+        var hasProposed = !string.IsNullOrEmpty(fileDone.ProposedName);
+        if (hasProposed)
+        {
+            _proposedNameCount++;
+            SyncProposedNamesPill();
+        }
+        if (_fileDonesThisStreamer == 1)
+        {
+            StreamCaptionText.Text = fileDone.Description ?? string.Empty;
+            StreamProposedNameText.Text = hasProposed
+                ? $"Proposed name: {fileDone.ProposedName}"
+                : string.Empty;
         }
     }
 
@@ -1038,9 +1068,9 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex) { DebugLog.Warn("SetApplyBusy UI update threw: " + ex.Message); }
     }
 
-    // Analyzes every file currently selected in the Library view. We send
-    // one DeepAnalyzeFile per file. Engine throttles parallelism via its
-    // model pool; sending N requests just queues them up.
+    // Analyze the current Library selection as one bounded engine batch so the
+    // multi-GB VLM loads once and the existing persistent-server wave scheduler
+    // handles progress, cancellation, and per-file terminals.
     private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
         {
@@ -1049,23 +1079,21 @@ public sealed partial class DeepAnalyzeView : UserControl
                 await ShowAlertAsync("Deep Analyze isn't ready", reason);
                 return;
             }
-            var sel = SelectionRegistry.Instance.LibrarySelection;
-            if (sel.Count == 0) return;
-            _selectedRunCancelled = false;
-            foreach (var id in sel)
+            var selected = SelectionRegistry.Instance.LibrarySelection.ToArray();
+            if (selected.Length == 0) return;
+            try
             {
-                if (_selectedRunCancelled) break;
-                try
-                {
-                    await EngineClient.Instance.DeepAnalyzeFileAsync(id, _activeModel);
-                }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn($"DeepAnalyzeFile({id}) failed: {ex.Message}");
-                    _selectedRunCancelled = true;
-                    await ShowAlertAsync("Deep Analyze stopped", ex.Message);
-                    break;
-                }
+                await EngineClient.Instance.DeepAnalyzeAllAsync(
+                    _activeModel,
+                    skipExisting: false,
+                    tagsOnly: false,
+                    proposeRenames: ProposeRenamesCheck.IsChecked == true,
+                    fileIds: selected);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn($"Deep Analyze selected batch failed: {ex.Message}");
+                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
             }
         });
 
@@ -1095,9 +1123,6 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnCancelClicked(object sender, RoutedEventArgs e)
     {
-        // Also stop the per-file "Analyze Selected" send loop — the engine
-        // cancel below only stops the file currently in flight.
-        _selectedRunCancelled = true;
         // L5: latch a 'Cancelling…' state + disable Cancel now. When the command
         // is queued behind a scan the engine can't act until the scan releases the
         // gate, so without this the button stayed enabled with no feedback for the

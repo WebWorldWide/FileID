@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import errno
 import os
 import subprocess
 import sys
@@ -46,6 +47,16 @@ class FingerprintReadonlyTreeTests(unittest.TestCase):
                 os.chmod(root, 0o755)
             self.assertNotEqual(before["metadataSha256"], after["metadataSha256"])
 
+    def test_atomic_output_replaces_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "corpus"
+            root.mkdir()
+            output = base / "fingerprint.json"
+            output.write_text("old output\n", encoding="utf-8")
+            write_output_atomically(output, root.resolve(strict=True), "safe output\n")
+            self.assertEqual(output.read_text(encoding="utf-8"), "safe output\n")
+
     def test_atomic_output_replaces_symlink_without_following_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -56,7 +67,12 @@ class FingerprintReadonlyTreeTests(unittest.TestCase):
             output_dir = base / "output"
             output_dir.mkdir()
             output = output_dir / "fingerprint.json"
-            output.symlink_to(protected)
+            try:
+                output.symlink_to(protected)
+            except OSError as error:
+                if error.errno in (errno.EPERM, errno.EACCES) or getattr(error, "winerror", None) == 1314:
+                    self.skipTest("symlink creation is unavailable without Windows Developer Mode")
+                raise
 
             write_output_atomically(output, root.resolve(strict=True), "safe output\n")
 

@@ -912,6 +912,18 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private void OnSlotPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(ModelSlot.Status)) return;
+        // Arm the no-progress watchdog from the Status-set-to-Downloading
+        // transition point so EVERY entry into Downloading is watched — the
+        // fresh install (PrewarmAsync / pre-stamp) AND a late-progress
+        // Failed→Downloading revert in ModelSlot.Apply (the case a
+        // once-failed-then-revived download previously left unwatched forever).
+        // A Status PropertyChanged only fires on a genuine change, so Status ==
+        // Downloading here means it just transitioned in. ArmNoProgressWatchdog
+        // is idempotent (Interlocked guard), so exactly one watchdog runs.
+        if (sender is ModelSlot slot && slot.Status == ModelInstallStatus.Downloading)
+        {
+            ArmNoProgressWatchdog(slot);
+        }
         RecomputeAggregates();
     }
 
@@ -1110,6 +1122,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             slot.LastProgressAt = DateTime.UtcNow;
         }
         slot.CurrentModelKind = modelKind;
+        // Anchor the no-progress watchdog clock at IPC-send time for BOTH the
+        // fresh and the InstallAll-pre-stamped path. The watchdog is armed off
+        // the Status→Downloading transition (OnSlotPropertyChanged), which for a
+        // pre-stamped slot fired before WaitForReadyAsync; without this refresh
+        // its window would be measured from the pre-stamp and could false-fire
+        // while a slow cold-start engine was still becoming Ready.
+        slot.LastProgressAt = DateTime.UtcNow;
         DebugLog.Info($"[INSTALL] {modelKind} status set to Downloading; sending IPC...");
 
         try
@@ -1124,21 +1143,29 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
 
-        // No-progress watchdog: 30 s after the IPC send, if Status is still
-        // Downloading and no progress event has landed, fail with a clear
-        // message. Mirrors macOS WelcomeSheet's "stuck install" handling.
-        ScheduleNoProgressWatchdog(slot, modelKind);
+        // The no-progress watchdog is armed from the Status-set-to-Downloading
+        // transition (OnSlotPropertyChanged → ArmNoProgressWatchdog), so it is
+        // already live for this slot here — including the InstallAll pre-stamp
+        // and any Failed→Downloading revert. No explicit arm needed.
     }
 
-    private void ScheduleNoProgressWatchdog(ModelSlot slot, string modelKind, CancellationToken ct = default)
+    private void ArmNoProgressWatchdog(ModelSlot slot, CancellationToken ct = default)
     {
-        // This method is reached after `await ...ConfigureAwait(false)`, so the
-        // ambient DispatcherQueue.GetForCurrentThread() would return null here
-        // and silently disable the watchdog (a genuinely stuck install would
-        // then never surface "No response — try again"). slot.Fail mutates
-        // x:Bind-observed state, so it must marshal to the UI thread: prefer
-        // the dispatcher captured at the public install entry points, falling
-        // back to the ctor-time capture (APP-2).
+        // Exactly one live watchdog per slot. A running loop already re-checks
+        // LastProgressAt each window, so it covers any Downloading state the slot
+        // is in; a second arm request while one is live is a no-op. When the loop
+        // exits (terminal state, fired failure, or cancellation) the finally
+        // clears the guard, so a later Downloading transition — crucially the
+        // Failed→Downloading revert in ModelSlot.Apply after the watchdog already
+        // failed the slot — re-arms a fresh watchdog instead of leaving a revived
+        // download unwatched forever.
+        if (Interlocked.CompareExchange(ref slot.WatchdogLive, 1, 0) != 0) return;
+        // This method can be reached after `await ...ConfigureAwait(false)`, so
+        // the ambient DispatcherQueue.GetForCurrentThread() would return null
+        // here and silently disable the watchdog. slot.Fail mutates x:Bind-
+        // observed state, so it must marshal to the UI thread: prefer the
+        // dispatcher captured at the public install entry points, falling back
+        // to the ctor-time capture (APP-2).
         var ui = _uiDispatcher ?? _ui;
         _ = Task.Run(async () =>
         {
@@ -1165,6 +1192,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                     var lastAny = new DateTime(Interlocked.Read(ref _lastAnyProgressAtTicks), DateTimeKind.Utc);
                     var lastProgress = slot.LastProgressAt > lastAny ? slot.LastProgressAt : lastAny;
                     if (DateTime.UtcNow - lastProgress < NoProgressTimeout) continue;
+                    var modelKind = slot.CurrentModelKind ?? slot.DisplayLabel;
                     DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
                     if (ui is not null)
                     {
@@ -1191,6 +1219,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             catch (Exception ex)
             {
                 DebugLog.Warn($"[INSTALL] no-progress watchdog threw: {ex.Message}");
+            }
+            finally
+            {
+                // Release the single-owner guard so the next Downloading
+                // transition can arm a fresh watchdog.
+                Interlocked.Exchange(ref slot.WatchdogLive, 0);
             }
         }, ct);
     }

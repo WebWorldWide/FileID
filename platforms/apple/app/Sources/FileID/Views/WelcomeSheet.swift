@@ -154,6 +154,10 @@ struct WelcomeSheet: View {
                     // otherwise re-show the spinner.
                     vlmRequested = false
                     resetVLMTracking()
+                    // Drop the engine's last mid-download fraction for this model
+                    // too — it isn't cleared by a Cancel and would otherwise fool a
+                    // fresh retry's watchdogs into thinking a download is underway.
+                    engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
                     engine.cancelPrewarm()
                 }
             )
@@ -329,6 +333,11 @@ struct WelcomeSheet: View {
         }
         guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
         resetVLMTracking()
+        // Clear any residual progress from a just-cancelled attempt at the same
+        // model so both watchdogs below arm against a clean slate — otherwise a
+        // lingering fraction makes the 30 s "no response" guard see the old
+        // modelKind and bail, and a genuinely-hung retry spins forever. (R6-07)
+        engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
         vlmRequested = true
         let started = Date()
         vlmRequestedAt = started

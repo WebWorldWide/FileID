@@ -40,7 +40,9 @@ param(
                                      # still tripping a true unbounded leak.
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
-    [int]$ScanTimeoutMinutes = 15,   # full-library corpora (60K+ files) need 60-90 min
+    [int]$ScanTimeoutMinutes = 120,  # uncapped real corpora can exceed 90 min on cold storage
+    [string]$StateDirectory = "",     # isolated LOCALAPPDATA parent; retained for incremental reruns
+    [switch]$UseLiveState,            # explicit opt-in to %LOCALAPPDATA%\FileID (may wipe its catalog)
     [switch]$Verbose
 )
 
@@ -123,8 +125,26 @@ if ($corpusFiles -lt 10) {
 }
 OK "corpus has $corpusFiles files"
 
-# --- 3. Wipe DB -------------------------------------------------------
-$AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
+# --- 3. Select isolated state + wipe DB ------------------------------
+$LiveLocalAppData = $env:LOCALAPPDATA
+if ($UseLiveState -and -not [string]::IsNullOrWhiteSpace($StateDirectory)) {
+    throw "Use either -UseLiveState or -StateDirectory, not both."
+}
+if ($UseLiveState) {
+    $EngineLocalAppData = $LiveLocalAppData
+    Warn "using live FileID state; a run without -SkipWipe deletes the live catalog"
+} else {
+    if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
+        if ($SkipWipe) {
+            throw "-SkipWipe requires an explicit -StateDirectory so there is an isolated catalog to reuse."
+        }
+        $StateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-iterate-" + [guid]::NewGuid().ToString("N"))
+    }
+    $EngineLocalAppData = [System.IO.Path]::GetFullPath($StateDirectory)
+    New-Item -ItemType Directory -Force -Path $EngineLocalAppData | Out-Null
+    OK "isolated engine state: $EngineLocalAppData"
+}
+$AppDataRoot = Join-Path $EngineLocalAppData "FileID"
 $faceCrops = Join-Path $AppDataRoot "face_crops"
 if ($SkipWipe) {
     Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
@@ -152,10 +172,18 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
-# Force the bundled ORT 1.22 beside the engine — System32 ships a stale 1.17
-# that the default DLL search order (System32 first) would otherwise bind,
-# panicking our ort 2.0.0-rc.10 crate. Belt-and-suspenders with colocation.
-$psi.Environment["ORT_DYLIB_PATH"] = Join-Path (Split-Path $EnginePath) "onnxruntime.dll"
+$psi.Environment["LOCALAPPDATA"] = $EngineLocalAppData
+if (-not $psi.Environment.ContainsKey("FILEID_MODELS_DIR")) {
+    $liveModels = Join-Path $LiveLocalAppData "FileID\Models"
+    if (Test-Path -LiteralPath $liveModels -PathType Container) {
+        $psi.Environment["FILEID_MODELS_DIR"] = $liveModels
+    }
+}
+# Leave ORT_DYLIB_PATH unset. The engine pins a verified accelerator-pack
+# runtime (CUDA/OpenVINO) before its first ORT session when one is installed;
+# otherwise ort's load-dynamic resolver finds the base DLL colocated above.
+# Inheriting a developer-shell override silently defeats the accelerator pin.
+[void]$psi.Environment.Remove("ORT_DYLIB_PATH")
 # V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
 # wedged the DirectML driver and locked the entire system requiring a
 # hard reboot. Pool sizing is now VRAM-budgeted inside the engine and
@@ -219,6 +247,26 @@ if (-not $ready) {
 }
 OK "engine ready"
 
+$eventOffset = 0L
+function Read-NewEventLines {
+    if (-not (Test-Path -LiteralPath $eventLog -PathType Leaf)) { return @() }
+    $stream = [System.IO.FileStream]::new(
+        $eventLog,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+    try {
+        [void]$stream.Seek($script:eventOffset, [System.IO.SeekOrigin]::Begin)
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 4096, $true)
+        try {
+            $lines = [System.Collections.Generic.List[string]]::new()
+            while (($line = $reader.ReadLine()) -ne $null) { $lines.Add($line) }
+            $script:eventOffset = $stream.Position
+            return $lines.ToArray()
+        } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
 
 $scanStart = Get-Date
@@ -232,8 +280,7 @@ $totalProcessed = 0
 $deadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
 while (-not $scanComplete -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
-    $events = Get-Content $eventLog -ErrorAction SilentlyContinue
-    foreach ($line in $events) {
+    foreach ($line in (Read-NewEventLines)) {
         if ($line -match '"residentMB"\s*:\s*(\d+)') {
             $mb = [int]$Matches[1]
             if ($mb -gt $peakResidentMB) { $peakResidentMB = $mb }
@@ -265,8 +312,7 @@ $clusterDeadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
 $clusterDone = $false
 while (-not $clusterDone -and (Get-Date) -lt $clusterDeadline) {
     Start-Sleep -Seconds 2
-    $events = Get-Content $eventLog -ErrorAction SilentlyContinue
-    foreach ($line in $events) {
+    foreach ($line in (Read-NewEventLines)) {
         if ($line -match '"residentMB"\s*:\s*(\d+)') {
             $mb = [int]$Matches[1]
             if ($mb -gt $peakResidentMB) { $peakResidentMB = $mb }
@@ -314,7 +360,7 @@ $fatalCount = (Get-Content $eventLog | Where-Object { $_ -match '"kind"\s*:\s*"(
 Assert "[A6] no fatal engine errors" ($fatalCount -eq 0)
 
 # A7: no Windows Error Reporting crash dumps for FileIDEngine in last 5 min.
-$werDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportArchive"
+$werDir = Join-Path $LiveLocalAppData "Microsoft\Windows\WER\ReportArchive"
 $recentCrashes = 0
 if (Test-Path $werDir) {
     $cutoff = (Get-Date).AddMinutes(-10)
@@ -371,8 +417,10 @@ if ($failures -eq 0) {
     Write-Host "  throughput: $([int]$throughput) files/sec" -ForegroundColor DarkGreen
     Write-Host "  peak RAM:   $peakResidentMB MB" -ForegroundColor DarkGreen
     Write-Host "  scan time:  $([int]$scanElapsed.TotalSeconds)s" -ForegroundColor DarkGreen
+    Write-Host "  state:      $EngineLocalAppData" -ForegroundColor DarkGreen
     exit 0
 } else {
     Write-Host "$failures assertion(s) FAILED" -ForegroundColor Red
+    Write-Host "  state:      $EngineLocalAppData" -ForegroundColor Yellow
     exit 1
 }

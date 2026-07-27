@@ -14,9 +14,6 @@
 //      and surface the last error.
 //   7. Bridge engine stderr → DebugLog (local-only) so engine tracing is
 //      visible in app.log.
-//   8. Throttle DeepAnalyzeFileDone events to 2 Hz (matches macOS — without
-//      it, fast VLM runs spam the UI ~50/s).
-//
 // PRIVACY: every log call site that includes a path goes through
 // PathRedactor.Redact. The engine never reaches the network on its own;
 // only the IPC `prewarmModel` / `deepAnalyzeAll` paths trigger downloads,
@@ -61,12 +58,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // — so all four caps are kept symmetric. Bumped 32→64 MiB (R3-07B/R5-12) to hold
     // a full ~200k-move whole-library plan while still bounding a runaway line. An
     // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
-    private const int MaxFrameChars = 64 * 1024 * 1024;
+    private const int MaxFrameBytes = 64 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state (#22). Owned by a single
     /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
     /// loop from a respawn can't race another's buffer/resync flag.</summary>
-    private sealed class StdoutFraming
+    internal sealed class StdoutFraming
     {
         public readonly StringBuilder Buffer = new();
         public readonly char[] Chunk = new char[16 * 1024];
@@ -74,6 +71,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // multi-MB frame isn't rescanned from index 0 on every chunk (the old
         // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
         public int Scanned;
+        public long Utf8Bytes;
         public bool Resyncing;
         // Set when an over-cap frame was discarded, so StdoutLoopAsync can surface
         // a one-shot visible error instead of failing silently.
@@ -125,9 +123,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private long _expectingExitAtTicks;
     private int _restartAfterExpectedExit;
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
-
-    private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
-    private static readonly TimeSpan DeepAnalyzeFileDoneThrottle = TimeSpan.FromMilliseconds(500); // 2 Hz
 
     // Re-entrancy gate for any auto-triggered Deep Analyze pass. Released
     // in the DeepAnalyzeCompleteEvent arm.
@@ -319,6 +314,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _lastRestructurePlan, value);
     }
 
+    /// <summary>Discard the cached restructure plan. Called when the active
+    /// library folder changes/clears/wipes: a plan is computed for one root and
+    /// otherwise never invalidated, so a stale plan for the OLD folder would
+    /// keep a live Apply that moves files in a library the user has moved on
+    /// from (CRITICAL audit finding). Nulling it fires PropertyChanged →
+    /// RestructureView clears the on-screen plan.</summary>
+    public void InvalidateRestructurePlan() => LastRestructurePlan = null;
+
     private RestructureApplyResult? _lastRestructureApplyResult;
     public RestructureApplyResult? LastRestructureApplyResult
     {
@@ -335,16 +338,32 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public bool LastRestructureApplyResultWasUndo { get; private set; }
 
     private bool _canUndoRestructure;
-    /// <summary>True once an applyRestructure moved files and they haven't been
-    /// undone yet — drives the "Undo last run" button. (R2)</summary>
+    /// <summary>True once an applyRestructure may have moved files and they haven't
+    /// been fully undone yet — drives the "Undo last run" button. (R2)</summary>
     public bool CanUndoRestructure
     {
         get => _canUndoRestructure;
         private set => Set(ref _canUndoRestructure, value);
     }
+    private string? _pendingRestructureApplyRoot;
+    private bool _pendingRestructureApplyUndoable;
+    internal string? UndoRestructureRoot { get; private set; }
     /// Set by UndoRestructureAsync so the next RestructureApplyResult is read as
-    /// the undo's reply (clears CanUndoRestructure) rather than a fresh apply.
+    /// the undo's reply rather than a fresh apply.
     internal bool UndoRestructureInFlight { get; set; }
+
+    internal static bool? NextCanUndoRestructure(
+        bool wasUndo,
+        RestructureApplyResult result,
+        bool forwardRunWasUndoable = true)
+    {
+        if (wasUndo)
+        {
+            return result.Failed > 0 || !string.IsNullOrWhiteSpace(result.PrivilegeError);
+        }
+        if (!forwardRunWasUndoable) return false;
+        return result.Applied > 0 ? true : null;
+    }
 
     private BulkActionResult? _lastBulkAction;
     public BulkActionResult? LastBulkAction
@@ -451,6 +470,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public IObservable<IpcEvent> Events => _events;
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    internal event Action<DeepAnalyzeFileDone>? DeepAnalyzeFileDoneReceived;
 
     private EngineClient()
     {
@@ -464,6 +484,48 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
               ?? throw new InvalidOperationException(
                   "EngineClient must be constructed on the UI thread. "
                   + "First-touch the singleton from App.OnLaunched, not from a Task.Run continuation.");
+        UndoRestructureRoot = ReadPersistedRestructureUndoRoot(
+            Path.Combine(AppPaths.Root, "restructure_undo.ndjson"));
+        CanUndoRestructure = UndoRestructureRoot is not null;
+    }
+
+    internal static string? ReadPersistedRestructureUndoRoot(string journalPath)
+    {
+        try
+        {
+            if (!File.Exists(journalPath)) return null;
+            using var stream = new FileStream(
+                journalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+            var firstLine = reader.ReadLine();
+            if (string.IsNullOrWhiteSpace(firstLine)) return null;
+            using var document = System.Text.Json.JsonDocument.Parse(firstLine);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("version", out var version)
+                || version.GetInt32() != 2
+                || !root.TryGetProperty("library_root", out var libraryRoot))
+            {
+                return null;
+            }
+            var value = libraryRoot.GetString();
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            var firstEntry = reader.ReadLine();
+            if (string.IsNullOrWhiteSpace(firstEntry)) return null;
+            using var entryDocument = System.Text.Json.JsonDocument.Parse(firstEntry);
+            var entry = entryDocument.RootElement;
+            if (!entry.TryGetProperty("file_id", out _)
+                || !entry.TryGetProperty("from", out _)
+                || !entry.TryGetProperty("to", out _))
+            {
+                return null;
+            }
+            return value;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Could not read persisted Restructure undo metadata: " + ex.Message);
+            return null;
+        }
     }
 
     // ─── Lifecycle ─────────────────────────────────────────────────────
@@ -751,12 +813,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>S4: read one newline-delimited engine frame, bounded to
-    /// <see cref="MaxFrameChars"/>. A frame that exceeds the cap before a
+    /// <see cref="MaxFrameBytes"/> UTF-8 bytes. A frame that exceeds the cap before a
     /// newline arrives is discarded and we resync to the next newline, so a
     /// never-terminating line can't OOM the UI. Returns null at EOF. All framing
     /// state lives in the caller-owned <paramref name="st"/>, so each
     /// StdoutLoopAsync owns its own — no cross-loop sharing (#22).</summary>
-    private static async Task<string?> ReadBoundedFrameAsync(StreamReader reader, StdoutFraming st, CancellationToken ct)
+    internal static async Task<string?> ReadBoundedFrameAsync(
+        StreamReader reader,
+        StdoutFraming st,
+        CancellationToken ct,
+        int maxFrameBytes = MaxFrameBytes)
     {
         while (true)
         {
@@ -775,6 +841,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 string frame = st.Buffer.ToString(0, nl);
                 st.Buffer.Remove(0, nl + 1);
                 st.Scanned = 0;
+                st.Utf8Bytes = Encoding.UTF8.GetByteCount(st.Buffer.ToString());
                 if (st.Resyncing)
                 {
                     // This frame is the tail of an oversize line — drop it and
@@ -783,17 +850,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     continue;
                 }
                 if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
+                if (Encoding.UTF8.GetByteCount(frame) > maxFrameBytes)
+                {
+                    DebugLog.Warn($"Engine emitted an oversize IPC frame (> {maxFrameBytes} UTF-8 bytes); discarding.");
+                    st.OversizeDropped = true;
+                    continue;
+                }
                 return frame;
             }
             // Everything currently buffered is newline-free.
             st.Scanned = st.Buffer.Length;
             // No newline yet: if the buffer crossed the cap, the engine is
             // emitting an oversize/garbage frame. Drop it and resync.
-            if (st.Buffer.Length > MaxFrameChars)
+            if (st.Utf8Bytes > maxFrameBytes)
             {
-                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
+                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {maxFrameBytes} UTF-8 bytes); discarding and resyncing.");
                 st.Buffer.Clear();
                 st.Scanned = 0;
+                st.Utf8Bytes = 0;
                 st.Resyncing = true;
                 st.OversizeDropped = true;
             }
@@ -806,6 +880,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     string tail = st.Buffer.ToString();
                     st.Buffer.Clear();
                     st.Scanned = 0;
+                    st.Utf8Bytes = 0;
                     if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
                     return tail;
                 }
@@ -818,6 +893,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // accumulated buffer (the O(n^2) on a large frame). (audit A0)
             int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
+            st.Utf8Bytes += Encoding.UTF8.GetByteCount(st.Chunk, 0, read);
             if (Array.IndexOf(st.Chunk, '\n', 0, read) >= 0)
             {
                 st.Scanned = bufLenBefore;
@@ -1199,9 +1275,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// or surfaces a clean error — never silently throws "Engine not
     /// running."
     /// </summary>
-    public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+    public async Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
     {
-        if (State == LifecycleState.Ready) return Task.CompletedTask;
+        ct.ThrowIfCancellationRequested();
+        if (State == LifecycleState.Ready) return;
         if (State == LifecycleState.Crashed)
         {
             throw new InvalidOperationException(
@@ -1214,50 +1291,44 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             if (e.PropertyName != nameof(State)) return;
             if (State == LifecycleState.Ready)
             {
-                PropertyChanged -= handler;
                 tcs.TrySetResult(true);
             }
             else if (State == LifecycleState.Crashed)
             {
-                PropertyChanged -= handler;
                 tcs.TrySetException(new InvalidOperationException(
                     "Engine crashed while waiting for ready: " + (CrashReason ?? "unknown reason")));
             }
         };
         PropertyChanged += handler;
-        // Re-check after subscribing in case the state changed between
-        // the early-return above and the handler attach.
-        if (State == LifecycleState.Ready)
+        // Re-check both terminal states after subscribing so a transition in
+        // the precheck/attach window cannot strand the waiter until timeout.
+        var stateAfterSubscribe = State;
+        if (stateAfterSubscribe == LifecycleState.Ready)
         {
             PropertyChanged -= handler;
-            return Task.CompletedTask;
+            return;
         }
-        return Task.Run(async () =>
+        if (stateAfterSubscribe == LifecycleState.Crashed)
         {
-            try
-            {
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(timeout);
-                using var reg = cts.Token.Register(() =>
-                {
-                    PropertyChanged -= handler;
-                    if (ct.IsCancellationRequested)
-                    {
-                        tcs.TrySetCanceled(ct);
-                    }
-                    else
-                    {
-                        tcs.TrySetException(new TimeoutException(
-                            $"Engine did not become Ready within {timeout.TotalSeconds:0}s (current state: {State})."));
-                    }
-                });
-                await tcs.Task.ConfigureAwait(false);
-            }
-            finally
-            {
-                PropertyChanged -= handler;
-            }
-        }, ct);
+            PropertyChanged -= handler;
+            throw new InvalidOperationException(
+                "Engine crashed while waiting for ready: " + (CrashReason ?? "unknown reason"));
+        }
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(timeout);
+        try
+        {
+            await tcs.Task.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"Engine did not become Ready within {timeout.TotalSeconds:0}s (current state: {State}).");
+        }
+        finally
+        {
+            PropertyChanged -= handler;
+        }
     }
 
     // ─── Event router ──────────────────────────────────────────────────
@@ -1510,15 +1581,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastError = e.Error;
                             DebugLog.Warn($"[IPC IN] engine error: kind={e.Error.Kind} msg={e.Error.Message} path={PathRedactor.Redact(e.Error.Path)}");
                         }
-                        // M7: a terminal Deep Analyze error that arrives with NO
-                        // accompanying DeepAnalyzeComplete (vlm_model_missing) would
-                        // otherwise strand the command slot for the rest of the
-                        // session and wedge the Deep Analyze view — release it here
-                        // as belt-and-suspenders (idempotent with any Complete).
-                        if (IsTerminalDeepAnalyzeErrorWithoutComplete(e.Error.Kind))
-                        {
-                            ReleaseDeepAnalyzeCommandOnTerminalError(generation);
-                        }
                         // PAR-111: a clustering FAILURE must release the auto gate,
                         // else auto-clustering stays suppressed for the rest of the
                         // session. Match the EXACT failure kind — not a broad
@@ -1569,13 +1631,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case DeepAnalyzeFileDoneEvent dafd:
                         Volatile.Write(ref _deepAnalyzePresentationGeneration, generation);
-                        // Throttle: 2 Hz. Without this, fast VLM runs spam ~50/s.
-                        var now = DateTime.UtcNow;
-                        if (now - _lastDeepAnalyzeFileDone >= DeepAnalyzeFileDoneThrottle)
-                        {
-                            DeepAnalyzeLast = dafd.FileDone;
-                            _lastDeepAnalyzeFileDone = now;
-                        }
+                        // FileDone is terminal accounting, not droppable progress:
+                        // concurrent wave members arrive back-to-back and every
+                        // result must reach the view's proposed-name tally.
+                        try { DeepAnalyzeFileDoneReceived?.Invoke(dafd.FileDone); }
+                        catch (Exception ex) { DebugLog.Warn("Deep Analyze FileDone subscriber threw: " + ex.Message); }
+                        DeepAnalyzeLast = dafd.FileDone;
                         break;
                     case DeepAnalyzeCompleteEvent dac:
                         if (!CompleteDeepAnalyzeCommand(generation, dac.Result, () =>
@@ -1616,19 +1677,40 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // UndoRestructureInFlight is cleared below, and set it before
                         // the result so it is already correct when the result's
                         // PropertyChanged enqueues the view's SyncApplyResult.
-                        LastRestructureApplyResultWasUndo = UndoRestructureInFlight;
-                        LastRestructureApplyResult = rar.Result;
-                        // Toggle the "Undo last run" affordance: an apply that
-                        // moved files makes the run undoable; the undo's own reply
-                        // clears it. (R2)
-                        if (UndoRestructureInFlight)
+                        bool wasUndo = UndoRestructureInFlight;
+                        LastRestructureApplyResultWasUndo = wasUndo;
+                        _lastRestructureApplyResult = rar.Result;
+                        PropertyChanged?.Invoke(
+                            this,
+                            new PropertyChangedEventArgs(nameof(LastRestructureApplyResult)));
+                        var nextCanUndo = NextCanUndoRestructure(
+                            wasUndo,
+                            rar.Result,
+                            _pendingRestructureApplyUndoable);
+                        if (wasUndo)
                         {
                             UndoRestructureInFlight = false;
-                            CanUndoRestructure = false;
+                            if (nextCanUndo == false)
+                            {
+                                UndoRestructureRoot = null;
+                            }
                         }
                         else
                         {
-                            CanUndoRestructure = rar.Result.Applied > 0;
+                            if (nextCanUndo == true)
+                            {
+                                UndoRestructureRoot = _pendingRestructureApplyRoot;
+                            }
+                            else if (!_pendingRestructureApplyUndoable)
+                            {
+                                UndoRestructureRoot = null;
+                            }
+                            _pendingRestructureApplyRoot = null;
+                            _pendingRestructureApplyUndoable = false;
+                        }
+                        if (nextCanUndo.HasValue)
+                        {
+                            CanUndoRestructure = nextCanUndo.Value;
                         }
                         break;
                     case BulkActionResultEvent bar:

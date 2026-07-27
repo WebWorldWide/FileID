@@ -142,9 +142,40 @@ def write_output_atomically(output: Path, root: Path, encoded: str) -> None:
     if resolved_output == root or root in resolved_output.parents:
         raise ValueError("--output must be outside the fingerprinted root")
 
+    temporary_name = f".{output.name}.fileid-{os.getpid()}-{secrets.token_hex(8)}.tmp"
+    if os.name == "nt":
+        temporary_path = parent / temporary_name
+        opened_parent = os.stat(parent, follow_symlinks=False)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+                descriptor = None
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            current_parent = os.stat(parent, follow_symlinks=False)
+            if (opened_parent.st_dev, opened_parent.st_ino) != (
+                current_parent.st_dev,
+                current_parent.st_ino,
+            ):
+                raise ValueError("--output parent changed during validation")
+            os.replace(temporary_path, resolved_output)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+        return
+
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(parent, directory_flags)
-    temporary_name = f".{output.name}.fileid-{os.getpid()}-{secrets.token_hex(8)}.tmp"
     descriptor: int | None = None
     try:
         opened = os.fstat(directory_fd)

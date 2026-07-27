@@ -350,7 +350,11 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             // transitioned to an inactive zero state by the shared engine helper,
             // preserving its ID and user tags while clearing stale content facts.
             batch.push(ScanRecord::Zero(ZeroByteObservation {
-                path: path.to_path_buf(),
+                // The engine keys the row by `observation.path.to_string_lossy()`
+                // verbatim, so this must be the SAME stripped form we store as
+                // `path_text` (canonical_path_text) — not the raw `\\?\` walk
+                // path, which would miss the existing row and leave stale content.
+                path: std::path::PathBuf::from(canonical_path_text(path)),
                 file_ref: fileid_engine::platform::file_ref(path),
             }));
             // Respect the same batch-flush bound as the main path so a tree of

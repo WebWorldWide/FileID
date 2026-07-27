@@ -13,6 +13,7 @@ public enum DeepAnalyzeScope: Sendable {
     case singleFile(Int64)
     case folder(prefix: String)
     case wholeLibrary(skipExisting: Bool)
+    case selected(fileIDs: [Int64], skipExisting: Bool)
 }
 
 public enum DeepAnalyzeRunner {
@@ -58,6 +59,26 @@ public enum DeepAnalyzeRunner {
                           let path: String = row["path_text"], !path.isEmpty else { return nil }
                     return Target(id: rowID, path: path)
                 }
+            case .selected(let fileIDs, let skipExisting):
+                var seen = Set<Int64>()
+                let ids = fileIDs.filter { $0 > 0 && seen.insert($0).inserted }
+                guard !ids.isEmpty else { return [] }
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                let r = try GRDB.Row.fetchAll(db, sql: """
+                    SELECT id, path_text, vlm_model FROM files
+                    WHERE id IN (\(placeholders))
+                      AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model')
+                      AND failed = 0
+                    """, arguments: StatementArguments(ids))
+                let targets = r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    let existingModel: String? = row["vlm_model"]
+                    if skipExisting && existingModel == modelKey { return nil }
+                    return Target(id: rowID, path: path)
+                }
+                let byID = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0) })
+                return ids.compactMap { byID[$0] }
             case .wholeLibrary(let skipExisting):
                 let sql: String
                 let args: StatementArguments
@@ -143,6 +164,29 @@ public enum DeepAnalyzeRunner {
             return
         }
 
+        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+            modelKind: modelKey,
+            phase: .resolvingTargets,
+            message: "Finding files to analyze…"
+        )))
+        let targets: [(id: Int64, path: String)]
+        do {
+            targets = try await resolveTargets(database: database,
+                                                scope: scope, modelKey: modelKey)
+        } catch {
+            await sink.emit(.error(EngineError(
+                kind: "deep_targets_failed",
+                message: "Could not resolve targets: \(error.localizedDescription)"
+            )))
+            await finish(processed: 0, failed: 0, cancelled: false)
+            return
+        }
+        let total = targets.count
+        guard total > 0 else {
+            await finish(processed: 0, failed: 0, cancelled: false)
+            return
+        }
+
         // Defensive RAM check — the UI hides too-big models, but a stale
         // IPC command (e.g. user picked a big model on a different Mac
         // and it persisted in UserDefaults) could still arrive. Loading
@@ -160,7 +204,7 @@ public enum DeepAnalyzeRunner {
             return
         }
 
-        // 1. Load the model (download if needed, with progress events).
+        // 2. Load the model (download if needed, with progress events).
         // Tell the UI we're entering the multi-second cold-load window
         // so the startingCard can update its label from "Queued" to
         // "Loading <model>…". Without this the user stares at the same
@@ -203,32 +247,6 @@ public enum DeepAnalyzeRunner {
                     message: "Could not load \(modelKind.displayName): \(error.localizedDescription)"
                 )))
             }
-            await finish(processed: 0, failed: 0, cancelled: false)
-            return
-        }
-
-        // 2. Resolve targets.
-        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
-            modelKind: modelKey,
-            phase: .resolvingTargets,
-            message: "Finding files to analyze…"
-        )))
-        let targets: [(id: Int64, path: String)]
-        do {
-            targets = try await resolveTargets(database: database,
-                                                scope: scope, modelKey: modelKey)
-        } catch {
-            await sink.emit(.error(EngineError(
-                kind: "deep_targets_failed",
-                message: "Could not resolve targets: \(error.localizedDescription)"
-            )))
-            // F-C3-028: this exit previously returned with no terminal event,
-            // stranding the UI. Emit the terminal complete like every other exit.
-            await finish(processed: 0, failed: 0, cancelled: false)
-            return
-        }
-        let total = targets.count
-        guard total > 0 else {
             await finish(processed: 0, failed: 0, cancelled: false)
             return
         }

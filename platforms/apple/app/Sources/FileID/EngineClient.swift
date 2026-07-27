@@ -381,6 +381,13 @@ public final class EngineClient {
                         state.scanned = state.data.count
                         break
                     }
+                    let lineBytes = state.data.distance(from: state.data.startIndex, to: nl)
+                    if lineBytes > maxFrameBytes {
+                        oversizeBytes = max(oversizeBytes ?? 0, lineBytes)
+                        state.data.removeSubrange(state.data.startIndex...nl)
+                        state.scanned = 0
+                        continue
+                    }
                     let line = state.data.subdata(in: state.data.startIndex..<nl)
                     state.data.removeSubrange(state.data.startIndex...nl)
                     state.scanned = 0
@@ -398,7 +405,7 @@ public final class EngineClient {
                 return out
             }
             if let dropped = oversizeBytes {
-                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes, no newline) — discarding")
+                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes) — discarding")
                 Task { @MainActor in
                     self?.lastError = EngineError(
                         kind: "ipc_frame_too_large",
@@ -1030,7 +1037,7 @@ public final class EngineClient {
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
         guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
-        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true)) else { return }
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true, fileIDs: nil)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
@@ -1098,6 +1105,18 @@ public final class EngineClient {
     /// every in-flight prewarm (the only mode the welcome sheet uses today).
     public func cancelPrewarm() {
         send(.cancelPrewarm(modelKind: nil))
+    }
+
+    /// Drop a stale `modelDownloadProgress` left behind by a cancelled prewarm.
+    /// The engine only auto-clears the bar at fraction 1.0 (or on exit); a user
+    /// Cancel stops mid-download, so the last fraction lingers with the same
+    /// modelKind and would fool WelcomeSheet's retry watchdogs into believing a
+    /// fresh download is already progressing — arming neither the "no response"
+    /// nor the "stalled" timer. Pass a modelKind to clear only that model's
+    /// residue; nil clears whatever is showing.
+    public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {
+        if let modelKind, modelDownloadProgress?.modelKind != modelKind { return }
+        modelDownloadProgress = nil
     }
 }
 

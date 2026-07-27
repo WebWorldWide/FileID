@@ -1,5 +1,33 @@
 # NEXT — resume here
 
+## STATUS 2026-07-27 — Adlon performance floor restored; final Windows review fixes locally green
+
+The current dirty branch completes the full 135,740-file Adlon scan in 4,813 s (~28.2 files/s versus the 25 files/s floor), improves the 2,006-video workload from 483 s to 153 s, preserves the read-only corpus fingerprint, and passes People, Deep Analyze, Restructure apply/Undo, release-bundle, privacy, and local test gates. See STATE 2026-07-27.
+
+Resume in this order:
+
+1. **Review and land deliberately.** Preserve the large pre-existing cross-platform dirty tree. Do not reset, squash away unrelated work, commit, or push without owner approval. After landing, require every active GitHub workflow green.
+2. **Run native platform gates.** On macOS, compile/test the optional Deep Analyze `fileIDs` path, the 64 MiB terminated/unterminated `LineBuffer` tests, and native MLX/QuickLook behavior. On Linux, run GTK workspace fmt/clippy/tests and package smoke. Execute ARM64 and AMD/Intel/QNN hardware matrices externally.
+3. **Keep remaining scalability work measurement-driven.** Existing-catalog rename-heal still performs legacy probes and repeated lookup work, semantic search remains a linear embedding scan, and native Media Foundation/model calls are only cooperatively cancellable. Profile identical warm/cold workloads before changing them; do not raise CUDA model concurrency above the measured pool of two.
+4. **Retain fail-closed mutation semantics.** Restructure and bulk rename require durable identity; old rows without `file_ref` must be rescanned before mutation. Windows Restructure moves the held source handle relative to a held destination parent. Undo journals remain exact-root-bound and retryable through disk-success/DB-failure. Never weaken these checks for headline throughput.
+5. **External release gates remain.** Replace all ten reviewed GitHub/NVIDIA runtime URLs with byte-identical vetted Hugging Face mirrors, then run strict egress. Clean-VM installer/upgrade/accessibility, public-trust signing, hosted CI, native platform builds, and vendor hardware remain unproven locally.
+
+Evidence: `%TEMP%\fileid-iterate-5f1a2a56ea8f4406a6abcf794abb297d` (pre-optimization full run), the final 4,813 s isolated Adlon run recorded in STATE/engine logs, `%TEMP%\fileid-adlon-before.json` plus the matching post-run fingerprint, and the final two-file Restructure sandbox output (`APPLY=2/0`, `UNDO=2/0`, integrity `ok`).
+
+## STATUS 2026-07-26 — Windows People/Deep Analyze/Restructure hardening is locally green on `fix-crash-hardening-and-xplat-audit`
+
+The preserved Adlon catalog now passes the reported People completion/event-burst path on the final Release build: Re-cluster (54.92 s) → navigate away → authoritative auto-return → 408 scroll mutations, exit 0, no WER/Application Error/dump. Analyze Selected uses one persistent VLM batch and was verified on two real images plus a 1 s no-model `skipExisting` repeat. Restructure produced a 70,151-move read-only real plan; isolated apply/Undo restored bytes + DB paths and passed integrity. A final isolated 1,000-file Adlon CUDA scan passed all harness assertions at ~33 files/s and 3.1 GB peak. Full Windows Rust/.NET gates are green (App 292, IPC 48). See STATE 2026-07-26.
+
+Resume in this order:
+
+1. **Review and land deliberately.** The branch still has a large pre-existing cross-platform dirty tree; do not squash away or reset unrelated work. Review the complete diff, commit on the branch, push/PR, and require all active GitHub workflows green. Re-run the Windows gates if conflict resolution touches People, Deep Analyze IPC, Restructure recovery, logging, or runtime selection.
+2. **Run native cross-platform gates.** On macOS, compile/test the new optional `fileIDs` command mirror and confirm an empty/already-analyzed selected batch reaches completion without loading/downloading the model. On Linux, run GTK app fmt/clippy/tests and exercise the whole-library (`fileIDs=nil`) path. Swift tooling was unavailable on the Windows verification host.
+3. **Keep performance claims measured.** The bounded 1k and 3k Adlon runs are stable at ~33 files/s with CUDA, above the 25 files/s regression floor but below the aspirational ≥140 files/s product target. Run an uncapped current-tree Adlon soak when a long hardware window is available; preserve the event log, end-to-end/model-phase rates, peak RSS/VRAM, failed-row causes, and corpus fingerprint. The remaining compute lever is a genuinely dynamic-batch RAM++ export/pipeline, not higher CUDA session counts (pool >2 regresses).
+4. **Retain the new safety semantics.** Restructure journal v2 is exact-root-bound; owner chose fail-closed rejection of legacy rootless journals. A failed-only apply preserves existing Undo state without presenting it as a new run; a physical move whose DB update fails counts as moved and remains undoable. Deep Analyze selected batches stay capped at 10,000 and prefilter before model startup. Do not relax these to hide errors or improve headline throughput.
+5. **External release gates remain.** Native ARM64/AMD/Intel/QNN hardware, clean-VM installer/upgrade/accessibility, signed publication, strict Hugging Face-only runtime mirrors, and hosted CI are not proven by this session.
+
+Evidence: `%TEMP%\tmpalhirz.tmp\events.jsonl` (final 1k CUDA scan), `%LOCALAPPDATA%\FileID\logs\app.log` / `engine.jsonl.2026-07-26` (final People flow), and STATE 2026-07-26.
+
 ## STATUS 2026-07-21 — CUDA/Blackwell perf recovery + discovery/ETA/install-truth landed on branch `perf-cuda-discovery-fixes`
 
 Tagging recovered from 0.55 img/s (silent CPU fallback) to ~21 img/s sustained on the RTX 5080 (see STATE top + DECISIONS 2026-07-21 ×4). All local gates green (engine Windows+WSL clippy/tests, app build/tests/format, license-policy + both egress modes). Resume in this order:

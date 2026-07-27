@@ -125,9 +125,14 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
         // them to the captured UI thread — else a native fast-fail
         // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
-        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); ClearStaleModeGroups(); }
+        // Only the LATEST refresh may write ErrorMessage: a slow FAILING refresh
+        // must not overwrite a newer SUCCESSFUL refresh's cleared (null) error
+        // with a stale banner. Guard with the generation token (mirrors
+        // LibraryViewModel). ClearStaleModeGroups already routes through
+        // ApplyOnUi's own generation check.
+        catch (SqliteException ex) { OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (IOException ex) { OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); ClearStaleModeGroups(); }
+        catch (Exception ex) { OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; }); ClearStaleModeGroups(); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
@@ -157,99 +162,107 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         => mode == CleanupMode.Similar ? LoadSimilar(ct) : LoadExact(ct);
 
     private List<DuplicateGroup> LoadExact(CancellationToken ct)
+        => LoadExactFromPath(_dbPath, ct);
+
+    internal static List<DuplicateGroup> LoadExactFromPath(string dbPath, CancellationToken ct)
     {
         // First-launch guard: the engine creates the DB on first scan.
-        if (!File.Exists(_dbPath))
+        if (!File.Exists(dbPath))
         {
             return new List<DuplicateGroup>();
         }
         var connString = new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadOnly,
         }.ToString();
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Let SQLite's indexed content_hash grouping find only the largest
-        // duplicate groups. The old implementation materialized every hashed
-        // file and a second dictionary even though the UI rendered 200 groups.
-        // That made opening Cleanup proportional to the entire library.
+        // Rank members for the largest duplicate groups in one SQLite pass.
+        // The previous 1+N query shape reopened a statement for every visible
+        // group (up to 201 queries per refresh) and made Cleanup lag on large DBs.
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT content_hash, size_bytes, COUNT(*) AS n
-            FROM files
-            WHERE content_hash IS NOT NULL AND failed = 0
-            GROUP BY content_hash, size_bytes
-            HAVING n > 1
-            ORDER BY n DESC, hex(content_hash), size_bytes
-            LIMIT $maxGroups
+            WITH duplicate_keys AS (
+                SELECT content_hash, size_bytes, COUNT(*) AS n
+                FROM files
+                WHERE content_hash IS NOT NULL AND failed = 0
+                GROUP BY content_hash, size_bytes
+                HAVING n > 1
+                ORDER BY n DESC, hex(content_hash), size_bytes
+                LIMIT $maxGroups
+            ), ranked AS (
+                SELECT f.id, f.path_text, f.size_bytes, f.modified_at,
+                       hex(f.content_hash) AS hash_hex, k.n,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY f.content_hash, f.size_bytes
+                           ORDER BY COALESCE(f.aesthetic, 0) DESC,
+                                    f.size_bytes DESC,
+                                    COALESCE(f.created_at, 1e18) ASC,
+                                    LENGTH(f.path_text) ASC,
+                                    f.path_text ASC
+                       ) AS member_rank
+                FROM files AS f
+                JOIN duplicate_keys AS k
+                  ON f.content_hash = k.content_hash AND f.size_bytes = k.size_bytes
+                WHERE f.failed = 0
+            )
+            SELECT id, path_text, size_bytes, modified_at, hash_hex, n
+            FROM ranked
+            WHERE member_rank <= $maxPerGroup
+            ORDER BY n DESC, hash_hex, size_bytes, member_rank
+            LIMIT $maxMembers
             """;
         cmd.Parameters.AddWithValue("$maxGroups", MaxGroups);
-        var keys = new List<(byte[] Hash, long Size, int Count)>(MaxGroups);
-        using (var reader = cmd.ExecuteReader())
-        {
-            while (reader.Read())
-            {
-                ct.ThrowIfCancellationRequested();
-                if (reader.IsDBNull(0)) continue;
-                var hashBytes = (byte[])reader[0];
-                if (hashBytes.Length == 0) continue;
-                keys.Add((hashBytes, reader.GetInt64(1), reader.GetInt32(2)));
-            }
-        }
+        cmd.Parameters.AddWithValue("$maxPerGroup", MaxVisibleMembersPerGroup);
+        cmd.Parameters.AddWithValue("$maxMembers", MaxVisibleMembers);
 
-        var groups = new List<DuplicateGroup>(keys.Count);
-        var remaining = MaxVisibleMembers;
-        foreach (var key in keys)
+        var groups = new List<DuplicateGroup>(MaxGroups);
+        string? currentHash = null;
+        long currentSize = 0;
+        int currentTotal = 0;
+        List<DuplicateMember>? members = null;
+
+        void CommitCurrent()
         {
-            if (remaining < 2) break;
-            var visible = Math.Min(Math.Min(key.Count, MaxVisibleMembersPerGroup), remaining);
-            using var membersCmd = conn.CreateCommand();
-            membersCmd.CommandText = """
-                SELECT id, path_text, size_bytes, modified_at
-                FROM files
-                WHERE content_hash = $hash AND size_bytes = $size AND failed = 0
-                ORDER BY COALESCE(aesthetic, 0) DESC,
-                         size_bytes DESC,
-                         COALESCE(created_at, 1e18) ASC,
-                         LENGTH(path_text) ASC,
-                         path_text ASC
-                LIMIT $limit
-                """;
-            membersCmd.Parameters.AddWithValue("$hash", key.Hash);
-            membersCmd.Parameters.AddWithValue("$size", key.Size);
-            membersCmd.Parameters.AddWithValue("$limit", visible);
-            var hash = Convert.ToHexString(key.Hash);
-            var groupKey = $"dup-{hash}:{key.Size}";
-            var members = new List<DuplicateMember>(visible);
-            using (var memberReader = membersCmd.ExecuteReader())
-            {
-                while (memberReader.Read())
-                {
-                    ct.ThrowIfCancellationRequested();
-                    var path = memberReader.GetString(1);
-                    members.Add(new DuplicateMember
-                    {
-                        Id = memberReader.GetInt64(0),
-                        Path = path,
-                        FileName = System.IO.Path.GetFileName(path),
-                        SizeBytes = memberReader.GetInt64(2),
-                        ModifiedAt = memberReader.IsDBNull(3) ? null : memberReader.GetDouble(3),
-                        GroupKey = groupKey,
-                        IsKeeper = members.Count == 0,
-                    });
-                }
-            }
-            if (members.Count < 2) continue;
+            if (currentHash is null || members is null || members.Count < 2) return;
             groups.Add(new DuplicateGroup
             {
-                ContentHash = hash,
+                ContentHash = currentHash,
                 Members = members,
-                TotalMemberCount = key.Count,
-                IsApproximate = key.Size > FullHashMaxBytes,
+                TotalMemberCount = currentTotal,
+                IsApproximate = currentSize > FullHashMaxBytes,
             });
-            remaining -= members.Count;
         }
+
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            ct.ThrowIfCancellationRequested();
+            var hash = reader.GetString(4);
+            var size = reader.GetInt64(2);
+            if (!string.Equals(hash, currentHash, StringComparison.Ordinal) || size != currentSize)
+            {
+                CommitCurrent();
+                currentHash = hash;
+                currentSize = size;
+                currentTotal = checked((int)reader.GetInt64(5));
+                members = new List<DuplicateMember>(Math.Min(currentTotal, MaxVisibleMembersPerGroup));
+            }
+            var path = reader.GetString(1);
+            var groupKey = $"dup-{hash}:{size}";
+            members!.Add(new DuplicateMember
+            {
+                Id = reader.GetInt64(0),
+                Path = path,
+                FileName = System.IO.Path.GetFileName(path),
+                SizeBytes = size,
+                ModifiedAt = reader.IsDBNull(3) ? null : reader.GetDouble(3),
+                GroupKey = groupKey,
+                IsKeeper = members.Count == 0,
+            });
+        }
+        CommitCurrent();
         return groups;
     }
 

@@ -51,11 +51,15 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // RemoveAt/Insert, so without this a mid-selection re-cluster would run the
     // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
     private bool _selectMaintenancePending;
+    private bool _continueBannerRefreshPending;
 
     private bool _unloaded;
     public PeopleView()
     {
-        ViewModel = new PeopleViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        ViewModel = new PeopleViewModel(
+            AppPaths.DbPath,
+            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
+            () => AppViewModel.Instance.Settings.PeopleHideUnknown);
         InitializeComponent();
         // Named handlers (not inline lambdas) so OnUnloaded can detach
         // them. Inline lambdas leak the view + VM graph (~hundreds of KB)
@@ -211,6 +215,22 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
+    private void ScheduleContinueToDeepAnalyzeBannerRefresh()
+    {
+        if (_unloaded || _continueBannerRefreshPending) return;
+        _continueBannerRefreshPending = true;
+        if (!DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
+            "PeopleView.RefreshContinueToDeepAnalyzeBanner",
+            () =>
+            {
+                _continueBannerRefreshPending = false;
+                if (!_unloaded) RefreshContinueToDeepAnalyzeBanner();
+            })))
+        {
+            _continueBannerRefreshPending = false;
+        }
+    }
+
     private void OnContinueToDeepAnalyzeClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnContinueToDeepAnalyzeClicked", () =>
         {
@@ -244,62 +264,69 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         });
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (_unloaded) return;
-        OnPropertyChanged(nameof(StatusText));
-        OnPropertyChanged(nameof(FooterVisibility));
-    }
+        => DebugLog.SafeRun("PeopleView.OnViewModelPropertyChanged", () =>
+        {
+            if (_unloaded) return;
+            OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(FooterVisibility));
+        });
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
-    {
-        if (_unloaded) return;
-        OnPropertyChanged(nameof(StatusText));
-        OnPropertyChanged(nameof(FooterVisibility));
-        RefreshContinueToDeepAnalyzeBanner();
-
-        // Keep select-mode wiring consistent across refreshes. The
-        // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
-        // surviving instances and their IsSelected subscription, but a refresh
-        // can still Add brand-new clusters (which arrive unwired, with a
-        // Collapsed checkbox) or Remove gone ones (whose subscription would
-        // leak). Re-apply wiring + checkbox visibility + count so the select UI
-        // never goes stale after a re-cluster while the user is mid-selection.
-        if (!ViewModel.IsSelectMode) return;
-
-        // Detach handlers from any instances leaving the collection so a removed
-        // (or replaced) cluster's subscription can't leak past its lifetime.
-        if (e.OldItems != null)
+        => DebugLog.SafeRun("PeopleView.OnClustersCollectionChanged", () =>
         {
-            foreach (var removed in e.OldItems)
+            if (_unloaded) return;
+            OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(FooterVisibility));
+            ScheduleContinueToDeepAnalyzeBannerRefresh();
+
+            // Keep select-mode wiring consistent across refreshes. The
+            // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
+            // surviving instances and their IsSelected subscription, but a refresh
+            // can still Add brand-new clusters (which arrive unwired, with a
+            // Collapsed checkbox) or Remove gone ones (whose subscription would
+            // leak). Re-apply wiring + checkbox visibility + count so the select UI
+            // never goes stale after a re-cluster while the user is mid-selection.
+            if (!ViewModel.IsSelectMode) return;
+
+            // Detach handlers from any instances leaving the collection so a removed
+            // (or replaced) cluster's subscription can't leak past its lifetime.
+            if (e.OldItems != null)
             {
-                if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
+                foreach (var removed in e.OldItems)
+                {
+                    if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
+                }
             }
-        }
 
-        // MergeByClusterId fires this handler once per RemoveAt/Insert, so one
-        // Refresh that restructures the list raises it M times. The settled
-        // selection projection, checkbox visibility, and count depend only on the
-        // FINAL collection, so coalesce them to a single deferred pass guarded by
-        // a pending flag instead of O(N) work + a whole-subtree walk per delta
-        // (O(N^2) when a re-cluster replaces most instances mid-selection). The
-        // defer also lets the checkbox sweep see newly-realized cards.
-        if (_selectMaintenancePending) return;
-        _selectMaintenancePending = true;
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            _selectMaintenancePending = false;
-            if (_unloaded || !ViewModel.IsSelectMode) return;
-            // Detach-then-attach makes the reproject non-re-entrant and guards
-            // against double-subscription; restores selection by stable ClusterId
-            // so a mid-selection re-cluster never silently drops the user's
-            // multi-select. Covers Add / Replace / Reset alike.
-            foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
-            ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
-            foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
-            UpdateCheckboxVisibility();
-            UpdateSelectionCountText();
+            // MergeByClusterId fires this handler once per RemoveAt/Insert, so one
+            // Refresh that restructures the list raises it M times. The settled
+            // selection projection, checkbox visibility, and count depend only on the
+            // FINAL collection, so coalesce them to a single deferred pass guarded by
+            // a pending flag instead of O(N) work + a whole-subtree walk per delta
+            // (O(N^2) when a re-cluster replaces most instances mid-selection). The
+            // defer also lets the checkbox sweep see newly-realized cards.
+            if (_selectMaintenancePending) return;
+            _selectMaintenancePending = true;
+            if (!DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
+                "PeopleView.OnClustersCollectionChanged.maintenance",
+                () =>
+                {
+                    _selectMaintenancePending = false;
+                    if (_unloaded || !ViewModel.IsSelectMode) return;
+                    // Detach-then-attach makes the reproject non-re-entrant and guards
+                    // against double-subscription; restores selection by stable ClusterId
+                    // so a mid-selection re-cluster never silently drops the user's
+                    // multi-select. Covers Add / Replace / Reset alike.
+                    foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
+                    ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
+                    foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
+                    UpdateCheckboxVisibility();
+                    UpdateSelectionCountText();
+                })))
+            {
+                _selectMaintenancePending = false;
+            }
         });
-    }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
@@ -676,17 +703,18 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     });
 
     private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName != nameof(PersonCluster.IsSelected)) return;
-        // Keep the id-keyed selection set in sync as the user toggles cards, so a
-        // later instance-replacing refresh can re-project selection by id.
-        if (sender is PersonCluster pc)
+        => DebugLog.SafeRun("PeopleView.OnClusterIsSelectedChanged", () =>
         {
-            if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
-            else _selectedClusterIds.Remove(pc.ClusterId);
-        }
-        UpdateSelectionCountText();
-    }
+            if (_unloaded || e.PropertyName != nameof(PersonCluster.IsSelected)) return;
+            // Keep the id-keyed selection set in sync as the user toggles cards, so a
+            // later instance-replacing refresh can re-project selection by id.
+            if (sender is PersonCluster pc)
+            {
+                if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
+                else _selectedClusterIds.Remove(pc.ClusterId);
+            }
+            UpdateSelectionCountText();
+        });
 
     // Re-project id-keyed selection onto the supplied cluster instances. Pulled
     // out as a static so the survives-an-instance-replacing-refresh behavior is
@@ -864,6 +892,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             SelectButtonText.Text = "Select";
             UpdateCheckboxVisibility();
             await ViewModel.RefreshAsync(CancellationToken.None);
+            UpdateHiddenUnknownsFooter();
         }
         finally
         {
@@ -902,7 +931,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        => DebugLog.SafeRun("PeopleView.OnPropertyChanged",
+            () => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name)));
 
     // ─── Session change log: merge undo capture ─────────────────────────
     // Engine `revertMerge` recreates the merged-away person and moves the
@@ -916,27 +946,22 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         => await Task.Run(() =>
         {
             var ids = new System.Collections.Generic.List<long>();
-            try
+            var connStr = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
             {
-                var connStr = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                {
-                    DataSource = AppPaths.DbPath,
-                    Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                }.ToString();
-                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id";
-                cmd.Parameters.AddWithValue("@id", personId);
-                using var r = cmd.ExecuteReader();
-                while (r.Read()) ids.Add(r.GetInt64(0));
-            }
-            catch (Exception ex)
+                DataSource = AppPaths.DbPath,
+                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+            }.ToString();
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id";
+            cmd.Parameters.AddWithValue("@id", personId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) ids.Add(r.GetInt64(0));
+            if (ids.Count == 0)
             {
-                // No snapshot → the merge simply won't be undoable; never
-                // block the merge itself on this read.
-                DebugLog.Warn("ReadFaceIdsForPersonAsync failed: " + ex.Message);
-                ids.Clear();
+                throw new InvalidOperationException(
+                    $"Person #{personId} no longer has any faces; refresh People and try again.");
             }
             return ids;
         }).ConfigureAwait(true);

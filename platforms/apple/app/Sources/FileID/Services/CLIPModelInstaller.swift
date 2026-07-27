@@ -177,6 +177,11 @@ public final class CLIPModelInstaller {
         for d in dirs {
             try? FileManager.default.removeItem(at: d)
         }
+        // The text encoder's ORT session is now backed by deleted weights.
+        // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
+        // and falls back to keyword-only search instead of a stale semantic path
+        // that would fail on the next query. (Install→Remove leaked it true.)
+        textEncoderReady = false
         refreshStatus()
     }
 

@@ -123,6 +123,15 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// silent for 30+ s mid-download.</summary>
     public DateTime LastProgressAt { get; set; } = DateTime.MinValue;
 
+    /// <summary>Single-owner guard for ModelInstallerService's no-progress
+    /// watchdog (0 = none running, 1 = one live). Manipulated only via
+    /// Interlocked so exactly one watchdog loop watches this slot at a time;
+    /// the loop clears it when it exits so the next Downloading transition
+    /// (including a late-progress Failed→Downloading revert in <see cref="Apply"/>)
+    /// re-arms a fresh watchdog. Kept here (not in the service) so it lives with
+    /// the slot it guards.</summary>
+    internal int WatchdogLive;
+
     // EMA bandwidth tracking — mirrors macOS's `updateVLMRate` in
     // WelcomeSheet.swift. Sample every 500 ms; smooth with α=0.3.
     private DateTime _rateSampleAt;
