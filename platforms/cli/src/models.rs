@@ -12,10 +12,11 @@
 //! this user-initiated command — the project's single allowed network call.
 
 use std::io::{IsTerminal, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
@@ -25,6 +26,21 @@ use crate::context::{human_size, print_json, truncate, Ctx};
 /// is the registry key passed to `lookup_full`; `license` + `category` are the
 /// `shared/docs/MODELS.md` facts the registry doesn't carry. `required` marks the
 /// two models the `scan --models` pre-flight gate demands.
+#[derive(Clone, Copy)]
+struct LicensePolicy {
+    key: &'static str,
+    display_name: &'static str,
+    terms_url: &'static str,
+    reviewed_at: &'static str,
+}
+
+const GEMMA_POLICY: LicensePolicy = LicensePolicy {
+    key: "Gemma",
+    display_name: "Google Gemma Terms of Use",
+    terms_url: "https://ai.google.dev/gemma/terms",
+    reviewed_at: "2026-07-16",
+};
+
 struct Catalog {
     name: &'static str,
     kind: &'static str,
@@ -40,6 +56,121 @@ struct Catalog {
 /// cross-platform model weights, and several aren't HuggingFace-hosted. Every
 /// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
 /// commercially-usable Gemma Terms) per the commercial-clean posture.
+fn license_policy(kind: &str) -> Option<LicensePolicy> {
+    match kind {
+        "gemma_3_4b" => Some(GEMMA_POLICY),
+        _ => None,
+    }
+}
+
+fn acceptance_key(policy: LicensePolicy) -> String {
+    format!("ModelLicenseAccepted:{}:{}", policy.key, policy.reviewed_at)
+}
+
+fn acceptance_path() -> Result<PathBuf> {
+    let models = fileid_engine::paths::models_dir()?;
+    let root = models
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("models directory has no parent"))?;
+    Ok(root.join("model-licenses.json"))
+}
+
+fn load_acceptances(path: &Path) -> Result<std::collections::HashSet<String>> {
+    if !path.exists() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let bytes = std::fs::read(path)?;
+    let entries: Vec<String> = serde_json::from_slice(&bytes)?;
+    Ok(entries.into_iter().collect())
+}
+
+fn record_acceptance(path: &Path, policy: LicensePolicy) -> Result<()> {
+    let mut accepted = load_acceptances(path)?;
+    accepted.insert(acceptance_key(policy));
+    let mut entries: Vec<_> = accepted.into_iter().collect();
+    entries.sort();
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("license acceptance path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec(&entries)?)?;
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(_) if path.exists() => {
+            std::fs::remove_file(path)?;
+            std::fs::rename(temp, path)?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(temp);
+            Err(error.into())
+        }
+    }
+}
+
+fn ensure_license_acceptance(ctx: &Ctx, pending: &[&Resolved]) -> Result<()> {
+    let path = acceptance_path()?;
+    let mut accepted = load_acceptances(&path)?;
+    let mut policies = Vec::new();
+    for model in pending {
+        let Some(policy) = license_policy(model.cat.kind) else {
+            continue;
+        };
+        if !policies
+            .iter()
+            .any(|existing: &LicensePolicy| existing.key == policy.key)
+        {
+            policies.push(policy);
+        }
+    }
+
+    for policy in policies {
+        let key = acceptance_key(policy);
+        if accepted.contains(&key) {
+            continue;
+        }
+        if ctx.json {
+            print_json(&serde_json::json!({
+                "command": "models",
+                "action": "download",
+                "error": "license_acceptance_required",
+                "policy": policy.key,
+                "reviewedAt": policy.reviewed_at,
+                "termsUrl": policy.terms_url,
+                "message": "run this command interactively to review and accept the model terms",
+            }));
+            anyhow::bail!(
+                "{} acceptance is required before download",
+                policy.display_name
+            );
+        }
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "{} acceptance is required before download; review {} and run this command interactively (--yes does not accept license terms)",
+                policy.display_name,
+                policy.terms_url
+            );
+        }
+        eprintln!("{}", ctx.bold("License acceptance required"));
+        eprintln!(
+            "  This optional model is governed by the {}, not FileID's Apache-2.0 license.",
+            policy.display_name
+        );
+        eprintln!("  Full terms: {}", policy.terms_url);
+        eprint!("  Type I ACCEPT to accept and download [cancel]: ");
+        let _ = std::io::stderr().flush();
+        let mut response = String::new();
+        if std::io::stdin().read_line(&mut response).is_err() || response.trim() != "I ACCEPT" {
+            anyhow::bail!("license terms were not accepted; nothing was downloaded");
+        }
+        record_acceptance(&path, policy)
+            .with_context(|| format!("recording {} acceptance", policy.key))?;
+        accepted.insert(key);
+    }
+    Ok(())
+}
+
 const CATALOG: &[Catalog] = &[
     Catalog {
         name: "arcface",
@@ -106,6 +237,10 @@ const CATALOG: &[Catalog] = &[
         required: false,
     },
 ];
+
+fn is_vlm_kind(kind: &str) -> bool {
+    matches!(kind, "mistral_small_3_2" | "qwen2_5_vl_7b" | "gemma_3_4b")
+}
 
 fn recommended_vlm_kind() -> &'static str {
     let total = fileid_engine::platform::physical_memory_gb();
@@ -264,6 +399,9 @@ pub fn list(ctx: &Ctx) -> Result<()> {
                     "sizeBytes": r.size_bytes,
                     "sizeHuman": human_size(r.size_bytes as i64),
                     "license": r.cat.license,
+                    "termsRequired": license_policy(r.cat.kind).is_some(),
+                    "termsUrl": license_policy(r.cat.kind).map(|policy| policy.terms_url),
+                    "externalRuntimeRequired": cfg!(target_os = "linux") && is_vlm_kind(r.cat.kind),
                     "category": r.cat.category,
                     "repo": r.repo,
                     "files": r.model.files.iter().map(|f| serde_json::json!({
@@ -332,13 +470,33 @@ pub fn list(ctx: &Ctx) -> Result<()> {
             ctx.dim(&status_cell)
         };
 
+        let license = if license_policy(r.cat.kind).is_some() {
+            format!("{} *", r.cat.license)
+        } else {
+            r.cat.license.to_string()
+        };
         println!(
             "  {name_cell} {status_cell} {:>9}  {:<16} {}",
             human_size(r.size_bytes as i64),
-            r.cat.license,
+            license,
             r.cat.category,
         );
     }
+
+    if resolved
+        .iter()
+        .any(|r| license_policy(r.cat.kind).is_some())
+    {
+        println!(
+            "  {}",
+            ctx.dim("* Separate model terms require explicit acceptance before download.")
+        );
+    }
+    #[cfg(target_os = "linux")]
+    println!(
+        "  {}",
+        ctx.dim("Deep Analyze VLM weights require a compatible `llama-mtmd-cli` on PATH; Linux packages do not bundle it.")
+    );
 
     let total: u64 = resolved.iter().map(|r| r.size_bytes).sum();
     let installed_count = resolved.iter().filter(|r| r.installed).count();
@@ -451,6 +609,9 @@ pub fn download(
                         "sizeHuman": human_size(r.size_bytes as i64),
                         "repo": r.repo,
                         "license": r.cat.license,
+                        "termsRequired": license_policy(r.cat.kind).is_some(),
+                        "termsUrl": license_policy(r.cat.kind).map(|policy| policy.terms_url),
+                        "externalRuntimeRequired": cfg!(target_os = "linux") && is_vlm_kind(r.cat.kind),
                         "files": r.model.files.iter().map(|f| f.url.clone()).collect::<Vec<_>>(),
                     })
                 })
@@ -530,6 +691,8 @@ pub fn download(
         }
         return Ok(());
     }
+
+    ensure_license_acceptance(ctx, &pending)?;
 
     // ── Download each pending model in turn, with overall progress. ──
     // The bar/porcelain line spans ALL pending models: `pending_bytes` is the
@@ -890,6 +1053,40 @@ fn human_eta(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_policy_acceptance_is_exact_and_versioned() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-cli-license-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("model-licenses.json");
+        let policy = license_policy("gemma_3_4b").expect("Gemma policy");
+
+        assert!(!load_acceptances(&path)
+            .unwrap()
+            .contains(&acceptance_key(policy)));
+        record_acceptance(&path, policy).unwrap();
+        assert!(load_acceptances(&path)
+            .unwrap()
+            .contains(&acceptance_key(policy)));
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&vec!["ModelLicenseAccepted:Gemma:2025-01-01"]).unwrap(),
+        )
+        .unwrap();
+        assert!(!load_acceptances(&path)
+            .unwrap()
+            .contains(&acceptance_key(policy)));
+        assert!(license_policy("qwen2_5_vl_7b").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn vlm_fit_keeps_a_system_ram_floor_even_with_large_vram() {

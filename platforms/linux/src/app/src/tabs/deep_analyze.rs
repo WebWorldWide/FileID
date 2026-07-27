@@ -221,6 +221,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let folder_btn = gtk::Button::builder()
         .label("Analyze a folder…")
         .css_classes(["pill"])
+        .sensitive(vlm_runtime_available())
         .build();
     let cancel_btn = gtk::Button::builder()
         .label("Cancel")
@@ -577,7 +578,7 @@ fn end_run(ui: &Rc<DeepUi>) {
     ui.starting_card.set_visible(false);
     ui.progress_card.set_visible(false);
     ui.cancel_btn.set_visible(false);
-    ui.run_btn.set_sensitive(true);
+    ui.run_btn.set_sensitive(vlm_runtime_available());
 }
 
 // ─── Event handling ──────────────────────────────────────────────────────────
@@ -701,7 +702,7 @@ fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
     ui.naming_banner
         .set_visible(c.named_people == 0 && !ui.in_flight.get());
     if !ui.in_flight.get() {
-        ui.run_btn.set_sensitive(true);
+        ui.run_btn.set_sensitive(vlm_runtime_available());
     }
 }
 
@@ -823,6 +824,10 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
 
 // ─── Model picker ────────────────────────────────────────────────────────────
 
+fn vlm_runtime_available() -> bool {
+    std::env::var_os("FLATPAK_ID").is_none()
+}
+
 fn populate_picker(ui: &Rc<DeepUi>) {
     for vlm in VLMS.iter() {
         let (installed, gb) = model_install_info(vlm.key);
@@ -898,6 +903,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
         if is_default {
             btn.add_css_class("file-tile-selected");
         }
+        btn.set_sensitive(vlm_runtime_available());
 
         let key = vlm.key;
         btn.connect_clicked(clone!(
@@ -1174,10 +1180,14 @@ fn build_status_card(
 fn build_picker_card(picker_box: &gtk::Box, download_card: &gtk::Box) -> gtk::Box {
     let card = glass_card();
     card.append(&heading("AI Models — accuracy tier (Deep Analyze)"));
-    card.append(&wrap_caption(
-        "Reads images and writes captions plus smart filenames. Pick a model; it downloads on \
-         first run.",
-    ));
+    let runtime_note = if std::env::var_os("FLATPAK_ID").is_some() {
+        "Deep Analyze is unavailable in this Flatpak until a reviewed llama-mtmd-cli is bundled; do not download VLM weights yet."
+    } else {
+        "Weights download on first run. A compatible external llama-mtmd-cli must be visible on PATH."
+    };
+    card.append(&wrap_caption(&format!(
+        "Reads images and writes captions plus smart filenames. {runtime_note}"
+    )));
     card.append(picker_box);
     card.append(download_card);
     card

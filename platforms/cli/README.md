@@ -127,8 +127,8 @@ apps do. By default it writes the engine's canonical library
 forwarded to the engine child so the AI scan and subsequent read commands use
 the same isolated database.
 
-> **macOS:** `--models` works here once you install the engine's **own** models
-> with **`fileid models download --all`**. The Rust engine needs its own model
+> **macOS:** `--models` works here once you install the engine's **own** required
+> models with **`fileid models download mobileclip_s2 arcface`**. The Rust engine needs its own model
 > layout (`mobileclip_s2` / `arcface`), which the macOS desktop app's Swift
 > CoreML models don't satisfy — so the CLI/TUI install + read the engine's
 > weights under `~/.local/share/FileID/Models` (kept separate from the app's
@@ -140,16 +140,17 @@ Two pre-flights before it spawns anything:
 
 1. **Models installed?** Mirrors the engine's `startScan` gate (`mobileclip_s2`
    + `arcface` sentinels). If missing, it prints which models are missing, the
-   models directory, and how to install them (**`fileid models download --all`**,
+   models directory, and how to install them (**`fileid models download mobileclip_s2 arcface`**,
    or the desktop app's Welcome screen / Settings → Local AI; see
    `shared/docs/MODELS.md`).
 2. **Engine binary located?** Looks at `$FILEID_ENGINE_BIN`, next to the
    `fileid` executable, the dev-layout engine `target/` dir, then `PATH`. If
    absent, it says how to provide it.
 
-Install the models with **`fileid models download --all`** (the CLI's own
-downloader — user-initiated HF egress + SHA-256 pinning; the desktop app's
-installer also works). Once installed, `fileid scan --models <path>` lights up
+Install the required scan models with **`fileid models download mobileclip_s2 arcface`**
+(the CLI's own downloader — user-initiated HF egress + SHA-256 pinning; the desktop
+app's installer also works). `--all` additionally selects optional multi-GB models;
+preview it with `--dry-run`. Once the required pair is installed, `fileid scan --models <path>` lights up
 `people`, `dedupe --exact/--similar`, and `search --similar` on **all three
 platforms** (macOS included; see the note above). A desktop-app scan remains an
 alternative way to populate those columns.
@@ -165,8 +166,7 @@ fileid --db /tmp/lib.sqlite scan ~/Documents
 fileid --db /tmp/lib.sqlite search invoice 2024
 fileid --db /tmp/lib.sqlite --json info ~/Documents/invoice.pdf
 
-# Full ML pipeline on the engine's library — Linux/Windows; needs installed
-# models (on macOS, scan with full ML in the desktop app instead)
+# Full ML pipeline on the engine's library; first install mobileclip_s2 + arcface
 fileid scan --models ~/Pictures
 
 # Query the library a desktop app (or `scan --models`) already built

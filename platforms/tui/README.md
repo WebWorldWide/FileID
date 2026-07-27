@@ -46,7 +46,8 @@ Populate a library out-of-band with the CLI's model-free scan — `fileid --db
 then point the TUI at the same `--db`. You can also press `s` to scan from
 inside the TUI (see Keys); that drives the engine's **full ML pipeline** on all
 three platforms once the models are installed — press `D` on the Settings tab
-(or run `fileid models download --all`) to fetch them, macOS included.
+for the curated non-VLM set, or install the minimum scan pair with
+`fileid models download mobileclip_s2 arcface`.
 
 ## Keys
 
@@ -57,7 +58,7 @@ three platforms once the models are installed — press `D` on the Settings tab
 | `↑`/`↓` or `k`/`j` | move selection |
 | `g` / `G` | first / last row |
 | `/` | search (Library tab) — type to filter, `Enter` keeps, `Esc` clears |
-| `s` | **scan a folder** — opens a path prompt; `~` expands; `Enter`/`Tab` confirm, `Esc` cancel. Drives the engine's full-ML scan (Linux/Windows; on **macOS** use the desktop app for full ML) and live-streams progress to the status line, then auto-reloads. |
+| `s` | **scan a folder** — opens a path prompt; `~` expands; `Enter`/`Tab` confirm, `Esc` cancel. Drives the engine's full-ML scan on Linux, Windows, and macOS and live-streams progress to the status line, then auto-reloads. |
 | `r` | reload from the DB (re-reads every view) |
 | `?` | toggle the keys overlay |
 | `q` / `Esc` / `Ctrl-C` | quit (works mid-scan; the terminal is always restored) |
@@ -99,16 +100,17 @@ auto-reloads every view. See [`src/scan.rs`](src/scan.rs).
 (`mobileclip_s2` + `arcface`) and the engine binary:
 
 > **macOS:** this in-TUI `s` scan runs full ML once you install the engine's
-> **own** models — press **`D`** on the Settings tab (or run `fileid models
-> download --all`). The Rust engine needs its own model layout, which the macOS
+> **own** models — press **`D`** on the Settings tab, or run `fileid models
+> download mobileclip_s2 arcface` for the minimum scan pair. The Rust engine needs its own model layout, which the macOS
 > app's Swift CoreML models don't satisfy, so the TUI installs + reads its
 > weights under `~/.local/share/FileID/Models` (separate from the app's read-only
 > CoreML dir). Until then it reports "models not installed" — never a crash. You
 > can also scan with full ML in the **FileID desktop app** and reload here with
 > `r`. Full-ML `s` scanning works the same on **Linux/Windows**.
 
-- **Models** — installed once with `D` on the Settings tab (or `fileid models
-  download --all`), on every platform incl. macOS; the desktop app's
+- **Models** — `D` installs the curated non-VLM set used by the TUI; the minimum
+  scan pair is also available via `fileid models download mobileclip_s2 arcface`
+  on every platform including macOS. The desktop app's
   Settings → Local AI also installs them. If they're missing, the status line
   says exactly which, and how.
 - **Engine binary** — located via `FILEID_ENGINE_BIN`, then beside `fileid-tui`,

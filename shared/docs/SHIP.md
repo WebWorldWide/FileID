@@ -27,10 +27,10 @@ These hold for every shipped feature, on every platform.
   download instrumentation. The only network egress is user-initiated model
   downloads from `huggingface.co`. CI scans the shipped binaries for telemetry
   strings as a release blocker. See [`PRIVACY.md`](PRIVACY.md).
-- **Apache-2.0.** Root `LICENSE`. Every weight FileID downloads by default is
-  Apache-2.0 or MIT — no non-commercial or research-only models in the core
-  feature set (see [`MODELS.md`](MODELS.md)). The project is free to be
-  open-sourced *and* commercialized without a licensing blocker.
+- **Apache-2.0 project, commercial-clean models.** Root `LICENSE`. Core weights
+  are Apache-2.0/MIT and no non-commercial-only model may ship. Optional
+  restricted models such as Gemma are commercially usable under separately
+  accepted upstream terms (see [`MODELS.md`](MODELS.md)).
 - **Performance is a feature.** Match or beat the macOS pipeline on comparable
   hardware; use the GPU/NPU when present.
 - **The macOS app is the visual reference.** Windows is a 1:1 port — same palette
@@ -59,10 +59,30 @@ For the overall product:
 - Signed, packaged, downloadable from a public GitHub release.
 - README + LICENSE + CONTRIBUTING + PRIVACY + screenshots in the repo.
 
+## Current audit status (2026-07-27)
+
+Locally runnable source gates are green on Windows and native WSL: locked Rust
+format/clippy/tests for the shared engine, CLI, TUI, and GTK app; Linux release
+build; Windows x64 Release app build plus App/IPC tests and format; 71 shared
+policy regressions; model-license/bootstrap/workflow/current-doc policy; and the
+reviewed runtime-egress known-blocker baseline. A current read-only Adlon
+fingerprint matches the preserved pre-audit result exactly. Final independent
+review found no remaining locally actionable blocker/high/medium code issue.
+
+This does **not** authorize publication. The strict no-flag runtime-egress gate
+still rejects the ten reviewed GitHub/NVIDIA archives and widened downloader host
+set described in `PRIVACY.md`; release staging must remain blocked until those
+artifacts are removed or mirrored to Hugging Face. Native macOS, ARM64 and other
+vendor hardware, distro/clean-VM lifecycle, accessibility, signing/notarization,
+and hosted CI also remain required. Blocking filesystem/codec calls receive
+bounded cooperative shutdown, not a guarantee that pathological kernel reads can
+be cancelled inside the process.
+
 ## Model stack (commercial-clean)
 
-Every default weight is Apache-2.0 / MIT and downloaded at runtime from upstream,
-SHA-pinned, after the user explicitly triggers it. Full registry in
+Core weights are Apache-2.0/MIT. Optional restricted weights such as Gemma use
+separately accepted commercially usable upstream terms. Downloads are user-triggered
+and SHA/revision-pinned; the full registry and acceptance policies live in
 [`MODELS.md`](MODELS.md).
 
 | Capability | Model | License |
@@ -77,10 +97,13 @@ SHA-pinned, after the user explicitly triggers it. Full registry in
 Removed in the commercial-clean pass: the non-commercial Qwen2.5-VL-3B,
 InsightFace ArcFace/SCRFD, and research-only MobileCLIP-S2.
 
-On Windows, ONNX Runtime auto-selects the execution provider
-(CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU). NVIDIA cards without the CUDA
-pack installed run on DirectML — fully functional, ~80–90% of native CUDA
-throughput for ML inference. macOS uses MLX + CoreML + the Neural Engine.
+On Windows, ONNX Runtime selects among execution providers actually present on
+the machine. The release-approved universal GPU path is DirectML, with CPU as the
+floor; owner-supplied CUDA/OpenVINO/QNN runtimes are development/BYO paths, not
+approved product Performance Packs. The current development registry still
+contains legacy GitHub/NVIDIA runtime downloads, so strict runtime-egress policy
+blocks release staging until those entries are removed or mirrored to Hugging Face.
+macOS uses MLX + CoreML + the Neural Engine.
 
 ## Restructure — butler-grade overhaul
 
@@ -149,9 +172,9 @@ on the Developer ID cert). The major open items:
   until that check passes. Also open on Mac: F1 (non-image Exact-dedup content_hash)
   from the audit.
 - **Throughput re-baseline — DONE 2026-07 on RTX 5080.** Measured ~40 f/s full corpus
-  on DirectML (~5× the 2060); the GPU is dispatch-bound (idle p50=19%), so the CUDA
-  Performance Pack (3–5× on inference latency) is the biggest remaining lever —
-  blocked on ORT CUDA EP DLL hosting. See STATE.md.
+  on DirectML (~5× the 2060); the GPU is dispatch-bound (idle p50=19%). Owner-local
+  CUDA EP provisioning remains a development performance experiment, but no CUDA
+  Performance Pack is approved for product distribution. See STATE.md.
 - **Face clustering** — DONE on the Rust engine (Windows/Linux/CLI/TUI): mutual-kNN
   default-on + a pre-clustering quality gate + label-calibrated thresholds
   (pass1 0.50) took the owner's labelled People-tab precision/recall to 1.0
@@ -166,12 +189,13 @@ on the Developer ID cert). The major open items:
 ## Appendix — Windows per-vendor verification matrix
 
 The engine's ORT execution-provider picker auto-detects the best accelerator on
-each vendor's silicon. **GPU Performance Packs were removed** (no shippable,
-license-compliant per-vendor URLs) — DirectML is the universal GPU path for every
-D3D12-capable vendor, CPU is the floor. Rationale in `DECISIONS.md`. The
-Intel OpenVINO and Snapdragon QNN packs remain unhosted; power users who install a
-vendor SDK locally get the engine's auto-pick (OpenVINO / QNN), but the default
-ship target is DirectML or CPU.
+each vendor's silicon. **GPU Performance Packs are not approved for release** (no
+shippable, license-compliant per-vendor URLs) — DirectML is the universal GPU path
+for every D3D12-capable vendor and CPU is the floor. Legacy pack definitions remain
+in the development registry and are a deliberate strict-egress release blocker,
+not a shippable product path. Rationale in `DECISIONS.md`. Power users who install
+a vendor SDK locally can use the engine's auto-pick (CUDA / OpenVINO / QNN), but
+the default ship target is DirectML or CPU.
 
 Run a 1,000-file scan on representative hardware per row and confirm the engine log
 + throughput.
@@ -203,7 +227,7 @@ on real silicon — is the missing layer the six checks above provide.
 ### Build pre-reqs for the verification pass
 
 - Public-trust Authenticode provider configured through `WINDOWS_SIGNING.md`; verify signatures on a clean Windows VM. Signing improves reputation but cannot guarantee first-run SmartScreen suppression.
-- `llama_runtime_x64` (Vulkan llama.cpp) downloadable from GitHub.
+- Mirror `llama_runtime_x64` and the remaining reviewed GitHub/NVIDIA runtime archives to Hugging Face, or remove those download paths; the strict egress gate must pass before staging.
 
 ### Lane gate
 

@@ -18,6 +18,8 @@ internal sealed partial class EngineClient
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
     // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
+    private readonly object _writeQueueLock = new();
+    private Task _writeTail = Task.CompletedTask;
     internal const string GpuRestartRequiredMessage =
         "Windows reset the GPU while FileID was using it. Restart FileID's engine before scanning again.";
 
@@ -45,21 +47,40 @@ internal sealed partial class EngineClient
             return Task.FromException(new InvalidOperationException(GpuRestartRequiredMessage));
         }
 
-        // The engine's stdin reader handles concurrent writers because
-        // our writes are atomic per-line, but we still serialize through a
-        // lock to make the byte order deterministic for log correlation.
-        // Encode inside Task.Run so a large applyRestructure frame (multi-MB
-        // JSON serialize + array copy) runs on the thread pool, not the UI
-        // thread that called us.
-        return Task.Run(() =>
+        var generation = SpawnGeneration;
+        lock (_writeQueueLock)
+        {
+            var predecessor = _writeTail;
+            var queued = SendCommandAfterAsync(
+                predecessor, generation, payload, commandKind, onWriteStarted, ct);
+            _writeTail = queued;
+            return queued;
+        }
+    }
+
+    private async Task SendCommandAfterAsync(
+        Task predecessor,
+        int generation,
+        CommandPayload payload,
+        string commandKind,
+        Action? onWriteStarted,
+        CancellationToken ct)
+    {
+        try
+        {
+            await predecessor.ConfigureAwait(false);
+        }
+        catch
+        {
+            // A failed command does not poison the FIFO for later commands.
+        }
+
+        await Task.Run(() =>
         {
             ct.ThrowIfCancellationRequested();
-
             var cmd = IpcCommand.New(payload);
             var bytes = IpcCoder.EncodeLine(cmd);
             DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
-
-            // F.3: refuse to write a frame that risks pipe-buffer deadlock.
             if (bytes.Length > MaxIpcFrameBytes)
             {
                 var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
@@ -70,6 +91,12 @@ internal sealed partial class EngineClient
             {
                 lock (_writeLock)
                 {
+                    if (generation != SpawnGeneration)
+                    {
+                        var msg = $"Engine changed while {commandKind} was queued; refusing to send it to the replacement process.";
+                        DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
+                        throw new InvalidOperationException(msg);
+                    }
                     if (_stdin is null)
                     {
                         DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
@@ -86,7 +113,7 @@ internal sealed partial class EngineClient
                 DebugLog.Warn($"[IPC OUT] {commandKind} threw on send: {ex.Message}");
                 throw;
             }
-        }, ct);
+        }, ct).ConfigureAwait(false);
     }
 
     internal static bool RequiresHealthyGpu(CommandPayload payload) => payload is
@@ -110,6 +137,7 @@ internal sealed partial class EngineClient
 
     private readonly GenerationOwnedOperationSlot<ScanStartPresentation> _scanStartSlot = new();
     private long _scanPresentationRevision;
+    private long _scanControlRevision;
     private DateTime? _scanStartedAt;
     private TimeSpan _lastScanDuration;
     public TimeSpan LastScanDuration
@@ -157,6 +185,7 @@ internal sealed partial class EngineClient
         }
 
         presentation.Revision = Interlocked.Increment(ref _scanPresentationRevision);
+        Interlocked.Increment(ref _scanControlRevision);
         if (!ReferenceEquals(_scanStartSlot.Current, owner) || owner.Generation != SpawnGeneration)
         {
             _scanStartSlot.Release(owner);
@@ -281,6 +310,7 @@ internal sealed partial class EngineClient
         LastScanDuration = TimeSpan.Zero;
         _scanStartedAt = null;
         IsPaused = false;
+        Interlocked.Increment(ref _scanControlRevision);
         _shownPhaseRank = -1;
     }
 
@@ -323,31 +353,104 @@ internal sealed partial class EngineClient
         get => _isPaused;
         private set => Set(ref _isPaused, value);
     }
-    public Task PauseScanAsync()
+    private async Task EnsureScanStartConfirmedAsync()
     {
+        var generation = SpawnGeneration;
+        for (var attempt = 0; attempt < 500; attempt++)
+        {
+            if (_scanStartSlot.Current is null)
+            {
+                if (generation != SpawnGeneration)
+                {
+                    throw new InvalidOperationException("The engine changed while the scan was starting.");
+                }
+                return;
+            }
+            await Task.Delay(10);
+        }
+        throw new TimeoutException("The engine did not confirm the scan start within 5 seconds.");
+    }
+
+    public async Task PauseScanAsync()
+    {
+        await EnsureScanStartConfirmedAsync();
+        var generation = SpawnGeneration;
+        var previous = IsPaused;
+        var revision = Interlocked.Increment(ref _scanControlRevision);
         IsPaused = true;
-        return SendCommandAsync(new PauseScanCommand());
+        try
+        {
+            await SendCommandAsync(new PauseScanCommand()).ConfigureAwait(false);
+        }
+        catch
+        {
+            RollbackScanControl(generation, revision, () => IsPaused = previous);
+            throw;
+        }
     }
-    public Task ResumeScanAsync()
+
+    public async Task ResumeScanAsync()
     {
+        await EnsureScanStartConfirmedAsync();
+        var generation = SpawnGeneration;
+        var previous = IsPaused;
+        var revision = Interlocked.Increment(ref _scanControlRevision);
         IsPaused = false;
-        return SendCommandAsync(new ResumeScanCommand());
+        try
+        {
+            await SendCommandAsync(new ResumeScanCommand()).ConfigureAwait(false);
+        }
+        catch
+        {
+            RollbackScanControl(generation, revision, () => IsPaused = previous);
+            throw;
+        }
     }
-    public Task CancelScanAsync()
+
+    public async Task CancelScanAsync()
     {
-        // Optimistic UI flip: clear the "in-flight" indicators immediately
-        // so the sidebar drops back to Idle within microseconds. The engine
-        // will follow up with PhaseChanged(Cancelled) + a possible final
-        // Progress event; both are no-ops on the already-cleared state.
-        // Without this, _scanStartedAt + LastProgress + LastBatch + IsPaused
-        // retained their prior-scan values until the next scan started, so
-        // the sidebar's "Scan complete — N files in MM:SS" panel showed the
-        // STALE values from before the cancel.
+        await EnsureScanStartConfirmedAsync();
+        var generation = SpawnGeneration;
+        var previousPaused = IsPaused;
+        var previousStartedAt = _scanStartedAt;
+        var previousProgress = LastProgress;
+        var previousBatch = LastBatch;
+        var revision = Interlocked.Increment(ref _scanControlRevision);
         IsPaused = false;
         _scanStartedAt = null;
         LastProgress = null;
         LastBatch = null;
-        return SendCommandAsync(new CancelScanCommand());
+        try
+        {
+            await SendCommandAsync(new CancelScanCommand()).ConfigureAwait(false);
+        }
+        catch
+        {
+            RollbackScanControl(generation, revision, () =>
+            {
+                IsPaused = previousPaused;
+                _scanStartedAt = previousStartedAt;
+                LastProgress = previousProgress;
+                LastBatch = previousBatch;
+            });
+            throw;
+        }
+    }
+
+    private void RollbackScanControl(int generation, long revision, Action rollback)
+    {
+        if (generation != SpawnGeneration || Interlocked.Read(ref _scanControlRevision) != revision)
+        {
+            return;
+        }
+        _ui.TryEnqueue(() =>
+        {
+            if (generation == SpawnGeneration
+                && Interlocked.Read(ref _scanControlRevision) == revision)
+            {
+                rollback();
+            }
+        });
     }
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
     public async Task ShutdownAsync()

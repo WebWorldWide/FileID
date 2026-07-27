@@ -1,24 +1,16 @@
 // Subprocess wrapper around llama.cpp's `llama-mtmd-cli.exe` for VLM
 // inference (Deep Analyze).
 //
-// We deliberately go through a subprocess instead of linking the
-// `llama-cpp-2` Rust bindings by default. The native binding adds ~150
-// MB of build artifacts and requires cmake at build time. The subprocess
-// path keeps CI builds fast and the runtime DLL surface small. Toggle
-// `--features vlm-native` at build time if zero-subprocess inference
-// matters for your deployment.
+// The subprocess boundary keeps the engine isolated from native llama.cpp
+// failures and lets cancellation or engine teardown reclaim the model process.
 //
-// Hardening: `find()` only probes `%LOCALAPPDATA%\FileID\Models\
-// llama.cpp\` (no PATH lookup — supply-chain hardening). Binary is
-// sanity-checked (PE header + size bounds) before spawning.
+// Hardening: Windows uses only the managed Models directory. Unix may use a
+// compatible `llama-mtmd-cli` from PATH after ELF/Mach-O and size validation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-#[cfg(not(feature = "vlm-native"))]
-use anyhow::anyhow;
-#[cfg(not(feature = "vlm-native"))]
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -253,13 +245,14 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
     // poll a bounded wall-clock window, killing a wedged probe. The process-wide
     // error mode set at startup (main.rs) keeps a missing-DLL load from popping a
     // modal dialog that would otherwise defeat this timeout. (M6)
-    let mut child = match std::process::Command::new(p)
+    let mut probe = std::process::Command::new(p);
+    probe
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    crate::platform::configure_child_lifetime(&mut probe);
+    let mut child = match probe.spawn() {
         Ok(c) => c,
         Err(err) => bail!(
             "{}: could not spawn for --version probe ({err}). Likely \
@@ -286,8 +279,7 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
             ),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::platform::terminate_child_tree(&mut child);
                     bail!(
                         "{}: --version probe did not return within 20s — likely a \
                          missing/mismatched dependent DLL blocking load. Re-install \
@@ -297,11 +289,14 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(err) => bail!(
-                "{}: failed waiting on --version probe ({err}). Re-install the \
-                 runtime from Settings -> Performance.",
-                safe_path
-            ),
+            Err(err) => {
+                crate::platform::terminate_child_tree(&mut child);
+                bail!(
+                    "{}: failed waiting on --version probe ({err}). Re-install the \
+                     runtime from Settings -> Performance.",
+                    safe_path
+                )
+            }
         }
     }
 }
@@ -322,14 +317,7 @@ pub async fn caption(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     on_token: impl FnMut(&str),
 ) -> Result<CaptionResult> {
-    #[cfg(feature = "vlm-native")]
-    {
-        return native::caption(runner, req, cancel, on_token).await;
-    }
-
-    #[cfg(not(feature = "vlm-native"))]
-    {
-        let mut on_token = on_token;
+    let mut on_token = on_token;
         let mut cmd = Command::new(&runner.binary);
         cmd.arg("-m").arg(&req.gguf_path);
         cmd.arg("--mmproj").arg(&req.mmproj_path);
@@ -367,6 +355,7 @@ pub async fn caption(
         // Kill the child if the parent task is dropped mid-caption so we
         // don't orphan llama-mtmd-cli for the OS session.
         cmd.kill_on_drop(true);
+        crate::platform::configure_child_lifetime(cmd.as_std_mut());
 
         let safe_binary = crate::platform::redact_path_for_log(&runner.binary);
         let mut child = cmd
@@ -439,14 +428,34 @@ pub async fn caption(
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = child.kill().await;
+                        crate::platform::terminate_tokio_child_tree(&mut child).await;
                         bail!("cancelled");
                     }
                 }
             }
         }
 
-        let status = child.wait().await.context("waiting on VLM child")?;
+        let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::platform::terminate_tokio_child_tree(&mut child).await;
+                bail!("cancelled");
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if std::time::Instant::now() < exit_deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                Ok(None) => {
+                    crate::platform::terminate_tokio_child_tree(&mut child).await;
+                    bail!("VLM closed stdout but did not exit within 30 seconds");
+                }
+                Err(error) => {
+                    crate::platform::terminate_tokio_child_tree(&mut child).await;
+                    return Err(error).context("waiting on VLM child");
+                }
+            }
+        };
         if !status.success() {
             let tail = stderr_tail
                 .lock()
@@ -457,46 +466,7 @@ pub async fn caption(
             }
             bail!("VLM exited with status {:?} — stderr tail: {}", status, tail);
         }
-        Ok(CaptionResult { text: text.trim().to_string() })
-    }
-}
-
-#[cfg(feature = "vlm-native")]
-mod native {
-    // Native (in-process) llama.cpp path. Off by default; the user opts
-    // in via `cargo build --features vlm-native --release`. Adds ~150 MB
-    // build artifacts + requires cmake.
-    //
-    // For now this is a placeholder that delegates to the subprocess
-    // path so the feature builds cleanly. A real implementation lands
-    // in a follow-up; the contract is the same.
-    use super::{bail, Arc, CaptionRequest, CaptionResult, Result, VlmRunner};
-    // `async` is intentional: the real llama-cpp-2 impl that replaces this
-    // placeholder is async, and the caller `.await`s it.
-    #[allow(clippy::unused_async)]
-    pub async fn caption(
-        runner: &VlmRunner,
-        req: &CaptionRequest,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
-        on_token: impl FnMut(&str),
-    ) -> Result<CaptionResult> {
-        // Touch the full runner/request contract so its fields stay "read"
-        // even while this placeholder ignores them — the real llama-cpp-2 impl
-        // consumes all of them. Replace with that invocation once the native
-        // build wires up.
-        let _ = (
-            &runner.binary,
-            &req.gguf_path,
-            &req.mmproj_path,
-            &req.image_path,
-            &req.prompt,
-            req.max_tokens,
-            req.greedy,
-            cancel,
-            on_token,
-        );
-        bail!("vlm-native is a build-time placeholder; rebuild without the feature")
-    }
+    Ok(CaptionResult { text: text.trim().to_string() })
 }
 
 // ── Discrete-GPU selection for the llama.cpp runner ────────────────────
@@ -542,6 +512,7 @@ async fn probe_discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    crate::platform::configure_child_lifetime(cmd.as_std_mut());
     let child = cmd.spawn().ok()?;
     // Tie the device probe to the engine job so a hung probe can't outlive an
     // ungraceful engine death. (L4)
@@ -655,6 +626,18 @@ mod tests {
     /// missing (Deep Analyze "model isn't installed" on a complete install).
     #[test]
     fn find_weights_resolves_wire_kind_through_registry_dir() {
+        struct RestoreModelsDir(Option<std::ffi::OsString>);
+        impl Drop for RestoreModelsDir {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("FILEID_MODELS_DIR", value),
+                    None => std::env::remove_var("FILEID_MODELS_DIR"),
+                }
+            }
+        }
+
+        let _env_guard = crate::paths::TEST_ENV_LOCK.lock().unwrap();
+        let _restore = RestoreModelsDir(std::env::var_os("FILEID_MODELS_DIR"));
         let root = std::env::temp_dir().join(format!(
             "fileid-vlm-weights-{}-{}",
             std::process::id(),
@@ -669,11 +652,10 @@ mod tests {
         std::env::set_var("FILEID_MODELS_DIR", &root);
         let by_kind = find_weights("mistral_small_3_2");
         let by_dir_name = find_weights("mistral-small-3.2");
-        std::env::remove_var("FILEID_MODELS_DIR");
-        let _ = std::fs::remove_dir_all(&root);
 
         let (gguf, _) = by_kind.expect("snake_case wire kind must resolve");
         assert!(gguf.ends_with("vlm/mistral-small-3.2/model.gguf") || gguf.ends_with("vlm\\mistral-small-3.2\\model.gguf"));
         assert!(by_dir_name.is_some(), "registry dir spelling must also resolve");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

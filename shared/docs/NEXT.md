@@ -1,5 +1,18 @@
 # NEXT — resume here
 
+## STATUS 2026-07-27 — Final whole-repository audit locally complete; publication remains blocked
+
+The final dirty-tree audit closed the remaining locally actionable findings: Linux helper descendants are parent-bound and killed/reaped as groups, scan decoder teardown is bounded and panic-visible, Windows outbound IPC is FIFO and generation-bound, explicit engine shutdown no longer burns teardown deadlines, and model/license/package documentation matches current behavior. Native WSL clean gates pass for the shared engine, GTK app, CLI, and TUI; Windows Rust/.NET gates and 71 shared policy regressions pass. A current read-only fingerprint of `F:\Adlon Drive` exactly matches the preserved final fingerprint despite the exFAT volume reporting `Warning` / `Full Repair Needed`: 163,787 files, 12,804 directories, 2,687,450,463,370 bytes, metadata SHA-256 `529f3a9f9c0cd54e5842bbd347d83f4edb6a62ac28aea5810db712a9c079725b`, two expected `scandir:2` observations, and all 1,000 deterministic 64 KiB-bounded samples unchanged.
+
+Resume in this order:
+
+1. **Do not publish the current runtime registry.** The strict release egress gate intentionally fails on the exact reviewed ten GitHub/NVIDIA runtime archives plus the widened redirect allowlist. Provision byte-identical, license-vetted Hugging Face mirrors or remove those download paths, review the source changes, refresh the digest baseline, and require the strict no-flag gate to pass. DirectML is the approved Windows GPU path; CUDA/OpenVINO/QNN are owner-provisioned development paths, not product Performance Packs.
+2. **Run external platform/hardware gates.** Native macOS Swift/Rust build/test and RAM++/ViT-B/32/SFace database parity; Windows ARM64 and AMD/Intel/QNN; native distro/Flatpak/AppImage installs; clean-VM install/upgrade/repair/uninstall; accessibility; signing/notarization; and hosted CI remain unverified locally.
+3. **Review and land deliberately.** The approximately 70-file uncommitted audit diff has not been committed, pushed, or published. Preserve it, inspect it as one change set, then land only with owner approval and require every active GitHub workflow green.
+4. **Keep the bounded-shutdown caveat explicit.** Filesystem/image/document decoder calls are not intrinsically cancellable. The pipeline now stops admission, cancels/wakes workers, and waits only to a deadline; a pathological kernel or codec read can outlive that deadline until process exit. Do not claim guaranteed in-process quiescence for such calls.
+
+Evidence: `.ralph/baseline/final-pass-linux-gate-complete.log`, `.ralph/baseline/fileid-adlon-current-64k.json`, `.ralph/baseline/strict-runtime-egress-final.log`, the Windows final-monitor log recorded in `.ralph/final-pre-release-audit.md`, and final independent reviews under `.pi-subagents/artifacts/outputs/{5c249c54,c4027978}/`.
+
 ## STATUS 2026-07-27 — Adlon performance floor restored; final Windows review fixes locally green
 
 The current dirty branch completes the full 135,740-file Adlon scan in 4,813 s (~28.2 files/s versus the 25 files/s floor), improves the 2,006-video workload from 483 s to 153 s, preserves the read-only corpus fingerprint, and passes People, Deep Analyze, Restructure apply/Undo, release-bundle, privacy, and local test gates. See STATE 2026-07-27.

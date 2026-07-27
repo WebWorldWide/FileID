@@ -77,7 +77,8 @@ impl WhisperRunner {
     /// on a reader thread so a chatty child never fills the pipe and blocks.
     pub fn transcribe(&self, model: &Path, wav: &Path, cancel: &AtomicBool) -> Result<String> {
         use std::io::Read;
-        let mut child = Command::new(&self.binary)
+        let mut command = Command::new(&self.binary);
+        command
             .arg("-m")
             .arg(model)
             .arg("-f")
@@ -88,9 +89,16 @@ impl WhisperRunner {
             .arg("auto") // auto-detect language
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        crate::platform::configure_child_lifetime(&mut command);
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawn {}", self.binary.display()))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            crate::platform::assign_child_to_engine_job(child.as_raw_handle());
+        }
         let mut stdout = child.stdout.take().expect("stdout piped");
         let reader = std::thread::spawn(move || {
             let mut s = String::new();
@@ -111,8 +119,7 @@ fn wait_for_transcript(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::platform::terminate_child_tree(&mut child);
             let _ = reader.join();
             bail!("cancelled");
         }
@@ -126,15 +133,13 @@ fn wait_for_transcript(
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::platform::terminate_child_tree(&mut child);
                 let _ = reader.join();
                 return Err(error).context("whisper-cli try_wait");
             }
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::platform::terminate_child_tree(&mut child);
             let _ = reader.join();
             bail!("whisper-cli timed out after {:?}", timeout);
         }

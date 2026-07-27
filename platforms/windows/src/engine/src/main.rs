@@ -5,9 +5,8 @@
 //! (one per line). Local-only logs go to %LOCALAPPDATA%/FileID/logs/ via
 //! tracing; nothing leaves the machine.
 //!
-//! Lifetime is bound to the parent: parent-stdin EOF or the parent process
-//! disappearing (detected by a periodic OpenProcess poll on Windows) triggers
-//! a clean shutdown — drain the WAL, flush the sink, exit zero.
+//! Parent exit or stdin EOF cancels active work, quiesces mutations, checkpoints
+//! the WAL when safe, flushes the sink, and exits.
 
 #![allow(clippy::needless_return)]
 
@@ -424,6 +423,8 @@ async fn async_main() -> Result<()> {
 
     let dispatch_sink = sink.clone();
     let dispatch_shutdown = shutdown.clone();
+    let command_shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_command_shutdown_requested = command_shutdown_requested.clone();
     let dispatch_db = db_conn.clone();
 
     // Active scan coordinator. None when no scan is running; populated by
@@ -513,7 +514,7 @@ async fn async_main() -> Result<()> {
     // Prewarm cancellation is per-model-kind, owned by a static registry inside
     // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
     // flag to thread through here.
-    let stdio_loop = tokio::spawn(async move {
+    let mut stdio_loop = tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
@@ -551,6 +552,7 @@ async fn async_main() -> Result<()> {
                                 std::panic::AssertUnwindSafe(handle_line(
                                     &dispatch_sink,
                                     &dispatch_shutdown,
+                                    &dispatch_command_shutdown_requested,
                                     dispatch_db.as_ref(),
                                     &dispatch_db_path,
                                     &dispatch_scan_state,
@@ -583,6 +585,12 @@ async fn async_main() -> Result<()> {
                                     ))))
                                     .await;
                             }
+                            if dispatch_command_shutdown_requested
+                                .load(std::sync::atomic::Ordering::Acquire)
+                            {
+                                tracing::info!("shutdown command handled; stdio loop exiting");
+                                break;
+                            }
                         }
                         Ok(BoundedRead::Oversized(seen)) => {
                             // SEC: rejected mid-read, never allocated past the cap.
@@ -612,36 +620,72 @@ async fn async_main() -> Result<()> {
         }
     });
 
-    // Wait for shutdown signal (from either source).
     main_shutdown.await;
 
-    // Checkpoint before exit so the next opener doesn't need the .wal/.shm
-    // sidecars. On failure, surface to the sink before teardown so the
-    // app's next launch can warn about stale-read. Capture into a local
-    // so the mutex guard drops before any await on the sink.
-    let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
-        let guard = conn_arc.lock();
-        db::checkpoint_truncate(&guard)
-    });
-    if let Some(Err(err)) = checkpoint_outcome {
-        tracing::warn!(?err, "WAL checkpoint at shutdown failed");
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "checkpoint_failed_at_shutdown".into(),
-            message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
-            path: None,
-            model_kind: None,
-        }))))
-        .await;
+    scan_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(coordinator) = scan_state.lock().as_ref() {
+        coordinator.request_cancel();
+    }
+    deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Release);
+    restructure_apply_cancel.store(true, std::sync::atomic::Ordering::Release);
+    commands::prewarm::cancel_prewarm(None);
+
+    if tokio::time::timeout(Duration::from_secs(2), &mut stdio_loop)
+        .await
+        .is_err()
+    {
+        tracing::warn!("stdio command loop did not stop within the shutdown deadline");
+        stdio_loop.abort();
+    }
+
+    let mutation_guard = match tokio::time::timeout(
+        Duration::from_secs(30),
+        mutation_gate.lock(),
+    )
+    .await
+    {
+        Ok(guard) => Some(guard),
+        Err(_) => {
+            tracing::error!("active mutation did not quiesce before shutdown deadline");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "shutdown_quiescence_timeout".into(),
+                message: "FileID could not finish cancelling active work before shutdown. Recovery journals remain available and the WAL was left intact.".into(),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+            None
+        }
+    };
+
+    if mutation_guard.is_some() {
+        let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
+            let guard = conn_arc.lock();
+            db::checkpoint_truncate(&guard)
+        });
+        if let Some(Err(err)) = checkpoint_outcome {
+            tracing::warn!(?err, "WAL checkpoint at shutdown failed");
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "checkpoint_failed_at_shutdown".into(),
+                message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
+                path: None,
+                model_kind: None,
+            }))))
+            .await;
+        }
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(db_conn);
 
-    // Tear down stdio loop and sink.
-    stdio_loop.abort();
+    jobs.clear_listeners();
     drop(sink);
     let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
 
-    tracing::info!("FileIDEngine exiting cleanly");
+    if mutation_guard.is_some() {
+        tracing::info!("FileIDEngine exiting after quiescent checkpoint");
+    } else {
+        tracing::warn!("FileIDEngine exiting without a shutdown checkpoint");
+    }
     Ok(())
 }
 
@@ -1074,6 +1118,7 @@ fn idle_deep_analyze_rejection_event(
 async fn handle_line(
     sink: &Sink,
     shutdown: &Arc<Notify>,
+    command_shutdown_requested: &std::sync::atomic::AtomicBool,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
     db_path: &std::path::Path,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
@@ -1194,6 +1239,7 @@ async fn handle_line(
         }
         CommandPayload::Shutdown(_) => {
             tracing::info!("shutdown command received");
+            command_shutdown_requested.store(true, std::sync::atomic::Ordering::Release);
             shutdown.notify_waiters();
         }
         CommandPayload::PrewarmModel(payload) => {

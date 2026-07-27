@@ -40,6 +40,27 @@ async fn wait_for_blocking<T: Send + 'static>(
     }
 }
 
+async fn reject_stranded_decoders(
+    sink: &Sink,
+    scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
+    active: usize,
+) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "decoder_shutdown_incomplete".into(),
+        message: format!(
+            "{active} decoder worker(s) from the previous scan are still stopping. Wait and retry; restart FileID if they do not exit."
+        ),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+    sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+        ScanPhase::Failed,
+    ))))
+    .await;
+    *scan_state.lock() = None;
+}
+
 async fn reject_gpu_device_removed(
     sink: &Sink,
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
@@ -106,6 +127,13 @@ pub(crate) async fn handle_start_scan(
         .await;
         *scan_state.lock() = None;
         tracing::info!("[SCAN] queued scan cancelled before model loading");
+        return;
+    }
+
+    let active_decoders = crate::pipeline::tagging::active_decoder_threads();
+    if active_decoders > 0 {
+        reject_stranded_decoders(&sink, &scan_state, active_decoders).await;
+        tracing::warn!(active_decoders, "[SCAN] previous decoder workers are still active");
         return;
     }
 

@@ -254,6 +254,7 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
         child_prefix.push(sep);
     }
     let mut out: Vec<ResolvedExclusion> = Vec::new();
+    let mut seen = std::collections::HashSet::with_capacity(raw.len());
     for r in raw {
         let Some(res) = resolve_exclusion_unrooted(Path::new(r)) else {
             continue;
@@ -265,10 +266,9 @@ pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExc
         if !res.normalized.starts_with(&child_prefix) {
             continue;
         }
-        if out.iter().any(|e| e.normalized == res.normalized) {
-            continue;
+        if seen.insert(res.normalized.clone()) {
+            out.push(res);
         }
-        out.push(res);
     }
     out
 }

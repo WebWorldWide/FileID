@@ -7,8 +7,6 @@
 //! written by the Rust engine and the macOS Swift engine agree byte-for-byte.
 //! For large files we hash a composite of head + interior samples + tail + size
 //! rather than read gigabytes per file.
-#![allow(dead_code)] // wired into the rename/move rebind path within Phase 3.
-
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -31,6 +29,9 @@ pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> 
     hash_with_threshold(path, size, FULL_HASH_MAX_BYTES)
 }
 
+// Public library surface used by the CLI, TUI, and Linux app rather than the
+// engine binary.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ExactDuplicateCandidate {
     pub id: i64,
@@ -38,6 +39,7 @@ pub struct ExactDuplicateCandidate {
     pub indexed_size: i64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ExactDuplicateGroup {
     pub hash: [u8; 32],
@@ -45,6 +47,7 @@ pub struct ExactDuplicateGroup {
     pub files: Vec<ExactDuplicateCandidate>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ExactDuplicateGrouping {
     pub groups: Vec<ExactDuplicateGroup>,
@@ -57,6 +60,7 @@ pub(crate) struct ExactFileHash {
     _file: std::fs::File,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) enum ExactFileLock {
     None,
@@ -64,6 +68,7 @@ pub(crate) enum ExactFileLock {
     DenyMutation,
 }
 
+#[allow(dead_code)]
 pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
     exact_file_sha256_until_with_identity(path, expected_size, || false, ExactFileLock::None)
         .map(|proof| proof.hash)
@@ -77,6 +82,7 @@ pub(crate) fn exact_file_sha256_guard(
     exact_file_sha256_until_with_identity(path, expected_size, || false, lock)
 }
 
+#[allow(dead_code)]
 fn exact_file_sha256_until(
     path: &Path,
     expected_size: u64,
@@ -173,12 +179,14 @@ fn exact_file_sha256_until_with_identity(
     })
 }
 
+#[allow(dead_code)]
 pub fn group_exact_duplicates(
     candidates: Vec<ExactDuplicateCandidate>,
 ) -> ExactDuplicateGrouping {
     group_exact_duplicates_until(candidates, || false)
 }
 
+#[allow(dead_code)]
 pub fn group_exact_duplicates_until(
     candidates: Vec<ExactDuplicateCandidate>,
     should_cancel: impl Fn() -> bool,

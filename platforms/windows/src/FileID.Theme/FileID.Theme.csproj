@@ -1,13 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!--
-    FileID.Theme — visual language as a class library.
-    Owns: Theme.xaml (brushes + tokens), GlassCard / GoldButton /
-    SettingToggleRow / ThemedSegmentedControl reusable components, motion
-    primitives (Shimmer, LavaLamp, SpringEasing), and the ReducedMotion bridge.
-
-    Separated from FileID.App so the theme can be unit-tested + visually
-    audited in isolation (a future Theme Gallery debug app references this).
-  -->
+  <!-- Shared WinUI palette, surfaces, motion primitives, and reduced-motion bridge. -->
   <PropertyGroup>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>

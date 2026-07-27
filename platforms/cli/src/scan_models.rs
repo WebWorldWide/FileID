@@ -14,10 +14,8 @@
 //! Two pre-flights before we ever spawn:
 //!   1. Models installed? We mirror the engine's exact `startScan` gate
 //!      (`mobileclip_s2` + `arcface` sentinels) and, if anything is missing,
-//!      print a clear, actionable message and stop. On macOS that message leads
-//!      with the desktop app: the Rust engine can't reuse the macOS app's Swift
-//!      models, so "install these models" would be a dead end — full-ML scanning
-//!      there is the app's job, and the CLI/TUI do model-free FTS + browsing.
+//!      print the exact install command and stop. macOS uses a separate Rust
+//!      engine model directory and also requires ONNX Runtime.
 //!   2. Engine binary located? If not, we say how to point at it.
 //!
 //! The full pipeline writes the engine's canonical library by default. An
@@ -158,28 +156,32 @@ fn missing_models() -> Vec<(&'static str, String)> {
 }
 
 fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_dir: Option<&Path>) {
-    // On macOS the Rust engine can't reuse the desktop app's Swift models, so
-    // "install these models" is a dead end — full-ML scanning there is the app's
-    // job. Lead with that; elsewhere, installing the engine's models is correct.
+    // macOS uses separate Rust-engine weights from the desktop app's CoreML set.
     let on_macos = cfg!(target_os = "macos");
 
+    let install_command = format!(
+        "fileid models download {}",
+        missing
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     if ctx.json {
-        let (message, hint) = if on_macos {
-            (
-                "the full ML pipeline requires installed AI models",
-                "install the engine's own models with `fileid models download --all` (downloads from huggingface.co), then re-run; or scan with full ML in the FileID desktop app, which owns the separate macOS CoreML models. `fileid models list` shows the set",
+        let hint = if on_macos {
+            format!(
+                "install the engine's own models with `{install_command}` (downloads from huggingface.co), then re-run; or scan with full ML in the FileID desktop app, which owns separate CoreML models. ONNX Runtime is also required on macOS"
             )
         } else {
-            (
-                "the full ML pipeline requires installed AI models",
-                "install them with `fileid models download --all` (downloads from huggingface.co); `fileid models list` shows the set + licenses. The desktop app's Welcome screen can also install them. See shared/docs/MODELS.md",
+            format!(
+                "install the required models with `{install_command}` (downloads from huggingface.co); `fileid models list` shows optional models and licenses"
             )
         };
         print_json(&serde_json::json!({
             "command": "scan",
             "mode": "models",
             "error": "models_not_installed",
-            "message": message,
+            "message": "the full ML pipeline requires installed AI models",
             "missing": missing.iter().map(|(k, n)| serde_json::json!({"kind": k, "name": n}))
                 .collect::<Vec<_>>(),
             "modelsDir": models_dir.map(|p| p.display().to_string()),
@@ -200,14 +202,12 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
         println!("  Expected under: {}", dir.display());
     }
     println!("  {}", ctx.bold("To install:"));
-    println!(
-        "    {}   {}",
-        ctx.bold("fileid models download --all"),
-        ctx.dim("(or name specific models; downloads once from huggingface.co)")
-    );
+    println!("    {}", ctx.bold(&install_command));
     println!(
         "    {}",
-        ctx.dim("Preview first: fileid models download --all --dry-run   ·   fileid models list")
+        ctx.dim(&format!(
+            "Preview first: {install_command} --dry-run   ·   fileid models list"
+        ))
     );
     if on_macos {
         println!(

@@ -1,9 +1,7 @@
 //! Pure-Rust keyword extraction (RAKE-style). Splits text into phrases at
 //! stopword boundaries, scores each phrase by sum of word degree / frequency
 //! (the classic RAKE metric), returns the top-N as content tags. No ML
-//! model, no new dependency — complements the (heavier) BGE/GLiNER text
-//! pipeline added later.
-#![allow(dead_code)] // wired into the Phase 4 document tagging integration.
+//! model or new dependency, complementing the heavier semantic-text pipeline.
 
 use std::collections::{HashMap, HashSet};
 

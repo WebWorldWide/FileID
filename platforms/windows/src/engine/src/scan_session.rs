@@ -473,7 +473,10 @@ impl ScanSession {
         emit_phase(SessionPhase::Tagging);
         let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
             .with_scan_root(root.to_path_buf());
-        let tagged_rx: mpsc::Receiver<TaggedFile> = tagger.spawn(discovered_rx);
+        let (tagged_rx, mut decoder_join): (
+            mpsc::Receiver<TaggedFile>,
+            tokio::task::JoinHandle<()>,
+        ) = tagger.spawn(discovered_rx);
 
         // Throttle progress emission: at most one event per 100 ms OR
         // every 1000 files (whichever first). Without throttling, a fast
@@ -513,6 +516,9 @@ impl ScanSession {
                 );
             })
             .await;
+        if writer_outcome.is_err() {
+            self.coordinator.request_cancel();
+        }
 
         // Tick exits on its own once discovery's `done` flips true; this
         // abort is belt-and-suspenders for the rare case where DBWriter
@@ -522,17 +528,41 @@ impl ScanSession {
         // PhaseChanged(Failed).
         tick.abort();
 
+        let decoder_wait = if self.coordinator.is_cancelled() {
+            std::time::Duration::from_secs(2)
+        } else {
+            std::time::Duration::from_secs(60)
+        };
+        let decoder_outcome = match tokio::time::timeout(decoder_wait, &mut decoder_join).await {
+            Ok(result) => result.context("joining decoder pool"),
+            Err(_) if self.coordinator.is_cancelled() => {
+                tracing::warn!(
+                    active = crate::pipeline::tagging::active_decoder_threads(),
+                    "cancelled scan left a decoder draining bounded read-only work"
+                );
+                Ok(())
+            }
+            Err(_) => Err(anyhow::anyhow!(
+                "decoder pool did not quiesce within {} seconds",
+                decoder_wait.as_secs()
+            )),
+        };
         let zero_byte_outcome = zero_byte_worker
             .await
             .context("joining zero-byte catalog worker")
             .and_then(|outcome| outcome);
         let discovery_outcome = discovery_join.await.context("joining discovery worker");
-        let pipeline_outcome = match (writer_outcome, zero_byte_outcome, discovery_outcome) {
-            (Ok((total, failed)), Ok((applied, rejected)), Ok(())) => {
+        let pipeline_outcome = match (
+            writer_outcome,
+            decoder_outcome,
+            zero_byte_outcome,
+            discovery_outcome,
+        ) {
+            (Ok((total, failed)), Ok(()), Ok((applied, rejected)), Ok(())) => {
                 Ok((total, failed, applied, rejected))
             }
-            (Err(err), _, _) | (_, Err(err), _) => Err(err),
-            (_, _, Err(err)) => Err(err),
+            (Err(err), _, _, _) | (_, _, Err(err), _) => Err(err),
+            (_, Err(err), _, _) | (_, _, _, Err(err)) => Err(err),
         };
         let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
             Ok(result) => result,
@@ -770,7 +800,7 @@ impl ProgressState {
             // -60 s forces the first batch callback past the throttle so the
             // sidebar fills immediately; the rate anchor below uses the real
             // `now` so the first measured interval is honest.
-            last_emit: now - Duration::from_secs(60),
+            last_emit: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
             last_total: 0,
             rate_anchor: now,
             rate_anchor_total: 0,

@@ -318,6 +318,77 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("await ShowAlertAsync(\"Deep Analyze stopped\", ex.Message);", deepAnalyze, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void SignedEngineLeasePrecedesTrustVerificationAndSpansSpawn()
+    {
+        var client = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
+        var pin = client.IndexOf("new FileStream(enginePath, FileMode.Open, FileAccess.Read, FileShare.Read)", StringComparison.Ordinal);
+        var lease = client.IndexOf("using var spawnPinLease = spawnPin;", pin, StringComparison.Ordinal);
+        var verify = client.IndexOf("var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(", lease, StringComparison.Ordinal);
+        var spawn = client.IndexOf("p = Process.Start(psi)", verify, StringComparison.Ordinal);
+
+        Assert.True(pin >= 0 && lease > pin && verify > lease && spawn > verify,
+            "Signed builds must deny engine writes/deletes before trust verification and retain the lease through spawn.");
+    }
+
+    [Fact]
+    public void ProgressDoesNotRetireScanControlRollbackOwnership()
+    {
+        var client = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
+        var commands = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.Commands.cs"));
+        var progress = client.IndexOf("case ProgressEvent p:", StringComparison.Ordinal);
+        var phase = client.IndexOf("case PhaseChangedEvent pc:", progress, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("_scanControlRevision", client[progress..phase], StringComparison.Ordinal);
+        Assert.Contains("Interlocked.Increment(ref _scanControlRevision)", commands, StringComparison.Ordinal);
+        Assert.Contains("Interlocked.Read(ref _scanControlRevision) == revision", commands, StringComparison.Ordinal);
+        Assert.Contains("await EnsureScanStartConfirmedAsync();", commands, StringComparison.Ordinal);
+        Assert.Contains("var predecessor = _writeTail;", commands, StringComparison.Ordinal);
+        Assert.Contains("_writeTail = queued;", commands, StringComparison.Ordinal);
+        Assert.Contains("await predecessor.ConfigureAwait(false);", commands, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OutboundQueueRejectsStaleEngineGenerationBeforeWriting()
+    {
+        var commands = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.Commands.cs"));
+        var capture = commands.IndexOf("var generation = SpawnGeneration;", StringComparison.Ordinal);
+        var awaitPredecessor = commands.IndexOf("await predecessor.ConfigureAwait(false);", capture, StringComparison.Ordinal);
+        var writeLock = commands.IndexOf("lock (_writeLock)", awaitPredecessor, StringComparison.Ordinal);
+        var staleCheck = commands.IndexOf("if (generation != SpawnGeneration)", writeLock, StringComparison.Ordinal);
+        var callback = commands.IndexOf("onWriteStarted?.Invoke();", staleCheck, StringComparison.Ordinal);
+        var write = commands.IndexOf("_stdin.BaseStream.Write", callback, StringComparison.Ordinal);
+
+        Assert.True(capture >= 0 && awaitPredecessor > capture && writeLock > awaitPredecessor,
+            "Each queued command must retain the generation that owned it before waiting in the FIFO.");
+        Assert.True(staleCheck > writeLock && callback > staleCheck && write > callback,
+            "A stale generation must be rejected under the write lock before callbacks or bytes reach replacement stdin.");
+    }
+
+    [Fact]
+    public void AutoScanAndQueueUseBoundedTerminalAndIncrementalContracts()
+    {
+        var app = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "App.xaml.cs"));
+        var queue = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "Views", "Sidebar", "SidebarQueueList.xaml.cs"));
+        var queueXaml = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "Views", "Sidebar", "SidebarQueueList.xaml"));
+
+        Assert.Contains("ScanPhase.Cancelled", app, StringComparison.Ordinal);
+        Assert.Contains("LifecycleState.Crashed", app, StringComparison.Ordinal);
+        Assert.Contains("SpawnGeneration != scanGeneration", app, StringComparison.Ordinal);
+        Assert.Contains("JobsRepeater.ItemsSource = _visibleRows", queue, StringComparison.Ordinal);
+        Assert.Contains("_visibleRows.Move(currentIndex, index)", queue, StringComparison.Ordinal);
+        Assert.DoesNotContain("Children.Clear", queue, StringComparison.Ordinal);
+        Assert.Contains("<StackLayout Spacing=\"4\" />", queueXaml, StringComparison.Ordinal);
+        Assert.Contains("MaxHeight=\"280\"", queueXaml, StringComparison.Ordinal);
+    }
+
     private static string PathInRepo(params string[] parts)
         => Path.Combine([RepoRoot, .. parts]);
 

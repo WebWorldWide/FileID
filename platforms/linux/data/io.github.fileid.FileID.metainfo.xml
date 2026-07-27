@@ -30,7 +30,7 @@
       <li>Library — search by filename, tag, or extracted text; grid preview.</li>
       <li>People — face clustering into named persons.</li>
       <li>Cleanup — exact and perceptual near-duplicate detection.</li>
-      <li>Deep Analyze — opt-in vision-language analysis of documents and images.</li>
+      <li>Deep Analyze — opt-in vision-language analysis; requires a compatible external llama-mtmd-cli and is not yet available in the Flatpak sandbox.</li>
       <li>Restructure — preview a proposed folder tree, then move or symlink.</li>
       <li>Settings — pick models, tune thresholds, manage the local library.</li>
     </ul>

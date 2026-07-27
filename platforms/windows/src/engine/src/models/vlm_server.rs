@@ -24,8 +24,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 pub struct VlmServer {
-    // Held so the child is killed on drop (kill_on_drop). Never read directly.
-    _child: Child,
+    // Held so the child process group is killed on drop.
+    child: Child,
     base_url: String,
     api_key: String,
     client: reqwest::Client,
@@ -42,6 +42,12 @@ const BIN_EXT: &str = ".exe";
 const BIN_EXT: &str = "";
 const MAX_VLM_ENCODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_VLM_RESPONSE_BYTES: usize = 1024 * 1024;
+
+impl Drop for VlmServer {
+    fn drop(&mut self) {
+        crate::platform::start_kill_tokio_child_tree(&mut self.child);
+    }
+}
 
 impl VlmServer {
     /// Candidate `llama-server` paths in preference order: the CUDA runtime
@@ -179,6 +185,7 @@ impl VlmServer {
         // Kill the server if this handle is dropped (job done / cancelled /
         // engine exit) so we never orphan a multi-GB process.
         cmd.kill_on_drop(true);
+        crate::platform::configure_child_lifetime(cmd.as_std_mut());
 
         let mut child = cmd.spawn().context("spawn bundled llama-server")?;
         // Tie the server to the engine job so an ungraceful engine death
@@ -239,7 +246,7 @@ impl VlmServer {
             "[VLM-SERVER] ready"
         );
         Ok(Self {
-            _child: child,
+            child,
             base_url,
             api_key,
             client,
@@ -317,11 +324,7 @@ fn build_loopback_client_with(builder: reqwest::ClientBuilder) -> Result<reqwest
 }
 
 async fn stop_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    crate::platform::terminate_tokio_child_tree(child).await;
 }
 
 async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {

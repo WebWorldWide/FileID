@@ -97,7 +97,7 @@ On-hardware verification (the third TESTING.md layer) runs on an RTX 2060 agains
 
 ## Linux distribution & packaging
 
-The Linux GTK4 app ships to **every distro** through declarative packaging under `packaging/` — see [`packaging/README.md`](../../packaging/README.md) for the full matrix and per-channel build commands. One Cargo binary (`fileid-linux`) plus the engine it spawns (`FileIDEngine`); each channel just wraps them and reuses the **single** desktop/metadata/icon source in `platforms/linux/data/` (never a copy).
+The Linux GTK4 app targets major distributions through declarative packaging under `packaging/` — see [`packaging/README.md`](../../packaging/README.md) for the matrix, validation status, and build commands. One Cargo binary (`fileid-linux`) plus the engine it spawns (`FileIDEngine`); each channel wraps them and reuses the **single** desktop/metadata/icon source in `platforms/linux/data/` (never a copy).
 
 | Channel | Covers | Native dep on |
 |---|---|---|
@@ -124,7 +124,7 @@ Rules when touching packaging:
 
 ## Hard rules (CI gates these — don't work around them)
 
-1. **No telemetry, ever.** No analytics SDK, no crash reporter, no auto-update pings, no model-download instrumentation. The only outbound traffic is user-initiated model downloads from `huggingface.co` plus a small set of runtime/help hosts; the canonical list + rationale live in `PRIVACY.md`. CI scans every shipped binary for the 22 forbidden telemetry strings, and scans all source for off-allowlist URLs. Both are release blockers. Never weaken or remove these guarantees.
+1. **No telemetry, ever.** No analytics SDK, no crash reporter, no auto-update pings, no model-download instrumentation. Shipping-binary egress is limited to user-initiated downloads from `huggingface.co`; help links open in the user's browser. Exact development-only GitHub/NVIDIA runtime mirrors are documented release blockers in `PRIVACY.md`, not approved production egress. CI scans shipped binaries and source policy. Never weaken these guarantees.
 2. **Path redaction in every log line that contains a user path.** Rust: `redact_path_for_log(path)`. C#: `PathRedactor.Redact(path)`. Swift: `redactPathForLog(_:)`. Audited at PR time.
 3. **No new dependency without a `DECISIONS.md` entry + sign-off.** Dev-deps and test-deps included — `cargo deny check` and the source-URL allowlist will catch them.
 4. **Single-writer DB.** The engine owns the only writer connection. The app reads through ephemeral read-only connections. Migrations (Rust `db/`, Swift `Database.swift`) are append-only and must stay byte-faithful across the two engines.
@@ -150,7 +150,7 @@ Once the `shared/parity-tests/` harness exists (not yet — see `TESTING.md`), t
 
 ### Adding a new model
 
-The model stack is commercial-clean — every default weight is Apache-2.0 or MIT. Keep it that way; a new model's license goes in the `DECISIONS.md` entry.
+The model stack is commercial-clean: core weights are Apache-2.0/MIT, no non-commercial-only model may ship, and restricted commercially usable models require an explicit acceptance policy. Record every new model's license/terms in `MODELS.md` and the rationale in `DECISIONS.md`.
 
 1. Add the entry to the model registry in `platforms/windows/src/engine/src/models/registry.rs` (append a `lookup_full` match arm + a `sentinel_path` arm) and the macOS analog. Sentinels land at `%LOCALAPPDATA%\FileID\Models\.sentinels\<id>.installed` (Windows) / `~/Library/Application Support/FileID/Models/.sentinels/` (macOS).
 2. Add the ONNX/GGUF loader in `platforms/windows/src/engine/src/models/<name>.rs`.
@@ -272,7 +272,6 @@ Unified `./build.sh` flags:
 | `--debug` | Debug build (faster iteration; needs .NET SDK on host to launch) |
 | `--tests` | Run cargo + dotnet tests |
 | `--arm64` | Cross-compile for Snapdragon WoA |
-| `--vlm-native` | Build with native llama.cpp bindings (requires cmake) |
 | `--sign` | Authenticode-sign every binary (needs `FILEID_SIGN_THUMBPRINT` env var) |
 | `--help` | Full flag list |
 
@@ -291,7 +290,6 @@ Underlying `build-all.ps1` flags (use directly when you want finer control):
 | `-SkipEngine` | Only rebuild the WinUI 3 app |
 | `-SkipApp` | Only rebuild the Rust engine |
 | `-Arm64` | Cross-compile for ARM64 |
-| `-VlmNative` | Native llama.cpp bindings |
 | `-Sign -Thumbprint <hex>` | Authenticode-sign every binary |
 
 **The three iteration commands you'll reach for most** — run from the repo root in Windows Terminal. These assume PowerShell 7 (`pwsh`); on built-in Windows PowerShell 5.1 just drop the `pwsh` prefix and call `.\platforms\windows\build\build-all.ps1 …` directly. All three build **Debug** (engine + app) by default — add `-Release` for the slower self-contained build that ships, and `-Run` to launch the app when the build finishes.
@@ -428,18 +426,18 @@ Out of the box, FileID picks the best path for the user's hardware:
 
 | Hardware | EP / backend | Performance Pack? |
 | --- | --- | --- |
-| NVIDIA RTX | DirectML default; CUDA opt-in | NVIDIA CUDA Pack (~600 MB) |
+| NVIDIA RTX | DirectML | Owner-provisioned CUDA development path only |
 | AMD | DirectML | — |
-| Intel iGPU + Arc | DirectML default; OpenVINO opt-in | Intel OpenVINO Pack (~300 MB) |
-| Snapdragon X Elite (WoA) | DirectML default; QNN NPU opt-in | Snapdragon NPU Pack (~150 MB) |
+| Intel iGPU + Arc | DirectML | Owner-provisioned OpenVINO development path only |
+| Snapdragon X Elite (WoA) | DirectML or CPU | Owner-provisioned QNN development path only |
 | Apple Silicon (macOS) | CoreML + ANE | — |
 | CPU floor | AVX2/AVX-512 (x64) or NEON (arm64) | — |
 
-DirectML covers every Windows GPU vendor in one shipped backend. Performance Packs (Settings → Performance) are user-initiated downloads that swap in the vendor-native EP for a perf bump on detected hardware.
+DirectML covers every Windows GPU vendor in the release-approved backend, with CPU fallback. CUDA/OpenVINO/QNN may be selected when a developer provisions the vendor runtime locally; they are not approved product Performance Packs. The current development registry still contains legacy off-policy runtime downloads, so the strict runtime-egress gate blocks release staging until those entries are removed or mirrored to Hugging Face.
 
 ## ML stack
 
-All default weights are permissively licensed (Apache-2.0 / MIT). The Windows column is live; **Linux runs the same Rust engine and ONNX stack as Windows**, and macOS is adopting it (rows marked *lockstep pending* — see [`MODELS.md`](MODELS.md)).
+Core weights are Apache-2.0/MIT; optional restricted models such as Gemma remain commercially usable under separately accepted upstream terms. **Linux runs the same Rust engine and ONNX stack as Windows.** macOS uses its native Swift/CoreML/MLX implementation, with the commercial-clean RAM++/ViT-B/32/SFace stack already wired as primary; *lockstep pending* means on-Mac embedding and database parity verification remains (see [`MODELS.md`](MODELS.md)).
 
 | Capability | macOS | Windows |
 | --- | --- | --- |

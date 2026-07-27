@@ -773,8 +773,8 @@ fn render_deep_analyze(f: &mut Frame, _app: &App, area: Rect) {
         rows[1],
         "Deep Analyze",
         "Use the desktop app for VLM review.",
-        "The terminal client can install the required AI models and scan folders, but the rich Deep Analyze review/rename workflow still lives in the native desktop app.",
-        Some(cta("D", "download models, then use FileID.app for Deep Analyze")),
+        "The terminal client installs scanning/search models and scans folders. Deep Analyze VLM weights and review/rename stay in the native desktop app.",
+        Some(cta("D", "download the TUI scan/search model set")),
     );
 }
 
@@ -910,10 +910,10 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
                 " D ",
                 Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Download all AI models for full scanning", Style::default().fg(FG)),
+            Span::styled("  Download scan/search AI models", Style::default().fg(FG)),
         ]),
         Line::from(Span::styled(
-            "Needed for tags, faces & search. Fetched from huggingface.co; a progress bar shows above.",
+            "Curated non-VLM set for tags, faces & search. Fetched from huggingface.co; progress shows above.",
             Style::default().fg(DIM),
         )),
         Line::from(""),
@@ -2209,7 +2209,7 @@ mod tests {
         })));
         let text = frame_text(80, 30, &app);
         assert!(
-            text.contains("Download all AI models"),
+            text.contains("Download scan/search AI models"),
             "Settings panel missing the download action"
         );
         assert!(
@@ -2299,7 +2299,7 @@ mod tests {
         })));
         app.tab = Tab::Settings;
         assert!(
-            frame_text(100, 30, &app).contains("Download all AI models"),
+            frame_text(100, 30, &app).contains("Download scan/search AI models"),
             "Settings (the D prompt) must be reachable before the first scan",
         );
         app.tab = Tab::Library;
@@ -2471,7 +2471,7 @@ mod tests {
             (
                 Tab::DeepAnalyze,
                 "Use the desktop app for VLM review.",
-                "download models",
+                "scan/search model",
             ),
             (
                 Tab::Restructure,
