@@ -352,10 +352,16 @@ mod tests {
         assert_eq!(strip_extended_length(r"\\?\C:\a\b"), r"C:\a\b");
         assert_eq!(strip_extended_length(r"\\?\UNC\srv\sh\x"), r"\\srv\sh\x");
         // UNC prefix must win over the shorter `\\?\` prefix it contains.
-        assert_eq!(strip_extended_length(r"\\?\UNC\server\share"), r"\\server\share");
+        assert_eq!(
+            strip_extended_length(r"\\?\UNC\server\share"),
+            r"\\server\share"
+        );
         // Non-verbatim strings pass through unchanged on every OS.
         assert_eq!(strip_extended_length(r"C:\a\b"), r"C:\a\b");
-        assert_eq!(strip_extended_length("/home/alice/pic.jpg"), "/home/alice/pic.jpg");
+        assert_eq!(
+            strip_extended_length("/home/alice/pic.jpg"),
+            "/home/alice/pic.jpg"
+        );
     }
 
     #[test]

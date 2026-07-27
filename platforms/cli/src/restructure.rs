@@ -361,7 +361,9 @@ fn absorb_chunk(
 fn resolve_library_root(conn: &rusqlite::Connection, root: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(root) = root {
         let canon = std::fs::canonicalize(&root).unwrap_or(root);
-        return Ok(PathBuf::from(strip_extended_length(&canon.to_string_lossy())));
+        return Ok(PathBuf::from(strip_extended_length(
+            &canon.to_string_lossy(),
+        )));
     }
 
     let mut stmt = conn.prepare("SELECT path_text FROM files WHERE failed = 0")?;
