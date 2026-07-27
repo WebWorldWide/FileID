@@ -19,7 +19,7 @@ use super::{EngineError, EventPayload, IpcEvent, Wrap};
 const CHANNEL_CAPACITY: usize = 16384;
 
 // C1-009: per-frame size cap, symmetric with the app's inbound cap
-// (EngineClient.MaxFrameChars) and the engine's command-read cap
+// (EngineClient.MaxFrameBytes) and the engine's command-read cap
 // (main.rs MAX_FRAME_BYTES). A frame above this is silently dropped by the
 // app's bounded reader (it resyncs to the next newline), which hangs the UI
 // that was awaiting the reply (e.g. a huge restructurePlan). Rather than emit

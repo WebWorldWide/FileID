@@ -210,6 +210,9 @@ pub struct DiscoveryHandle {
     /// Walk errors swallowed during traversal. Surfaced as a non-fatal
     /// `discovery_partial` event by the scan orchestrator.
     pub error_count: Arc<AtomicU64>,
+    /// Join handle retained by the scan orchestrator so a panic in the blocking
+    /// walker becomes a failed scan instead of an apparently successful empty one.
+    pub join: tokio::task::JoinHandle<()>,
 }
 
 struct ClassifiedEntry {
@@ -288,7 +291,7 @@ impl Discovery {
             "[DISCOVERY] adaptive parallel walk"
         );
 
-        tokio::task::spawn_blocking(move || {
+        let join = tokio::task::spawn_blocking(move || {
             // jwalk: rayon-backed parallel walk. process_read_dir prunes
             // noise directories at the read_dir level so we never recurse
             // into them (the win is dramatic on trees with deep
@@ -486,6 +489,7 @@ impl Discovery {
             done,
             seen_paths,
             error_count,
+            join,
         }
     }
 }

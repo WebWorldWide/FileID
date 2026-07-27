@@ -170,7 +170,8 @@ struct FileIDEngineMain {
 
     private static func requireLicenseAcceptance(
         for kind: AIModelKind,
-        sink: IPCSink
+        sink: IPCSink,
+        emitDeepAnalyzeTerminal: Bool = false
     ) async -> Bool {
         guard ModelLicenseAcceptance.isAccepted(for: kind) else {
             await sink.emit(.error(EngineError(
@@ -178,6 +179,12 @@ struct FileIDEngineMain {
                 message: "Open FileID and accept the \(kind.licenseName) before downloading or using \(kind.displayName).",
                 modelKind: kind.rawValue
             )))
+            if emitDeepAnalyzeTerminal {
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: kind.rawValue, cancelled: false
+                )))
+            }
             return false
         }
         return true
@@ -293,14 +300,31 @@ struct FileIDEngineMain {
                 await sink.emit(.faceClusteringComplete(summary))
             })
         case .deepAnalyzeFile(let fileID, let modelKind):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
-            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
             // Duplicate-command parity with the Windows engine: a second
             // deep-analyze while one is queued/running is rejected, not
             // silently queued (the app disables its buttons in-flight, so
@@ -329,14 +353,31 @@ struct FileIDEngineMain {
                                              modelKind: kind)
             })
         case .deepAnalyzeFolder(let prefix, let modelKind):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
-            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
@@ -356,15 +397,44 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames, let fileIDs):
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
-            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
+            if let fileIDs, fileIDs.count > 10_000 {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_analyze_selection_too_large",
+                    message: "Analyze Selected accepts at most 10,000 files per run. Reduce the selection and try again.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
@@ -380,15 +450,25 @@ struct FileIDEngineMain {
                 title: "Deep Analyze entire library (\(kind.displayName))",
                 etaSeconds: nil
             ) {
+                let scope: DeepAnalyzeScope = if let fileIDs {
+                    .selected(fileIDs: fileIDs, skipExisting: skipExisting)
+                } else {
+                    .wholeLibrary(skipExisting: skipExisting)
+                }
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
-                                             scope: .wholeLibrary(skipExisting: skipExisting),
+                                             scope: scope,
                                              modelKind: kind,
                                              tagsOnly: tagsOnly ?? false,
                                              proposeRenames: proposeRenames ?? true)
             })
         case .deepAnalyzeCancel:
-            await DeepAnalyze.shared.requestCancel()
-            JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
+            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+                await DeepAnalyze.shared.requestCancel()
+                JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
+            } else {
+                await DeepAnalyze.shared.clearCancel()
+                JSONLog.shared.info(ev: "deep_analyze_cancel_ignored_idle")
+            }
         case .prewarmModel(let modelKey):
             guard let kind = AIModelKind(rawValue: modelKey) else {
                 // Canonical cross-platform kind for "engine doesn't recognize

@@ -1238,24 +1238,12 @@ pub(crate) async fn handle_apply_restructure(
                 }
                 result
             } else {
-                // D3: the inline (≤5000-move) path must apply the SAME
-                // server-authoritative ask-tier exclusion the paged path does
-                // — "ask" = the butler was unsure and wants per-file consent,
-                // so it must never ride a bulk apply regardless of what the
-                // client sent. This is the engine-side backstop behind the
-                // app's default-deselect of ask rows; the two together mean an
-                // ask move can only apply via an explicit single-move request.
+                // Inline moves are exactly the rows the user reviewed and kept
+                // selected in WinUI, so an Ask-tier row here carries explicit
+                // consent. Only stored/truncated plans need the server-side Ask
+                // exclusion because most of those rows were never displayed.
                 let total = moves.len();
-                let mut skipped_ask = 0usize;
-                let filtered = exclude_ask_tier(moves.into_iter().map(Ok), &mut skipped_ask);
-                let result = apply.apply_iter(filtered, Some(total));
-                if skipped_ask > 0 {
-                    tracing::info!(
-                        skipped_ask,
-                        "[RESTRUCTURE] excluded ask-tier moves from inline apply"
-                    );
-                }
-                result
+                apply.apply_iter(moves.into_iter().map(Ok), Some(total))
             }
         },
     )
@@ -1503,11 +1491,12 @@ mod tests {
             let source = incoming.join(format!("{index}.jpg"));
             std::fs::write(&source, format!("payload-{index}")).unwrap();
             let source_text = source.to_string_lossy().into_owned();
+            let file_ref = crate::platform::file_ref(&source).unwrap() as i64;
             conn.execute(
                 "INSERT INTO files
-                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
-                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0)",
-                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1],
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
+                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0,?4)",
+                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1, file_ref],
             )
             .unwrap();
             moves.push(IpcMove {
@@ -1570,11 +1559,12 @@ mod tests {
             let source = incoming.join(format!("{index}.jpg"));
             std::fs::write(&source, format!("payload-{index}")).unwrap();
             let source_text = source.to_string_lossy().into_owned();
+            let file_ref = crate::platform::file_ref(&source).unwrap() as i64;
             conn.execute(
                 "INSERT INTO files
-                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
-                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0)",
-                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1],
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
+                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0,?4)",
+                rusqlite::params![index as i64 + 1, source_text, index as i64 + 1, file_ref],
             )
             .unwrap();
             moves.push(IpcMove {

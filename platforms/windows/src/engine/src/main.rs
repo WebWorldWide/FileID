@@ -43,7 +43,7 @@ use ipc::{
 const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Max inbound IPC frame size. 64 MiB, symmetric with the app's outbound
-/// command cap (MaxIpcFrameBytes) and its inbound read cap (MaxFrameChars).
+/// command cap (MaxIpcFrameBytes) and its inbound read cap (MaxFrameBytes).
 /// A large applyRestructure carries the same multi-MB move set the engine
 /// emitted in restructurePlan; the old 1 MiB cap silently rejected + drained
 /// it. Bumped 32→64 MiB (R3-07B/R5-12) to hold a ~200k-move whole-library

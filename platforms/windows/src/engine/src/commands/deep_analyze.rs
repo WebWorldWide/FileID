@@ -2,6 +2,7 @@
 //! prefix, or whole library. Streams per-token caption chunks to the UI at
 //! 4 Hz so a 50-tok/sec VLM doesn't flood the sink.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -167,6 +168,31 @@ impl Drop for GpuCancelBridge {
     }
 }
 
+fn is_known_vlm_model(model_kind: &str) -> bool {
+    match crate::models::registry::lookup_full(model_kind) {
+        crate::models::registry::LookupResult::Found(model) => matches!(
+            model.id,
+            "qwen2_5_vl_7b" | "gemma_3_4b" | "mistral_small_3_2"
+        ),
+        crate::models::registry::LookupResult::Unknown => false,
+    }
+}
+
+async fn reject_unknown_model(sink: &Sink, model_kind: &str, cancel: &AtomicBool) -> bool {
+    if is_known_vlm_model(model_kind) {
+        return false;
+    }
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "unknown_model".into(),
+        message: format!("Unknown Deep Analyze model: {model_kind}."),
+        path: None,
+        model_kind: Some(model_kind.to_string()),
+    }))))
+    .await;
+    send_early_failure_complete(sink, model_kind, cancel).await;
+    true
+}
+
 pub(crate) async fn handle_deep_analyze_file(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -175,6 +201,9 @@ pub(crate) async fn handle_deep_analyze_file(
 ) {
     if cancel.load(Ordering::Acquire) {
         send_cancelled_complete(&sink, &payload.model_kind).await;
+        return;
+    }
+    if reject_unknown_model(&sink, &payload.model_kind, &cancel).await {
         return;
     }
     if crate::coordinator::process_gpu_device_removed() {
@@ -347,6 +376,9 @@ pub(crate) async fn handle_deep_analyze_folder(
         send_cancelled_complete(&sink, &payload.model_kind).await;
         return;
     }
+    if reject_unknown_model(&sink, &payload.model_kind, &cancel).await {
+        return;
+    }
     // P16: sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
@@ -383,11 +415,31 @@ pub(crate) async fn handle_deep_analyze_all(
         send_cancelled_complete(&sink, &payload.model_kind).await;
         return;
     }
-    let ids = match collect_file_ids(
-        &db,
-        &format!("WHERE {}", deep_analyze_target_filter()),
-        &[],
-    ) {
+    if reject_unknown_model(&sink, &payload.model_kind, &cancel).await {
+        return;
+    }
+    if payload.file_ids.as_ref().is_some_and(|ids| ids.len() > MAX_SELECTED_FILE_IDS) {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "deep_analyze_selection_too_large".into(),
+            message: format!(
+                "Analyze Selected accepts at most {MAX_SELECTED_FILE_IDS} files per run. Reduce the selection and try again."
+            ),
+            path: None,
+            model_kind: Some(payload.model_kind.clone()),
+        }))))
+        .await;
+        send_early_failure_complete(&sink, &payload.model_kind, &cancel).await;
+        return;
+    }
+    let ids_result = match payload.file_ids.as_deref() {
+        Some(requested) => collect_requested_file_ids(&db, requested),
+        None => collect_file_ids(
+            &db,
+            &format!("WHERE {}", deep_analyze_target_filter()),
+            &[],
+        ),
+    };
+    let ids = match ids_result {
         Ok(v) => v,
         Err(err) => {
             tracing::warn!(?err, "deep_analyze_all query");
@@ -440,6 +492,63 @@ fn collect_file_ids(
     rows.collect()
 }
 
+const MAX_SELECTED_FILE_IDS: usize = 10_000;
+const ID_QUERY_CHUNK: usize = 400;
+
+fn collect_requested_file_ids(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    requested: &[i64],
+) -> rusqlite::Result<Vec<i64>> {
+    let mut seen = HashSet::with_capacity(requested.len());
+    let requested = requested
+        .iter()
+        .copied()
+        .filter(|id| *id > 0 && seen.insert(*id))
+        .collect::<Vec<_>>();
+    let conn = db.lock();
+    let mut valid = HashSet::with_capacity(requested.len());
+    for chunk in requested.chunks(ID_QUERY_CHUNK) {
+        let placeholders = (0..chunk.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id FROM files WHERE {} AND id IN ({placeholders})",
+            deep_analyze_target_filter()
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            valid.insert(row?);
+        }
+    }
+    Ok(requested.into_iter().filter(|id| valid.contains(id)).collect())
+}
+
+fn filter_pending_file_ids(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    file_ids: Vec<i64>,
+    model_kind: &str,
+) -> rusqlite::Result<Vec<i64>> {
+    let conn = db.lock();
+    let mut completed = HashSet::with_capacity(file_ids.len());
+    for chunk in file_ids.chunks(ID_QUERY_CHUNK) {
+        let placeholders = (0..chunk.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id FROM files WHERE vlm_model = ? AND id IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(chunk.len() + 1);
+        values.push(rusqlite::types::Value::Text(model_kind.to_string()));
+        values.extend(chunk.iter().copied().map(rusqlite::types::Value::Integer));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            completed.insert(row?);
+        }
+    }
+    Ok(file_ids
+        .into_iter()
+        .filter(|id| !completed.contains(id))
+        .collect())
+}
+
 /// Whether `file_id` is already analyzed by `model_kind` under skip_existing.
 /// Keyed on `vlm_model` ALONE — a file is DONE when analyzed BY THIS MODEL —
 /// exactly mirroring the macOS reference (DeepAnalyzeRunner.swift skip predicate
@@ -454,6 +563,7 @@ fn collect_file_ids(
 ///    / `obj_description` return None; a silent Whisper transcript too). Demanding
 ///    a caption re-ran those files — re-running Whisper decode+transcribe — on
 ///    every full pass even with skip_existing on.
+#[cfg(test)]
 fn skip_existing_done(conn: &rusqlite::Connection, file_id: i64, model_kind: &str) -> bool {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_model=?2)",
@@ -473,6 +583,42 @@ async fn run_deep_analyze_batch(
     tags_only: bool,
     propose_renames: bool,
 ) {
+    if cancel.load(Ordering::Acquire) {
+        send_cancelled_complete(&sink, model_kind).await;
+        return;
+    }
+    let file_ids = if skip_existing {
+        match filter_pending_file_ids(&db, file_ids, model_kind) {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(?err, "deep_analyze skip-existing query");
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "deep_analyze_query_failed".into(),
+                    message: "FileID couldn't read the Deep Analyze completion state. Check the database and try again.".into(),
+                    path: None,
+                    model_kind: Some(model_kind.to_string()),
+                }))))
+                .await;
+                send_early_failure_complete(&sink, model_kind, &cancel).await;
+                return;
+            }
+        }
+    } else {
+        file_ids
+    };
+    if file_ids.is_empty() {
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+            DeepAnalyzeComplete {
+                processed: 0,
+                failed: 0,
+                total_seconds: 0.0,
+                model_kind: model_kind.to_string(),
+                cancelled: false,
+            },
+        ))))
+        .await;
+        return;
+    }
     if crate::coordinator::process_gpu_device_removed() {
         send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
         return;
@@ -699,29 +845,6 @@ async fn run_deep_analyze_batch(
             let idx = cursor;
             let file_id = file_ids[idx];
             cursor += 1;
-            if skip_existing {
-                let already = {
-                    let conn = db.lock();
-                    skip_existing_done(&conn, file_id, model_kind)
-                };
-                if already {
-                    let is_last = idx as u64 == total.saturating_sub(1);
-                    if idx % 100 == 0 || is_last {
-                        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
-                            DeepAnalyzeProgress {
-                                processed: idx as u64,
-                                total,
-                                eta_seconds: batch_eta_seconds(rolling_fps, idx as u64, total),
-                                current_path: None,
-                                model_kind: model_kind.to_string(),
-                                current_caption: None,
-                            },
-                        ))))
-                        .await;
-                    }
-                    continue;
-                }
-            }
             let current_path: Option<String> = {
                 let conn = db.lock();
                 conn.query_row(
@@ -1168,6 +1291,7 @@ mod tests {
             crate::ipc::DeepAnalyzeAllPayload {
                 model_kind: "gemma3_4b".into(),
                 skip_existing: false,
+                file_ids: None,
                 tags_only: false,
                 propose_renames: true,
             },
@@ -1188,6 +1312,43 @@ mod tests {
                 assert_eq!(complete.inner.failed, 0);
             }
             other => panic!("expected only DeepAnalyzeComplete, got {other:?}"),
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unknown_model_emits_typed_error_and_terminal_failure() {
+        let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(2);
+
+        super::handle_deep_analyze_file(
+            sink,
+            db,
+            crate::ipc::DeepAnalyzeFilePayload {
+                file_id: 1,
+                model_kind: "not_a_model".into(),
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        let error = events.recv().await.expect("typed unknown-model error");
+        match error.payload {
+            crate::ipc::EventPayload::Error(error) => {
+                assert_eq!(error.inner.kind, "unknown_model");
+                assert_eq!(error.inner.model_kind.as_deref(), Some("not_a_model"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        let complete = events.recv().await.expect("terminal Deep Analyze failure");
+        match complete.payload {
+            crate::ipc::EventPayload::DeepAnalyzeComplete(complete) => {
+                assert_eq!(complete.inner.processed, 0);
+                assert_eq!(complete.inner.failed, 1);
+                assert!(!complete.inner.cancelled);
+                assert_eq!(complete.inner.model_kind, "not_a_model");
+            }
+            other => panic!("expected DeepAnalyzeComplete, got {other:?}"),
         }
         assert!(events.try_recv().is_err());
     }
@@ -1304,6 +1465,58 @@ mod tests {
             !skip_for("qwen2.5-vl-7b"),
             "a model switch must re-analyze, not skip the old model's caption"
         );
+    }
+
+    #[test]
+    fn selected_ids_are_bounded_to_valid_targets_and_keep_request_order() {
+        let db = in_memory_db();
+        let first = insert_file(&db, r"C:\lib\a.jpg", "image", 0, None, None);
+        let failed = insert_file(&db, r"C:\lib\b.jpg", "image", 1, None, None);
+        let unsupported = insert_file(&db, r"C:\lib\c.bin", "other", 0, None, None);
+        let second = insert_file(&db, r"C:\lib\d.mp4", "video", 0, None, None);
+
+        let selected = super::collect_requested_file_ids(
+            &db,
+            &[second, failed, first, unsupported, second, -1, 999_999],
+        )
+        .unwrap();
+        assert_eq!(selected, vec![second, first]);
+    }
+
+    #[tokio::test]
+    async fn all_already_analyzed_finishes_without_loading_a_model() {
+        let db = in_memory_db();
+        let fid = insert_file(
+            &db,
+            r"C:\lib\done.jpg",
+            "image",
+            0,
+            Some("missing-test-model"),
+            Some("done"),
+        );
+        let (sink, mut events) = crate::ipc::sink::Sink::channel_for_test(2);
+        super::run_deep_analyze_batch(
+            sink,
+            db,
+            "missing-test-model",
+            vec![fid],
+            Arc::new(AtomicBool::new(false)),
+            true,
+            false,
+            true,
+        )
+        .await;
+
+        let event = events.recv().await.expect("no-work completion");
+        match event.payload {
+            crate::ipc::EventPayload::DeepAnalyzeComplete(complete) => {
+                assert_eq!(complete.inner.processed, 0);
+                assert_eq!(complete.inner.failed, 0);
+                assert!(!complete.inner.cancelled);
+            }
+            other => panic!("expected DeepAnalyzeComplete, got {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "must not emit model-loading lifecycle events");
     }
 
     /// Regression: metadata-named kinds legitimately persist `vlm_model` with a

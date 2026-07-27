@@ -28,10 +28,12 @@
 
 param(
     [Parameter(Mandatory=$true)][string]$Corpus,
-    [int]$TimeoutMinutes = 60,
+    [int]$TimeoutMinutes = 120,
     [string]$Configuration = "Debug",
     [switch]$SkipBuild,
-    [switch]$SkipWipe
+    [switch]$SkipWipe,
+    [string]$StateDirectory = "",
+    [switch]$UseLiveState
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,11 +44,27 @@ $AppDir      = Resolve-Path (Join-Path $PlatformDir "src/FileID.App")
 $Solution    = Join-Path $PlatformDir "FileID.sln"
 $AppTfm      = "net8.0-windows10.0.19041.0"
 
-$LogsDir    = Join-Path $env:LOCALAPPDATA "FileID\logs"
+$LiveLocalAppData = $env:LOCALAPPDATA
+if ($UseLiveState -and -not [string]::IsNullOrWhiteSpace($StateDirectory)) {
+    throw "Use either -UseLiveState or -StateDirectory, not both."
+}
+if ($UseLiveState) {
+    $EngineLocalAppData = $LiveLocalAppData
+} else {
+    if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
+        if ($SkipWipe) {
+            throw "-SkipWipe requires an explicit -StateDirectory so there is isolated state to reuse."
+        }
+        $StateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-gui-" + [guid]::NewGuid().ToString("N"))
+    }
+    $EngineLocalAppData = [System.IO.Path]::GetFullPath($StateDirectory)
+    New-Item -ItemType Directory -Force -Path $EngineLocalAppData | Out-Null
+}
+$LogsDir    = Join-Path $EngineLocalAppData "FileID\logs"
 $AppLog     = Join-Path $LogsDir "app.log"
 $LastSess   = Join-Path $LogsDir "last-session.txt"
-$WerDir     = Join-Path $env:LOCALAPPDATA "CrashDumps"
-$StateDb    = Join-Path $env:LOCALAPPDATA "FileID\state.sqlite"
+$WerDir     = Join-Path $LiveLocalAppData "CrashDumps"
+$StateDb    = Join-Path $EngineLocalAppData "FileID\fileid.sqlite"
 
 function Step($msg) { Write-Host ">> $msg" -ForegroundColor Cyan }
 function OK($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
@@ -69,12 +87,12 @@ $corpusFileCount = (Get-ChildItem -Path $Corpus -Recurse -File -ErrorAction Sile
 OK "corpus: $Corpus ($corpusFileCount files)"
 
 # --- 2. Build ---------------------------------------------------------
-$AppExe = Join-Path $AppDir "bin\$Configuration\$AppTfm\FileID.exe"
+$AppExe = Join-Path $AppDir "bin\x64\$Configuration\$AppTfm\win-x64\FileID.exe"
 if (-not $SkipBuild) {
     Step "Building app ($Configuration)"
     Push-Location $PlatformDir
     try {
-        & dotnet build $Solution -c $Configuration --nologo -v minimal
+        & dotnet build $Solution -c $Configuration -p:Platform=x64 --nologo -v minimal
         if ($LASTEXITCODE -ne 0) { Fail "dotnet build failed"; exit 2 }
     } finally { Pop-Location }
     OK "build complete"
@@ -106,10 +124,24 @@ if (Test-Path $WerDir) {
 
 # --- 5. Spawn app -----------------------------------------------------
 Step "Launching app with --auto-scan-folder"
-$proc = Start-Process -FilePath $AppExe `
-    -ArgumentList @("--auto-scan-folder", $Corpus, "--auto-exit-after-scan") `
-    -PassThru
-OK "spawned pid=$($proc.Id)"
+$priorLocalAppData = $env:LOCALAPPDATA
+$priorModelsDir = $env:FILEID_MODELS_DIR
+try {
+    $env:LOCALAPPDATA = $EngineLocalAppData
+    if ([string]::IsNullOrWhiteSpace($env:FILEID_MODELS_DIR)) {
+        $liveModels = Join-Path $LiveLocalAppData "FileID\Models"
+        if (Test-Path -LiteralPath $liveModels -PathType Container) {
+            $env:FILEID_MODELS_DIR = $liveModels
+        }
+    }
+    $proc = Start-Process -FilePath $AppExe `
+        -ArgumentList @("--auto-scan-folder", $Corpus, "--auto-exit-after-scan") `
+        -PassThru
+} finally {
+    $env:LOCALAPPDATA = $priorLocalAppData
+    $env:FILEID_MODELS_DIR = $priorModelsDir
+}
+OK "spawned pid=$($proc.Id); isolated state=$EngineLocalAppData"
 
 # --- 6. Poll loop -----------------------------------------------------
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)

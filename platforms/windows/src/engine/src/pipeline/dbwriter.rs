@@ -88,11 +88,22 @@ pub struct BatchStats {
 pub struct DbWriter {
     conn: Arc<Mutex<Connection>>,
     coordinator: ScanCoordinator,
+    rename_heal_enabled: bool,
 }
 
 impl DbWriter {
     pub fn new(conn: Arc<Mutex<Connection>>, coordinator: ScanCoordinator) -> Self {
-        Self { conn, coordinator }
+        // A database with no file rows has neither an old path to heal nor a
+        // legacy hash recipe. Freeze this at scan start so rows inserted by the
+        // current scan do not trigger two pointless heal queries plus a second
+        // disk read on every later batch.
+        let rename_heal_enabled = conn
+            .lock()
+            .query_row("SELECT EXISTS(SELECT 1 FROM files LIMIT 1)", [], |row| {
+                row.get::<_, bool>(0)
+            })
+            .unwrap_or(true);
+        Self { conn, coordinator, rename_heal_enabled }
     }
 
     /// Drain the input receiver until the channel closes, flushing on
@@ -222,7 +233,7 @@ impl DbWriter {
         let legacy_hashes: Vec<Option<crate::util::content_hash::LegacyHashes>> = buffer
             .iter()
             .map(|f| {
-                if f.content_hash.is_some() {
+                if self.rename_heal_enabled && f.content_hash.is_some() {
                     crate::util::content_hash::legacy_content_hashes(&f.path, f.size_bytes).ok()
                 } else {
                     None
@@ -240,7 +251,7 @@ impl DbWriter {
         // candidate old paths under a brief read lock, then stat them with the
         // writer lock RELEASED, into a path -> "gone" map the in-tx loop
         // consults instead of statting. (audit R3-16)
-        let heal_old_path_gone: std::collections::HashMap<String, bool> = {
+        let heal_old_path_gone: std::collections::HashMap<String, bool> = if self.rename_heal_enabled {
             let mut old_paths: Vec<String> = Vec::new();
             {
                 let conn = self.conn.lock();
@@ -282,6 +293,8 @@ impl DbWriter {
                     (old, gone)
                 })
                 .collect()
+        } else {
+            std::collections::HashMap::new()
         };
 
         let conn = self.conn.lock();
@@ -379,7 +392,7 @@ impl DbWriter {
                 // preserving its id + every FK-linked row (tags / embeddings /
                 // faces / OCR) — what the rename-heal is for. Skipped when we
                 // have neither identity (no heal possible).
-                if f.file_ref.is_some() || f.content_hash.is_some() {
+                if self.rename_heal_enabled && (f.file_ref.is_some() || f.content_hash.is_some()) {
                     let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
                     // Legacy fallbacks (?4/?6): rows stamped by pre-SHA-256
                     // builds hold BLAKE3 — full-file at or under the cap, the
@@ -1073,6 +1086,28 @@ mod tests {
     use crate::pipeline::tagging::DetectedFace;
     use rusqlite::OptionalExtension; // .optional() in ingest_with_heal (lib code no longer uses it)
     use std::path::PathBuf;
+
+    #[test]
+    fn fresh_catalog_skips_rename_heal_for_the_entire_scan() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        crate::db::migrations::apply(&conn.lock()).unwrap();
+        let writer = DbWriter::new(conn, ScanCoordinator::new());
+        assert!(!writer.rename_heal_enabled);
+    }
+
+    #[test]
+    fn existing_catalog_keeps_rename_heal_enabled() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        crate::db::migrations::apply(&conn.lock()).unwrap();
+        conn.lock()
+            .execute(
+                "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES ('C:/a.jpg', 1, 1, 0, 'image', 'jpg', 0)",
+                [],
+            )
+            .unwrap();
+        let writer = DbWriter::new(conn, ScanCoordinator::new());
+        assert!(writer.rename_heal_enabled);
+    }
 
     /// Minimal mirror of the per-file body in `flush`. Exercises the
     /// real INSERT_FILE_SQL constant under test so any drift in the

@@ -74,6 +74,7 @@ $MsiProj     = Join-Path $PlatformDir "installer/FileID.Msi/FileID.Msi.wixproj"
 $BundleProj  = Join-Path $PlatformDir "installer/FileID.Bundle/FileID.Bundle.wixproj"
 $DistDir     = Join-Path $PlatformDir "dist/installer"
 $PrereqDir   = Join-Path $PlatformDir "dist/prereqs"
+$SymbolsDir  = Join-Path $DistDir "symbols"
 $FetchRuntimeScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
 $PrivacyScanner = Resolve-Path (Join-Path $PlatformDir "..\..\shared\scripts\check_binary_privacy.py")
 
@@ -342,6 +343,8 @@ if ($declaredWinAppRuntime -ne $WinAppRuntimeVersion) {
 
 Assert-ReleaseSourceContract
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
+Remove-Item -LiteralPath $SymbolsDir -Recurse -Force -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path $SymbolsDir | Out-Null
 foreach ($staleArtifact in @("FileIDSetup.exe", "FileID-x64.msi", "FileID-arm64.msi", "SHA256SUMS.txt")) {
     Remove-Item -LiteralPath (Join-Path $DistDir $staleArtifact) -Force -ErrorAction SilentlyContinue
 }
@@ -385,9 +388,9 @@ if (-not $SkipArm64) {
 }
 
 function Build-Engine($triple) {
-    Write-Host "Building engine ($triple, release)..." -ForegroundColor Cyan
+    Write-Host "Building engine ($triple, release-debuginfo)..." -ForegroundColor Cyan
     Push-Location $EngineDir
-    try { & rustup run 1.90 cargo build --release --locked --target $triple } finally { Pop-Location }
+    try { & rustup run 1.90 cargo build --profile release-debuginfo --locked --target $triple } finally { Pop-Location }
 }
 
 Build-Engine "x86_64-pc-windows-msvc"
@@ -426,7 +429,7 @@ if (-not $SkipArm64) {
 
 # ─── 4. Stage engine into each publish dir ─────────────────────────────────
 function Resolve-EngineExe($triple) {
-    return Join-Path $EngineDir "target/$triple/release/FileIDEngine.exe"
+    return Join-Path $EngineDir "target/$triple/release-debuginfo/FileIDEngine.exe"
 }
 
 function Stage-Engine($triple, $rid, $platform) {
@@ -435,6 +438,16 @@ function Stage-Engine($triple, $rid, $platform) {
     if (-not (Test-Path $src)) { throw "Missing engine binary: $src" }
     if (-not (Test-Path $dst)) { throw "Missing publish dir: $dst" }
     Copy-Item $src (Join-Path $dst "FileIDEngine.exe") -Force
+    $enginePdb = [System.IO.Path]::ChangeExtension($src, ".pdb")
+    if (-not (Test-Path -LiteralPath $enginePdb -PathType Leaf)) {
+        throw "Missing native crash symbols: $enginePdb"
+    }
+    $archSymbols = Join-Path $SymbolsDir $platform
+    New-Item -ItemType Directory -Force -Path $archSymbols | Out-Null
+    Copy-Item -LiteralPath $enginePdb -Destination (Join-Path $archSymbols "FileIDEngine.pdb") -Force
+    Get-ChildItem -LiteralPath $dst -Filter "*.pdb" -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $archSymbols -Force
+    }
 }
 
 function Get-PeMachine($path) {

@@ -109,7 +109,7 @@ const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
 const SUBSCRIBER_EVENT_CAP: usize = 4;
-const MAX_ENGINE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ENGINE_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENGINE_LOG_BYTES: usize = 1024 * 1024;
 
 // ─── Engine client ───────────────────────────────────────────────────────────
@@ -369,18 +369,38 @@ impl Drop for EngineClient {
 
 // ─── Process lifecycle ───────────────────────────────────────────────────────
 
+/// Emit a raw event from the **GTK main thread** without ever parking it. The
+/// fan-out pump consumes `raw_tx` on this same main thread, so a `send_blocking`
+/// here can deadlock: once the reader threads have filled the bounded channel,
+/// the send parks the main thread, the pump can no longer run to drain it, and
+/// the whole UI — engine respawn included — freezes for good. Instead `try_send`,
+/// and if the channel is momentarily full, defer a retry onto the main loop so
+/// the pump drains first; the event is still delivered, just a beat later.
+/// (Reader/worker threads keep `send_blocking` — blocking a worker is correct
+/// backpressure; only the main thread must never park.)
+fn emit_from_main(raw_tx: &Sender<EngineEvent>, event: EngineEvent) {
+    match raw_tx.try_send(event) {
+        Ok(()) | Err(async_channel::TrySendError::Closed(_)) => {}
+        Err(async_channel::TrySendError::Full(event)) => {
+            let raw_tx = raw_tx.clone();
+            glib::idle_add_local_once(move || emit_from_main(&raw_tx, event));
+        }
+    }
+}
+
 /// Spawn (or respawn) the engine child and wire its stdout to a reader thread
 /// feeding `raw_tx`. Updates `child` / `stdin` on the shared client.
 fn spawn_process(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
     let raw_tx = this.borrow().raw_tx.clone();
-    let _ = raw_tx.send_blocking(EngineEvent::Spawning);
+    emit_from_main(&raw_tx, EngineEvent::Spawning);
 
     let exe = match locate_engine_binary() {
         Ok(p) => p,
         Err(err) => {
-            let _ = raw_tx.send_blocking(EngineEvent::Error(format!(
-                "engine binary not found: {err}"
-            )));
+            emit_from_main(
+                &raw_tx,
+                EngineEvent::Error(format!("engine binary not found: {err}")),
+            );
             schedule_respawn(this);
             return;
         }
@@ -410,7 +430,7 @@ fn spawn_process(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
             }
         }
         Err(err) => {
-            let _ = raw_tx.send_blocking(EngineEvent::Error(format!("spawn failed: {err}")));
+            emit_from_main(&raw_tx, EngineEvent::Error(format!("spawn failed: {err}")));
             schedule_respawn(this);
         }
     }
@@ -440,9 +460,11 @@ fn schedule_respawn(this: &std::rc::Rc<std::cell::RefCell<EngineClient>>) {
         e.respawns
     };
     if n > RESPAWN_CAP {
-        let _ = this.borrow().raw_tx.send_blocking(EngineEvent::Error(
-            "engine crashed repeatedly — giving up. Restart the app.".into(),
-        ));
+        let raw_tx = this.borrow().raw_tx.clone();
+        emit_from_main(
+            &raw_tx,
+            EngineEvent::Error("engine crashed repeatedly — giving up. Restart the app.".into()),
+        );
         return;
     }
     let delay = std::time::Duration::from_millis(400 * n as u64);

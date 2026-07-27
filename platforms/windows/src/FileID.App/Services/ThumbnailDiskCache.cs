@@ -111,6 +111,13 @@ internal static class ThumbnailDiskCache
         {
             bytes = await File.ReadAllBytesAsync(cached, ct).ConfigureAwait(false);
         }
+        catch (Exception ex) when (ex is OperationCanceledException || ct.IsCancellationRequested)
+        {
+            // Routine scroll-away cancellation, NOT corruption — abandon the read
+            // but keep the cached file. Deleting a good persisted thumbnail here
+            // meant fast scrolling silently evicted valid entries.
+            return null;
+        }
         catch (Exception ex)
         {
             DebugLog.Warn($"ThumbnailDiskCache read ({PathRedactor.Redact(path)}): {ex.GetType().Name}: {ex.Message}");
@@ -119,7 +126,16 @@ internal static class ThumbnailDiskCache
             return null;
         }
 
-        var bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
+        BitmapImage? bmp;
+        try
+        {
+            bmp = await RenderFromBytesOnDispatcherAsync(bytes, dispatcher, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException || ct.IsCancellationRequested)
+        {
+            // Abandoned mid-decode (scrolled away) — keep the cached file.
+            return null;
+        }
         if (bmp != null)
         {
             // Only a successful decode counts as an LRU hit — a poisoned file
@@ -131,9 +147,12 @@ internal static class ThumbnailDiskCache
             }
             Interlocked.Increment(ref _diskHits);
         }
-        else
+        else if (!ct.IsCancellationRequested)
         {
-            // Decoded to null — treat as poisoned, drop the file + index entry.
+            // Decoded to null on a LIVE token — a genuine corrupt/undecodable
+            // file. Drop it + its index entry. A cancellation-driven null is
+            // filtered above (and by the ct guard here), so a scroll-away never
+            // deletes a good cache entry.
             try { File.Delete(cached); } catch { /* swallow */ }
             ForgetIndexEntry(cached);
         }
@@ -311,6 +330,13 @@ internal static class ThumbnailDiskCache
                 await bmp.SetSourceAsync(stream).AsTask(ct);
                 DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} src=disk");
                 tcs.TrySetResult(bmp);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException || ct.IsCancellationRequested)
+            {
+                // Scroll-away cancellation, not a decode failure. Signal it as
+                // cancelled so the caller keeps the cached file instead of
+                // treating a null as a poisoned (deletable) entry.
+                tcs.TrySetCanceled(ct);
             }
             catch (Exception ex)
             {

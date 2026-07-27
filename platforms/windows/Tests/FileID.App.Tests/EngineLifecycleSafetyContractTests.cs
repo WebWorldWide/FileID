@@ -1,10 +1,66 @@
-﻿using Xunit;
+﻿using FileID.ViewModels;
+using Xunit;
 
 namespace FileID.App.Tests;
 
 public sealed class EngineLifecycleSafetyContractTests
 {
     private static readonly string RepoRoot = FindRepoRoot();
+
+    [Fact]
+    public void PersistedRestructureUndoRequiresAtLeastOneValidEntry()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"fileid-undo-{Guid.NewGuid():N}.ndjson");
+        var root = Path.Combine(Path.GetTempPath(), "FileID-library");
+        try
+        {
+            File.WriteAllText(path, $"{{\"version\":2,\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n");
+            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+
+            File.AppendAllText(path, "{\"file_id\":1,\"from\":\"a\",\"to\":\"b\"}\n");
+            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task EngineStdoutFrameLimitCountsUtf8BytesNotUtf16Characters()
+    {
+        var payload = string.Concat(Enumerable.Repeat("é", 20)) + "\n";
+        await using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(payload));
+        using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+        var framing = new EngineClient.StdoutFraming();
+
+        var frame = await EngineClient.ReadBoundedFrameAsync(
+            reader,
+            framing,
+            CancellationToken.None,
+            maxFrameBytes: 32);
+
+        Assert.Null(frame);
+        Assert.True(framing.OversizeDropped);
+    }
+
+    [Fact]
+    public async Task UnterminatedEngineStdoutFrameAlsoUsesTheUtf8ByteLimit()
+    {
+        var payload = string.Concat(Enumerable.Repeat("é", 20));
+        await using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(payload));
+        using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+        var framing = new EngineClient.StdoutFraming();
+
+        var frame = await EngineClient.ReadBoundedFrameAsync(
+            reader,
+            framing,
+            CancellationToken.None,
+            maxFrameBytes: 32);
+
+        Assert.Null(frame);
+        Assert.True(framing.OversizeDropped);
+    }
 
     [Fact]
     public void StopTimeoutIsExplicitAndRestartFailsClosed()

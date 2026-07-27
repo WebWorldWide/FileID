@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nThe platform DTOs are hand-maintained in platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift, platforms/windows/src/engine/src/ipc/mod.rs, and platforms/windows/src/FileID.IpcSchema/. Swift, Rust, and C# conformance suites lock those DTOs to this schema.",
-  "version": "1.0.0",
+  "version": "1.1.0",
 
   "$defs": {
     "IPCCommand": {
@@ -11,7 +11,7 @@
       "additionalProperties": false,
       "required": ["id", "payload"],
       "properties": {
-        "id": { "type": "string", "description": "App-assigned UUID; engine echoes in any reply." },
+        "id": { "type": "string", "description": "App-assigned UUID for client-side correlation/logging only; the engine does NOT echo it (engine→app messages are IPCEvent, which has no id field)." },
         "payload": { "$ref": "#/$defs/CommandPayload" }
       }
     },
@@ -97,7 +97,8 @@
               "required": ["modelKind", "skipExisting"],
               "properties": {
                 "modelKind":    { "type": "string" },
-                "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
+                "skipExisting": { "type": "boolean", "description": "If true, skip files already processed by this model (files.vlm_model matches modelKind)." },
+                "fileIDs":      { "type": "array", "items": { "type": "integer" }, "maxItems": 10000, "uniqueItems": true, "description": "Optional bounded selection. When present, analyze only these file IDs through the same persistent batch runner; absent means the whole library." },
                 "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
                 "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
               }

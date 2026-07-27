@@ -31,7 +31,7 @@ The `generators/` subdirectory will hold scripted codegen once the schema settle
 
 The schema is versioned in its top-level `version` field. **Backward-incompatible changes** (renamed/removed variants, renamed fields, type narrowing) require a major version bump and coordinated commits across every platform. **Backward-compatible additions** (new variant, optional field) bump the minor version.
 
-The current major version is `1.x`. Engines reject command frames with an unrecognized variant name with `IPCEvent.error(EngineError(kind: "ipc_unknown_command", ...))`.
+The current major version is `1.x`. Engines reject malformed frames and unrecognized command variants with `IPCEvent.error(EngineError(kind: "command_decode_failed", ...))`; callers must not infer whether a rejected frame was syntactically malformed or merely unknown.
 
 ## Privacy clause
 

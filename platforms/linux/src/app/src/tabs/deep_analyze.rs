@@ -463,6 +463,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                 model_kind: kind.to_string(),
                 skip_existing: ui.skip_check.is_active(),
+                file_ids: None,
                 tags_only: false,
                 propose_renames: true,
             });

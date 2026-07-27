@@ -198,6 +198,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/models/vlm_server.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
+            "platforms/windows/src/engine/src/commands/bulk.rs",
             "platforms/windows/src/engine/src/main.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",

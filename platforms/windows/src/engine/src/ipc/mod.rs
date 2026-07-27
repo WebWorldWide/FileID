@@ -377,6 +377,8 @@ pub struct DeepAnalyzeFolderPayload {
 pub struct DeepAnalyzeAllPayload {
     pub model_kind: String,
     pub skip_existing: bool,
+    #[serde(default, rename = "fileIDs", skip_serializing_if = "Option::is_none")]
+    pub file_ids: Option<Vec<i64>>,
     /// Tags-only fast path (background auto-tag): one VLM call/file instead of
     /// three. Defaults to false (manual Deep Analyze = full caption + rename +
     /// tags). `#[serde(default)]` keeps older clients that omit the field valid.
@@ -1501,6 +1503,7 @@ mod tests {
             CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                 model_kind: "qwen2_5_vl_7b".into(),
                 skip_existing: true,
+                file_ids: Some(vec![42, 99]),
                 tags_only: true,
                 propose_renames: true,
             }),

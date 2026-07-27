@@ -895,11 +895,10 @@ public sealed partial class FilePreviewSheet : UserControl
         catch { name = null; }
 
         if (string.IsNullOrWhiteSpace(name)) return;
+        // Defensive: sheet may have closed or navigated during the async query.
+        // Reject the stale result before changing either backing state or XAML.
+        if (_unloaded || _navGen != navGen) return;
         _pendingProposedName = name;
-        // Defensive: sheet may have closed during the async query. Bail before
-        // touching XAML, then wrap the UI mutation so a torn-down dialog
-        // content tree doesn't fast-fail the dispatcher.
-        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             ProposedRenameText.Text = name;
@@ -918,7 +917,12 @@ public sealed partial class FilePreviewSheet : UserControl
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
             // Capture the pre-rename name NOW for the session change log's
             // inverse action (renaming back is just another renameFiles).
+            // Also capture the file id + navigation generation at CLICK time: a
+            // quick navigate-to-next while the 30 s rename await is pending must
+            // not let this completion hide/clear the NEWLY-displayed file's
+            // proposed-rename card. (audit A9 — rename vs quick-navigate)
             var fileId = FileId;
+            var navGenAtClick = _navGen;
             var oldName = System.IO.Path.GetFileName(FilePath);
             try
             {
@@ -932,7 +936,7 @@ public sealed partial class FilePreviewSheet : UserControl
                     "renameFiles",
                     () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
                     {
-                        new IpcSchema.RenameEntry(FileId, name!),
+                        new IpcSchema.RenameEntry(fileId, name!),
                     }),
                     TimeSpan.FromSeconds(30));
                 // Succeeded==0 (with Failed==0) is the engine's wholesale-error
@@ -971,8 +975,15 @@ public sealed partial class FilePreviewSheet : UserControl
                             }
                         });
                 }
-                ProposedRenameCard.Visibility = Visibility.Collapsed;
-                _pendingProposedName = null;
+                // Only collapse the card / clear the pending name if the SAME
+                // file is still displayed. If the user navigated to the next file
+                // while the rename was in flight, that file's own proposed-rename
+                // card (loaded by LoadProposedNameAsync) must be left intact.
+                if (!_unloaded && _navGen == navGenAtClick && FileId == fileId)
+                {
+                    ProposedRenameCard.Visibility = Visibility.Collapsed;
+                    _pendingProposedName = null;
+                }
             }
             catch (TimeoutException ex)
             {
@@ -1185,6 +1196,12 @@ public sealed partial class FilePreviewSheet : UserControl
             ShowTagStatus("Reopen the preview before tagging — no file id.");
             return;
         }
+        // Capture the file id + navigation generation at CLICK time so a quick
+        // navigate-to-next during the 30 s tag await doesn't render this file's
+        // status message (or clear the input) under the newly-displayed file.
+        var fileId = FileId;
+        var navGenAtClick = _navGen;
+        bool StillCurrent() => !_unloaded && _navGen == navGenAtClick && FileId == fileId;
         var raw = (TagInput.Text ?? string.Empty).Trim();
         if (raw.Length == 0) return;
         var tags = raw
@@ -1206,8 +1223,12 @@ public sealed partial class FilePreviewSheet : UserControl
             // class). Mirrors OnApplyRenameClicked above.
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "applyTags",
-                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add"),
+                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { fileId }, tags, mode: "add"),
                 TimeSpan.FromSeconds(30));
+            // Navigated away while tagging was in flight — the tags still applied
+            // to the captured file, but its status/input mutations would land on
+            // the wrong (now-displayed) file. Skip the UI update.
+            if (!StillCurrent()) return;
             // Also guard Succeeded==0 (the engine's wholesale-error shape, e.g. a
             // busy/locked DB), so a total failure isn't reported as "Added N tags".
             if (result.Failed > 0 || result.Succeeded == 0)
@@ -1222,12 +1243,12 @@ public sealed partial class FilePreviewSheet : UserControl
         catch (TimeoutException ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags timed out: " + ex.Message);
-            ShowTagStatus("Tagging didn't confirm — try again.");
+            if (StillCurrent()) ShowTagStatus("Tagging didn't confirm — try again.");
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags failed: " + ex);
-            ShowTagStatus("Failed: " + ex.Message);
+            if (StillCurrent()) ShowTagStatus("Failed: " + ex.Message);
         }
         finally
         {

@@ -217,7 +217,7 @@ struct IoStatusBlock {
 }
 
 #[cfg(windows)]
-unsafe fn nt_rename_relative(
+pub(crate) unsafe fn nt_rename_relative(
     handle: windows::Win32::Foundation::HANDLE,
     information: *const std::ffi::c_void,
     length: u32,
@@ -257,7 +257,7 @@ unsafe fn nt_rename_relative(
 }
 
 #[cfg(windows)]
-fn windows_handle_path(file: &std::fs::File) -> anyhow::Result<std::path::PathBuf> {
+pub(crate) fn windows_handle_path(file: &std::fs::File) -> anyhow::Result<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -284,7 +284,7 @@ fn windows_handle_path(file: &std::fs::File) -> anyhow::Result<std::path::PathBu
 }
 
 #[cfg(windows)]
-fn open_windows_directory_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+pub(crate) fn open_windows_directory_lock(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows::core::PCWSTR;

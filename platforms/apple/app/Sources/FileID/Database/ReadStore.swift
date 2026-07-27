@@ -723,6 +723,7 @@ public final class ReadStore: @unchecked Sendable {
                     SELECT * FROM files
                     WHERE kind = 'image' AND failed = 0
                       AND phash IS NOT NULL AND phash != 0
+                    ORDER BY id
                     """)
             }
         } catch {
@@ -761,7 +762,11 @@ public final class ReadStore: @unchecked Sendable {
                 let ad = a.createdAt ?? .distantFuture
                 let bd = b.createdAt ?? .distantFuture
                 if ad != bd { return ad < bd }
-                return a.pathText.count < b.pathText.count
+                if a.pathText.count != b.pathText.count { return a.pathText.count < b.pathText.count }
+                // Final tiebreaker on the unique id: Swift's sort isn't stable, so
+                // without this the displayed keeper (files[0]) of two rows tied on
+                // every rank key above would hop run-to-run. (display determinism)
+                return a.id < b.id
             }
             // Stable Identifiable id: the smallest member file id — independent of
             // which copy currently ranks as keeper, so SwiftUI identity (and the

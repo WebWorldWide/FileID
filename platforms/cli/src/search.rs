@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::context::{display_path, human_size, print_json, resolve_file_id, Ctx};
+use crate::context::{display_path, escape_like, human_size, print_json, resolve_file_id, Ctx};
 
 struct Hit {
     id: i64,
@@ -184,10 +184,13 @@ fn collect_filename(
     limit: usize,
     out: &mut BTreeMap<i64, Hit>,
 ) -> Result<()> {
-    let like = format!("%{}%", raw.to_lowercase());
+    // Escape LIKE metacharacters so a literal `%` or `_` in the query matches
+    // itself instead of acting as a wildcard. Lowercase first (to match
+    // `lower(path_text)`), then escape — the escape `\` is added last.
+    let like = format!("%{}%", escape_like(&raw.to_lowercase()));
     let mut stmt = conn.prepare(
         "SELECT id, path_text, kind, size_bytes FROM files \
-         WHERE failed = 0 AND lower(path_text) LIKE ?1 LIMIT ?2",
+         WHERE failed = 0 AND lower(path_text) LIKE ?1 ESCAPE '\\' LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![like, limit as i64], |r| {
         Ok(Hit {
@@ -423,6 +426,33 @@ mod tests {
         let mut hits = BTreeMap::new();
         assert!(collect_filename(&connection, "x", 10, &mut hits).is_err());
         assert!(collect_fts(&connection, "doc_fts", "x", 10, "content", &mut hits).is_err());
+    }
+
+    #[test]
+    fn filename_search_treats_underscore_as_literal() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL, \
+             kind TEXT NOT NULL DEFAULT 'other', size_bytes INTEGER NOT NULL DEFAULT 0, \
+             failed INTEGER NOT NULL DEFAULT 0);\
+             INSERT INTO files (id, path_text) VALUES (1, '/seed/reportX2023.pdf');",
+        )
+        .unwrap();
+        // `_` must not act as a single-char wildcard: the look-alike must miss.
+        let mut hits = BTreeMap::new();
+        collect_filename(&conn, "report_2023", 10, &mut hits).unwrap();
+        assert!(hits.is_empty());
+
+        // The literal underscore name matches once it is actually present.
+        conn.execute(
+            "INSERT INTO files (id, path_text) VALUES (2, '/seed/report_2023.pdf')",
+            [],
+        )
+        .unwrap();
+        let mut hits = BTreeMap::new();
+        collect_filename(&conn, "report_2023", 10, &mut hits).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits.contains_key(&2));
     }
 
     #[test]

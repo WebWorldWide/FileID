@@ -308,57 +308,80 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         try
         {
             if (_connection == null) return Array.Empty<FileRowWithScore>();
-            var heap = new PriorityQueue<FileRowWithScore, float>(limit);
-            using var cmd = _connection.CreateCommand();
-            // PAR-117: exclude failed files — a corrupt file with a stale CLIP
-            // embedding must not surface in semantic results. PAR-116: filter by
-            // kind in SQL so a kind-restricted grid isn't under-filled by the
-            // post-fetch C# filter.
-            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
-            cmd.CommandText = $"""
-            SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
-                   f.has_faces, f.has_text,
-                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
-                   f.vlm_proposed_name,
-                   e.embedding
-            FROM clip_embeddings e
-            JOIN files f ON f.id = e.file_id
-            WHERE f.failed = 0{kindClause}
-            """;
-            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
-            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            var heap = new PriorityQueue<long, float>(limit);
+            var scores = new Dictionary<long, float>();
+            using (var cmd = _connection.CreateCommand())
             {
-                var blob = (byte[])reader.GetValue(9);
-                // Skip dimension-mismatched/corrupt embeddings instead of
-                // scoring them 0 and occupying a result slot — parity with the
-                // macOS reference guard (#15).
-                if (blob.Length != queryEmbedding.Length * 4) continue;
-                float score = DotProduct(queryEmbedding, blob);
-                // Materialize the FileRow (GROUP_CONCAT split + List + record)
-                // only for rows the bounded top-K heap actually retains — the
-                // vast majority of embedding rows are discarded, so ReadRow on
-                // every row was pure Gen0 churn. SimilarFilesAsync already heaps
-                // ids and fetches survivors afterward; mirror that here. Reading
-                // by column index stays valid until the next ReadAsync, so a lazy
-                // materialize inside the enqueue branches is byte-identical.
-                if (heap.Count < limit)
+                // Score only IDs + embeddings. Fetching tags here would execute
+                // the correlated ordered GROUP_CONCAT once for every embedding
+                // even though only `limit` rows survive the heap.
+                var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+                cmd.CommandText = $"""
+                    SELECT f.id, e.embedding
+                    FROM clip_embeddings e
+                    JOIN files f ON f.id = e.file_id
+                    WHERE f.failed = 0{kindClause}
+                    """;
+                if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
                 {
-                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
-                }
-                else if (heap.TryPeek(out _, out var minScore) && score > minScore)
-                {
-                    heap.Dequeue();
-                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
+                    var fileId = reader.GetInt64(0);
+                    var blob = (byte[])reader.GetValue(1);
+                    if (blob.Length != queryEmbedding.Length * 4) continue;
+                    float score = DotProduct(queryEmbedding, blob);
+                    if (heap.Count < limit)
+                    {
+                        heap.Enqueue(fileId, score);
+                        scores[fileId] = score;
+                    }
+                    else if (heap.TryPeek(out var removedId, out var minScore) && score > minScore)
+                    {
+                        heap.Dequeue();
+                        scores.Remove(removedId);
+                        heap.Enqueue(fileId, score);
+                        scores[fileId] = score;
+                    }
                 }
             }
-            // Heap holds best `limit` ordered worst→best; reverse to best→worst.
-            var sorted = new List<FileRowWithScore>(heap.Count);
-            while (heap.Count > 0)
+
+            var topIds = new List<long>(heap.Count);
+            while (heap.Count > 0) topIds.Add(heap.Dequeue());
+            topIds.Reverse();
+            if (topIds.Count == 0) return Array.Empty<FileRowWithScore>();
+
+            var placeholders = new List<string>(topIds.Count);
+            using var detail = _connection.CreateCommand();
+            for (int i = 0; i < topIds.Count; i++)
             {
-                sorted.Add(heap.Dequeue());
+                var parameter = $"$id{i}";
+                placeholders.Add(parameter);
+                detail.Parameters.AddWithValue(parameter, topIds[i]);
             }
-            sorted.Reverse();
+            detail.CommandText = $"""
+                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
+                       (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
+                       vlm_proposed_name
+                FROM files
+                WHERE id IN ({string.Join(",", placeholders)}) AND failed = 0
+                """;
+            var byId = new Dictionary<long, FileRow>();
+            using (var reader = await detail.ExecuteReaderAsync(ct).ConfigureAwait(false))
+            {
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var row = ReadRow(reader);
+                    byId[row.Id] = row;
+                }
+            }
+            var sorted = new List<FileRowWithScore>(topIds.Count);
+            foreach (var id in topIds)
+            {
+                if (byId.TryGetValue(id, out var row))
+                {
+                    sorted.Add(new FileRowWithScore(row, scores[id]));
+                }
+            }
             return sorted;
         }
         finally { _gate.Release(); }

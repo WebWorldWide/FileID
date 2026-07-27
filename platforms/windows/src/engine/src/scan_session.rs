@@ -327,6 +327,7 @@ impl ScanSession {
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
+        let discovery_join = handle.join;
         let discovered_rx = handle.rx;
         let mut zero_byte_rx = handle.zero_byte_rx;
         let zero_byte_conn = self.db_conn.clone();
@@ -489,10 +490,14 @@ impl ScanSession {
         let discovered_count_for_batch = discovered_count.clone();
         let discovered_heavy_for_batch = discovered_heavy.clone();
         let discovered_done_for_batch = discovered_done_post.clone();
+        let mut last_summary_processed = 0u64;
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
-                emit_batch_summary(&sink_for_batch, &stats);
+                if should_emit_batch_summary(stats.batch_index, stats.processed_total, last_summary_processed) {
+                    emit_batch_summary(&sink_for_batch, &stats);
+                    last_summary_processed = stats.processed_total;
+                }
                 let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
                 let heavy = discovered_heavy_for_batch.load(std::sync::atomic::Ordering::Relaxed);
                 let walk_done =
@@ -521,27 +526,32 @@ impl ScanSession {
             .await
             .context("joining zero-byte catalog worker")
             .and_then(|outcome| outcome);
-        let (total, failed, zero_byte_applied, zero_byte_rejected) =
-            match (writer_outcome, zero_byte_outcome) {
-                (Ok((total, failed)), Ok((applied, rejected))) => {
-                    (total, failed, applied, rejected)
-                }
-                (Err(err), _) | (_, Err(err)) => {
-                    // Stamp the row 'failed' so Settings → Recent scans doesn't
-                    // show it as 'running' forever. Best-effort: the failure may be
-                    // the DB itself (SQLITE_FULL / unreachable).
-                    let conn = self.db_conn.lock();
-                    let completed_unix = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs_f64())
-                        .unwrap_or(0.0);
-                    let _ = conn.execute(
-                        "UPDATE scan_sessions SET completed_at = ?1, status = 'failed' WHERE id = ?2",
-                        rusqlite::params![completed_unix, session_id],
-                    );
-                    return Err(err);
-                }
-            };
+        let discovery_outcome = discovery_join.await.context("joining discovery worker");
+        let pipeline_outcome = match (writer_outcome, zero_byte_outcome, discovery_outcome) {
+            (Ok((total, failed)), Ok((applied, rejected)), Ok(())) => {
+                Ok((total, failed, applied, rejected))
+            }
+            (Err(err), _, _) | (_, Err(err), _) => Err(err),
+            (_, _, Err(err)) => Err(err),
+        };
+        let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
+            Ok(result) => result,
+            Err(err) => {
+                // Stamp the row 'failed' so Settings → Recent scans doesn't
+                // show it as 'running' forever. Best-effort: the failure may be
+                // the DB itself (SQLITE_FULL / unreachable).
+                let conn = self.db_conn.lock();
+                let completed_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let _ = conn.execute(
+                    "UPDATE scan_sessions SET completed_at = ?1, status = 'failed' WHERE id = ?2",
+                    rusqlite::params![completed_unix, session_id],
+                );
+                return Err(err);
+            }
+        };
         if zero_byte_applied > 0 {
             tracing::info!(
                 zero_byte_applied,
@@ -867,6 +877,10 @@ fn discovery_notice(
     })
 }
 
+fn should_emit_batch_summary(batch_index: u32, processed_total: u64, last_emitted: u64) -> bool {
+    batch_index == 0 || processed_total.saturating_sub(last_emitted) >= 100
+}
+
 fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
     let summary = BatchSummary {
         batch_index: stats.batch_index,
@@ -884,9 +898,9 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
-    // Intentional try_send. Per-batch BatchSummary events (one per ~100
-    // files) are best-effort — dropping during a sink-full burst is
-    // preferable to spawning an unbounded tail of tasks awaiting capacity.
+    // Intentional try_send. Summaries are sampled every ~100 processed files;
+    // progress and terminal events carry the authoritative lifecycle. Dropping
+    // a diagnostic sample is preferable to backpressuring the scan.
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
@@ -1200,6 +1214,15 @@ fn maybe_emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_summary_sampling_bounds_ipc_volume() {
+        assert!(should_emit_batch_summary(0, 5, 0));
+        assert!(!should_emit_batch_summary(1, 99, 5));
+        assert!(should_emit_batch_summary(20, 105, 5));
+        assert!(!should_emit_batch_summary(21, 150, 105));
+        assert!(should_emit_batch_summary(40, 205, 105));
+    }
 
     /// Kind-aware ETA: the heavy and light classes each use their own rate,
     /// so a hash-only stretch (light files flying by at hundreds/s) must not

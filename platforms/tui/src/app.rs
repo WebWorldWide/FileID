@@ -648,6 +648,13 @@ const COUNT_CAP: usize = 500;
 /// Max files listed in the browser's dimmed "files here" preview; the rest
 /// collapse into a `+N more` line.
 const FILE_LIST_CAP: usize = 64;
+/// Hard ceiling on entries a single `refresh` examines. The per-kind budgets are
+/// independent (so a file-heavy folder keeps its subdirs navigable), which means
+/// the "both budgets full" break never fires in a flat folder of only files (the
+/// dir budget never fills) — this ceiling bounds that walk so hundreds of
+/// thousands of files (or hidden dot-entries) can't freeze the UI. Comfortably
+/// above `COUNT_CAP` so merely file-heavy folders still surface their subdirs.
+const WALK_CAP: usize = COUNT_CAP * 10;
 
 /// A cheap, shallow tally of a directory's immediate contents (FIX 2): how many
 /// images, total files, and subfolders it holds. `capped` means the walk hit
@@ -743,7 +750,9 @@ impl Browser {
     /// (→ `rows`, sorted case-insensitively, prefixed by `..`), a dimmed file
     /// preview (→ `files`, capped), and `cwd`'s own [`DirCounts`] (→ `here`,
     /// for the title). File and directory work have independent [`COUNT_CAP`]
-    /// bounds, so a file-heavy folder cannot consume the navigation budget.
+    /// bounds, so a file-heavy folder keeps its subdirs navigable; a separate
+    /// [`WALK_CAP`] ceiling bounds the total entries examined so a huge flat
+    /// folder can never be walked to the end (which would freeze the UI).
     /// An unreadable directory yields empty lists + a `notice`;
     /// never panics. `file_type()` is preferred so symlink loops aren't
     /// followed; unreadable individual entries are simply skipped. Clears the
@@ -756,7 +765,19 @@ impl Browser {
         let mut here = DirCounts::default();
         match std::fs::read_dir(&self.cwd) {
             Ok(entries) => {
+                let mut examined = 0usize;
                 for entry in entries.flatten() {
+                    // Hard ceiling FIRST (before any per-entry work): a flat
+                    // folder of hundreds of thousands of files — or hidden
+                    // dot-entries — where the dir budget never fills would
+                    // otherwise be walked to the very end on every refresh,
+                    // freezing the UI (`q` included). Counting every entry, even
+                    // ones skipped below, is what bounds the dotfile case.
+                    examined += 1;
+                    if examined > WALK_CAP {
+                        here.capped = true;
+                        break;
+                    }
                     let path = entry.path();
                     let name = dir_label(&path);
                     // Hidden-by-default: skip dot-entries unless toggled on, so the
@@ -765,11 +786,10 @@ impl Browser {
                     if !self.show_hidden && name.starts_with('.') {
                         continue;
                     }
-                    // Both budgets exhausted: every further entry can only
-                    // re-set `capped`, so stop enumerating — a 200k-entry flat
-                    // folder must not be walked to the end on every refresh.
-                    // (audit 2026-07-14: the independent-budget fix dropped the
-                    // early break entirely.)
+                    // Both display budgets full: every further entry can only
+                    // re-set `capped`. The budgets are independent, so this fires
+                    // only when the folder has ≥COUNT_CAP of BOTH kinds — a
+                    // file-heavy folder keeps looking for subdirs (up to WALK_CAP).
                     if here.dirs >= COUNT_CAP && here.files >= COUNT_CAP {
                         here.capped = true;
                         break;

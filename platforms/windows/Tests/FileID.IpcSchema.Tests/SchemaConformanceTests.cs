@@ -46,6 +46,12 @@ public class SchemaConformanceTests
     private static readonly float[] _embedding512 = new float[512];
 
     [Fact]
+    public void SchemaVersion_ReflectsOptionalDeepAnalyzeSelectionAddition()
+    {
+        Assert.Equal("1.1.0", _schema.RootElement.GetProperty("version").GetString());
+    }
+
+    [Fact]
     public void CommandExemplars_CoverEveryVariantType()
     {
         AssertExemplarsCoverUnion(typeof(CommandPayload), CommandExemplars().Select(p => p.GetType()));
@@ -149,7 +155,8 @@ public class SchemaConformanceTests
         new VerifyCudaPackCommand(),
         new DeepAnalyzeFileCommand(42, "qwen2_5_vl_7b"),
         new DeepAnalyzeFolderCommand(@"C:\Users\adam\Pictures\2024", "qwen2_5_vl_7b"),
-        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true, ProposeRenames: true),
+        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true,
+            ProposeRenames: true, FileIds: new long[] { 42, 99 }),
         new DeepAnalyzeCancelCommand(),
         new PrewarmModelCommand("clip_text"),
         new CancelPrewarmCommand("clip_text"),
