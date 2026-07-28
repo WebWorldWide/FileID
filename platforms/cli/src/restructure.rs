@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use fileid_engine::ipc::RestructureMove;
+use fileid_engine::ipc::{RestructureApplyResult, RestructureMove};
 use fileid_engine::pipeline::discovery::FileKind;
 use fileid_engine::pipeline::restructure::{classify, FileForClassify, ProposedMove};
 use fileid_engine::pipeline::restructure_apply::RestructureApply;
@@ -599,18 +599,39 @@ fn apply_spooled(
             "failed": result.failed,
             "privilegeError": result.privilege_error,
         }));
-        if result.failed > 0 {
-            anyhow::bail!("restructure: {} move(s) failed", result.failed);
-        }
+        apply_outcome(&result)?;
         return Ok(());
     }
-    println!("{}", ctx.bold("Restructure apply complete."));
+    let headline = if result.failed > 0 || result.privilege_error.is_some() {
+        "Restructure apply did not complete."
+    } else {
+        "Restructure apply complete."
+    };
+    println!("{}", ctx.bold(headline));
     println!("  Applied:  {}", result.applied);
     if result.failed > 0 {
         println!("  Failed:   {}", result.failed);
     }
     if let Some(pe) = &result.privilege_error {
         println!("  {} {}", ctx.bold("Symlink privilege:"), pe);
+    }
+    apply_outcome(&result)?;
+    Ok(())
+}
+
+/// Turn an apply result into a process exit status.
+///
+/// A privilege refusal abandons the remaining moves without counting them in
+/// `failed`, so gating on `failed` alone reported success for a run that
+/// relocated nothing — `fileid restructure --apply --symlinks --json && next`
+/// would march straight on. Mirrors `dedupe`, which already treats its
+/// `unsupported` count as a failure.
+fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
+    if let Some(pe) = &result.privilege_error {
+        anyhow::bail!(
+            "restructure: symlink mode was refused ({pe}); {} move(s) applied, the rest were abandoned",
+            result.applied
+        );
     }
     if result.failed > 0 {
         anyhow::bail!("restructure: {} move(s) failed", result.failed);

@@ -797,13 +797,16 @@ fn apply_run(
     // suppress the preview lines that would otherwise corrupt the JSON output.
     if !ctx.json {
         println!(
-            "{} {} file(s) would {} ({} reclaimable):",
+            // The template already carries the verb, so the old "Will" prefix
+            // produced "Will N file(s) would move to Trash".
+            "{}{} file(s) {} {} ({} reclaimable):",
             if dry_run {
-                ctx.bold("DRY RUN —")
+                format!("{} ", ctx.bold("DRY RUN —"))
             } else {
-                ctx.bold("Will")
+                String::new()
             },
             victims.len(),
+            if dry_run { "would" } else { "will" },
             method,
             human_size(total_bytes),
         );
