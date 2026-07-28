@@ -224,6 +224,20 @@ public final class EngineClient {
         }
         process = nil
         stdinPipe = nil
+
+        // `handleEngineExit(for:)` deliberately rejects this process the moment
+        // it stops being `self.process`, so a restart NEVER reaches the reset
+        // there — `start()` reassigns `self.process` in `spawn()` before the old
+        // pipe's EOF lands. Without this call, Settings ▸ Restart Engine during a
+        // job left `deepAnalyzeInFlight` (and the undo/queue/App-Nap state)
+        // latched against a jobless engine, disabling Analyze until relaunch.
+        resetStateOnlyADeadEngineCouldClear()
+        // A restart is an explicit "start over", so drop the frozen scan
+        // progress too: `SidebarProcessingControl` keys off a non-idle phase and
+        // would otherwise keep rendering a dead Pause/Cancel pair with no
+        // reachable Start. The crash leg deliberately keeps its last progress as
+        // forensic context — only this explicit path clears it.
+        lastProgress = nil
     }
 
     /// Bounded wait for a child to exit; true if it exited within `timeout`.
@@ -696,24 +710,13 @@ public final class EngineClient {
         }
     }
 
-    @MainActor
-    private func handleEngineExit(for proc: Process?) {
-        // Identity guard (mirrors the Windows sender != _process check):
-        // a late EOF from a process we already terminated/replaced — a
-        // Restart, or a respawn that raced — must NOT tear down the
-        // engine that's live now, or reset its in-flight UI.
-        guard let proc, proc === self.process else { return }
-
-        // Nil pipe handlers so any in-flight GCD callback short-circuits.
-        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        process = nil
-        stdinPipe = nil
-
-        // A dead engine can never emit the terminal events that clear
-        // these — without the reset, one mid-job crash wedges Deep
-        // Analyze / People across the respawn (the respawned engine
-        // starts jobless, so nothing else un-sticks them).
+    /// Clear the UI state whose only other clearer is an engine terminal event.
+    ///
+    /// A dead engine can never emit those events, so one mid-job crash would
+    /// wedge Deep Analyze / People across the respawn (the respawned engine
+    /// starts jobless, so nothing else un-sticks them). Both the crash leg and
+    /// a deliberate restart run this — see the call in `terminateRunningEngine`.
+    private func resetStateOnlyADeadEngineCouldClear() {
         deepAnalyzeInFlight = false
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
@@ -740,6 +743,23 @@ public final class EngineClient {
         // StreamCard + inert Cancel) to reset — the engine can no longer
         // emit the terminal event that would clear them.
         engineResetSignal &+= 1
+    }
+
+    @MainActor
+    private func handleEngineExit(for proc: Process?) {
+        // Identity guard (mirrors the Windows sender != _process check):
+        // a late EOF from a process we already terminated/replaced — a
+        // Restart, or a respawn that raced — must NOT tear down the
+        // engine that's live now, or reset its in-flight UI.
+        guard let proc, proc === self.process else { return }
+
+        // Nil pipe handlers so any in-flight GCD callback short-circuits.
+        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        process = nil
+        stdinPipe = nil
+
+        resetStateOnlyADeadEngineCouldClear()
 
         // Expected exit (shutdown called or work just completed): silent
         // re-spawn, no error pill, no respawn budget burned. Covers
