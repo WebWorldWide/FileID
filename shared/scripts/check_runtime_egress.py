@@ -150,7 +150,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/windows/src/engine/src/downloader.rs": "a3533060920f874dbc328e745edcacf58208ee9c56756834627aea56c98a08c9",
     "platforms/windows/src/engine/src/main.rs": "3c0fab8beb362dd62e5a980e977246664c9d1244160fa29291b10b91f366ce7d",
     "platforms/windows/src/engine/src/models/vlm_server.rs": "7dbd53c1c05e7e76832a16ffb5d0b202119a49c4ae9577de2ec4172f19a0f182",
-    "platforms/apple/app/Sources/FileID/EngineClient.swift": "acd21de76029123062b8ee32f598908ec89807b08f87c8026c08b1c685366358",
+    "platforms/apple/app/Sources/FileID/EngineClient.swift": "e15254e4f0d4b21e1c70e4f955623fcd46583807157ded5bbf1902d56b862d20",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f68d473a8a29a33b11d9f37120482f70ade3b2ba427c6a39a5b39e5f37c1c231",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "02e754fcfe0311ab3e1a891c7006c12b6855761e2237be5a799852cb28c9bb00",
     "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
