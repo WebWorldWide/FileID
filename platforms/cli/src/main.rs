@@ -332,8 +332,25 @@ pub(crate) fn ensure_engine_models_dir() {
     }
 }
 
+/// Report a failure on stderr, honouring `--json`.
+///
+/// `--json` is documented as "machine-readable output", but the error paths
+/// always printed prose, so a run that failed emitted text no parser could
+/// read. Diagnostics stay on stderr either way — stdout remains pure data.
+fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({ "level": level, "kind": kind, "message": format!("{e:#}") })
+        );
+    } else {
+        eprintln!("{level}: {e:#}");
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let json_output = cli.global.json;
 
     // Bare `fileid`: print the friendly intro to stdout and exit cleanly.
     let Some(command) = cli.command else {
@@ -349,7 +366,7 @@ fn main() -> ExitCode {
     ) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            report_failure(json_output, "error", "context", &e);
             return ExitCode::FAILURE;
         }
     };
@@ -411,11 +428,11 @@ fn main() -> ExitCode {
         Err(e) if e.downcast_ref::<scan::PartialScan>().is_some() => {
             // Committed-but-partial scan: results are usable, some files were
             // unreadable. Dedicated code (rsync-style) so scripts can branch.
-            eprintln!("warning: {e:#}");
+            report_failure(json_output, "warning", "partialScan", &e);
             ExitCode::from(3)
         }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            report_failure(json_output, "error", "command", &e);
             ExitCode::FAILURE
         }
     }
