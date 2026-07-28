@@ -1,5 +1,32 @@
 # NEXT — resume here
 
+## ACTION FOR THE OWNER — add strict concurrency to macOS CI (needs `workflow` token scope)
+
+`shared/scripts/run_local_audit_gate.sh` runs the macOS suite as
+`swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`,
+but `.github/workflows/macos.yml` runs a plain `swift test --no-parallel`. Swift 6
+data races therefore fail the local gate and pass CI. The agent token used on
+2026-07-28 carries only `gist, read:org, repo` — pushing any `.github/workflows/`
+change is rejected — so this one is left for the owner.
+
+In `macos.yml`, the `Run tests` step's final command is:
+
+```
+perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+```
+
+Change it to:
+
+```
+perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel \
+  -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+```
+
+Land it on a branch first: this has never run in CI, so expect it to surface
+pre-existing concurrency warnings that the 12-minute alarm budget also has to
+absorb. If it is noisy, keep it as a separate non-required job rather than
+weakening the local gate.
+
 ## STATUS 2026-07-28 — Landed on `main` and CI-green; refreshed v0.1.1 as an unsigned prerelease
 
 The production-readiness pass is committed and pushed to `main` (no other branches, PRs, or open issues remain). Two real defects are closed — the off-thread `ReducedMotion` multicast raise that could kill the process and starve sibling subscribers, and ten `PropertyChanged` handlers that had drifted out of `DebugLog.SafeRun` — with a source-derived contract test preventing regression. A full uncapped `F:\Adlon Drive` run passed every assertion at ~29 files/s with **195 failures exactly matching the preserved baseline**, peak RSS 6,972 MB under the 8,500 cap, and a byte-identical read-only corpus fingerprint. Both GUIs were launched and rendered, not merely compiled. See STATE 2026-07-28.
