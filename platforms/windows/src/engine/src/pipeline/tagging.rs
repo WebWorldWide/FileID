@@ -1789,15 +1789,18 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         // move it), while every vision consumer downsamples far below the
         // scaled floor anyway (YuNet 640² letterbox, RAM++ 384², CLIP 224²).
         // Any scaled-decode failure falls through to the full decoder.
+        // Read the orientation once, from the same bytes both decode paths use.
+        // Neither the image crate nor the DCT-scaled path applies it for us.
+        let orientation = exif_orientation(bytes);
         if reader.format() == Some(image::ImageFormat::Jpeg) {
-            if let Some(out) = decode_jpeg_scaled(bytes) {
-                return Ok(out);
+            if let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
+                return apply_exif_orientation(buf, w, h, orientation);
             }
         }
         let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
-        Ok((rgb.into_raw(), w, h))
+        apply_exif_orientation(rgb.into_raw(), w, h, orientation)
     }));
     match result {
         Ok(r) => r,
@@ -2615,6 +2618,51 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
     .await?
 }
 
+/// EXIF orientation (IFD0 tag 0x0112), or `None` when absent/unreadable.
+///
+/// Camera and phone JPEGs are overwhelmingly stored in sensor order with an
+/// orientation tag rather than physically rotated. macOS decodes through
+/// `kCGImageSourceCreateThumbnailWithTransform: true`, which honours the tag;
+/// the `image` crate does not, and neither does the DCT-scaled JPEG path. Left
+/// unapplied, every downstream consumer — phash, CLIP, RAM++, face detection —
+/// sees a sideways frame, which both breaks cross-platform parity and costs
+/// real face recall on portrait photos.
+fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()?;
+    let raw = exif
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value
+        .get_uint(0)?;
+    image::metadata::Orientation::from_exif(u8::try_from(raw).ok()?)
+}
+
+/// Rotate/flip a decoded RGB frame into upright display order.
+///
+/// A missing tag and the identity orientation both return the buffer untouched,
+/// so the common case costs one tag lookup and no allocation.
+fn apply_exif_orientation(
+    buf: Vec<u8>,
+    w: u32,
+    h: u32,
+    orientation: Option<image::metadata::Orientation>,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let Some(orientation) = orientation else {
+        return Ok((buf, w, h));
+    };
+    if orientation == image::metadata::Orientation::NoTransforms {
+        return Ok((buf, w, h));
+    }
+    let img = image::RgbImage::from_raw(w, h, buf)
+        .ok_or_else(|| anyhow::anyhow!("orientation: {w}x{h} does not match the decoded buffer"))?;
+    let mut dyn_img = image::DynamicImage::ImageRgb8(img);
+    dyn_img.apply_orientation(orientation);
+    let rgb = dyn_img.into_rgb8();
+    let (ow, oh) = rgb.dimensions();
+    Ok((rgb.into_raw(), ow, oh))
+}
+
 fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
@@ -3061,6 +3109,41 @@ mod tests {
     /// C5: over-cap images get EXIF from `exif_from_head` (a bounded head
     /// read) — there is no later fallback. A minimal JPEG whose APP1 segment
     /// carries a TIFF IFD with a Model tag must yield the camera model.
+    /// Every downstream consumer (phash, CLIP, RAM++, faces) reads the buffer
+    /// this returns, so the transform has to land here rather than per-consumer.
+    #[test]
+    fn exif_orientation_transforms_the_decoded_frame() {
+        use image::metadata::Orientation;
+
+        // 2x1: left red, right green.
+        let buf = vec![255, 0, 0, 0, 255, 0];
+
+        // No tag and the identity orientation must both be zero-cost pass-throughs.
+        let (out, w, h) = apply_exif_orientation(buf.clone(), 2, 1, None).unwrap();
+        assert_eq!((out, w, h), (buf.clone(), 2, 1));
+        let (out, w, h) =
+            apply_exif_orientation(buf.clone(), 2, 1, Some(Orientation::NoTransforms)).unwrap();
+        assert_eq!((out, w, h), (buf.clone(), 2, 1));
+
+        // A quarter turn swaps the reported dimensions — this is what stops face
+        // detection from seeing portrait photos on their side.
+        for turn in [Orientation::Rotate90, Orientation::Rotate270] {
+            let (out, w, h) = apply_exif_orientation(buf.clone(), 2, 1, Some(turn)).unwrap();
+            assert_eq!((w, h), (1, 2), "{turn:?} must swap dimensions");
+            assert_eq!(out.len(), buf.len(), "{turn:?} must preserve pixel count");
+        }
+
+        // A half turn keeps the shape and reverses pixel order.
+        let (out, w, h) =
+            apply_exif_orientation(buf.clone(), 2, 1, Some(Orientation::Rotate180)).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(out, vec![0, 255, 0, 255, 0, 0]);
+
+        // A buffer that does not match the claimed dimensions must surface as an
+        // error, never a panic in the scan pipeline.
+        assert!(apply_exif_orientation(vec![1, 2, 3], 9, 9, Some(Orientation::Rotate90)).is_err());
+    }
+
     #[test]
     fn exif_from_head_extracts_camera_model() {
         let mut jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x28];
