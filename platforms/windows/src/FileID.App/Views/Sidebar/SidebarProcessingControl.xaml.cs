@@ -76,12 +76,13 @@ public sealed partial class SidebarProcessingControl : UserControl
 
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("SidebarProcessingControl.OnAppChanged", () =>
     {
         if (e.PropertyName is nameof(AppViewModel.HasFolder))
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
-    }
+    });
 
     /// <summary>Cached per-launch (NOT persisted) so the pre-scan
     /// performance warning isn't shown twice in a single session. Reset

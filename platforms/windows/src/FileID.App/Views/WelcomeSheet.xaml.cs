@@ -78,6 +78,7 @@ public sealed partial class WelcomeSheet : UserControl
     }
 
     private void OnServicePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("WelcomeSheet.OnServicePropertyChanged", () =>
     {
         if (e.PropertyName is nameof(ModelInstallerService.AllInstalled)
             or nameof(ModelInstallerService.IsBusy)
@@ -91,7 +92,7 @@ public sealed partial class WelcomeSheet : UserControl
         {
             SyncVlmPicker();
         }
-    }
+    });
 
     private void ScheduleAutoDismiss()
     {

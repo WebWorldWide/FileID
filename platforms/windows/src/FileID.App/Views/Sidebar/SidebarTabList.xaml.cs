@@ -84,12 +84,13 @@ public sealed partial class SidebarTabList : UserControl
     }
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun("SidebarTabList.OnAppViewModelChanged", () =>
     {
         if (e.PropertyName is nameof(AppViewModel.ActiveTab) or nameof(AppViewModel.HasFolder))
         {
             DispatcherQueue.TryEnqueue(SyncSelection);
         }
-    }
+    });
 
     private void SyncSelection()
     {
