@@ -115,11 +115,12 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("CleanupView.OnViewModelPropertyChanged", () =>
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
-    }
+    });
 
     // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
     // explicitly so a CollectionChanged.Reset — which carries neither OldItems

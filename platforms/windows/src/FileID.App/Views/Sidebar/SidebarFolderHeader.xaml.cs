@@ -23,6 +23,7 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("SidebarFolderHeader.OnAppViewModelChanged", () =>
     {
         if (e.PropertyName is nameof(AppViewModel.FolderPath)
                           or nameof(AppViewModel.FolderDisplay)
@@ -30,7 +31,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
-    }
+    });
 
     private void Sync()
     {

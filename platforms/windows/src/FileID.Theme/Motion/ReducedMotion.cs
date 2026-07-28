@@ -49,7 +49,35 @@ public sealed class ReducedMotion : INotifyPropertyChanged
                 return;
             }
             _isReduced = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsReduced)));
+            RaiseIsReducedChanged();
+        }
+    }
+
+    // Subscribers are invoked from OnAnimationsEnabledChanged, which runs on a
+    // threadpool thread. A plain multicast Invoke there is a process-kill: one
+    // subscriber that throws (a null DispatcherQueue on a torn-down control is
+    // the realistic case) escapes as an unhandled exception on a thread with no
+    // handler, AND every later subscriber is skipped, silently freezing their
+    // motion. Isolate each subscriber so neither can happen.
+    private void RaiseIsReducedChanged()
+    {
+        var handler = PropertyChanged;
+        if (handler is null)
+        {
+            return;
+        }
+        var args = new PropertyChangedEventArgs(nameof(IsReduced));
+        foreach (var target in handler.GetInvocationList())
+        {
+            try
+            {
+                ((PropertyChangedEventHandler)target)(this, args);
+            }
+            catch
+            {
+                // A motion primitive failing to react to the accessibility
+                // toggle must never take the app down or block its siblings.
+            }
         }
     }
 

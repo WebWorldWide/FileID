@@ -7,6 +7,33 @@
 
 ---
 
+## 2026-07-28 — Off-thread accessibility notifications fan out per subscriber; the SafeRun invariant is machine-checked
+
+`ReducedMotion` re-raises `PropertyChanged` directly from the WinRT
+`UISettings.AnimationsEnabledChanged` callback, which runs on a threadpool
+thread with no handler above it. A plain multicast `PropertyChanged?.Invoke`
+there is two defects at once: the first subscriber that throws — a torn-down
+control whose `DispatcherQueue` is gone is the realistic case — escapes as an
+unhandled exception and kills the process, and every later subscriber in the
+invocation list is skipped, silently freezing its motion. The raise therefore
+walks `GetInvocationList()` and guards each subscriber individually. Marshalling
+the whole raise to the UI thread was rejected because it would make three
+consumers pay a dispatcher hop for a preference that changes at human speed, and
+it would not have fixed the sibling-starvation half of the defect.
+
+The complementary rule — every handler subscribed to *another* object's
+`PropertyChanged` wraps its body in `DebugLog.SafeRun` — was already the app's
+convention but was only enforced by review, and nine handlers plus `UndoStack`'s
+one-shot `EngineClient` subscription had drifted out of it. Those are now
+wrapped, and `EventHandlerSafetyContractTests` re-derives the rule from source on
+every test run so a new subscription cannot silently reopen the stowed-exception
+crash class. The contract deliberately scopes to subscriptions that carry a
+receiver expression: `EngineClient`'s bare `PropertyChanged += handler`
+self-subscriptions await their own one-shot reply and only compare a property
+name and call `TrySetResult`, which cannot throw. The test asserts a floor on the
+number of subscriptions it inspected so a rename of the event cannot turn it into
+a vacuous pass.
+
 ## 2026-07-27 — Video throughput uses bounded MF scaling, not higher model concurrency
 
 The full-corpus regression was decode-bound, especially on videos, rather than SQLite-insert-bound. Windows therefore asks Media Foundation for an even, maximum-1280px RGB32 working frame with advanced processing. A codec may fall back to native resolution only when the negotiated BGRA buffer plus retained RGB fit the same 64 MiB admission reservation; missing dimensions and oversized fallbacks fail closed before the retained allocation. The global predecode budget is 192 MiB on Low-memory hosts and 768 MiB otherwise, and OBJ rendering takes it exclusively because parser geometry/text can greatly exceed the 512×512 output. This preserved output on the measured 2,006-video set while improving 483 s to 153 s and lifted the uncapped Adlon scan above the 25 files/s floor. Raising CUDA session count was rejected because measured pools above two regress throughput.

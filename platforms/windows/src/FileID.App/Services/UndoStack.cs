@@ -80,7 +80,7 @@ internal sealed class UndoStack : INotifyPropertyChanged
         // and the loser is a no-op.
         int consumed = 0; // 0 = pending, 1 = consumed
         System.ComponentModel.PropertyChangedEventHandler? once = null;
-        once = (_, ev) =>
+        once = (_, ev) => DebugLog.SafeRun("UndoStack.CaptureNextBulkResult", () =>
         {
             if (ev.PropertyName != nameof(ViewModels.EngineClient.LastBulkAction)) return;
             var bar = ec.LastBulkAction;
@@ -98,7 +98,7 @@ internal sealed class UndoStack : INotifyPropertyChanged
             ec.PropertyChanged -= once;
             if (batchId.Length == 0) return;
             Instance.Push(undoLabel, kind, () => reverse(batchId));
-        };
+        });
         ec.PropertyChanged += once;
 
         void Cancel()

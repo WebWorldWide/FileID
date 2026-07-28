@@ -910,6 +910,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     }
 
     private void OnSlotPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("ModelInstallerService.OnSlotPropertyChanged", () =>
     {
         if (e.PropertyName != nameof(ModelSlot.Status)) return;
         // Arm the no-progress watchdog from the Status-set-to-Downloading
@@ -925,7 +926,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             ArmNoProgressWatchdog(slot);
         }
         RecomputeAggregates();
-    }
+    });
 
     /// <summary>
     /// Seed initial state from on-disk sentinels. Only sets Installed for

@@ -65,6 +65,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnServiceErrorChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun("LibraryViewModel.OnServiceErrorChanged", () =>
     {
         if (e.PropertyName is not (nameof(ReadStore.LastOpenError) or nameof(ClipSearchService.LastSearchError)))
             return;
@@ -72,7 +73,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         var msg = !string.IsNullOrEmpty(_store.LastOpenError) ? _store.LastOpenError : _clip.LastSearchError;
         if (string.IsNullOrEmpty(msg)) return;
         _ui.TryEnqueue(() => { if (!_disposed) ErrorMessage = msg; });
-    }
+    });
 
     public void Dispose()
     {
@@ -183,6 +184,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnTilePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun("LibraryViewModel.OnTilePropertyChanged", () =>
     {
         if (e.PropertyName != nameof(FileTile.IsSelected)) return;
         if (sender is not FileTile t) return;
@@ -197,7 +199,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(SelectedItems));
         PublishSelectionToRegistry();
-    }
+    });
 
     private void PublishSelectionToRegistry()
     {
