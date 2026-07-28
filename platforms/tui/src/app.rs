@@ -380,6 +380,17 @@ impl App {
             }
         }
         match code {
+            // A committed search (Enter) leaves `search_active` false but keeps
+            // the term, and the empty-results panel then advertises
+            // `Esc  clear the search` (ui.rs). Honour that before the quit arm
+            // below — otherwise the on-screen instruction closed the app.
+            KeyCode::Esc if !self.search.is_empty() => {
+                self.search.clear();
+                self.set_cursor(0);
+                if !self.data.query.is_empty() {
+                    self.request_reload();
+                }
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => self.switch_tab(self.tab.next()),
             KeyCode::BackTab => self.switch_tab(self.tab.prev()),
@@ -1217,6 +1228,35 @@ mod tests {
             app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert!(app.should_quit, "Ctrl+C must quit from this context");
         }
+    }
+
+    /// The empty-results panel advertises `Esc  clear the search`; before the
+    /// guarded arm that honours it, Esc fell through to the quit arm and closed
+    /// the app instead of doing what the screen said.
+    #[test]
+    fn esc_clears_a_committed_search_before_it_quits() {
+        let mut app = app_with_files(3);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "zzzz".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE); // commit; term is retained
+        assert!(!app.search_active);
+        assert_eq!(app.search, "zzzz");
+
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(
+            app.search, "",
+            "Esc must clear the term the panel points at"
+        );
+        assert!(
+            !app.should_quit,
+            "Esc must not quit while a search is showing"
+        );
+
+        // With nothing left to clear, Esc reverts to quitting.
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.should_quit);
     }
 
     /// A control chord must never land in a text field as its bare letter.
