@@ -342,6 +342,23 @@ impl App {
     /// Handle one key press. Returns nothing; mutates state (incl. `should_quit`
     /// and `reload_requested`, which `main` acts on).
     pub fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
+        // Control chords are resolved BEFORE the modal handlers below, which
+        // dispatch on `code` alone. Without this, a chord reached their
+        // `KeyCode::Char(c)` arm and was typed in as a bare letter: Ctrl+C in
+        // the search box appended "c" instead of quitting, and Ctrl+U appended
+        // "u" instead of doing nothing.
+        //
+        // AltGr reports as CONTROL|ALT on Windows, and it types real characters
+        // on European layouts (@, €, ł). So this only claims CONTROL *without*
+        // ALT — otherwise AltGr text would be silently swallowed.
+        if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) {
+            if let KeyCode::Char(c) = code {
+                if c.eq_ignore_ascii_case(&'c') {
+                    self.should_quit = true;
+                }
+                return;
+            }
+        }
         if self.input_active {
             self.on_key_input(code);
             return;
@@ -364,7 +381,6 @@ impl App {
         }
         match code {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.should_quit = true,
             KeyCode::Tab => self.switch_tab(self.tab.next()),
             KeyCode::BackTab => self.switch_tab(self.tab.prev()),
             KeyCode::Char(d @ '1'..='6') => {
@@ -1177,6 +1193,60 @@ mod tests {
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert!(!app.search_active);
         assert_eq!(app.visible_files().len(), 3);
+    }
+
+    /// Ctrl+C is the terminal's universal abort, so it must work from the modal
+    /// overlays too — they dispatch on `KeyCode` alone, so it used to be
+    /// swallowed there and typed in as a bare "c".
+    #[test]
+    fn ctrl_c_quits_from_every_context() {
+        for enter_context in [
+            (|app: &mut App| {
+                app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+            }) as fn(&mut App),
+            |app: &mut App| {
+                app.on_key(KeyCode::Char('?'), KeyModifiers::NONE);
+            },
+            |app: &mut App| {
+                app.switch_tab(Tab::People);
+            },
+            |_app: &mut App| {},
+        ] {
+            let mut app = app_with_files(3);
+            enter_context(&mut app);
+            app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+            assert!(app.should_quit, "Ctrl+C must quit from this context");
+        }
+    }
+
+    /// A control chord must never land in a text field as its bare letter.
+    /// Ctrl+U previously appended "u" to the query.
+    #[test]
+    fn control_chords_are_not_typed_into_the_search_box() {
+        let mut app = app_with_files(3);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for ch in "cat".chars() {
+            app.on_key(KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        for chord in ['u', 'w', 'a', 'd'] {
+            app.on_key(KeyCode::Char(chord), KeyModifiers::CONTROL);
+        }
+        assert_eq!(app.search, "cat", "control chords must not edit the query");
+        assert!(!app.should_quit);
+    }
+
+    /// AltGr reports as CONTROL|ALT on Windows and types real characters on
+    /// European layouts, so it must NOT be treated as a control chord.
+    #[test]
+    fn altgr_still_types_into_the_search_box() {
+        let mut app = app_with_files(3);
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        app.on_key(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert_eq!(app.search, "e", "AltGr text must survive");
+        assert!(!app.should_quit, "AltGr+C must not quit");
     }
 
     #[test]
