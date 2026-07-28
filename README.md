@@ -233,7 +233,9 @@ FileID/
 
 ## Contributing
 
-Start with [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md) — setup, build-from-source, CI gates, troubleshooting, and contribution recipes.
+Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for the short version, then [`shared/docs/CONTRIBUTING.md`](shared/docs/CONTRIBUTING.md) for the full guide — setup, build-from-source, CI gates, troubleshooting, and contribution recipes.
+
+Found a security problem? Please don't open a public issue — see [`SECURITY.md`](SECURITY.md).
 
 Per-front-end conventions: [Windows](platforms/windows/CLAUDE.md) · [macOS](platforms/apple/CLAUDE.md) · [Linux](platforms/linux/CLAUDE.md) · [CLI](platforms/cli/README.md) · [TUI](platforms/tui/README.md) · [packaging](packaging/README.md). Cross-platform principles live in the root [`CLAUDE.md`](CLAUDE.md).
 
