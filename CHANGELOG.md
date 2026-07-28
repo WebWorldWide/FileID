@@ -2,7 +2,7 @@
 
 All notable changes to FileID are tracked here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, no analytics, no crash-reporter SDKs. The CI privacy gate scans every release binary against a 22-string deny-list before publication.
+Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, no analytics, no crash-reporter SDKs. The CI privacy gate scans every release binary against a 23-string deny-list before publication.
 
 ## [Unreleased]
 
