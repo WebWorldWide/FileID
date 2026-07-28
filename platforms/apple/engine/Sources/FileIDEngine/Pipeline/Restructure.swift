@@ -715,7 +715,16 @@ public enum Restructure {
             if let p = f.vlmProposed, !p.isEmpty {
                 newName = ext.isEmpty || ext == "_" ? p : "\(p).\(ext)"
             } else {
-                newName = FilesystemNameSafe.componentSafe(oldURL.lastPathComponent)
+                // Sanitize the stem separately and re-attach the extension, the
+                // same way the VLM branch above does. Passing the whole
+                // component through `componentSafe` truncated it to 200 scalars
+                // INCLUDING the extension, so any basename longer than that was
+                // renamed with its suffix cut off: the file stopped opening by
+                // double-click, and FileID's own next scan dropped it from the
+                // library because `FileTypes.isTaggable("")` is false.
+                let stem = FilesystemNameSafe.componentSafe(
+                    oldURL.deletingPathExtension().lastPathComponent)
+                newName = ext.isEmpty || ext == "_" ? stem : "\(stem).\(ext)"
             }
             let target = dir.appendingPathComponent(newName)
             out.append(RestructureProposal(

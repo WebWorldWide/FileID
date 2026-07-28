@@ -1370,9 +1370,14 @@ struct FileIDEngineMain {
         do {
             let deleted = try await database.pool.write { db -> Int in
                 var ids = Set<Int64>()
+                // Needles SQLite cannot match on its own — see the fallback below.
+                var unicodeNeedles: [(exact: String, prefix: String)] = []
                 for excluded in excludedPaths {
                     let prefix = excluded.hasSuffix("/") ? excluded : excluded + "/"
                     let upper = prefixUpperBound(prefix)
+                    if excluded.contains(where: { !$0.isASCII }) {
+                        unicodeNeedles.append((exact: excluded, prefix: prefix))
+                    }
                     // Match against path_search (the NFC form of path_text), not
                     // path_text itself. The excluded-path needle is NFC-normalized
                     // (normalizeExcludedPaths / Discovery.normalizedExclusionPath both
@@ -1388,6 +1393,37 @@ struct FileIDEngineMain {
                            OR (lower(path_search) >= ? AND lower(path_search) < ?)
                         """, arguments: [excluded, prefix, upper])
                     ids.formUnion(rows)
+                }
+
+                // The query above delegates case folding to SQLite's built-in
+                // lower(), which folds ASCII A-Z only — no ICU extension is
+                // loaded (Database.swift). The needle, by contrast, was folded by
+                // Swift over the full Unicode range (normalizeExcludedPaths /
+                // Discovery.normalizedExclusionPath). For a path holding a
+                // non-ASCII uppercase letter — "Fotos/Ärchiv", "Документы" — the
+                // needle reads "ärchiv" while lower(path_search) still reads
+                // "Ärchiv", so the equality misses AND the BINARY range bound
+                // misses at the first differing byte. The purge then deleted
+                // nothing and reported success, leaving every already-indexed
+                // file under an excluded folder — with its tags, faces and OCR —
+                // visible in the library forever.
+                //
+                // Only such needles pay for this pass, so ASCII libraries keep
+                // the indexed query and scan nothing extra.
+                if !unicodeNeedles.isEmpty {
+                    let rows = try Row.fetchAll(
+                        db, sql: "SELECT id, path_search FROM files WHERE path_search IS NOT NULL")
+                    for row in rows {
+                        guard let stored: String = row["path_search"],
+                            let id: Int64 = row["id"]
+                        else { continue }
+                        let folded = stored.precomposedStringWithCanonicalMapping.lowercased()
+                        if unicodeNeedles.contains(where: {
+                            folded == $0.exact || folded.hasPrefix($0.prefix)
+                        }) {
+                            ids.insert(id)
+                        }
+                    }
                 }
                 guard !ids.isEmpty else { return 0 }
 
