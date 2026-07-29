@@ -334,7 +334,7 @@
                                       OnContent="Skip already-analyzed"
                                       Margin="14,0,0,0"
                                       AutomationProperties.Name="Skip already-analyzed files"
-                                      AutomationProperties.HelpText="When on, files that already have a caption are skipped; when off, every file is re-analyzed" />
+                                      AutomationProperties.HelpText="When on, files that completed a full pass with the selected model are skipped; partial passes may run again" />
                         <CheckBox Grid.Column="5"
                                   x:Name="ProposeRenamesCheck"
                                   Content="Propose renames"

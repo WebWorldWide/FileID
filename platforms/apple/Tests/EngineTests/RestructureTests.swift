@@ -658,6 +658,14 @@ struct RestructureApplyTests {
         #expect(plan.truncated)
         #expect(plan.totalMoves == total)
         #expect(plan.moves.count == Restructure.storedPlanPreviewCap)
+        let confidence = try #require(plan.confidenceCounts)
+        #expect(confidence.auto == 0)
+        #expect(confidence.review == 0)
+        #expect(confidence.ask == total)
+        #expect(confidence.unknown == 0)
+        #expect(
+            confidence.auto + confidence.review + confidence.ask + confidence.unknown
+                == total)
         let planID = try #require(plan.planID)
         #expect(FileManager.default.fileExists(
             atPath: planDir.appendingPathComponent("\(planID).ndjson").path))

@@ -265,61 +265,142 @@ struct DeepAnalyzeRunnerTests {
                 "unescaped LIKE '%' must not pull /root/50anythingoff into the pass")
     }
 
-    // F-C3-044 — a NULL caption / proposed name must preserve the prior
-    // value (COALESCE), not clobber it; the model column always updates.
-    @Test("persist: NULL caption/name preserves prior value (COALESCE)")
-    func persistCoalesces() async throws {
+    @Test("skipExisting keys selected and library scopes on full completion")
+    func skipExistingUsesFullCompletionModel() async throws {
+        let (db, tmp) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let legacy = try await insertFile(db, path: "/root/legacy.jpg")
+        let complete = try await insertFile(db, path: "/root/complete.jpg")
+        let otherModel = try await insertFile(db, path: "/root/other.jpg")
+        try await db.pool.write { db in
+            try db.execute(sql: """
+                UPDATE files SET vlm_model = 'model-a' WHERE id = ?
+                """, arguments: [legacy])
+            try db.execute(sql: """
+                UPDATE files
+                SET vlm_model = 'model-a', vlm_full_model = 'model-a'
+                WHERE id = ?
+                """, arguments: [complete])
+            try db.execute(sql: """
+                UPDATE files
+                SET vlm_model = 'model-b', vlm_full_model = 'model-b'
+                WHERE id = ?
+                """, arguments: [otherModel])
+        }
+
+        let selected = try await DeepAnalyzeRunner.resolveTargets(
+            database: db,
+            scope: .selected(fileIDs: [complete, legacy, otherModel], skipExisting: true),
+            modelKey: "model-a")
+        #expect(selected.map { $0.id } == [legacy, otherModel])
+
+        let wholeLibrary = try await DeepAnalyzeRunner.resolveTargets(
+            database: db,
+            scope: .wholeLibrary(skipExisting: true),
+            modelKey: "model-a")
+        #expect(Set(wholeLibrary.map { $0.id }) == Set([legacy, otherModel]))
+    }
+
+    @Test("persist full pass clears requested empty outputs and stale tags")
+    func persistFullPassClearsRequestedEmptyOutputs() async throws {
         let (db, tmp) = try makeDB()
         defer { try? FileManager.default.removeItem(at: tmp) }
         let id = try await insertFile(db, path: "/root/x.jpg")
 
-        // Seed a prior good result.
-        try await db.pool.write { db in
-            try db.execute(sql: """
-                UPDATE files SET vlm_description = 'old desc',
-                                 vlm_proposed_name = 'old-name',
-                                 vlm_model = 'm0' WHERE id = ?
-                """, arguments: [id])
-        }
-
-        // New caption, but the model proposed no name → name must survive.
         try await DeepAnalyzeRunner.persist(
             database: db, fileID: id,
-            description: "new desc", proposedName: nil, modelKey: "m1")
-        var row = try await fetchVLM(db, id)
-        #expect(row.desc == "new desc")
-        #expect(row.name == "old-name", "NULL proposed_name must not clobber prior value")
-        #expect(row.model == "m1")
-
-        // Both NULL (e.g. inference produced nothing this pass) → both survive.
+            description: "old desc", proposedName: "old-name", tags: ["old-tag"],
+            modelKey: "model-a")
         try await DeepAnalyzeRunner.persist(
             database: db, fileID: id,
-            description: nil, proposedName: nil, modelKey: "m2")
-        row = try await fetchVLM(db, id)
-        #expect(row.desc == "new desc")
-        #expect(row.name == "old-name")
-        #expect(row.model == "m2")
+            description: "", proposedName: nil, tags: [],
+            modelKey: "model-b")
+        let row = try await fetchVLM(db, id)
+        let completion = try await fetchCompletion(db, id)
+        let tagCount = try await vlmTagCount(db, id)
 
-        // Real values overwrite.
+        #expect(row.desc == nil)
+        #expect(row.name == nil)
+        #expect(row.model == "model-b")
+        #expect(completion.fullModel == "model-b")
+        #expect(tagCount == 0)
+    }
+
+    @Test("persist partial clears requested empty output but preserves unrequested same-model data")
+    func persistPartialRespectsRequestedComponents() async throws {
+        let (db, tmp) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let id = try await insertFile(db, path: "/root/partial.jpg")
         try await DeepAnalyzeRunner.persist(
             database: db, fileID: id,
-            description: "newer", proposedName: "new-name", modelKey: "m3")
-        row = try await fetchVLM(db, id)
-        #expect(row.desc == "newer")
-        #expect(row.name == "new-name")
-        #expect(row.model == "m3")
+            description: "old desc", proposedName: "keep-name", tags: ["old-tag"],
+            modelKey: "model-a")
 
-        // R3-01: an EMPTY-but-present caption/name must be treated like NULL —
-        // COALESCE alone wouldn't protect "" (it's not NULL), so a parse() that
-        // yielded an empty DESCRIPTION section would otherwise clobber the prior
-        // good value. persist() maps "" → nil so the prior value survives.
         try await DeepAnalyzeRunner.persist(
             database: db, fileID: id,
-            description: "", proposedName: "", modelKey: "m4")
-        row = try await fetchVLM(db, id)
-        #expect(row.desc == "newer", "empty caption must not clobber prior value")
-        #expect(row.name == "new-name", "empty proposed_name must not clobber prior value")
-        #expect(row.model == "m4")
+            description: "", proposedName: nil, tags: [],
+            modelKey: "model-a",
+            updatesDescription: true,
+            updatesProposedName: false,
+            completesFullPass: false)
+        let row = try await fetchVLM(db, id)
+        let completion = try await fetchCompletion(db, id)
+        let tagCount = try await vlmTagCount(db, id)
+
+        #expect(row.desc == nil)
+        #expect(row.name == "keep-name")
+        #expect(row.model == "model-a")
+        #expect(completion.fullModel == "model-a")
+        #expect(tagCount == 0)
+    }
+
+    @Test("persist tracks full completion without misattributing partial output")
+    func persistFullCompletionSemantics() async throws {
+        let (db, tmp) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let id = try await insertFile(db, path: "/root/completion.jpg")
+
+        try await DeepAnalyzeRunner.persist(
+            database: db, fileID: id,
+            description: "full", proposedName: "full-name",
+            modelKey: "model-a", completesFullPass: true)
+        var state = try await fetchCompletion(db, id)
+        let completedAt = try #require(state.analyzedAt)
+        #expect(state.model == "model-a")
+        #expect(state.fullModel == "model-a")
+
+        try await DeepAnalyzeRunner.persist(
+            database: db, fileID: id,
+            description: nil, proposedName: nil, tags: ["same-model"],
+            modelKey: "model-a",
+            updatesDescription: false,
+            updatesProposedName: false,
+            completesFullPass: false)
+        state = try await fetchCompletion(db, id)
+        #expect(state.model == "model-a")
+        #expect(state.fullModel == "model-a")
+        #expect(state.analyzedAt == completedAt)
+
+        try await DeepAnalyzeRunner.persist(
+            database: db, fileID: id,
+            description: "partial", proposedName: nil, tags: ["different-model"],
+            modelKey: "model-b",
+            updatesDescription: true,
+            updatesProposedName: false,
+            completesFullPass: false)
+        state = try await fetchCompletion(db, id)
+        #expect(state.model == nil)
+        #expect(state.fullModel == nil)
+        #expect(state.analyzedAt == nil)
+
+        try await DeepAnalyzeRunner.persist(
+            database: db, fileID: id,
+            description: "full b", proposedName: "full-b",
+            modelKey: "model-b", completesFullPass: true)
+        state = try await fetchCompletion(db, id)
+        #expect(state.model == "model-b")
+        #expect(state.fullModel == "model-b")
+        #expect(state.analyzedAt != nil)
     }
 
     private func fetchVLM(_ db: FileIDEngine.Database, _ id: Int64) async throws
@@ -332,6 +413,31 @@ struct DeepAnalyzeRunnerTests {
             let name: String? = r["vlm_proposed_name"]
             let model: String? = r["vlm_model"]
             return (desc, name, model)
+        }
+    }
+
+    private func fetchCompletion(_ db: FileIDEngine.Database, _ id: Int64) async throws
+        -> (model: String?, fullModel: String?, analyzedAt: Double?) {
+        try await db.pool.read { db in
+            guard let r = try Row.fetchOne(db, sql: """
+                SELECT vlm_model, vlm_full_model, vlm_analyzed_at
+                FROM files WHERE id = ?
+                """, arguments: [id]) else {
+                return (nil, nil, nil)
+            }
+            let model: String? = r["vlm_model"]
+            let fullModel: String? = r["vlm_full_model"]
+            let analyzedAt: Double? = r["vlm_analyzed_at"]
+            return (model, fullModel, analyzedAt)
+        }
+    }
+
+    private func vlmTagCount(_ db: FileIDEngine.Database, _ id: Int64) async throws -> Int {
+        try await db.pool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM tags WHERE file_id = ? AND source = 'vlm'",
+                arguments: [id]) ?? -1
         }
     }
 

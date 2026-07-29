@@ -210,12 +210,9 @@ public actor ScanCoordinator {
         // so cancelling the task unblocks the suspended producer and lets the
         // group finish and emit scanComplete(.cancelled).
         activeScanTask?.cancel()
-        // F-C6-013 wiring: cancelScan is the app's single "stop the current long
-        // op" signal — also stop an in-flight restructure apply. The apply task
-        // polls `Task.isCancelled` per move (Restructure.apply's default), so
-        // cancelling the registered handle breaks its loop at the next boundary.
-        // No stale-cancel risk: a fresh apply registers a new (un-cancelled)
-        // handle, and only a subsequent requestCancel cancels it.
+    }
+
+    public func requestRestructureCancel() {
         if activeRestructureToken != nil && activeRestructureTask == nil {
             restructureCancelPending = true
         }
@@ -229,6 +226,7 @@ public actor ScanCoordinator {
     public func requestShutdown() {
         Self.setShutdownMirror(true)
         requestCancel()
+        requestRestructureCancel()
     }
 
     /// Track the in-flight scan task so the engine can await it on shutdown

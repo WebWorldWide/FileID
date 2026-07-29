@@ -16,6 +16,7 @@
 using System;
 using System.ComponentModel;
 using System.Threading.Tasks;
+using FileID.IpcSchema;
 
 namespace FileID.Services;
 
@@ -28,7 +29,7 @@ internal sealed class UndoStack : INotifyPropertyChanged
         ChangeLog.Instance.Changed += (_, _) => OnChanged();
     }
 
-    public bool CanUndo => ChangeLog.Instance.UndoableCount > 0;
+    public bool CanUndo => ChangeLog.Instance.MostRecentUndoable is not null;
     public string TopLabel => ChangeLog.Instance.MostRecentUndoable?.Label ?? string.Empty;
 
     public void Push(string label, Func<Task<bool>> reverse)
@@ -53,8 +54,20 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
     private void OnChanged()
     {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanUndo)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TopLabel)));
+        RaisePropertyChanged(nameof(CanUndo));
+        RaisePropertyChanged(nameof(TopLabel));
+    }
+
+    private void RaisePropertyChanged(string propertyName)
+    {
+        var subscribers = PropertyChanged;
+        if (subscribers is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        foreach (PropertyChangedEventHandler subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(this, args); }
+            catch (Exception ex) { DebugLog.Warn($"Undo-stack subscriber failed for {propertyName}: {ex.Message}"); }
+        }
     }
 
     /// <summary>
@@ -89,15 +102,13 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
 
-            // Action is "trashFiles:<uuid>". A missing/empty suffix (no colon,
-            // or a trailing ':' with nothing after it) yields no batch id; skip
-            // rather than push an undo entry whose reverse can never resolve.
-            // IndexOf+Substring is bounds-safe — never throws on a malformed suffix.
-            var colonIdx = bar.Action.IndexOf(':');
-            var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
             ec.PropertyChanged -= once;
-            if (batchId.Length == 0) return;
-            Instance.Push(undoLabel, kind, () => reverse(batchId));
+            var batchId = GetUndoableBatchId(bar);
+            if (batchId is null) return;
+            var historyLabel = bar.Failed == 0
+                ? undoLabel
+                : $"{undoLabel} — {bar.Succeeded:N0} changed";
+            Instance.Push(historyLabel, kind, () => reverse(batchId));
         });
         ec.PropertyChanged += once;
 
@@ -108,6 +119,15 @@ internal sealed class UndoStack : INotifyPropertyChanged
         }
         _ = Task.Delay(timeout ?? TimeSpan.FromSeconds(30)).ContinueWith(_ => Cancel());
         return new CallbackRegistration(Cancel);
+    }
+
+    internal static string? GetUndoableBatchId(BulkActionResult result)
+    {
+        if (result.Succeeded == 0 || string.IsNullOrWhiteSpace(result.Action)) return null;
+        var colonIdx = result.Action.IndexOf(':');
+        if (colonIdx < 0) return null;
+        var batchId = result.Action[(colonIdx + 1)..].Trim();
+        return batchId.Length == 0 ? null : batchId;
     }
 
     private sealed class CallbackRegistration(Action cancel) : IDisposable

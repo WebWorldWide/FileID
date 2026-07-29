@@ -984,35 +984,37 @@ impl ProposedRow {
 }
 
 fn query_status(active: String) -> async_channel::Receiver<StatusCounts> {
-    spawn_db(move |conn| {
-        let total_images: i64 = conn
-            .query_row("SELECT COUNT(*) FROM files WHERE kind = 'image'", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or(0);
-        let pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM files WHERE kind = 'image' AND \
-                 (vlm_description IS NULL OR vlm_description = '' OR vlm_model IS NULL OR vlm_model <> ?1)",
-                rusqlite::params![active],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let named_people: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL AND TRIM(name) <> '') \
-                 OR (first_name IS NOT NULL AND TRIM(first_name) <> '') \
-                 OR (last_name IS NOT NULL AND TRIM(last_name) <> '')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        StatusCounts {
-            total_images,
-            pending,
-            named_people,
-        }
-    })
+    spawn_db(move |conn| status_counts(conn, &active))
+}
+
+fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
+    let total_images: i64 = conn
+        .query_row("SELECT COUNT(*) FROM files WHERE kind = 'image'", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE kind = 'image' AND \
+             (vlm_full_model IS NULL OR vlm_full_model <> ?1)",
+            rusqlite::params![active],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let named_people: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL AND TRIM(name) <> '') \
+             OR (first_name IS NOT NULL AND TRIM(first_name) <> '') \
+             OR (last_name IS NOT NULL AND TRIM(last_name) <> '')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    StatusCounts {
+        total_images,
+        pending,
+        named_people,
+    }
 }
 
 fn query_proposed() -> async_channel::Receiver<Vec<ProposedRow>> {
@@ -1430,5 +1432,36 @@ mod recommendation_tests {
             recommended_vlm_kind(48.0, 40.0, Some(PLENTY)),
             "mistral_small_3_2"
         );
+    }
+
+    #[test]
+    fn status_pending_uses_full_completion_model() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (
+                id INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                vlm_description TEXT,
+                vlm_model TEXT,
+                vlm_full_model TEXT
+            );
+            CREATE TABLE persons (
+                name TEXT,
+                first_name TEXT,
+                last_name TEXT
+            );
+            INSERT INTO files VALUES
+                (1, 'image', NULL, 'model-a', 'model-a'),
+                (2, 'image', 'legacy', 'model-a', NULL),
+                (3, 'image', 'other', 'model-b', 'model-b'),
+                (4, 'video', 'done', 'model-a', 'model-a');
+            INSERT INTO persons VALUES (NULL, 'Ada', NULL);",
+        )
+        .unwrap();
+
+        let counts = status_counts(&conn, "model-a");
+        assert_eq!(counts.total_images, 3);
+        assert_eq!(counts.pending, 2);
+        assert_eq!(counts.named_people, 1);
     }
 }

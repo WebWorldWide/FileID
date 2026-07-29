@@ -25,6 +25,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public let vlmDescription: String?
     public let vlmProposedName: String?
     public let vlmModel: String?
+    public let vlmFullModel: String?
     public let vlmAnalyzedAt: Date?
 
     public init(
@@ -35,7 +36,8 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         cameraModel: String?, locationLat: Double?, locationLon: Double?,
         failed: Bool, errorMessage: String?,
         vlmDescription: String? = nil, vlmProposedName: String? = nil,
-        vlmModel: String? = nil, vlmAnalyzedAt: Date? = nil
+        vlmModel: String? = nil, vlmFullModel: String? = nil,
+        vlmAnalyzedAt: Date? = nil
     ) {
         self.id = id
         self.pathText = pathText
@@ -57,6 +59,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         self.vlmDescription = vlmDescription
         self.vlmProposedName = vlmProposedName
         self.vlmModel = vlmModel
+        self.vlmFullModel = vlmFullModel
         self.vlmAnalyzedAt = vlmAnalyzedAt
     }
 
@@ -68,6 +71,10 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
 
     public var isImage: Bool { kind == "image" }
     public var isVideo: Bool { kind == "video" }
+
+    public func isFullyAnalyzed(by modelKey: String) -> Bool {
+        vlmFullModel == modelKey
+    }
 }
 
 /// Duplicate group — files verified by a live full-file digest, or a

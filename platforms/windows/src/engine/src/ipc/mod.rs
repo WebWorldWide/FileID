@@ -58,6 +58,10 @@ pub enum CommandPayload {
     ResumeScan(Empty),
     #[serde(rename = "cancelScan")]
     CancelScan(Empty),
+    #[serde(rename = "cancelRestructure")]
+    CancelRestructure(Empty),
+    #[serde(rename = "healthCheck")]
+    HealthCheck(HealthCheckPayload),
     #[serde(rename = "requestStatus")]
     RequestStatus(Empty),
     #[serde(rename = "shutdown")]
@@ -332,6 +336,12 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
 pub struct Empty {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartScanPayload {
     /// Absolute filesystem path to the folder root to scan.
@@ -445,6 +455,8 @@ pub struct UndoRestructurePayload {
     /// Same library root the apply used — the destinations the undo writes back
     /// to are containment-checked against it. (R2)
     pub library_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut_undo_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,6 +675,9 @@ pub enum EventPayload {
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
 
+    #[serde(rename = "healthCheckResult")]
+    HealthCheckResult(Wrap<HealthCheckResult>),
+
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),
 
@@ -769,6 +784,13 @@ pub struct EngineInfo {
     /// Optional so older clients of this schema don't break.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware: Option<HardwareInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckResult {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub pid: i32,
 }
 
 /// Reply payload for the `verifyCudaPack` command. Mirrors the EngineInfo's
@@ -1090,6 +1112,8 @@ pub struct RestructurePlan {
     pub truncated: bool,
     pub moves: Vec<RestructureMove>,
     pub category_counts: Vec<RestructureCategoryCount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_counts: Option<RestructureConfidenceCounts>,
     /// Engine-authoritative folder classification — Anchor / Mixed / Junk
     /// counts per RestructurePlan. None on older plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1102,6 +1126,15 @@ pub struct FolderClassificationCounts {
     pub anchor_folders: u32,
     pub mixed_folders: u32,
     pub junk_folders: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RestructureConfidenceCounts {
+    pub auto: u64,
+    pub review: u64,
+    pub ask: u64,
+    pub unknown: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1122,6 +1155,14 @@ pub struct RestructureApplyResult {
     /// to the user via a one-shot dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privilege_error: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut_undo_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1489,6 +1530,10 @@ mod tests {
             CommandPayload::PauseScan(Empty {}),
             CommandPayload::ResumeScan(Empty {}),
             CommandPayload::CancelScan(Empty {}),
+            CommandPayload::CancelRestructure(Empty {}),
+            CommandPayload::HealthCheck(HealthCheckPayload {
+                request_id: "health-check-1".into(),
+            }),
             CommandPayload::RequestStatus(Empty {}),
             CommandPayload::Shutdown(Empty {}),
             CommandPayload::RunFaceClustering(Empty {}),
@@ -1518,6 +1563,7 @@ mod tests {
             }),
             CommandPayload::UndoRestructure(UndoRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
+                shortcut_undo_token: None,
             }),
             CommandPayload::ApplyRestructure(ApplyRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),

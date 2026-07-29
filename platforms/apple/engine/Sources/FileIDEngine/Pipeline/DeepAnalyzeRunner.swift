@@ -21,8 +21,8 @@ public enum DeepAnalyzeRunner {
     /// Resolve scope → ordered list of (id, path) pairs. Targets images,
     /// videos, and PDFs — for videos we extract a keyframe; for PDFs we
     /// render the first page; for images we feed the file directly. The
-    /// VLM captions all three. WholeLibrary skips files already
-    /// described by the requested model when `skipExisting=true`.
+    /// VLM captions all three. WholeLibrary skips files with a successful
+    /// full pass by the requested model when `skipExisting=true`.
     public static func resolveTargets(
         database: Database,
         scope: DeepAnalyzeScope,
@@ -65,7 +65,7 @@ public enum DeepAnalyzeRunner {
                 guard !ids.isEmpty else { return [] }
                 let placeholders = ids.map { _ in "?" }.joined(separator: ",")
                 let r = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT id, path_text, vlm_model FROM files
+                    SELECT id, path_text, vlm_full_model FROM files
                     WHERE id IN (\(placeholders))
                       AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model')
                       AND failed = 0
@@ -73,8 +73,8 @@ public enum DeepAnalyzeRunner {
                 let targets = r.compactMap { row -> Target? in
                     guard let rowID: Int64 = row["id"], rowID > 0,
                           let path: String = row["path_text"], !path.isEmpty else { return nil }
-                    let existingModel: String? = row["vlm_model"]
-                    if skipExisting && existingModel == modelKey { return nil }
+                    let fullModel: String? = row["vlm_full_model"]
+                    if skipExisting && fullModel == modelKey { return nil }
                     return Target(id: rowID, path: path)
                 }
                 let byID = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0) })
@@ -86,7 +86,7 @@ public enum DeepAnalyzeRunner {
                     sql = """
                         SELECT id, path_text FROM files
                         WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                          AND (vlm_model IS NULL OR vlm_model != ?)
+                          AND (vlm_full_model IS NULL OR vlm_full_model != ?)
                         ORDER BY scanned_at ASC
                         """
                     args = [modelKey]
@@ -130,6 +130,7 @@ public enum DeepAnalyzeRunner {
     ) async {
         let started = Date()
         let modelKey = modelKind.rawValue
+        let completesFullPass = !tagsOnly && proposeRenames
 
         // No inline face clustering — it's a separate job. When
         // clusters are present captions use real names; otherwise
@@ -343,7 +344,10 @@ public enum DeepAnalyzeRunner {
                                       description: tagsOnly ? nil : result.description,
                                       proposedName: proposeRenames && !tagsOnly ? result.proposedName : nil,
                                       tags: result.tags,
-                                      modelKey: modelKey)
+                                      modelKey: modelKey,
+                                      updatesDescription: !tagsOnly,
+                                      updatesProposedName: proposeRenames && !tagsOnly,
+                                      completesFullPass: completesFullPass)
                     processed += 1
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
@@ -382,50 +386,69 @@ public enum DeepAnalyzeRunner {
         description: String?,
         proposedName: String?,
         tags: [String] = [],
-        modelKey: String
+        modelKey: String,
+        updatesDescription: Bool = true,
+        updatesProposedName: Bool = true,
+        completesFullPass: Bool = true
     ) async throws {
-        // R3-01 defense-in-depth: COALESCE only guards NULL, so an empty-but-
-        // present "" would overwrite a prior good value. Map an empty string to
-        // nil here too, so even a direct persist("") preserves the prior
-        // caption/name. (analyze() already classifies empty output as a failure
-        // upstream; this closes the persist layer regardless of caller.)
         let safeDesc = (description?.isEmpty == true) ? nil : description
         let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
-        // Clean tags once outside the txn (cheap, keeps the write tight).
         let cleanTags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         try await database.pool.write { db in
-            // F-C3-044: COALESCE so a NULL result (model returned no caption or
-            // no proposed name on this pass) preserves a prior good value rather
-            // than clobbering it with NULL (Windows parity, deep_analyze.rs).
-            try db.execute(sql: """
-                UPDATE files
-                SET vlm_description = COALESCE(?, vlm_description),
-                    vlm_proposed_name = COALESCE(?, vlm_proposed_name),
-                    vlm_model = ?,
-                    vlm_analyzed_at = ?
-                WHERE id = ?
-                """, arguments: [
-                    safeDesc,
-                    safeName,
-                    modelKey,
-                    Date().timeIntervalSince1970,
-                    fileID
-                ])
-            // VLM searchable tags (source='vlm'). Replace this file's prior vlm
-            // tags only when the pass produced some — an empty result leaves prior
-            // tags intact (mirrors the Windows DELETE+INSERT, deep_analyze.rs; the
-            // DELETE there runs in the same "Both"-mode path that produced tags).
-            // user/auto tags (other sources) are untouched.
-            if !cleanTags.isEmpty {
-                try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vlm'",
-                               arguments: [fileID])
-                for tag in cleanTags {
-                    try db.execute(sql: """
-                        INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?, ?, 'vlm', NULL)
-                        """, arguments: [fileID, tag])
-                }
+            if completesFullPass {
+                try db.execute(sql: """
+                    UPDATE files
+                    SET vlm_description = CASE
+                            WHEN ? THEN ? ELSE vlm_description END,
+                        vlm_proposed_name = CASE
+                            WHEN ? THEN ? ELSE vlm_proposed_name END,
+                        vlm_model = ?,
+                        vlm_full_model = ?,
+                        vlm_analyzed_at = ?
+                    WHERE id = ?
+                    """, arguments: [
+                        updatesDescription,
+                        safeDesc,
+                        updatesProposedName,
+                        safeName,
+                        modelKey,
+                        modelKey,
+                        Date().timeIntervalSince1970,
+                        fileID
+                    ])
+            } else {
+                try db.execute(sql: """
+                    UPDATE files
+                    SET vlm_description = CASE
+                            WHEN ? THEN ? ELSE vlm_description END,
+                        vlm_proposed_name = CASE
+                            WHEN ? THEN ? ELSE vlm_proposed_name END,
+                        vlm_model = CASE
+                            WHEN vlm_full_model = ? THEN vlm_model ELSE NULL END,
+                        vlm_full_model = CASE
+                            WHEN vlm_full_model = ? THEN vlm_full_model ELSE NULL END,
+                        vlm_analyzed_at = CASE
+                            WHEN vlm_full_model = ? THEN vlm_analyzed_at ELSE NULL END
+                    WHERE id = ?
+                    """, arguments: [
+                        updatesDescription,
+                        safeDesc,
+                        updatesProposedName,
+                        safeName,
+                        modelKey,
+                        modelKey,
+                        modelKey,
+                        fileID
+                    ])
+            }
+            try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vlm'",
+                           arguments: [fileID])
+            for tag in cleanTags {
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?, ?, 'vlm', NULL)
+                    """, arguments: [fileID, tag])
             }
         }
     }

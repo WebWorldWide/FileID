@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -45,13 +45,78 @@ use crate::pipeline::restructure_feedback;
 
 type ClaimedDestination = [u8; 16];
 
-const UNDO_JOURNAL_VERSION: u32 = 2;
+const UNDO_JOURNAL_VERSION: u32 = 3;
+const SHORTCUT_UNDO_MANIFEST_VERSION: u32 = 3;
+const SHORTCUT_UNDO_RECEIPT_VERSION: u32 = 1;
+const SHORTCUT_UNDO_INTENT_VERSION: u32 = 1;
+const MAX_SHORTCUT_RECORD_BYTES: usize = 64 * 1024;
+const MAX_SHORTCUT_STAGING_ENTRIES: usize = 1024;
 
 #[derive(serde::Deserialize)]
 struct UndoEntry {
     file_id: i64,
     from: String,
     to: String,
+    #[serde(default)]
+    source_identity: Option<crate::platform::FileIdentity>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ShortcutUndoEntry {
+    file_id: i64,
+    source: String,
+    link: String,
+    #[serde(default)]
+    staging_link: Option<String>,
+    source_identity: crate::platform::FileIdentity,
+    link_identity: crate::platform::FileIdentity,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ShortcutUndoHeader {
+    version: u32,
+    library_root: String,
+    token: String,
+    #[serde(default)]
+    staging_dir: Option<String>,
+    #[serde(default)]
+    staging_dir_identity: Option<crate::platform::FileIdentity>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ShortcutUndoIntent {
+    version: u32,
+    token: String,
+    operation_id: String,
+    file_id: i64,
+    source: String,
+    link: String,
+    staging_link: String,
+    source_identity: crate::platform::FileIdentity,
+    #[serde(default)]
+    staging_link_identity: Option<crate::platform::FileIdentity>,
+}
+
+struct PreparedShortcutIntent {
+    intent: ShortcutUndoIntent,
+    path: PathBuf,
+    identity: crate::platform::FileIdentity,
+}
+
+struct ScannedShortcutIntent {
+    intent: ShortcutUndoIntent,
+    path: PathBuf,
+    identity: crate::platform::FileIdentity,
+    committed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct ShortcutUndoReceipt {
+    version: u32,
+    library_root: String,
+    token: String,
+    applied: u32,
+    planned: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -61,12 +126,283 @@ struct UndoJournalHeader {
 }
 
 struct UndoJournalScan {
+    version: Option<u32>,
     library_root: Option<PathBuf>,
+    spans: Vec<(u64, u32)>,
+}
+
+struct ShortcutUndoManifestScan {
+    file: File,
+    header: ShortcutUndoHeader,
     spans: Vec<(u64, u32)>,
 }
 
 struct UndoJournalIter {
     lines: Lines<BufReader<File>>,
+}
+
+struct ShortcutUndoManifest {
+    file: File,
+    len: u64,
+    path: PathBuf,
+    token: String,
+    staging_dir: PathBuf,
+    staging_dir_identity: crate::platform::FileIdentity,
+    committed_entries: usize,
+}
+
+impl ShortcutUndoManifest {
+    fn create(dir: &Path, library_root: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating shortcut undo directory {}", dir.display()))?;
+        let token = uuid::Uuid::new_v4().to_string();
+        let staging_base = library_root.join(".fileid-restructure-shortcut-staging");
+        std::fs::create_dir_all(&staging_base).with_context(|| {
+            format!(
+                "creating shortcut staging directory {}",
+                staging_base.display()
+            )
+        })?;
+        anyhow::ensure!(
+            ensure_inside_root(&staging_base, library_root).is_ok()
+                && !has_reparse_point_in_chain(&staging_base, library_root)
+                && std::fs::symlink_metadata(&staging_base)
+                    .is_ok_and(|metadata| metadata.file_type().is_dir()),
+            "shortcut staging base is not a safe directory inside the selected library root"
+        );
+        let staging_dir = staging_base.join(&token);
+        std::fs::create_dir(&staging_dir).with_context(|| {
+            format!(
+                "creating token-owned shortcut staging directory {}",
+                staging_dir.display()
+            )
+        })?;
+        let staging_dir_identity = crate::platform::file_identity(&staging_dir)
+            .context("reading shortcut staging directory identity")?;
+        let path = shortcut_manifest_path(dir, &token)?;
+        let opened = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&staging_dir);
+                return Err(error)
+                    .with_context(|| format!("creating shortcut undo manifest {}", path.display()));
+            }
+        };
+        let mut header = serde_json::to_string(&ShortcutUndoHeader {
+            version: SHORTCUT_UNDO_MANIFEST_VERSION,
+            library_root: library_root.to_string_lossy().into_owned(),
+            token: token.clone(),
+            staging_dir: Some(staging_dir.to_string_lossy().into_owned()),
+            staging_dir_identity: Some(staging_dir_identity),
+        })?;
+        header.push('\n');
+        file.write_all(header.as_bytes())
+            .context("writing shortcut undo manifest header")?;
+        file.sync_all()
+            .context("syncing shortcut undo manifest header")?;
+        Ok(Self {
+            file,
+            len: header.len() as u64,
+            path,
+            token,
+            staging_dir,
+            staging_dir_identity,
+            committed_entries: 0,
+        })
+    }
+
+    fn prepare_intent(
+        &self,
+        file_id: i64,
+        source: &str,
+        link: &Path,
+        source_identity: crate::platform::FileIdentity,
+    ) -> Result<PreparedShortcutIntent> {
+        anyhow::ensure!(
+            crate::platform::file_identity(&self.staging_dir) == Some(self.staging_dir_identity)
+                && std::fs::symlink_metadata(&self.staging_dir)
+                    .is_ok_and(|metadata| metadata.file_type().is_dir()),
+            "shortcut staging directory changed before intent creation"
+        );
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let staging_link = self.staging_dir.join(format!("{operation_id}.link"));
+        let intent_path = self
+            .staging_dir
+            .join(format!("{operation_id}.intent.json"));
+        let intent = ShortcutUndoIntent {
+            version: SHORTCUT_UNDO_INTENT_VERSION,
+            token: self.token.clone(),
+            operation_id,
+            file_id,
+            source: source.to_string(),
+            link: link.to_string_lossy().into_owned(),
+            staging_link: staging_link.to_string_lossy().into_owned(),
+            source_identity,
+            staging_link_identity: None,
+        };
+        let mut bytes =
+            serde_json::to_vec(&intent).context("serializing shortcut creation intent")?;
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&intent_path)
+            .context("creating shortcut creation intent")?;
+        file.write_all(&bytes)
+            .context("writing shortcut creation intent")?;
+        file.sync_all().context("syncing shortcut creation intent")?;
+        let identity = crate::platform::file_identity_from_file(&file)
+            .context("reading shortcut creation intent identity")?;
+        anyhow::ensure!(
+            crate::platform::file_identity(&intent_path) == Some(identity)
+                && crate::platform::file_identity(&self.staging_dir)
+                    == Some(self.staging_dir_identity),
+            "shortcut creation intent changed while publishing"
+        );
+        Ok(PreparedShortcutIntent {
+            intent,
+            path: intent_path,
+            identity,
+        })
+    }
+
+    fn record_staged_identity(
+        &self,
+        prepared: &mut PreparedShortcutIntent,
+        link_identity: crate::platform::FileIdentity,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            prepared.path.parent() == Some(self.staging_dir.as_path())
+                && crate::platform::file_identity(&prepared.path) == Some(prepared.identity)
+                && crate::platform::file_identity(&self.staging_dir)
+                    == Some(self.staging_dir_identity)
+                && shortcut_link_identity(Path::new(&prepared.intent.staging_link))?
+                    == link_identity,
+            "shortcut creation intent changed before recording the staged identity"
+        );
+        prepared.intent.staging_link_identity = Some(link_identity);
+        let mut bytes =
+            serde_json::to_vec(&prepared.intent).context("serializing staged shortcut intent")?;
+        bytes.push(b'\n');
+        anyhow::ensure!(
+            bytes.len() <= MAX_SHORTCUT_RECORD_BYTES,
+            "staged shortcut intent is too large"
+        );
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&prepared.path)
+            .context("opening staged shortcut intent")?;
+        anyhow::ensure!(
+            crate::platform::file_identity_from_file(&file) == Some(prepared.identity),
+            "shortcut creation intent changed while opening for update"
+        );
+        file.set_len(0)
+            .context("truncating staged shortcut intent")?;
+        file.write_all(&bytes)
+            .context("writing staged shortcut intent")?;
+        file.sync_all().context("syncing staged shortcut intent")?;
+        anyhow::ensure!(
+            crate::platform::file_identity(&prepared.path) == Some(prepared.identity)
+                && crate::platform::file_identity(&self.staging_dir)
+                    == Some(self.staging_dir_identity),
+            "shortcut creation intent changed while recording the staged identity"
+        );
+        Ok(())
+    }
+
+    fn append_committed(
+        &mut self,
+        file_id: i64,
+        source: &str,
+        link: &Path,
+        staging_link: Option<&Path>,
+        source_identity: crate::platform::FileIdentity,
+        link_identity: crate::platform::FileIdentity,
+    ) -> Result<u64> {
+        let previous = self.len;
+        let mut line = serde_json::to_string(&ShortcutUndoEntry {
+            file_id,
+            source: source.to_string(),
+            link: link.to_string_lossy().into_owned(),
+            staging_link: staging_link.map(|path| path.to_string_lossy().into_owned()),
+            source_identity,
+            link_identity,
+        })?;
+        line.push('\n');
+        let append = (|| -> Result<()> {
+            self.file
+                .write_all(line.as_bytes())
+                .context("appending committed shortcut undo entry")?;
+            self.file
+                .sync_data()
+                .context("syncing committed shortcut undo entry")
+        })();
+        if let Err(error) = append {
+            self.rollback_to(previous);
+            return Err(error);
+        }
+        self.len = previous + line.len() as u64;
+        self.committed_entries += 1;
+        Ok(previous)
+    }
+
+    fn rollback_committed(&mut self, previous: u64) {
+        self.rollback_to(previous);
+        self.committed_entries = self.committed_entries.saturating_sub(1);
+    }
+
+    fn complete_intent(&self, prepared: &PreparedShortcutIntent) -> Result<()> {
+        anyhow::ensure!(
+            prepared.path.parent() == Some(self.staging_dir.as_path())
+                && crate::platform::file_identity(&prepared.path) == Some(prepared.identity)
+                && crate::platform::file_identity(&self.staging_dir)
+                    == Some(self.staging_dir_identity),
+            "shortcut creation intent changed before completion"
+        );
+        std::fs::remove_file(&prepared.path)
+            .context("removing completed shortcut creation intent")
+    }
+
+    fn rollback_to(&mut self, previous: u64) {
+        use std::io::Seek as _;
+        let _ = self.file.set_len(previous);
+        let _ = self.file.seek(std::io::SeekFrom::Start(previous));
+        let _ = self.file.sync_data();
+        self.len = previous;
+    }
+
+    fn finish(self) -> Option<String> {
+        let Self {
+            file,
+            path,
+            token,
+            staging_dir,
+            committed_entries,
+            ..
+        } = self;
+        let staging_has_work = std::fs::read_dir(&staging_dir)
+            .ok()
+            .is_some_and(|mut entries| entries.next().is_some());
+        if !staging_has_work {
+            let staging_base = staging_dir.parent().map(Path::to_path_buf);
+            let _ = std::fs::remove_dir(&staging_dir);
+            if let Some(staging_base) = staging_base {
+                let _ = std::fs::remove_dir(staging_base);
+            }
+        }
+        if committed_entries == 0 && !staging_has_work {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            None
+        } else {
+            let _ = file.sync_all();
+            Some(token)
+        }
+    }
 }
 
 impl Iterator for UndoJournalIter {
@@ -89,45 +425,135 @@ impl Iterator for UndoJournalIter {
 struct UndoJournal {
     file: File,
     len: u64,
+    path: PathBuf,
+    prior_backup: Option<PathBuf>,
+    first_move_committed: bool,
+    committed: bool,
 }
 
 impl UndoJournal {
-    /// Open fresh, truncating the previous run's journal. Called lazily right
-    /// before the FIRST journaled move, so an apply that never journals
-    /// (symlink mode, all no-ops) preserves the prior journal, and an open
-    /// failure aborts before anything moves. Fail-closed: undo protection is a
-    /// precondition of a recorded apply, not best-effort.
-    fn open_truncating(path: Option<PathBuf>, library_root: &Path) -> Result<UndoJournal> {
+    /// Preserve the previous journal until the first move commits, while making
+    /// the new write-ahead entry durable before that move starts.
+    fn open_replacing(path: Option<PathBuf>, library_root: &Path) -> Result<UndoJournal> {
         let path = path.context("no undo journal location available")?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("creating undo journal dir {}", dir.display()))?;
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .with_context(|| format!("opening undo journal {}", path.display()))?;
-        let mut header = serde_json::json!({
-            "version": UNDO_JOURNAL_VERSION,
-            "library_root": library_root.to_string_lossy()
-        })
-        .to_string();
-        header.push('\n');
-        file.write_all(header.as_bytes())
-            .context("writing undo journal header")?;
-        file.sync_all()
-            .with_context(|| format!("syncing truncated undo journal {}", path.display()))?;
-        Ok(UndoJournal { file, len: header.len() as u64 })
+        recover_prior_undo_journal(&path, library_root)?;
+        let prior_backup = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    metadata.file_type().is_file(),
+                    "undo journal path is not a regular file"
+                );
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("restructure_undo.ndjson");
+                let backup =
+                    path.with_file_name(format!(".{name}.prior-{}", uuid::Uuid::new_v4()));
+                std::fs::rename(&path, &backup)
+                    .with_context(|| format!("preserving prior undo journal {}", path.display()))?;
+                Some(backup)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspecting undo journal {}", path.display()));
+            }
+        };
+        let opened = (|| -> Result<(File, u64)> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| format!("opening undo journal {}", path.display()))?;
+            let mut header = serde_json::json!({
+                "version": UNDO_JOURNAL_VERSION,
+                "library_root": library_root.to_string_lossy()
+            })
+            .to_string();
+            header.push('\n');
+            file.write_all(header.as_bytes())
+                .context("writing undo journal header")?;
+            file.sync_all()
+                .with_context(|| format!("syncing new undo journal {}", path.display()))?;
+            Ok((file, header.len() as u64))
+        })();
+        match opened {
+            Ok((file, len)) => Ok(UndoJournal {
+                file,
+                len,
+                path,
+                prior_backup,
+                first_move_committed: false,
+                committed: false,
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_file(&path);
+                if let Some(backup) = prior_backup {
+                    let _ = std::fs::rename(backup, &path);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_replacement(&mut self) -> Result<()> {
+        if self.committed {
+            return Ok(());
+        }
+        self.first_move_committed = true;
+        if let Some(backup) = self.prior_backup.as_ref() {
+            std::fs::remove_file(backup).with_context(|| {
+                format!("removing preserved prior undo journal {}", backup.display())
+            })?;
+            self.prior_backup = None;
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    fn restore_prior_if_uncommitted(self) {
+        if self.committed || self.first_move_committed {
+            return;
+        }
+        let UndoJournal {
+            file,
+            path,
+            prior_backup,
+            ..
+        } = self;
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        if let Some(backup) = prior_backup {
+            if let Err(error) = std::fs::rename(&backup, &path) {
+                tracing::error!(
+                    ?error,
+                    "[RESTRUCTURE] could not restore preserved prior undo journal"
+                );
+            }
+        }
     }
 
     /// Durably append one inverse entry; returns the pre-append offset so a
     /// failed move can roll the entry back.
-    fn append_ahead(&mut self, file_id: i64, from: &str, to: &str) -> Result<u64> {
+    fn append_ahead(
+        &mut self,
+        file_id: i64,
+        from: &str,
+        to: &str,
+        source_identity: crate::platform::FileIdentity,
+    ) -> Result<u64> {
         let prev = self.len;
-        let mut line =
-            serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
+        let mut line = serde_json::json!({
+            "file_id": file_id,
+            "from": from,
+            "to": to,
+            "source_identity": source_identity
+        })
+        .to_string();
         line.push('\n');
         self.file
             .write_all(line.as_bytes())
@@ -150,6 +576,166 @@ impl UndoJournal {
     }
 }
 
+fn prior_undo_journal_backups(path: &Path) -> Result<Vec<PathBuf>> {
+    let Some(parent) = path.parent() else {
+        return Ok(Vec::new());
+    };
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("undo journal path has no UTF-8 file name")?;
+    let prefix = format!(".{name}.prior-");
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("listing undo journal directory {}", parent.display()));
+        }
+    };
+    let mut backups = Vec::new();
+    for entry in entries {
+        let entry = entry.context("reading undo journal directory entry")?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        let parsed = uuid::Uuid::parse_str(suffix)
+            .with_context(|| format!("invalid preserved undo journal name {file_name}"))?;
+        anyhow::ensure!(
+            parsed.to_string() == suffix,
+            "preserved undo journal name is not canonical"
+        );
+        backups.push(entry.path());
+    }
+    backups.sort();
+    Ok(backups)
+}
+
+fn validate_owned_undo_scan(scan: &UndoJournalScan, library_root: &Path) -> Result<()> {
+    let recorded_root = scan
+        .library_root
+        .as_ref()
+        .context("undo journal predates exact library-root ownership")?;
+    let canonical_root = canonicalize_safely(library_root)
+        .with_context(|| format!("library root {}", library_root.display()))?;
+    let canonical_recorded = canonicalize_safely(recorded_root)
+        .with_context(|| format!("recorded library root {}", recorded_root.display()))?;
+    anyhow::ensure!(
+        paths_equal(
+            &canonical_root.to_string_lossy(),
+            &canonical_recorded.to_string_lossy()
+        ),
+        "preserved undo journal belongs to a different library root"
+    );
+    Ok(())
+}
+
+fn regular_file_identity(path: &Path, label: &str) -> Result<crate::platform::FileIdentity> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting {label} {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "{label} is not a regular file"
+    );
+    crate::platform::file_identity(path)
+        .with_context(|| format!("reading {label} identity {}", path.display()))
+}
+
+fn read_undo_entry_span(path: &Path, span: (u64, u32)) -> Result<UndoEntry> {
+    use std::io::{Read as _, Seek as _};
+
+    let mut file = File::open(path)
+        .with_context(|| format!("opening undo journal entry {}", path.display()))?;
+    file.seek(std::io::SeekFrom::Start(span.0))
+        .context("seeking undo journal recovery entry")?;
+    let mut bytes = vec![0u8; span.1 as usize];
+    file.read_exact(&mut bytes)
+        .context("reading undo journal recovery entry")?;
+    serde_json::from_slice(&bytes).context("parsing undo journal recovery entry")
+}
+
+fn recover_prior_undo_journal(path: &Path, library_root: &Path) -> Result<()> {
+    let backups = prior_undo_journal_backups(path)?;
+    if backups.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        backups.len() == 1,
+        "multiple preserved undo journals make crash recovery ambiguous"
+    );
+    let backup = &backups[0];
+    let backup_identity = regular_file_identity(backup, "preserved undo journal")?;
+    let backup_scan = scan_undo_journal_spans(backup)?
+        .context("preserved undo journal disappeared during recovery")?;
+    validate_owned_undo_scan(&backup_scan, library_root)?;
+
+    let current_scan = scan_undo_journal_spans(path)?;
+    let current_identity = if let Some(scan) = current_scan.as_ref() {
+        validate_owned_undo_scan(scan, library_root)?;
+        Some(regular_file_identity(path, "current undo journal")?)
+    } else {
+        None
+    };
+
+    anyhow::ensure!(
+        crate::platform::file_identity(backup) == Some(backup_identity),
+        "preserved undo journal changed during recovery"
+    );
+    if let Some(scan) = current_scan.as_ref().filter(|scan| !scan.spans.is_empty()) {
+        anyhow::ensure!(
+            scan.version == Some(UNDO_JOURNAL_VERSION),
+            "current and preserved undo journals both contain work without recoverable identity evidence"
+        );
+        let first = read_undo_entry_span(path, scan.spans[0])?;
+        let source_identity = first.source_identity.context(
+            "current and preserved undo journals both contain work without source identity",
+        )?;
+        let moved = crate::platform::file_identity(Path::new(&first.from))
+            == Some(source_identity);
+        let not_moved =
+            crate::platform::file_identity(Path::new(&first.to)) == Some(source_identity);
+        anyhow::ensure!(
+            moved ^ not_moved,
+            "current and preserved undo journals both contain work; filesystem state is ambiguous"
+        );
+        if moved {
+            let current_identity =
+                current_identity.context("current undo journal disappeared during recovery")?;
+            anyhow::ensure!(
+                crate::platform::file_identity(path) == Some(current_identity)
+                    && crate::platform::file_identity(backup) == Some(backup_identity),
+                "undo journal changed during committed replacement recovery"
+            );
+            std::fs::remove_file(backup).with_context(|| {
+                format!(
+                    "removing obsolete preserved undo journal {}",
+                    backup.display()
+                )
+            })?;
+            return Ok(());
+        }
+    }
+    if let Some(identity) = current_identity {
+        anyhow::ensure!(
+            crate::platform::file_identity(path) == Some(identity),
+            "current undo journal changed during recovery"
+        );
+        std::fs::remove_file(path)
+            .with_context(|| format!("removing empty replacement journal {}", path.display()))?;
+    }
+    crate::util::rename_no_replace(backup, path)
+        .with_context(|| format!("restoring preserved undo journal {}", backup.display()))?;
+    anyhow::ensure!(
+        crate::platform::file_identity(path) == Some(backup_identity),
+        "restored undo journal identity changed during recovery"
+    );
+    Ok(())
+}
+
 /// One forward pass over the journal collecting its root binding and each
 /// entry's byte span. Returns None if the journal does not exist.
 /// Tolerates exactly a torn TRAILING entry: under write-ahead ordering an
@@ -166,6 +752,7 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
     };
     let mut reader = BufReader::new(file);
     let mut spans: Vec<(u64, u32)> = Vec::new();
+    let mut version = None;
     let mut library_root: Option<PathBuf> = None;
     let mut offset = 0u64;
     let mut buf: Vec<u8> = Vec::new();
@@ -180,12 +767,13 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
         let body_len = if had_newline { n - 1 } else { n };
         if offset == 0 {
             if let Ok(header) = serde_json::from_slice::<UndoJournalHeader>(&buf[..body_len]) {
-                if header.version != UNDO_JOURNAL_VERSION {
+                if !matches!(header.version, 2 | UNDO_JOURNAL_VERSION) {
                     anyhow::bail!("unsupported undo journal version {}", header.version);
                 }
                 if header.library_root.trim().is_empty() {
                     anyhow::bail!("undo journal has an empty library root");
                 }
+                version = Some(header.version);
                 library_root = Some(PathBuf::from(header.library_root));
                 offset += n as u64;
                 if !had_newline {
@@ -196,11 +784,15 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
         }
         let parses = serde_json::from_slice::<UndoEntry>(&buf[..body_len]).is_ok();
         if parses {
-            spans.push((offset, u32::try_from(body_len).context("journal entry too large")?));
-            offset += n as u64;
             if !had_newline {
+                tracing::warn!(
+                    offset,
+                    "[RESTRUCTURE] dropping unterminated trailing undo entry"
+                );
                 break;
             }
+            spans.push((offset, u32::try_from(body_len).context("journal entry too large")?));
+            offset += n as u64;
         } else {
             // Only a torn FINAL entry is acceptable.
             let mut probe = [0u8; 1];
@@ -220,7 +812,432 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
             );
         }
     }
-    Ok(Some(UndoJournalScan { library_root, spans }))
+    Ok(Some(UndoJournalScan {
+        version,
+        library_root,
+        spans,
+    }))
+}
+
+fn scan_shortcut_undo_manifest(path: &Path) -> Result<Option<ShortcutUndoManifestScan>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspecting shortcut undo manifest {}", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_file(),
+        "shortcut undo manifest is not a regular file"
+    );
+    let expected_identity = crate::platform::file_identity(path)
+        .context("reading shortcut undo manifest identity")?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("opening shortcut undo manifest {}", path.display()));
+        }
+    };
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&file) == Some(expected_identity),
+        "shortcut undo manifest changed while opening"
+    );
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    let header_len = read_bounded_shortcut_line(
+        &mut reader,
+        &mut buffer,
+        "reading shortcut undo manifest header",
+    )?;
+    anyhow::ensure!(
+        header_len > 0 && buffer.last() == Some(&b'\n'),
+        "shortcut undo manifest has a truncated header"
+    );
+    let header: ShortcutUndoHeader = serde_json::from_slice(&buffer[..header_len - 1])
+        .context("parsing shortcut undo manifest header")?;
+    anyhow::ensure!(
+        matches!(header.version, 2 | SHORTCUT_UNDO_MANIFEST_VERSION),
+        "unsupported shortcut undo manifest version {}",
+        header.version
+    );
+
+    let mut spans = Vec::new();
+    let mut offset = header_len as u64;
+    loop {
+        let length = read_bounded_shortcut_line(
+            &mut reader,
+            &mut buffer,
+            "reading shortcut undo manifest",
+        )?;
+        if length == 0 {
+            break;
+        }
+        let had_newline = buffer.last() == Some(&b'\n');
+        let body_len = if had_newline { length - 1 } else { length };
+        if !had_newline {
+            tracing::warn!(
+                offset,
+                "[RESTRUCTURE] dropping uncommitted trailing shortcut undo entry"
+            );
+            break;
+        }
+        if serde_json::from_slice::<ShortcutUndoEntry>(&buffer[..body_len]).is_ok() {
+            spans.push((
+                offset,
+                u32::try_from(body_len).context("shortcut undo entry too large")?,
+            ));
+            offset += length as u64;
+            continue;
+        }
+        anyhow::bail!(
+            "shortcut undo manifest corrupt at byte {offset}: refusing partial cleanup"
+        );
+    }
+    Ok(Some(ShortcutUndoManifestScan {
+        file: reader.into_inner(),
+        header,
+        spans,
+    }))
+}
+
+fn read_bounded_shortcut_line<R: BufRead>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    context: &'static str,
+) -> Result<usize> {
+    use std::io::Read as _;
+
+    buffer.clear();
+    let mut bounded = (&mut *reader).take((MAX_SHORTCUT_RECORD_BYTES + 1) as u64);
+    let length = std::io::BufRead::read_until(&mut bounded, b'\n', buffer).context(context)?;
+    anyhow::ensure!(
+        length <= MAX_SHORTCUT_RECORD_BYTES,
+        "shortcut undo record exceeds the {} byte limit",
+        MAX_SHORTCUT_RECORD_BYTES
+    );
+    Ok(length)
+}
+
+fn read_shortcut_entry_at(
+    file: &mut File,
+    start: u64,
+    len: u32,
+) -> Result<ShortcutUndoEntry> {
+    use std::io::{Read as _, Seek as _};
+
+    anyhow::ensure!(
+        len as usize <= MAX_SHORTCUT_RECORD_BYTES,
+        "shortcut undo entry exceeds the bounded record limit"
+    );
+    let mut bytes = vec![0u8; len as usize];
+    file.seek(std::io::SeekFrom::Start(start))
+        .context("seeking shortcut undo entry")?;
+    file.read_exact(&mut bytes)
+        .context("reading shortcut undo entry")?;
+    serde_json::from_slice(&bytes).context("parsing shortcut undo entry")
+}
+
+fn read_shortcut_intent(
+    path: &Path,
+    expected_operation_id: &str,
+    expected_staging_dir: &Path,
+    expected_token: &str,
+    canonical_root: &Path,
+) -> Result<ScannedShortcutIntent> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting shortcut intent {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file()
+            && metadata.len() <= u64::try_from(MAX_SHORTCUT_RECORD_BYTES).unwrap_or(u64::MAX),
+        "shortcut intent is not a bounded regular file"
+    );
+    let expected_identity =
+        crate::platform::file_identity(path).context("reading shortcut intent identity")?;
+    let mut file = File::open(path).context("opening shortcut intent")?;
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&file) == Some(expected_identity),
+        "shortcut intent changed while opening"
+    );
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take((MAX_SHORTCUT_RECORD_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .context("reading shortcut intent")?;
+    anyhow::ensure!(
+        !bytes.is_empty()
+            && bytes.len() <= MAX_SHORTCUT_RECORD_BYTES
+            && bytes.last() == Some(&b'\n'),
+        "shortcut intent is truncated or oversized"
+    );
+    let intent: ShortcutUndoIntent =
+        serde_json::from_slice(&bytes[..bytes.len() - 1]).context("parsing shortcut intent")?;
+    let operation_id = uuid::Uuid::parse_str(&intent.operation_id)
+        .context("shortcut intent has an invalid operation id")?;
+    anyhow::ensure!(
+        operation_id.to_string() == intent.operation_id
+            && intent.operation_id == expected_operation_id
+            && intent.version == SHORTCUT_UNDO_INTENT_VERSION
+            && intent.token == expected_token
+            && intent.file_id > 0
+            && !intent.source.trim().is_empty()
+            && !intent.link.trim().is_empty(),
+        "shortcut intent fields do not match its recovery context"
+    );
+    let expected_staging_link =
+        expected_staging_dir.join(format!("{}.link", intent.operation_id));
+    anyhow::ensure!(
+        paths_equal(
+            &intent.staging_link,
+            &expected_staging_link.to_string_lossy()
+        ),
+        "shortcut intent staging path does not match its operation id"
+    );
+    let final_link = Path::new(&intent.link);
+    let final_parent = final_link
+        .parent()
+        .context("shortcut intent destination has no parent")?;
+    anyhow::ensure!(
+        ensure_inside_root(final_parent, canonical_root).is_ok()
+            && !has_reparse_point_in_chain(final_parent, canonical_root),
+        "shortcut intent destination is not safely contained by the selected library root"
+    );
+    anyhow::ensure!(
+        crate::platform::file_identity(path) == Some(expected_identity),
+        "shortcut intent changed while reading"
+    );
+    Ok(ScannedShortcutIntent {
+        intent,
+        path: path.to_path_buf(),
+        identity: expected_identity,
+        committed: false,
+    })
+}
+
+fn shortcut_staging_context(
+    header: &ShortcutUndoHeader,
+    token: &str,
+    canonical_root: &Path,
+) -> Result<Option<(PathBuf, crate::platform::FileIdentity)>> {
+    if header.version == 2 {
+        return Ok(None);
+    }
+    let staging_dir = PathBuf::from(
+        header
+            .staging_dir
+            .as_deref()
+            .context("v3 shortcut manifest is missing its staging directory")?,
+    );
+    let staging_identity = header
+        .staging_dir_identity
+        .context("v3 shortcut manifest is missing its staging directory identity")?;
+    let expected = canonical_root
+        .join(".fileid-restructure-shortcut-staging")
+        .join(token);
+    anyhow::ensure!(
+        paths_equal(&staging_dir.to_string_lossy(), &expected.to_string_lossy()),
+        "shortcut staging directory does not match the manifest token and library root"
+    );
+    match std::fs::symlink_metadata(&staging_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspecting shortcut staging directory"),
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.file_type().is_dir()
+                    && ensure_inside_root(&staging_dir, canonical_root).is_ok()
+                    && !has_reparse_point_in_chain(&staging_dir, canonical_root)
+                    && crate::platform::file_identity(&staging_dir) == Some(staging_identity),
+                "shortcut staging directory was replaced or is unsafe"
+            );
+        }
+    }
+    Ok(Some((staging_dir, staging_identity)))
+}
+
+fn recover_shortcut_intents(
+    scan: &ShortcutUndoManifestScan,
+    token: &str,
+    canonical_root: &Path,
+) -> Result<u32> {
+    let Some((staging_dir, staging_identity)) =
+        shortcut_staging_context(&scan.header, token, canonical_root)?
+    else {
+        return Ok(0);
+    };
+    let mut intent_paths = Vec::new();
+    let mut staged_operation_ids = HashSet::new();
+    for (index, entry) in std::fs::read_dir(&staging_dir)
+        .context("enumerating shortcut staging directory")?
+        .enumerate()
+    {
+        anyhow::ensure!(
+            index < MAX_SHORTCUT_STAGING_ENTRIES,
+            "shortcut staging directory exceeds the {} entry limit",
+            MAX_SHORTCUT_STAGING_ENTRIES
+        );
+        let entry = entry.context("reading shortcut staging entry")?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .context("shortcut staging entry has a non-Unicode name")?
+            .to_string();
+        if let Some(operation_id) = name.strip_suffix(".intent.json") {
+            let parsed = uuid::Uuid::parse_str(operation_id)
+                .context("shortcut intent filename is not a UUID")?;
+            anyhow::ensure!(
+                parsed.to_string() == operation_id,
+                "shortcut intent filename is not a canonical UUID"
+            );
+            intent_paths.push((operation_id.to_string(), entry.path()));
+        } else if let Some(operation_id) = name.strip_suffix(".link") {
+            let parsed = uuid::Uuid::parse_str(operation_id)
+                .context("staged shortcut filename is not a UUID")?;
+            anyhow::ensure!(
+                parsed.to_string() == operation_id,
+                "staged shortcut filename is not a canonical UUID"
+            );
+            staged_operation_ids.insert(operation_id.to_string());
+        } else {
+            anyhow::bail!("shortcut staging directory contains an unexpected entry");
+        }
+    }
+
+    let mut intents = Vec::with_capacity(intent_paths.len());
+    let mut intent_operation_ids = HashSet::new();
+    let mut intent_by_staging_key = HashMap::new();
+    for (operation_id, path) in intent_paths {
+        let intent =
+            read_shortcut_intent(&path, &operation_id, &staging_dir, token, canonical_root)?;
+        anyhow::ensure!(
+            intent_operation_ids.insert(operation_id),
+            "shortcut staging directory contains a duplicate intent"
+        );
+        let key = claimed_destination_key(Path::new(&intent.intent.staging_link));
+        anyhow::ensure!(
+            intent_by_staging_key.insert(key, intents.len()).is_none(),
+            "shortcut intents claim the same staged path"
+        );
+        intents.push(intent);
+    }
+    let mut manifest_file = scan
+        .file
+        .try_clone()
+        .context("cloning shortcut manifest for intent recovery")?;
+    let mut committed_staged_operation_ids = HashSet::new();
+    for &(start, len) in &scan.spans {
+        let entry = read_shortcut_entry_at(&mut manifest_file, start, len)?;
+        let Some(staging_link) = entry.staging_link.as_deref() else {
+            continue;
+        };
+        let staging_path = Path::new(staging_link);
+        let operation_id = staging_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".link"))
+            .context("committed staged shortcut has an invalid filename")?;
+        let parsed = uuid::Uuid::parse_str(operation_id)
+            .context("committed staged shortcut filename is not a UUID")?;
+        anyhow::ensure!(
+            parsed.to_string() == operation_id
+                && staging_path.parent() == Some(staging_dir.as_path())
+                && paths_equal(staging_link, &staging_dir.join(format!("{operation_id}.link")).to_string_lossy())
+                && committed_staged_operation_ids.insert(operation_id.to_string()),
+            "committed staged shortcut path is duplicated or outside its token-owned directory"
+        );
+        let key = claimed_destination_key(Path::new(staging_link));
+        let Some(&intent_index) = intent_by_staging_key.get(&key) else {
+            continue;
+        };
+        let intent = &mut intents[intent_index];
+        anyhow::ensure!(
+            paths_equal(staging_link, &intent.intent.staging_link)
+                && entry.file_id == intent.intent.file_id
+                && paths_equal(&entry.source, &intent.intent.source)
+                && paths_equal(&entry.link, &intent.intent.link)
+                && entry.source_identity == intent.intent.source_identity
+                && intent.intent.staging_link_identity == Some(entry.link_identity),
+            "committed shortcut entry does not match its pending intent"
+        );
+        anyhow::ensure!(
+            !intent.committed,
+            "shortcut manifest contains duplicate committed staging entries"
+        );
+        intent.committed = true;
+    }
+    anyhow::ensure!(
+        staged_operation_ids
+            .iter()
+            .all(|operation_id| {
+                intent_operation_ids.contains(operation_id)
+                    || committed_staged_operation_ids.contains(operation_id)
+            }),
+        "shortcut staging directory contains a staged link without durable recovery evidence"
+    );
+
+    let mut recovered = 0u32;
+    for intent in intents {
+        anyhow::ensure!(
+            crate::platform::file_identity(&staging_dir) == Some(staging_identity),
+            "shortcut staging directory changed during recovery"
+        );
+        let staged_link = Path::new(&intent.intent.staging_link);
+        if !intent.committed {
+            match std::fs::symlink_metadata(staged_link) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspecting pending staged shortcut"),
+                Ok(_) => {
+                    let expected_link = intent.intent.staging_link_identity.context(
+                        "pending staged shortcut has no durably recorded link identity",
+                    )?;
+                    remove_recorded_shortcut(
+                        staged_link,
+                        Path::new(&intent.intent.source),
+                        intent.intent.source_identity,
+                        expected_link,
+                        canonical_root,
+                    )
+                    .context("removing pending staged shortcut")?;
+                }
+            }
+        }
+        anyhow::ensure!(
+            crate::platform::file_identity(&intent.path) == Some(intent.identity)
+                && crate::platform::file_identity(&staging_dir) == Some(staging_identity),
+            "shortcut intent changed during recovery"
+        );
+        std::fs::remove_file(&intent.path).context("removing recovered shortcut intent")?;
+        recovered = recovered.saturating_add(1);
+    }
+    Ok(recovered)
+}
+
+fn cleanup_shortcut_staging_dir(
+    header: &ShortcutUndoHeader,
+    token: &str,
+    canonical_root: &Path,
+) -> Result<()> {
+    let Some((staging_dir, staging_identity)) =
+        shortcut_staging_context(header, token, canonical_root)?
+    else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        std::fs::read_dir(&staging_dir)
+            .context("checking completed shortcut staging directory")?
+            .next()
+            .is_none()
+            && crate::platform::file_identity(&staging_dir) == Some(staging_identity),
+        "completed shortcut staging directory still contains recovery evidence"
+    );
+    std::fs::remove_dir(&staging_dir).context("removing completed shortcut staging directory")?;
+    if let Some(staging_base) = staging_dir.parent() {
+        let _ = std::fs::remove_dir(staging_base);
+    }
+    Ok(())
 }
 
 /// Streams journal entries NEWEST-FIRST via pre-scanned byte spans. Dependent
@@ -275,6 +1292,219 @@ fn claimed_destination_key(path: &Path) -> ClaimedDestination {
     key
 }
 
+struct ReverseShortcutUndoIter {
+    file: File,
+    spans: Vec<(u64, u32)>,
+    next: usize,
+}
+
+impl Iterator for ReverseShortcutUndoIter {
+    type Item = Result<ShortcutUndoEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use std::io::{Read as _, Seek as _};
+        if self.next == 0 {
+            return None;
+        }
+        self.next -= 1;
+        let (start, len) = self.spans[self.next];
+        let mut buffer = vec![0u8; len as usize];
+        let entry = (|| -> Result<ShortcutUndoEntry> {
+            self.file
+                .seek(std::io::SeekFrom::Start(start))
+                .context("seeking shortcut undo entry")?;
+            self.file
+                .read_exact(&mut buffer)
+                .context("reading shortcut undo entry")?;
+            serde_json::from_slice(&buffer).context("parsing shortcut undo entry")
+        })();
+        Some(entry)
+    }
+}
+
+fn shortcut_manifest_path(dir: &Path, token: &str) -> Result<PathBuf> {
+    let parsed = uuid::Uuid::parse_str(token).context("invalid shortcut undo token")?;
+    anyhow::ensure!(
+        parsed.to_string() == token,
+        "shortcut undo token must use canonical UUID form"
+    );
+    Ok(dir.join(format!("{token}.ndjson")))
+}
+
+fn shortcut_receipt_path(dir: &Path, token: &str) -> Result<PathBuf> {
+    shortcut_manifest_path(dir, token)?;
+    Ok(dir.join(format!("{token}.complete.json")))
+}
+
+fn read_shortcut_undo_receipt(path: &Path) -> Result<Option<ShortcutUndoReceipt>> {
+    use std::io::Read as _;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading shortcut undo receipt metadata"),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_file() && metadata.len() <= 64 * 1024,
+        "shortcut undo receipt must be a bounded regular file"
+    );
+    let expected_identity = crate::platform::file_identity(path)
+        .context("reading shortcut undo receipt identity")?;
+    let mut file = File::open(path).context("opening shortcut undo receipt")?;
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&file) == Some(expected_identity),
+        "shortcut undo receipt changed while opening"
+    );
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    file.read_to_end(&mut bytes)
+        .context("reading shortcut undo receipt")?;
+    anyhow::ensure!(
+        bytes.last() == Some(&b'\n')
+            && crate::platform::file_identity(path) == Some(expected_identity),
+        "shortcut undo receipt is truncated or changed"
+    );
+    let receipt = serde_json::from_slice::<ShortcutUndoReceipt>(&bytes[..bytes.len() - 1])
+        .context("parsing shortcut undo receipt")?;
+    anyhow::ensure!(
+        receipt.version == SHORTCUT_UNDO_RECEIPT_VERSION,
+        "unsupported shortcut undo receipt version {}",
+        receipt.version
+    );
+    Ok(Some(receipt))
+}
+
+fn write_shortcut_undo_receipt(
+    dir: &Path,
+    receipt: &ShortcutUndoReceipt,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating shortcut undo directory {}", dir.display()))?;
+    let path = shortcut_receipt_path(dir, &receipt.token)?;
+    if let Some(existing) = read_shortcut_undo_receipt(&path)? {
+        anyhow::ensure!(
+            existing == *receipt,
+            "shortcut undo receipt conflicts with the completed operation"
+        );
+        return Ok(path);
+    }
+
+    let temp = dir.join(format!(
+        ".{}.{}.receipt.tmp",
+        receipt.token,
+        uuid::Uuid::new_v4()
+    ));
+    let write_result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .context("creating temporary shortcut undo receipt")?;
+        let mut bytes = serde_json::to_vec(receipt).context("serializing shortcut undo receipt")?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)
+            .context("writing temporary shortcut undo receipt")?;
+        file.sync_all()
+            .context("syncing temporary shortcut undo receipt")?;
+        drop(file);
+        crate::util::rename_no_replace(&temp, &path)
+            .context("publishing shortcut undo receipt")?;
+        let published = File::open(&path).context("opening published shortcut undo receipt")?;
+        published
+            .sync_all()
+            .context("syncing published shortcut undo receipt")
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temp);
+        if let Some(existing) = read_shortcut_undo_receipt(&path)? {
+            anyhow::ensure!(
+                existing == *receipt,
+                "shortcut undo receipt conflicts with the completed operation"
+            );
+            return Ok(path);
+        }
+        return Err(error);
+    }
+    anyhow::ensure!(
+        read_shortcut_undo_receipt(&path)?.as_ref() == Some(receipt),
+        "published shortcut undo receipt did not validate"
+    );
+    Ok(path)
+}
+
+#[derive(Default)]
+pub(crate) struct DestinationClaims {
+    claimed: HashSet<ClaimedDestination>,
+    next_suffix: HashMap<ClaimedDestination, u64>,
+}
+
+#[derive(Default)]
+struct ExistingShortcutIndex {
+    scanned_parents: HashSet<ClaimedDestination>,
+    by_target: HashMap<(ClaimedDestination, ClaimedDestination), PathBuf>,
+}
+
+impl ExistingShortcutIndex {
+    fn find(
+        &mut self,
+        source: &Path,
+        parent: &Path,
+        expected_source: crate::platform::FileIdentity,
+    ) -> Result<Option<PathBuf>> {
+        anyhow::ensure!(
+            crate::platform::file_identity(source) == Some(expected_source),
+            "shortcut source changed during existing-link inspection"
+        );
+        let canonical_parent = canonicalize_safely(parent)?;
+        let parent_key = claimed_destination_key(&canonical_parent);
+        if self.scanned_parents.insert(parent_key) {
+            for entry in
+                std::fs::read_dir(crate::util::path_safety::to_extended_length(parent))?.flatten()
+            {
+                let path = entry.path();
+                if !std::fs::symlink_metadata(&path)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    continue;
+                }
+                let Ok(target) = resolved_symlink_target(&path) else {
+                    continue;
+                };
+                let Ok(canonical_target) = canonicalize_safely(&target) else {
+                    continue;
+                };
+                self.by_target.insert(
+                    (parent_key, claimed_destination_key(&canonical_target)),
+                    path,
+                );
+            }
+        }
+        let canonical_source = canonicalize_safely(source)?;
+        Ok(self
+            .by_target
+            .get(&(parent_key, claimed_destination_key(&canonical_source)))
+            .cloned())
+    }
+}
+
+impl DestinationClaims {
+    pub(crate) fn reserve(&mut self, destination: &Path) -> Result<PathBuf> {
+        let family = claimed_destination_key(destination);
+        let start_suffix = self.next_suffix.get(&family).copied().unwrap_or(2);
+        let (reserved, next_suffix) =
+            unique_destination_from(destination, &self.claimed, start_suffix)?;
+        if reserved != destination {
+            self.next_suffix.insert(family, next_suffix);
+        }
+        self.claimed.insert(claimed_destination_key(&reserved));
+        Ok(reserved)
+    }
+
+    fn release(&mut self, destination: &Path) {
+        self.claimed
+            .remove(&claimed_destination_key(destination));
+    }
+}
+
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -286,14 +1516,123 @@ pub struct RestructureApply {
     db_conn: Arc<Mutex<Connection>>,
     library_root: PathBuf,
     use_symlinks: bool,
+    strict_destinations: bool,
     // F-C6-013: cooperative cancel polled between moves. Defaults to a fresh,
-    // never-set flag; the dispatcher injects a shared flag via `with_cancel` so
+    // never-set flag; the dispatcher injects an operation-specific flag via `with_cancel` so
     // a user "stop" aborts a 100k-move apply between moves (each completed move
     // is already durable, so stopping mid-batch preserves per-move atomicity).
     cancel: Arc<AtomicBool>,
     // Test seam: journal location override so concurrent tests never share (or
     // clobber) the real user journal. None → the app-data location.
     undo_journal_override: Option<PathBuf>,
+    shortcut_undo_dir_override: Option<PathBuf>,
+    #[cfg(test)]
+    fail_next_move_after_journal: AtomicBool,
+    #[cfg(test)]
+    fail_next_symlink_post_create: AtomicBool,
+    #[cfg(test)]
+    fail_next_shortcut_manifest_commit: AtomicBool,
+    #[cfg(test)]
+    cancel_after_undo_replay: AtomicBool,
+}
+
+pub(crate) struct ForwardBatchPreflight<'a> {
+    apply: &'a RestructureApply,
+    canonical_root: PathBuf,
+    file_ids: HashSet<i64>,
+    sources: HashSet<ClaimedDestination>,
+    destinations: HashSet<ClaimedDestination>,
+    destination_claims: DestinationClaims,
+}
+
+impl ForwardBatchPreflight<'_> {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.apply.is_cancelled()
+    }
+
+    pub(crate) fn validate(&mut self, move_: &RestructureMove) -> Result<()> {
+        anyhow::ensure!(move_.file_id > 0, "move file ID must be positive");
+        anyhow::ensure!(
+            self.file_ids.insert(move_.file_id),
+            "plan contains a duplicate file ID"
+        );
+        anyhow::ensure!(
+            !move_.source.is_empty()
+                && !move_.destination.is_empty()
+                && !move_.source.contains('\0')
+                && !move_.destination.contains('\0'),
+            "move paths must be nonempty and contain no NUL characters"
+        );
+
+        let source = Path::new(&move_.source);
+        let destination = Path::new(&move_.destination);
+        anyhow::ensure!(
+            source.is_absolute() && destination.is_absolute(),
+            "move paths must be absolute"
+        );
+        anyhow::ensure!(
+            !paths_equal(&move_.source, &move_.destination),
+            "plan contains a no-op move"
+        );
+        ensure_inside_root(source, &self.canonical_root)
+            .context("move source is outside the selected library root")?;
+        ensure_inside_root(destination, &self.canonical_root)
+            .context("move destination is outside the selected library root")?;
+
+        let source_metadata =
+            std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(source))
+                .context("planned source is unavailable")?;
+        anyhow::ensure!(
+            !source_metadata.file_type().is_symlink(),
+            "planned source must not be a symbolic link"
+        );
+        let canonical_source =
+            std::fs::canonicalize(source).context("canonicalizing planned source")?;
+        anyhow::ensure!(
+            self.sources
+                .insert(claimed_destination_key(&canonical_source)),
+            "plan contains a duplicate source"
+        );
+
+        let (db_path, db_ref) = current_identity_in_db(&self.apply.db_conn, move_.file_id)?
+            .context("planned file no longer exists in the database")?;
+        anyhow::ensure!(
+            paths_equal(&db_path, &move_.source),
+            "planned source no longer matches the database"
+        );
+        anyhow::ensure!(
+            verified_file_identity(db_ref, source).is_some(),
+            "planned source identity changed; rescan and re-plan"
+        );
+
+        if let Some(name) = destination.file_name().and_then(|name| name.to_str()) {
+            anyhow::ensure!(
+                crate::util::path_safety::is_safe_filename(name),
+                "planned destination has an invalid filename"
+            );
+        } else {
+            anyhow::bail!("planned destination must name a file");
+        }
+        let normalized_destination =
+            crate::util::path_safety::canonicalize_for_containment(destination);
+        anyhow::ensure!(
+            self.destinations
+                .insert(claimed_destination_key(&normalized_destination)),
+            "plan contains a duplicate destination"
+        );
+        if let Some(parent) = destination.parent() {
+            anyhow::ensure!(
+                !has_reparse_point_in_chain(parent, &self.canonical_root),
+                "planned destination parent contains a reparse point"
+            );
+        }
+        let reserved = self.destination_claims.reserve(destination)?;
+        anyhow::ensure!(
+            reserved == destination,
+            "planned destination is no longer collision-free; re-plan before applying"
+        );
+        Ok(())
+    }
 }
 
 impl RestructureApply {
@@ -302,23 +1641,97 @@ impl RestructureApply {
             db_conn,
             library_root,
             use_symlinks,
+            strict_destinations: false,
             cancel: Arc::new(AtomicBool::new(false)),
             undo_journal_override: None,
+            shortcut_undo_dir_override: None,
+            #[cfg(test)]
+            fail_next_move_after_journal: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_symlink_post_create: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_shortcut_manifest_commit: AtomicBool::new(false),
+            #[cfg(test)]
+            cancel_after_undo_replay: AtomicBool::new(false),
         }
     }
 
     #[cfg(test)]
-    fn with_undo_journal_path(mut self, path: PathBuf) -> Self {
+    pub(crate) fn with_undo_journal_path(mut self, path: PathBuf) -> Self {
         self.undo_journal_override = Some(path);
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_shortcut_undo_dir(mut self, path: PathBuf) -> Self {
+        self.shortcut_undo_dir_override = Some(path);
+        self
+    }
+
+    fn shortcut_undo_dir(&self) -> Result<PathBuf> {
+        match &self.shortcut_undo_dir_override {
+            Some(path) => Ok(path.clone()),
+            #[cfg(test)]
+            None => Ok(self
+                .library_root
+                .join(".fileid-test-restructure-shortcut-undo")),
+            #[cfg(not(test))]
+            None => crate::paths::restructure_shortcut_undo_dir(),
+        }
+    }
+
     /// Inject a shared cancellation flag. `handle_apply_restructure` passes the
-    /// flag that the CancelScan dispatch arm sets; `apply` polls it at the top of
+    /// flag that the CancelRestructure dispatch arm sets; `apply` polls it at the top of
     /// each move so a long apply is stoppable. (F-C6-013)
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn with_fail_next_move_after_journal(self) -> Self {
+        self.fail_next_move_after_journal.store(true, Ordering::Relaxed);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_fail_next_shortcut_manifest_commit(self) -> Self {
+        self.fail_next_shortcut_manifest_commit
+            .store(true, Ordering::Relaxed);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_cancel_after_undo_replay(self) -> Self {
+        self.cancel_after_undo_replay
+            .store(true, Ordering::Relaxed);
+        self
+    }
+
+    pub(crate) fn with_strict_destinations(mut self) -> Self {
+        self.strict_destinations = true;
+        self
+    }
+
+    pub(crate) fn begin_forward_preflight(&self) -> Result<ForwardBatchPreflight<'_>> {
+        anyhow::ensure!(
+            self.library_root.is_absolute() && self.library_root.is_dir(),
+            "restructure library root must be an existing absolute directory"
+        );
+        let canonical_root = std::fs::canonicalize(&self.library_root)
+            .with_context(|| format!("library root {}", self.library_root.display()))?;
+        Ok(ForwardBatchPreflight {
+            apply: self,
+            canonical_root,
+            file_ids: HashSet::new(),
+            sources: HashSet::new(),
+            destinations: HashSet::new(),
+            destination_claims: DestinationClaims::default(),
+        })
     }
 
     /// Apply every proposed move. Stops on first hard error; returns the
@@ -360,7 +1773,11 @@ impl RestructureApply {
     where
         I: IntoIterator<Item = Result<RestructureMove>>,
     {
-        let canonical_root = canonicalize_safely(&self.library_root)
+        anyhow::ensure!(
+            self.library_root.is_absolute() && self.library_root.is_dir(),
+            "restructure library root must be an existing absolute directory"
+        );
+        let canonical_root = std::fs::canonicalize(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
 
         let mut applied = 0u32;
@@ -374,26 +1791,7 @@ impl RestructureApply {
         // and an unopenable journal aborts before ANY file moves — undo
         // protection is a precondition now, not best-effort.
         let mut journal: Option<UndoJournal> = None;
-        // L1: a recorded SYMLINK run journals nothing (it creates links, not
-        // move-based inverses), but a prior REAL-move run's journal would
-        // survive — so "Undo last run" after a symlink run would reverse that
-        // older, unrelated real run (data movement the user didn't ask to
-        // undo). Clear any stale journal at the start of a recorded symlink
-        // run so undo_last is a truthful no-op afterward. Best-effort: a
-        // failure to remove it only risks the pre-existing mis-undo, so it
-        // must not abort the symlink apply.
-        if record_undo && self.use_symlinks {
-            if let Some(path) = self.undo_journal_path() {
-                match std::fs::remove_file(&path) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "[RESTRUCTURE] could not clear stale undo journal before symlink run"
-                    ),
-                }
-            }
-        }
+        let mut shortcut_manifest: Option<ShortcutUndoManifest> = None;
         // (source, final destination) of every successful real move, fed to the
         // learn-from-corrections memory in ONE lock acquisition after the loop so a
         // future plan can boost a move toward a folder the user has filed here
@@ -409,11 +1807,15 @@ impl RestructureApply {
         // instead of silently clobbering the first (data loss). Mirrors the
         // `ci_starts_with` full-Unicode fold and the macOS `Restructure.swift`
         // lowercased claimed set, so a library round-trips identically.
-        let mut claimed: HashSet<ClaimedDestination> = HashSet::new();
+        let mut claimed = DestinationClaims::default();
+        let mut existing_shortcuts = ExistingShortcutIndex::default();
 
         // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop.
         let total = total_hint.unwrap_or(0);
+        let planned = total_hint.map(|count| count as u64);
+        let mut processed = 0usize;
+        let mut cancelled = false;
         for (idx, m) in moves.into_iter().enumerate() {
             // A failed stream read (corrupt / vanished spooled plan) must NOT
             // discard the partial result via `?`: every move already applied is
@@ -440,10 +1842,11 @@ impl RestructureApply {
             // already completed is durable (per-move FS op + DB update), so
             // stopping BETWEEN moves is safe and preserves per-move atomicity.
             if self.cancel.load(Ordering::Relaxed) {
+                cancelled = true;
                 tracing::info!(applied, failed, processed = idx, total, "[RESTRUCTURE] apply cancelled by user");
                 break;
             }
-            let processed = idx + 1;
+            processed = idx + 1;
             if should_emit_apply_progress(processed, total, APPLY_PROGRESS_INTERVAL) {
                 tracing::info!(applied, failed, processed, total, "[RESTRUCTURE] apply progress");
             }
@@ -527,6 +1930,15 @@ impl RestructureApply {
             };
 
             let source_path = Path::new(&m.source);
+            if record_undo && ensure_inside_root(source_path, &canonical_root).is_err() {
+                tracing::warn!(
+                    file_id = m.file_id,
+                    source=%crate::platform::redact_path_for_log(source_path),
+                    "rejecting move whose source is outside the selected library root"
+                );
+                failed += 1;
+                continue;
+            }
             if std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(source_path))
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
             {
@@ -594,6 +2006,33 @@ impl RestructureApply {
                 }
             }
 
+            if self.use_symlinks {
+                let Some(parent) = dest.parent() else {
+                    failed += 1;
+                    continue;
+                };
+                match existing_shortcuts.find(source_path, parent, source_identity) {
+                    Ok(Some(existing)) => {
+                        tracing::info!(
+                            file_id = m.file_id,
+                            link = %crate::platform::redact_path_for_log(&existing),
+                            "[RESTRUCTURE] matching shortcut already exists"
+                        );
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            file_id = m.file_id,
+                            "[RESTRUCTURE] could not inspect existing shortcuts"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                }
+            }
+
             // Skip a no-op (the file already sits at its PLANNED destination)
             // BEFORE uniquifying. If we uniquified first, `unique_destination`
             // would see the file itself occupying `dest`, bump it to a ` (2)`
@@ -614,9 +2053,26 @@ impl RestructureApply {
             let final_dest = if self.use_symlinks {
                 dest.clone()
             } else {
-                let d = unique_destination(&dest, &claimed);
-                claimed.insert(claimed_destination_key(&d));
-                d
+                match claimed.reserve(&dest) {
+                    Ok(destination) if self.strict_destinations && destination != dest => {
+                        tracing::warn!(
+                            file_id = m.file_id,
+                            "[RESTRUCTURE] planned destination became occupied after preflight"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                    Ok(destination) => destination,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            file_id = m.file_id,
+                            "[RESTRUCTURE] could not reserve a collision-free destination"
+                        );
+                        failed += 1;
+                        continue;
+                    }
+                }
             };
 
             // WRITE-AHEAD: the inverse entry (final → original) is durable
@@ -628,12 +2084,17 @@ impl RestructureApply {
             if record_undo && !self.use_symlinks {
                 if journal.is_none() {
                     journal = Some(
-                        UndoJournal::open_truncating(self.undo_journal_path(), &canonical_root)
+                        UndoJournal::open_replacing(self.undo_journal_path(), &canonical_root)
                             .context("undo journal unavailable; aborting before any file moves")?,
                     );
                 }
                 let j = journal.as_mut().expect("journal just opened");
-                match j.append_ahead(m.file_id, &final_dest.to_string_lossy(), &m.source) {
+                match j.append_ahead(
+                    m.file_id,
+                    &final_dest.to_string_lossy(),
+                    &m.source,
+                    source_identity,
+                ) {
                     Ok(prev) => journal_entry_offset = Some(prev),
                     Err(err) => {
                         tracing::error!(
@@ -648,14 +2109,73 @@ impl RestructureApply {
                     }
                 }
             }
+            if record_undo && self.use_symlinks && shortcut_manifest.is_none() {
+                shortcut_manifest = Some(
+                    ShortcutUndoManifest::create(&self.shortcut_undo_dir()?, &canonical_root)
+                        .context(
+                            "shortcut undo manifest unavailable; aborting before creating shortcuts",
+                        )?,
+                );
+            }
 
-            let result = if self.use_symlinks {
-                make_symlink(&m.source, &final_dest)
+            #[cfg(test)]
+            let inject_move_failure = self
+                .fail_next_move_after_journal
+                .swap(false, Ordering::Relaxed);
+            #[cfg(not(test))]
+            let inject_move_failure = false;
+            #[cfg(test)]
+            let inject_symlink_post_create_failure = self
+                .fail_next_symlink_post_create
+                .swap(false, Ordering::Relaxed);
+            #[cfg(not(test))]
+            let inject_symlink_post_create_failure = false;
+            #[cfg(test)]
+            let inject_shortcut_commit_failure = self
+                .fail_next_shortcut_manifest_commit
+                .swap(false, Ordering::Relaxed);
+            #[cfg(not(test))]
+            let inject_shortcut_commit_failure = false;
+            let result = if inject_move_failure {
+                Err(ApplyError::Other(anyhow::anyhow!(
+                    "injected move failure after journal append"
+                )))
+            } else if self.use_symlinks {
+                if let Some(manifest) = shortcut_manifest.as_mut() {
+                    create_recorded_shortcut(
+                        manifest,
+                        m.file_id,
+                        &m.source,
+                        &final_dest,
+                        source_identity,
+                        &canonical_root,
+                        inject_symlink_post_create_failure,
+                        inject_shortcut_commit_failure,
+                    )
+                } else {
+                    make_symlink(
+                        &m.source,
+                        &final_dest,
+                        source_identity,
+                        &canonical_root,
+                        inject_symlink_post_create_failure,
+                    )
+                }
             } else {
                 move_file(&m.source, &final_dest, source_identity, &canonical_root)
+                    .map(|()| SymlinkOutcome::Created)
             };
             match result {
-                Ok(()) => {
+                Ok(SymlinkOutcome::AlreadyPresent) => {}
+                Ok(SymlinkOutcome::Created) => {
+                    if let Some(journal) = journal.as_mut() {
+                        if let Err(error) = journal.commit_replacement() {
+                            tracing::warn!(
+                                ?error,
+                                "[RESTRUCTURE] preserved prior undo journal cleanup will retry before returning"
+                            );
+                        }
+                    }
                     if !self.use_symlinks {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
@@ -702,10 +2222,16 @@ impl RestructureApply {
                     if let (Some(j), Some(prev)) = (journal.as_mut(), journal_entry_offset) {
                         j.rollback_to(prev);
                     }
+                    let shortcut_undo_token =
+                        shortcut_manifest.take().and_then(ShortcutUndoManifest::finish);
                     return Ok(RestructureApplyResult {
                         applied,
                         failed,
                         privilege_error: Some(msg),
+                        cancelled: false,
+                        planned,
+                        remaining: None,
+                        shortcut_undo_token,
                     });
                 }
                 Err(ApplyError::Other(err)) => {
@@ -722,7 +2248,7 @@ impl RestructureApply {
                     // otherwise a later move whose natural destination equals
                     // this (now-free) path is needlessly uniquified to " (2)".
                     if !self.use_symlinks {
-                        claimed.remove(&claimed_destination_key(&final_dest));
+                        claimed.release(&final_dest);
                     }
                     failed += 1;
                 }
@@ -733,9 +2259,19 @@ impl RestructureApply {
         // sync_all covers file metadata on a clean finish. (None during an undo
         // run, record_undo=false, so a CANCELLED undo leaves the ORIGINAL
         // journal intact and the user can re-run undo for the remainder.)
-        if let Some(j) = journal {
-            let _ = j.file.sync_all();
+        if let Some(mut journal) = journal {
+            if journal.first_move_committed && !journal.committed {
+                journal
+                    .commit_replacement()
+                    .context("committing replacement undo journal after a successful move")?;
+            }
+            if journal.committed {
+                let _ = journal.file.sync_all();
+            } else {
+                journal.restore_prior_if_uncommitted();
+            }
         }
+        let shortcut_undo_token = shortcut_manifest.and_then(ShortcutUndoManifest::finish);
 
         // Learn-from-corrections: each applied move is an approved example, so credit
         // its filename tokens toward its destination folder for future plans. One lock
@@ -744,17 +2280,33 @@ impl RestructureApply {
         if record_undo {
             record_feedback_batch(&self.db_conn, &mut applied_pairs);
         }
-        Ok(RestructureApplyResult { applied, failed, privilege_error: None })
+        Ok(RestructureApplyResult {
+            applied,
+            failed,
+            privilege_error: None,
+            cancelled,
+            planned,
+            remaining: cancelled.then(|| total.saturating_sub(processed) as u64),
+            shortcut_undo_token,
+        })
     }
 
     // ── Undo (R2 — reversible "Undo last run") ──────────────────────────────
 
     fn undo_journal_path(&self) -> Option<PathBuf> {
-        self.undo_journal_override.clone().or_else(|| {
+        if let Some(path) = self.undo_journal_override.clone() {
+            return Some(path);
+        }
+        #[cfg(test)]
+        {
+            Some(self.library_root.join(".fileid-test-restructure-undo.ndjson"))
+        }
+        #[cfg(not(test))]
+        {
             crate::paths::trash_log_path()
                 .ok()
                 .and_then(|t| t.parent().map(|d| d.join("restructure_undo.ndjson")))
-        })
+        }
     }
 
     fn open_undo_journal(&self) -> Result<Option<UndoJournalIter>> {
@@ -783,13 +2335,30 @@ impl RestructureApply {
     /// (RESTRUCTURE.md §6 reversibility; macOS parity, audit 2026-07-14)
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
         let Some(path) = self.undo_journal_path() else {
-            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+            return Ok(RestructureApplyResult {
+                applied: 0,
+                failed: 0,
+                privilege_error: None,
+                cancelled: false,
+                planned: Some(0),
+                remaining: None,
+                shortcut_undo_token: None,
+            });
         };
+        recover_prior_undo_journal(&path, &self.library_root)?;
         // One forward pass collects byte spans + validates entries; replay then
         // seeks backward through the spans. No journal-sized String/Vec is
         // retained even for a million-move apply (16 B/entry of offsets).
         let Some(scan) = scan_undo_journal_spans(&path)? else {
-            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+            return Ok(RestructureApplyResult {
+                applied: 0,
+                failed: 0,
+                privilege_error: None,
+                cancelled: false,
+                planned: Some(0),
+                remaining: None,
+                shortcut_undo_token: None,
+            });
         };
         let total = scan.spans.len();
         let recorded_root = scan.library_root.context(
@@ -808,7 +2377,15 @@ impl RestructureApply {
         if total == 0 {
             std::fs::remove_file(&path)
                 .with_context(|| format!("removing empty undo journal {}", path.display()))?;
-            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+            return Ok(RestructureApplyResult {
+                applied: 0,
+                failed: 0,
+                privilege_error: None,
+                cancelled: false,
+                planned: Some(0),
+                remaining: None,
+                shortcut_undo_token: None,
+            });
         }
         let spans = scan.spans;
         let validation_file = File::open(&path)
@@ -832,13 +2409,17 @@ impl RestructureApply {
         // cancelled undo must leave the original intact so the user can re-run it and
         // put the REMAINING files back (already-restored ones stale-skip on the
         // retry). Only a fully-completed (non-cancelled) undo clears it.
-        let mut result = self.apply_iter_with(
+        let result = self.apply_iter_with(
             inverse,
             Some(total),
             false,
         )?;
-        if self.cancel.load(Ordering::Relaxed) && result.failed == 0 {
-            result.failed = 1;
+        #[cfg(test)]
+        if self
+            .cancel_after_undo_replay
+            .swap(false, Ordering::Relaxed)
+        {
+            self.cancel.store(true, Ordering::Relaxed);
         }
         // Clear the journal ONLY on a fully-completed undo: not cancelled AND
         // every inverse move succeeded. A partial failure (a file locked by
@@ -847,7 +2428,7 @@ impl RestructureApply {
         // ones stale-skip on the retry, exactly like the cancel path. Deleting
         // it on partial failure permanently stranded the un-restored files in
         // their group folders with no inverse-move record. (audit 2026-07-08)
-        if !self.cancel.load(Ordering::Relaxed) && result.failed == 0 {
+        if !result.cancelled && result.failed == 0 {
             // Re-read the journal for bounded-memory empty-directory cleanup
             // before deleting it. Repeated parents are harmless: remove_dir is
             // empty-only, and later entries simply observe an absent directory.
@@ -855,6 +2436,156 @@ impl RestructureApply {
             let _ = std::fs::remove_file(&path);
         }
         Ok(result)
+    }
+
+    pub fn undo_shortcuts(&self, token: &str) -> Result<RestructureApplyResult> {
+        let manifest_dir = self.shortcut_undo_dir()?;
+        let manifest_path = shortcut_manifest_path(&manifest_dir, token)?;
+        let receipt_path = shortcut_receipt_path(&manifest_dir, token)?;
+        let canonical_root = canonicalize_safely(&self.library_root)
+            .with_context(|| format!("library root {}", self.library_root.display()))?;
+        if let Some(receipt) = read_shortcut_undo_receipt(&receipt_path)? {
+            anyhow::ensure!(
+                receipt.token == token,
+                "shortcut undo receipt token does not match the requested token"
+            );
+            let recorded_root = canonicalize_safely(Path::new(&receipt.library_root))
+                .context("canonicalizing shortcut undo receipt library root")?;
+            anyhow::ensure!(
+                paths_equal(
+                    &recorded_root.to_string_lossy(),
+                    &canonical_root.to_string_lossy()
+                ),
+                "shortcut undo receipt belongs to a different library root"
+            );
+            return Ok(RestructureApplyResult {
+                applied: receipt.applied,
+                failed: 0,
+                privilege_error: None,
+                cancelled: false,
+                planned: Some(receipt.planned),
+                remaining: None,
+                shortcut_undo_token: None,
+            });
+        }
+        let Some(scan) = scan_shortcut_undo_manifest(&manifest_path)? else {
+            anyhow::bail!("shortcut undo token was not found");
+        };
+
+        anyhow::ensure!(
+            scan.header.token == token,
+            "shortcut undo manifest token does not match the requested token"
+        );
+        let recorded_root = canonicalize_safely(Path::new(&scan.header.library_root))
+            .context("canonicalizing shortcut undo manifest library root")?;
+        anyhow::ensure!(
+            paths_equal(
+                &recorded_root.to_string_lossy(),
+                &canonical_root.to_string_lossy()
+            ),
+            "shortcut undo manifest belongs to a different library root"
+        );
+
+        let manifest_identity = crate::platform::file_identity_from_file(&scan.file)
+            .context("reading shortcut undo manifest identity")?;
+        let recovered_intents = recover_shortcut_intents(&scan, token, &canonical_root)?;
+        let header = scan.header;
+        let entry_total = scan.spans.len();
+        let total = entry_total.saturating_add(recovered_intents as usize);
+        let planned = Some(u64::try_from(total).unwrap_or(u64::MAX));
+        let mut entries = ReverseShortcutUndoIter {
+            file: scan.file,
+            spans: scan.spans,
+            next: entry_total,
+        };
+        let mut applied = recovered_intents;
+        let mut failed = 0u32;
+        let mut processed = recovered_intents as usize;
+        let mut cancelled = false;
+
+        for entry in &mut entries {
+            if self.cancel.load(Ordering::Relaxed) {
+                cancelled = true;
+                break;
+            }
+            let entry = entry?;
+            processed += 1;
+            let removal = remove_recorded_shortcut(
+                Path::new(&entry.link),
+                Path::new(&entry.source),
+                entry.source_identity,
+                entry.link_identity,
+                &canonical_root,
+            )
+            .and_then(|removed| {
+                if removed {
+                    return Ok(true);
+                }
+                let Some(staging_link) = entry.staging_link.as_deref() else {
+                    return Ok(false);
+                };
+                remove_recorded_shortcut(
+                    Path::new(staging_link),
+                    Path::new(&entry.source),
+                    entry.source_identity,
+                    entry.link_identity,
+                    &canonical_root,
+                )
+            });
+            match removal {
+                Ok(_) => applied = applied.saturating_add(1),
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    tracing::warn!(
+                        ?error,
+                        file_id = entry.file_id,
+                        "[RESTRUCTURE] shortcut undo entry could not be safely removed"
+                    );
+                }
+            }
+        }
+
+        if !cancelled && failed == 0 {
+            anyhow::ensure!(
+                crate::platform::file_identity(&manifest_path) == Some(manifest_identity),
+                "shortcut undo manifest changed during replay"
+            );
+            cleanup_shortcut_staging_dir(&header, token, &canonical_root)?;
+            write_shortcut_undo_receipt(
+                &manifest_dir,
+                &ShortcutUndoReceipt {
+                    version: SHORTCUT_UNDO_RECEIPT_VERSION,
+                    library_root: canonical_root.to_string_lossy().into_owned(),
+                    token: token.to_string(),
+                    applied,
+                    planned: u64::try_from(total).unwrap_or(u64::MAX),
+                },
+            )?;
+            if crate::platform::file_identity(&manifest_path) == Some(manifest_identity) {
+                if let Err(error) = std::fs::remove_file(&manifest_path) {
+                    tracing::warn!(
+                        ?error,
+                        "[RESTRUCTURE] completed shortcut manifest cleanup will retry later"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "[RESTRUCTURE] completed shortcut manifest changed before cleanup; receipt remains authoritative"
+                );
+            }
+        }
+
+        Ok(RestructureApplyResult {
+            applied,
+            failed,
+            privilege_error: None,
+            cancelled,
+            planned,
+            remaining: cancelled.then(|| {
+                u64::try_from(total.saturating_sub(processed)).unwrap_or(u64::MAX)
+            }),
+            shortcut_undo_token: None,
+        })
     }
 
     /// Remove the empty group folders an apply created, after its undo restored the
@@ -901,6 +2632,533 @@ fn should_emit_apply_progress(processed: usize, total: usize, interval: usize) -
 enum ApplyError {
     Privilege(String),
     Other(anyhow::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymlinkOutcome {
+    Created,
+    AlreadyPresent,
+}
+
+#[cfg(windows)]
+fn shortcut_link_identity(link: &Path) -> Result<crate::platform::FileIdentity> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let link_ext = crate::util::path_safety::to_extended_length(link);
+    let metadata = std::fs::symlink_metadata(&link_ext).context("reading shortcut metadata")?;
+    anyhow::ensure!(
+        metadata.file_type().is_symlink(),
+        "shortcut path is not a symbolic link"
+    );
+    let wide: Vec<u16> = link_ext
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )?
+    };
+    anyhow::ensure!(!handle.is_invalid(), "opening shortcut without following it");
+    let link_file = unsafe { File::from_raw_handle(handle.0 as _) };
+    let raw_handle = HANDLE(link_file.as_raw_handle());
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            raw_handle,
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>())
+                .context("shortcut attribute structure size")?,
+        )?;
+    }
+    const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    anyhow::ensure!(
+        tag.ReparseTag == IO_REPARSE_TAG_SYMLINK,
+        "shortcut path is not a symbolic link"
+    );
+    crate::platform::file_identity_from_file(&link_file)
+        .context("reading no-follow shortcut identity")
+}
+
+#[cfg(not(windows))]
+fn shortcut_link_identity(link: &Path) -> Result<crate::platform::FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(link).context("reading shortcut metadata")?;
+    anyhow::ensure!(
+        metadata.file_type().is_symlink(),
+        "shortcut path is not a symbolic link"
+    );
+    Ok(crate::platform::FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn remove_recorded_shortcut(
+    link: &Path,
+    source: &Path,
+    expected_source: crate::platform::FileIdentity,
+    expected_link: crate::platform::FileIdentity,
+    canonical_root: &Path,
+) -> Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FileAttributeTagInfo, FileDispositionInfo,
+        GetFileInformationByHandleEx, SetFileInformationByHandle, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_DISPOSITION_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ, DELETE, OPEN_EXISTING,
+    };
+
+    let parent = link.parent().context("shortcut has no parent")?;
+    anyhow::ensure!(
+        ensure_inside_root(parent, canonical_root).is_ok()
+            && !has_reparse_point_in_chain(parent, canonical_root),
+        "shortcut path is not safely contained by the selected library root"
+    );
+    let link_ext = crate::util::path_safety::to_extended_length(link);
+    let metadata = match std::fs::symlink_metadata(&link_ext) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading shortcut metadata"),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_symlink(),
+        "recorded shortcut path is occupied by a non-shortcut"
+    );
+    anyhow::ensure!(
+        crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(link, source)?,
+        "recorded shortcut no longer points to the original file"
+    );
+
+    let expected_parent = crate::platform::file_identity(parent)
+        .context("reading shortcut parent identity")?;
+    let parent_handle = crate::commands::trash::open_windows_directory_lock(parent)?;
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&parent_handle) == Some(expected_parent)
+            && crate::platform::file_identity(parent) == Some(expected_parent),
+        "shortcut parent changed during validation"
+    );
+    let held_parent = crate::commands::trash::windows_handle_path(&parent_handle)?;
+    anyhow::ensure!(
+        ci_starts_with(&held_parent, canonical_root),
+        "shortcut parent escaped the selected library root"
+    );
+
+    let wide: Vec<u16> = link_ext
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            DELETE.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )?
+    };
+    anyhow::ensure!(!handle.is_invalid(), "opening recorded shortcut");
+    let link_file = unsafe { File::from_raw_handle(handle.0 as _) };
+    let raw_handle = HANDLE(link_file.as_raw_handle());
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            raw_handle,
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>())
+                .context("shortcut attribute structure size")?,
+        )?;
+    }
+    const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    anyhow::ensure!(
+        tag.ReparseTag == IO_REPARSE_TAG_SYMLINK
+            && crate::platform::file_identity_from_file(&link_file) == Some(expected_link),
+        "recorded shortcut path is not the original symbolic link"
+    );
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&parent_handle) == Some(expected_parent)
+            && crate::platform::file_identity(parent) == Some(expected_parent)
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(link, source)?,
+        "recorded shortcut changed during validation"
+    );
+
+    let disposition = FILE_DISPOSITION_INFO {
+        DeleteFile: BOOLEAN(1),
+    };
+    unsafe {
+        SetFileInformationByHandle(
+            raw_handle,
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                .context("shortcut disposition structure size")?,
+        )?;
+    }
+    drop(link_file);
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn remove_recorded_shortcut(
+    link: &Path,
+    source: &Path,
+    expected_source: crate::platform::FileIdentity,
+    expected_link: crate::platform::FileIdentity,
+    canonical_root: &Path,
+) -> Result<bool> {
+    let parent = link.parent().context("shortcut has no parent")?;
+    ensure_inside_root(parent, canonical_root)?;
+    let metadata = match std::fs::symlink_metadata(link) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("reading shortcut metadata"),
+    };
+    anyhow::ensure!(
+        metadata.file_type().is_symlink(),
+        "recorded shortcut path is occupied by a non-shortcut"
+    );
+    anyhow::ensure!(
+        shortcut_link_identity(link)? == expected_link
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(link, source)?,
+        "recorded shortcut is no longer the original link to the original file"
+    );
+    anyhow::ensure!(
+        shortcut_link_identity(link)? == expected_link,
+        "recorded shortcut changed during validation"
+    );
+    std::fs::remove_file(link).context("removing recorded shortcut")?;
+    Ok(true)
+}
+
+fn cleanup_prepared_shortcut(
+    manifest: &ShortcutUndoManifest,
+    prepared: &PreparedShortcutIntent,
+    expected_link: crate::platform::FileIdentity,
+    canonical_root: &Path,
+) -> Result<()> {
+    remove_recorded_shortcut(
+        Path::new(&prepared.intent.staging_link),
+        Path::new(&prepared.intent.source),
+        prepared.intent.source_identity,
+        expected_link,
+        canonical_root,
+    )?;
+    manifest.complete_intent(prepared)
+}
+
+fn create_recorded_shortcut(
+    manifest: &mut ShortcutUndoManifest,
+    file_id: i64,
+    source: &str,
+    final_link: &Path,
+    source_identity: crate::platform::FileIdentity,
+    canonical_root: &Path,
+    force_post_create_validation_failure: bool,
+    force_manifest_commit_failure: bool,
+) -> std::result::Result<SymlinkOutcome, ApplyError> {
+    let source_path = Path::new(source);
+    if let Ok(metadata) = std::fs::symlink_metadata(final_link) {
+        if metadata.file_type().is_symlink()
+            && crate::platform::file_identity(source_path) == Some(source_identity)
+            && symlink_target_matches(final_link, source_path).unwrap_or(false)
+        {
+            return Ok(SymlinkOutcome::AlreadyPresent);
+        }
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut destination is already occupied"
+        )));
+    }
+
+    let mut prepared = manifest
+        .prepare_intent(file_id, source, final_link, source_identity)
+        .map_err(ApplyError::Other)?;
+    let staged_link = PathBuf::from(&prepared.intent.staging_link);
+    match make_symlink(
+        source,
+        &staged_link,
+        source_identity,
+        canonical_root,
+        force_post_create_validation_failure,
+    ) {
+        Ok(SymlinkOutcome::Created) => {}
+        Ok(SymlinkOutcome::AlreadyPresent) => {
+            return Err(ApplyError::Other(anyhow::anyhow!(
+                "shortcut staging path was unexpectedly occupied; recovery evidence was preserved"
+            )));
+        }
+        Err(error) => {
+            if std::fs::symlink_metadata(&staged_link).is_err() {
+                manifest
+                    .complete_intent(&prepared)
+                    .map_err(ApplyError::Other)?;
+            }
+            return Err(error);
+        }
+    }
+
+    let link_identity = shortcut_link_identity(&staged_link).map_err(|error| {
+        ApplyError::Other(error.context(
+            "created staged shortcut identity could not be read; recovery evidence was preserved",
+        ))
+    })?;
+    if let Err(error) = manifest.record_staged_identity(&mut prepared, link_identity) {
+        return match cleanup_prepared_shortcut(
+            manifest,
+            &prepared,
+            link_identity,
+            canonical_root,
+        ) {
+            Ok(()) => Err(ApplyError::Other(error)),
+            Err(cleanup_error) => Err(ApplyError::Other(error.context(format!(
+                "recording the staged shortcut identity failed and identity-bound cleanup also failed: {cleanup_error:#}"
+            )))),
+        };
+    }
+
+    let commit = if force_manifest_commit_failure {
+        Err(anyhow::anyhow!(
+            "injected shortcut manifest commit failure"
+        ))
+    } else {
+        manifest.append_committed(
+            file_id,
+            source,
+            final_link,
+            Some(&staged_link),
+            source_identity,
+            link_identity,
+        )
+    };
+    let previous = match commit {
+        Ok(previous) => previous,
+        Err(error) => {
+            return match cleanup_prepared_shortcut(
+                manifest,
+                &prepared,
+                link_identity,
+                canonical_root,
+            ) {
+                Ok(()) => Err(ApplyError::Other(error)),
+                Err(cleanup_error) => Err(ApplyError::Other(error.context(format!(
+                    "shortcut undo commit failed and identity-bound cleanup also failed: {cleanup_error:#}"
+                )))),
+            };
+        }
+    };
+
+    if let Err(error) = rename_staged_shortcut(
+        &staged_link,
+        final_link,
+        source_path,
+        source_identity,
+        link_identity,
+        canonical_root,
+    ) {
+        let staged_is_original = shortcut_link_identity(&staged_link)
+            .is_ok_and(|identity| identity == link_identity)
+            && symlink_target_matches(&staged_link, source_path).unwrap_or(false);
+        if staged_is_original {
+            match cleanup_prepared_shortcut(
+                manifest,
+                &prepared,
+                link_identity,
+                canonical_root,
+            ) {
+                Ok(()) => {
+                    manifest.rollback_committed(previous);
+                    return Err(ApplyError::Other(error));
+                }
+                Err(cleanup_error) => {
+                    return Err(ApplyError::Other(error.context(format!(
+                        "staged shortcut rename failed and identity-bound cleanup also failed: {cleanup_error:#}"
+                    ))));
+                }
+            }
+        }
+        return Err(ApplyError::Other(error.context(
+            "staged shortcut rename was ambiguous; durable recovery evidence was preserved",
+        )));
+    }
+
+    manifest.complete_intent(&prepared).map_err(|error| {
+        ApplyError::Other(error.context(
+            "published shortcut is durable but its completed intent could not be removed",
+        ))
+    })?;
+    Ok(SymlinkOutcome::Created)
+}
+
+#[cfg(windows)]
+fn rename_staged_shortcut(
+    staged_link: &Path,
+    final_link: &Path,
+    source: &Path,
+    expected_source: crate::platform::FileIdentity,
+    expected_link: crate::platform::FileIdentity,
+    canonical_root: &Path,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_READ, DELETE, OPEN_EXISTING,
+    };
+
+    let staged_parent = staged_link.parent().context("staged shortcut has no parent")?;
+    let final_parent = final_link.parent().context("shortcut destination has no parent")?;
+    anyhow::ensure!(
+        ensure_inside_root(staged_parent, canonical_root).is_ok()
+            && ensure_inside_root(final_parent, canonical_root).is_ok()
+            && !has_reparse_point_in_chain(staged_parent, canonical_root)
+            && !has_reparse_point_in_chain(final_parent, canonical_root),
+        "staged shortcut rename escaped the selected library root"
+    );
+    anyhow::ensure!(
+        crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(staged_link, source)?,
+        "staged shortcut no longer points to the original source"
+    );
+
+    let staged_ext = crate::util::path_safety::to_extended_length(staged_link);
+    let wide: Vec<u16> = staged_ext
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            DELETE.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )?
+    };
+    anyhow::ensure!(!handle.is_invalid(), "opening staged shortcut");
+    let staged_file = unsafe { File::from_raw_handle(handle.0 as _) };
+    let raw_handle = HANDLE(staged_file.as_raw_handle());
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            raw_handle,
+            FileAttributeTagInfo,
+            (&raw mut tag).cast(),
+            u32::try_from(std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>())?,
+        )?;
+    }
+    const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    anyhow::ensure!(
+        tag.ReparseTag == IO_REPARSE_TAG_SYMLINK
+            && crate::platform::file_identity_from_file(&staged_file) == Some(expected_link),
+        "staged shortcut is not the recorded symbolic link"
+    );
+
+    let expected_parent = crate::platform::file_identity(final_parent)
+        .context("reading shortcut destination parent identity")?;
+    let parent_handle = crate::commands::trash::open_windows_directory_lock(final_parent)?;
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&parent_handle) == Some(expected_parent)
+            && crate::platform::file_identity(final_parent) == Some(expected_parent)
+            && ci_starts_with(
+                &crate::commands::trash::windows_handle_path(&parent_handle)?,
+                canonical_root
+            ),
+        "shortcut destination parent changed during staged rename"
+    );
+    let destination_wide: Vec<u16> = final_link
+        .file_name()
+        .context("shortcut destination has no filename")?
+        .encode_wide()
+        .collect();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let byte_len = header + destination_wide.len() * std::mem::size_of::<u16>();
+    let mut storage = vec![0u64; byte_len.div_ceil(std::mem::size_of::<u64>())];
+    let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        (*rename).Anonymous = FILE_RENAME_INFO_0 {
+            ReplaceIfExists: BOOLEAN(0),
+        };
+        (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
+        (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
+        std::ptr::copy_nonoverlapping(
+            destination_wide.as_ptr(),
+            std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(),
+            destination_wide.len(),
+        );
+        crate::commands::trash::nt_rename_relative(
+            raw_handle,
+            rename.cast(),
+            u32::try_from(byte_len)?,
+        )?;
+    }
+    anyhow::ensure!(
+        crate::platform::file_identity_from_file(&staged_file) == Some(expected_link)
+            && shortcut_link_identity(final_link)? == expected_link
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(final_link, source)?,
+        "published shortcut changed during staged rename"
+    );
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn rename_staged_shortcut(
+    staged_link: &Path,
+    final_link: &Path,
+    source: &Path,
+    expected_source: crate::platform::FileIdentity,
+    expected_link: crate::platform::FileIdentity,
+    canonical_root: &Path,
+) -> Result<()> {
+    let staged_parent = staged_link.parent().context("staged shortcut has no parent")?;
+    let final_parent = final_link.parent().context("shortcut destination has no parent")?;
+    ensure_inside_root(staged_parent, canonical_root)?;
+    ensure_inside_root(final_parent, canonical_root)?;
+    anyhow::ensure!(
+        shortcut_link_identity(staged_link)? == expected_link
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(staged_link, source)?,
+        "staged shortcut changed before rename"
+    );
+    crate::util::rename_no_replace(staged_link, final_link)
+        .context("publishing staged shortcut")?;
+    anyhow::ensure!(
+        shortcut_link_identity(final_link)? == expected_link
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && symlink_target_matches(final_link, source)?,
+        "published shortcut changed during staged rename"
+    );
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -984,45 +3242,149 @@ fn move_file(
 }
 
 #[cfg(windows)]
-fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+fn make_symlink(
+    src: &str,
+    dst: &Path,
+    expected_source: crate::platform::FileIdentity,
+    canonical_root: &Path,
+    force_post_create_validation_failure: bool,
+) -> std::result::Result<SymlinkOutcome, ApplyError> {
     use std::os::windows::ffi::OsStrExt;
-    // \\?\ prefix both operands so the link can be created (and its target
-    // resolved) past MAX_PATH (260) — same rationale as move_file.
-    let src_ext = crate::util::path_safety::to_extended_length(Path::new(src));
-    let dst_ext = crate::util::path_safety::to_extended_length(dst);
-    let src_w: Vec<u16> = src_ext
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let dst_w: Vec<u16> = dst_ext
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-    let r = unsafe {
-        CreateSymbolicLinkW(
-            PCWSTR(dst_w.as_ptr()),
-            PCWSTR(src_w.as_ptr()),
-            SYMBOLIC_LINK_FLAGS(flags.0),
-        )
+    use std::os::windows::io::FromRawHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    if r.as_bool() {
-        Ok(())
-    } else {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(1314) {
-            // ERROR_PRIVILEGE_NOT_HELD
+
+    let source = Path::new(src);
+    let Some(parent) = dst.parent() else {
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut destination has no parent"
+        )));
+    };
+    let result = (|| -> Result<SymlinkOutcome> {
+        anyhow::ensure!(
+            ensure_inside_root(dst, canonical_root).is_ok()
+                && !has_reparse_point_in_chain(parent, canonical_root),
+            "shortcut destination is not safely contained by the selected library root"
+        );
+        anyhow::ensure!(
+            crate::platform::file_identity(source) == Some(expected_source),
+            "shortcut source changed during validation"
+        );
+
+        let expected_parent = crate::platform::file_identity(parent)
+            .context("read shortcut destination parent identity")?;
+        let parent_handle = crate::commands::trash::open_windows_directory_lock(parent)?;
+        anyhow::ensure!(
+            crate::platform::file_identity_from_file(&parent_handle) == Some(expected_parent)
+                && crate::platform::file_identity(parent) == Some(expected_parent),
+            "shortcut destination parent changed during validation"
+        );
+        let held_parent = crate::commands::trash::windows_handle_path(&parent_handle)?;
+        anyhow::ensure!(
+            ci_starts_with(&held_parent, canonical_root),
+            "shortcut destination parent escaped the selected library root"
+        );
+
+        let src_ext = crate::util::path_safety::to_extended_length(source);
+        let mut source_wide: Vec<u16> = src_ext.as_os_str().encode_wide().collect();
+        source_wide.push(0);
+        let source_handle = unsafe {
+            CreateFileW(
+                PCWSTR(source_wide.as_ptr()),
+                FILE_READ_ATTRIBUTES.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )?
+        };
+        anyhow::ensure!(!source_handle.is_invalid(), "open shortcut source");
+        let source_file = unsafe { File::from_raw_handle(source_handle.0 as _) };
+        anyhow::ensure!(
+            crate::platform::file_identity_from_file(&source_file) == Some(expected_source),
+            "shortcut source changed while acquiring its lock"
+        );
+
+        if let Ok(metadata) =
+            std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(dst))
+        {
+            if metadata.file_type().is_symlink() && symlink_target_matches(dst, source)? {
+                return Ok(SymlinkOutcome::AlreadyPresent);
+            }
+            anyhow::bail!("shortcut destination is already occupied");
+        }
+
+        let dst_ext = crate::util::path_safety::to_extended_length(dst);
+        let src_w: Vec<u16> = src_ext
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let dst_w: Vec<u16> = dst_ext
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let flags = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+        let created = unsafe {
+            CreateSymbolicLinkW(
+                PCWSTR(dst_w.as_ptr()),
+                PCWSTR(src_w.as_ptr()),
+                SYMBOLIC_LINK_FLAGS(flags.0),
+            )
+        };
+        if !created.as_bool() {
+            let error = std::io::Error::last_os_error();
+            if std::fs::symlink_metadata(&dst_ext)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && symlink_target_matches(dst, source).unwrap_or(false)
+            {
+                return Ok(SymlinkOutcome::AlreadyPresent);
+            }
+            return Err(anyhow::Error::new(error));
+        }
+
+        let valid_after_create = crate::platform::file_identity_from_file(&parent_handle)
+            == Some(expected_parent)
+            && crate::platform::file_identity(parent) == Some(expected_parent)
+            && !has_reparse_point_in_chain(parent, canonical_root)
+            && crate::platform::file_identity_from_file(&source_file) == Some(expected_source)
+            && crate::platform::file_identity(source) == Some(expected_source)
+            && std::fs::symlink_metadata(&dst_ext)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && symlink_target_matches(dst, source).unwrap_or(false)
+            && !force_post_create_validation_failure;
+        if !valid_after_create {
+            if std::fs::symlink_metadata(&dst_ext)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && symlink_target_matches(dst, source).unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&dst_ext);
+            }
+            anyhow::bail!("shortcut validation changed during creation; the new link was removed");
+        }
+        Ok(SymlinkOutcome::Created)
+    })();
+
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(error)
+            if error
+                .chain()
+                .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .any(|error| error.raw_os_error() == Some(1314)) =>
+        {
             Err(ApplyError::Privilege(
                 "Symlink mode needs Developer Mode enabled \
                  (Settings → Privacy & security → For developers) \
                  OR an elevated FileID. Try the default 'real move' mode instead."
                     .into(),
             ))
-        } else {
-            Err(ApplyError::Other(anyhow::Error::msg(err.to_string())))
         }
+        Err(error) => Err(ApplyError::Other(error)),
     }
 }
 
@@ -1060,18 +3422,51 @@ fn move_file(
 }
 
 #[cfg(not(windows))]
-fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+fn make_symlink(
+    src: &str,
+    dst: &Path,
+    expected_source: crate::platform::FileIdentity,
+    canonical_root: &Path,
+    force_post_create_validation_failure: bool,
+) -> std::result::Result<SymlinkOutcome, ApplyError> {
     // The app's "use shortcuts/symlinks instead of moving" option. `dst` is the
     // link to create, `src` the existing target it points at — same operand
     // order as the Windows CreateSymbolicLinkW(dst, src) path. A pre-existing
     // `dst` makes symlink() fail naturally (no clobber). Unix symlink creation
     // is unprivileged, so there is no ApplyError::Privilege arm here.
+    if crate::platform::file_identity(Path::new(src)) != Some(expected_source) {
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut source changed during validation"
+        )));
+    }
+    if ensure_inside_root(dst, canonical_root).is_err() {
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut destination is outside the selected library root"
+        )));
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(dst) {
+        if metadata.file_type().is_symlink()
+            && symlink_target_matches(dst, Path::new(src)).unwrap_or(false)
+        {
+            return Ok(SymlinkOutcome::AlreadyPresent);
+        }
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut destination is already occupied"
+        )));
+    }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
     }
     std::os::unix::fs::symlink(src, dst)
-        .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))
+        .map_err(|e| ApplyError::Other(anyhow::Error::msg(e.to_string())))?;
+    if force_post_create_validation_failure {
+        let _ = std::fs::remove_file(dst);
+        return Err(ApplyError::Other(anyhow::anyhow!(
+            "shortcut validation changed during creation; the new link was removed"
+        )));
+    }
+    Ok(SymlinkOutcome::Created)
 }
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
@@ -1158,7 +3553,39 @@ fn paths_equal(a: &str, b: &str) -> bool {
 /// destination already claimed by an earlier move in this batch, by appending
 /// ` (2)`, ` (3)`, … before the extension — within the same parent so the
 /// containment/reparse checks already performed on `dest` still hold.
-fn unique_destination(dest: &Path, claimed: &HashSet<ClaimedDestination>) -> PathBuf {
+#[cfg(test)]
+fn unique_destination(
+    dest: &Path,
+    claimed: &HashSet<ClaimedDestination>,
+) -> Result<PathBuf> {
+    unique_destination_from(dest, claimed, 2).map(|(destination, _)| destination)
+}
+
+fn resolved_symlink_target(link: &Path) -> Result<PathBuf> {
+    let target = std::fs::read_link(crate::util::path_safety::to_extended_length(link))
+        .with_context(|| format!("reading shortcut target {}", link.display()))?;
+    if target.is_absolute() {
+        Ok(target)
+    } else {
+        Ok(link
+            .parent()
+            .context("shortcut has no parent")?
+            .join(target))
+    }
+}
+
+fn symlink_target_matches(link: &Path, source: &Path) -> Result<bool> {
+    let target = resolved_symlink_target(link)?;
+    let target = canonicalize_safely(&target)?;
+    let source = canonicalize_safely(source)?;
+    Ok(claimed_destination_key(&target) == claimed_destination_key(&source))
+}
+
+fn unique_destination_from(
+    dest: &Path,
+    claimed: &HashSet<ClaimedDestination>,
+    start_suffix: u64,
+) -> Result<(PathBuf, u64)> {
     let occupied = |p: &Path| {
         // \\?\ prefix so a deep already-occupied destination is detected rather
         // than mis-probed as free (std::fs silently fails past MAX_PATH).
@@ -1168,7 +3595,7 @@ fn unique_destination(dest: &Path, claimed: &HashSet<ClaimedDestination>) -> Pat
             || std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(p)).is_ok()
     };
     if !occupied(dest) {
-        return dest.to_path_buf();
+        return Ok((dest.to_path_buf(), start_suffix.max(2)));
     }
     let parent = dest.parent().unwrap_or_else(|| Path::new(""));
     let stem = dest
@@ -1176,18 +3603,23 @@ fn unique_destination(dest: &Path, claimed: &HashSet<ClaimedDestination>) -> Pat
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let ext = dest.extension().map(|e| e.to_string_lossy().into_owned());
-    for n in 2..=9999u32 {
+    let mut n = start_suffix.max(2);
+    loop {
         let name = match &ext {
             Some(e) => format!("{stem} ({n}).{e}"),
             None => format!("{stem} ({n})"),
         };
         let candidate = parent.join(name);
         if !occupied(&candidate) {
-            return candidate;
+            let next = n
+                .checked_add(1)
+                .context("destination suffix space exhausted")?;
+            return Ok((candidate, next));
         }
+        n = n
+            .checked_add(1)
+            .context("destination suffix space exhausted")?;
     }
-    // Exhausted — return the original; the no-REPLACE move then fails safely.
-    dest.to_path_buf()
 }
 
 /// Persist one bounded feedback batch, then release its path strings. Keeping
@@ -1515,6 +3947,9 @@ mod tests {
 
         assert_eq!(res.applied, 0, "cancelled before any move applies");
         assert_eq!(res.failed, 0, "a cancel is not a failure");
+        assert!(res.cancelled);
+        assert_eq!(res.planned, Some(1));
+        assert_eq!(res.remaining, Some(1));
         assert!(src.exists(), "source untouched by a cancelled apply");
         assert!(!root.join("Sorted").join("a.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -1715,16 +4150,16 @@ mod tests {
         let dest = tmp.join("audio.mp3");
         // Nothing assigned, file absent → original name.
         let assigned0: HashSet<ClaimedDestination> = HashSet::new();
-        assert_eq!(unique_destination(&dest, &assigned0), dest);
+        assert_eq!(unique_destination(&dest, &assigned0).unwrap(), dest);
         // A second move targeting the same name in-batch → " (2)".
         let mut assigned1: HashSet<ClaimedDestination> = HashSet::new();
         assigned1.insert(claimed_destination_key(&dest));
-        let d2 = unique_destination(&dest, &assigned1);
+        let d2 = unique_destination(&dest, &assigned1).unwrap();
         assert_eq!(d2, tmp.join("audio (2).mp3"));
         assert_ne!(d2, dest);
         // A file already on disk also forces disambiguation.
         std::fs::write(&dest, b"x").unwrap();
-        let d3 = unique_destination(&dest, &assigned0);
+        let d3 = unique_destination(&dest, &assigned0).unwrap();
         assert_eq!(d3, tmp.join("audio (2).mp3"));
         let _ = std::fs::remove_file(&dest);
     }
@@ -1748,16 +4183,22 @@ mod tests {
 
         // Free → returned as-is.
         let empty = HashSet::new();
-        assert_eq!(unique_destination(&dest, &empty), dest);
+        assert_eq!(unique_destination(&dest, &empty).unwrap(), dest);
 
         // On disk → bumped to " (2)".
         std::fs::write(&dest, b"x").unwrap();
-        assert_eq!(unique_destination(&dest, &empty), dir.join("IMG (2).jpg"));
+        assert_eq!(
+            unique_destination(&dest, &empty).unwrap(),
+            dir.join("IMG (2).jpg")
+        );
 
         // " (2)" also claimed this batch → bumped to " (3)".
         let mut claimed = HashSet::new();
         claimed.insert(claimed_destination_key(&dir.join("IMG (2).jpg")));
-        assert_eq!(unique_destination(&dest, &claimed), dir.join("IMG (3).jpg"));
+        assert_eq!(
+            unique_destination(&dest, &claimed).unwrap(),
+            dir.join("IMG (3).jpg")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1780,11 +4221,30 @@ mod tests {
         // Second move targets the case-variant "Photo.jpg" — same file on a
         // case-insensitive FS → must be detected and bumped to " (2)".
         assert_eq!(
-            unique_destination(&dir.join("Photo.jpg"), &claimed),
+            unique_destination(&dir.join("Photo.jpg"), &claimed).unwrap(),
             dir.join("Photo (2).jpg")
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn destination_claims_scale_past_ten_thousand_identical_basenames() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-uniqdest-10k-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let destination = dir.join("Report.pdf");
+        let mut claims = DestinationClaims::default();
+        let mut reserved = PathBuf::new();
+
+        for _ in 0..10_001 {
+            reserved = claims.reserve(&destination).unwrap();
+        }
+
+        assert_eq!(reserved, dir.join("Report (10001).pdf"));
+        assert_eq!(claims.claimed.len(), 10_001);
     }
 
     fn move_fixture(file_id: i64, source: &str, destination: &str) -> RestructureMove {
@@ -1807,6 +4267,52 @@ mod tests {
             params![id, path, file_ref],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn strict_apply_never_invents_a_destination_after_preflight() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-strict-race-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let incoming = root.join("incoming");
+        let sorted = root.join("Sorted");
+        std::fs::create_dir_all(&incoming).unwrap();
+        std::fs::create_dir_all(&sorted).unwrap();
+        let source = incoming.join("photo.jpg");
+        let destination = sorted.join("photo.jpg");
+        std::fs::write(&source, b"planned").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &source.to_string_lossy());
+        let journal_path = root.join("undo.json");
+        let apply = RestructureApply::new(
+            Arc::new(Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_strict_destinations()
+        .with_undo_journal_path(journal_path.clone());
+        let move_ = move_fixture(
+            1,
+            &source.to_string_lossy(),
+            &destination.to_string_lossy(),
+        );
+        {
+            let mut preflight = apply.begin_forward_preflight().unwrap();
+            preflight.validate(&move_).unwrap();
+        }
+
+        std::fs::write(&destination, b"raced").unwrap();
+        let result = apply.apply(&[move_]).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert_eq!(std::fs::read(&source).unwrap(), b"planned");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"raced");
+        assert!(!sorted.join("photo (2).jpg").exists());
+        assert!(!journal_path.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2058,6 +4564,322 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn undo_ignores_a_valid_but_unterminated_trailing_entry() {
+        let root = undo_fixture_root("undo-valid-torn");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        let dst = root.join("Sorted").join("photo.jpg");
+        std::fs::write(&src, b"PIC").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+        apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        let phantom = serde_json::json!({
+            "file_id": 9,
+            "from": root.join("Sorted").join("phantom.jpg"),
+            "to": root.join("phantom.jpg")
+        })
+        .to_string();
+        {
+            use std::io::Write as _;
+            let mut file = OpenOptions::new().append(true).open(&journal).unwrap();
+            file.write_all(phantom.as_bytes()).unwrap();
+        }
+
+        let undo = apply.undo_last().unwrap();
+
+        assert_eq!((undo.applied, undo.failed), (1, 0));
+        assert!(src.exists());
+        assert!(!dst.exists());
+        assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restart_recovers_prior_journal_when_replacement_never_committed() {
+        let root = undo_fixture_root("undo-prior-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        let dst = root.join("Photos").join("photo.jpg");
+        std::fs::write(&src, b"JPEG").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+        let result = apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        assert_eq!((result.applied, result.failed), (1, 0));
+
+        let replacement =
+            UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap();
+        drop(replacement);
+        assert_eq!(
+            scan_undo_journal_spans(&journal)
+                .unwrap()
+                .unwrap()
+                .spans
+                .len(),
+            0
+        );
+        assert_eq!(prior_undo_journal_backups(&journal).unwrap().len(), 1);
+
+        let undo = apply.undo_last().unwrap();
+
+        assert_eq!((undo.applied, undo.failed), (1, 0));
+        assert!(src.exists());
+        assert!(!dst.exists());
+        assert!(!journal.exists());
+        assert!(prior_undo_journal_backups(&journal).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restart_keeps_the_current_journal_when_its_first_move_reached_disk() {
+        let root = undo_fixture_root("undo-current-committed-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let prior_source = root.join("prior.jpg");
+        let prior_destination = root.join("Photos").join("prior.jpg");
+        let current_source = root.join("current.jpg");
+        let current_destination = root.join("Photos").join("current.jpg");
+        std::fs::write(&prior_source, b"PRIOR").unwrap();
+        std::fs::write(&current_source, b"CURRENT").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &prior_source.to_string_lossy());
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(
+            Arc::new(Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_undo_journal_path(journal.clone());
+        apply
+            .apply(&[move_fixture(
+                1,
+                &prior_source.to_string_lossy(),
+                &prior_destination.to_string_lossy(),
+            )])
+            .unwrap();
+
+        let current_identity = crate::platform::file_identity(&current_source).unwrap();
+        let mut replacement =
+            UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap();
+        replacement
+            .append_ahead(
+                2,
+                &current_destination.to_string_lossy(),
+                &current_source.to_string_lossy(),
+                current_identity,
+            )
+            .unwrap();
+        std::fs::create_dir_all(current_destination.parent().unwrap()).unwrap();
+        crate::util::rename_no_replace(&current_source, &current_destination).unwrap();
+        drop(replacement);
+
+        recover_prior_undo_journal(&journal, &root).unwrap();
+
+        assert!(prior_undo_journal_backups(&journal).unwrap().is_empty());
+        assert_eq!(
+            scan_undo_journal_spans(&journal)
+                .unwrap()
+                .unwrap()
+                .spans
+                .len(),
+            1
+        );
+        assert!(!current_source.exists());
+        assert_eq!(
+            crate::platform::file_identity(&current_destination),
+            Some(current_identity)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restart_restores_the_prior_journal_when_write_ahead_move_never_started() {
+        let root = undo_fixture_root("undo-current-uncommitted-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let prior_source = root.join("prior.jpg");
+        let prior_destination = root.join("Photos").join("prior.jpg");
+        let current_source = root.join("current.jpg");
+        let current_destination = root.join("Photos").join("current.jpg");
+        std::fs::write(&prior_source, b"PRIOR").unwrap();
+        std::fs::write(&current_source, b"CURRENT").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &prior_source.to_string_lossy());
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(
+            Arc::new(Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_undo_journal_path(journal.clone());
+        apply
+            .apply(&[move_fixture(
+                1,
+                &prior_source.to_string_lossy(),
+                &prior_destination.to_string_lossy(),
+            )])
+            .unwrap();
+        let prior_identity = crate::platform::file_identity(&journal).unwrap();
+
+        let current_identity = crate::platform::file_identity(&current_source).unwrap();
+        let mut replacement =
+            UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap();
+        replacement
+            .append_ahead(
+                2,
+                &current_destination.to_string_lossy(),
+                &current_source.to_string_lossy(),
+                current_identity,
+            )
+            .unwrap();
+        drop(replacement);
+
+        recover_prior_undo_journal(&journal, &root).unwrap();
+
+        assert!(prior_undo_journal_backups(&journal).unwrap().is_empty());
+        assert_eq!(
+            crate::platform::file_identity(&journal),
+            Some(prior_identity)
+        );
+        assert!(current_source.exists());
+        assert!(!current_destination.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recovery_fails_closed_when_current_and_prior_journals_both_have_work() {
+        let root = undo_fixture_root("undo-prior-ambiguous");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        let dst = root.join("Photos").join("photo.jpg");
+        std::fs::write(&src, b"JPEG").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+        apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+
+        let mut replacement =
+            UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap();
+        replacement
+            .append_ahead(
+                2,
+                &root.join("New").join("other.jpg").to_string_lossy(),
+                &root.join("other.jpg").to_string_lossy(),
+                crate::platform::file_identity(&dst).unwrap(),
+            )
+            .unwrap();
+        drop(replacement);
+
+        let error = apply.undo_last().unwrap_err();
+
+        assert!(error.to_string().contains("both contain work"));
+        assert!(journal.exists());
+        assert_eq!(prior_undo_journal_backups(&journal).unwrap().len(), 1);
+        assert!(dst.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn recovery_rejects_a_preserved_journal_from_another_root() {
+        let root_a = undo_fixture_root("undo-prior-owner-a");
+        let root_b = undo_fixture_root("undo-prior-owner-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let journal = root_a.join("undo.ndjson");
+        drop(UndoJournal::open_replacing(Some(journal.clone()), &root_a).unwrap());
+        drop(UndoJournal::open_replacing(Some(journal.clone()), &root_b).unwrap());
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let wrong_root = RestructureApply::new(
+            Arc::new(Mutex::new(conn)),
+            root_b.clone(),
+            false,
+        )
+        .with_undo_journal_path(journal.clone());
+
+        let error = wrong_root.undo_last().unwrap_err();
+
+        assert!(error.to_string().contains("different library root"));
+        assert!(journal.exists());
+        assert_eq!(prior_undo_journal_backups(&journal).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root_a);
+        let _ = std::fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn first_failed_move_restores_the_prior_undo_journal() {
+        let root = undo_fixture_root("undo-preserve-first-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let first_source = root.join("first.txt");
+        let second_source = root.join("second.txt");
+        std::fs::write(&first_source, b"FIRST").unwrap();
+        std::fs::write(&second_source, b"SECOND").unwrap();
+        let first_destination = root.join("Sorted").join("first.txt");
+        let second_destination = root.join("Sorted").join("second.txt");
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &first_source.to_string_lossy());
+        insert_file_row(&conn, 2, &second_source.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+
+        let first_apply = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_undo_journal_path(journal.clone());
+        let first = first_apply
+            .apply(&[move_fixture(
+                1,
+                &first_source.to_string_lossy(),
+                &first_destination.to_string_lossy(),
+            )])
+            .unwrap();
+        assert_eq!((first.applied, first.failed), (1, 0));
+        let prior_journal = std::fs::read(&journal).unwrap();
+
+        let failed_apply = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_undo_journal_path(journal.clone())
+            .with_fail_next_move_after_journal();
+        let failed = failed_apply
+            .apply(&[move_fixture(
+                2,
+                &second_source.to_string_lossy(),
+                &second_destination.to_string_lossy(),
+            )])
+            .unwrap();
+
+        assert_eq!((failed.applied, failed.failed), (0, 1));
+        assert_eq!(std::fs::read(&journal).unwrap(), prior_journal);
+        assert!(second_source.exists());
+        assert!(!second_destination.exists());
+        let undo = failed_apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (1, 0));
+        assert!(first_source.exists());
+        assert!(!first_destination.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// An apply that journals nothing (here: a pure no-op move) must NOT
     /// truncate the previous run's journal — that undo history is the user's
     /// only path back. (audit 2026-07-14)
@@ -2212,7 +5034,7 @@ mod tests {
         crate::db::migrations::apply(&conn).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
-        drop(UndoJournal::open_truncating(Some(journal.clone()), &root).unwrap());
+        drop(UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap());
 
         let result = RestructureApply::new(db, root.clone(), false)
             .with_undo_journal_path(journal.clone())
@@ -2249,9 +5071,47 @@ mod tests {
             .with_cancel(cancel)
             .undo_last()
             .unwrap();
-        assert_eq!((cancelled.applied, cancelled.failed), (0, 1));
+        assert_eq!((cancelled.applied, cancelled.failed), (0, 0));
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.remaining, Some(1));
         assert!(dst.exists());
         assert!(journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cancel_arriving_after_completed_undo_does_not_preserve_a_stale_journal() {
+        let root = undo_fixture_root("undo-cancel-after-replay");
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("photo.jpg");
+        let dst = root.join("Photos").join("photo.jpg");
+        std::fs::write(&src, b"JPEG").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &src.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(journal.clone())
+            .with_cancel(cancel.clone())
+            .with_cancel_after_undo_replay();
+        let result = apply
+            .apply(&[move_fixture(1, &src.to_string_lossy(), &dst.to_string_lossy())])
+            .unwrap();
+        assert_eq!((result.applied, result.failed), (1, 0));
+
+        let undo = apply.undo_last().unwrap();
+        assert_eq!((undo.applied, undo.failed), (1, 0));
+        assert!(!undo.cancelled);
+        assert!(cancel.load(Ordering::Relaxed));
+        assert!(src.exists());
+        assert!(!dst.exists());
+        assert!(
+            !journal.exists(),
+            "the completed replay result, not a later raw token race, owns cleanup"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2519,12 +5379,871 @@ mod tests {
         std::fs::write(&target, b"REAL").unwrap();
         let link = root.join("links").join("alias.bin");
 
-        make_symlink(&target.to_string_lossy(), &link).expect("symlink created");
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let identity = crate::platform::file_identity(&target).unwrap();
+        assert_eq!(
+            make_symlink(
+                &target.to_string_lossy(),
+                &link,
+                identity,
+                &canonical_root,
+                false,
+            )
+            .expect("symlink created"),
+            SymlinkOutcome::Created
+        );
         assert!(target.exists(), "original left in place (symlink mode does not move)");
         let meta = std::fs::symlink_metadata(&link).unwrap();
         assert!(meta.file_type().is_symlink(), "a real symlink was created");
         assert_eq!(std::fs::read(&link).unwrap(), b"REAL", "link resolves to the original payload");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn forward_apply_rejects_sources_outside_selected_root_in_both_modes() {
+        let base = undo_fixture_root("outside-source");
+        let root = base.join("selected");
+        let outside = base.join("outside.jpg");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+
+        for (index, use_symlinks) in [false, true].into_iter().enumerate() {
+            let conn = Connection::open_in_memory().unwrap();
+            crate::db::migrations::apply(&conn).unwrap();
+            insert_file_row(&conn, 1, &outside.to_string_lossy());
+            let db = Arc::new(Mutex::new(conn));
+            let destination = root.join(format!("mode-{index}.jpg"));
+            let apply = RestructureApply::new(db, root.clone(), use_symlinks)
+                .with_undo_journal_path(base.join(format!("undo-{index}.ndjson")));
+            let result = apply
+                .apply(&[move_fixture(
+                    1,
+                    &outside.to_string_lossy(),
+                    &destination.to_string_lossy(),
+                )])
+                .unwrap();
+            assert_eq!((result.applied, result.failed), (0, 1));
+            assert!(outside.exists());
+            assert!(!destination.exists());
+        }
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn symlink_preview_preserves_prior_real_move_journal() {
+        let root = undo_fixture_root("symlink-journal");
+        std::fs::create_dir_all(&root).unwrap();
+        let journal = root.join("undo.ndjson");
+        std::fs::write(&journal, b"prior-real-move-journal\n").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let apply = RestructureApply::new(
+            Arc::new(Mutex::new(conn)),
+            root.clone(),
+            true,
+        )
+        .with_undo_journal_path(journal.clone());
+
+        let result = apply.apply(&[]).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 0));
+        assert_eq!(
+            std::fs::read(&journal).unwrap(),
+            b"prior-real-move-journal\n"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn shortcut_undo_fixture(
+        tag: &str,
+    ) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf, String)> {
+        let root = undo_fixture_root(tag);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let link = root.join("Preview").join("original.bin");
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let mut manifest =
+            ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        match create_recorded_shortcut(
+            &mut manifest,
+            1,
+            &source.to_string_lossy(),
+            &link,
+            source_identity,
+            &canonical_root,
+            false,
+            false,
+        ) {
+            Ok(SymlinkOutcome::Created) => {}
+            Ok(SymlinkOutcome::AlreadyPresent) => panic!("fixture shortcut unexpectedly existed"),
+            Err(ApplyError::Privilege(_)) => {
+                let _ = std::fs::remove_dir_all(root);
+                return None;
+            }
+            Err(ApplyError::Other(error)) => panic!("creating fixture shortcut: {error:#}"),
+        }
+        let token = manifest.finish().unwrap();
+        Some((root, manifest_dir, source, link, token))
+    }
+
+    fn synthetic_shortcut_manifest(
+        root: &Path,
+        source: &Path,
+        link: &Path,
+        link_identity: crate::platform::FileIdentity,
+    ) -> (PathBuf, String) {
+        let canonical_root = canonicalize_safely(root).unwrap();
+        let source_identity = crate::platform::file_identity(source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let mut manifest =
+            ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        manifest
+            .append_committed(
+                1,
+                &source.to_string_lossy(),
+                link,
+                None,
+                source_identity,
+                link_identity,
+            )
+            .unwrap();
+        let token = manifest.finish().unwrap();
+        (manifest_dir, token)
+    }
+
+    #[test]
+    fn shortcut_undo_retry_returns_the_durable_completion_receipt() {
+        let root = undo_fixture_root("shortcut-receipt");
+        let source = root.join("original.bin");
+        let missing_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(missing_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let (manifest_dir, token) =
+            synthetic_shortcut_manifest(&root, &source, &missing_link, source_identity);
+        let real_move_journal = root.join("restructure_undo.ndjson");
+        std::fs::write(&real_move_journal, b"real-move-journal").unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(real_move_journal.clone())
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let first = apply.undo_shortcuts(&token).unwrap();
+        let retry = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((first.applied, first.failed, first.planned), (1, 0, Some(1)));
+        assert_eq!(
+            (retry.applied, retry.failed, retry.planned),
+            (1, 0, Some(1))
+        );
+        assert!(!retry.cancelled);
+        assert!(shortcut_receipt_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        assert!(!shortcut_manifest_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        assert_eq!(
+            std::fs::read(&real_move_journal).unwrap(),
+            b"real-move-journal"
+        );
+        let other_root = undo_fixture_root("shortcut-receipt-other-root");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let other = RestructureApply::new(
+            Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            other_root.clone(),
+            false,
+        )
+        .with_shortcut_undo_dir(manifest_dir.clone());
+        assert!(other.undo_shortcuts(&token).is_err());
+        let _ = std::fs::remove_dir_all(other_root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_unknown_token_is_not_ambiguous_success() {
+        let root = undo_fixture_root("shortcut-unknown-token");
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let token = uuid::Uuid::new_v4().to_string();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let error = apply.undo_shortcuts(&token).unwrap_err();
+
+        assert!(error.to_string().contains("was not found"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn valid_unterminated_shortcut_manifest_tail_is_not_replayed() {
+        let root = undo_fixture_root("shortcut-torn-tail");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let link = root.join("Preview").join("original.bin");
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let identity = crate::platform::file_identity(&source).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let manifest = ShortcutUndoManifest::create(&root.join("shortcut-undo"), &canonical_root)
+            .unwrap();
+        let ShortcutUndoManifest {
+            mut file,
+            path,
+            token: _,
+            ..
+        } = manifest;
+        let entry = serde_json::to_vec(&ShortcutUndoEntry {
+            file_id: 1,
+            source: source.to_string_lossy().into_owned(),
+            link: link.to_string_lossy().into_owned(),
+            staging_link: None,
+            source_identity: identity,
+            link_identity: identity,
+        })
+        .unwrap();
+        file.write_all(&entry).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let scan = scan_shortcut_undo_manifest(&path).unwrap().unwrap();
+
+        assert!(scan.spans.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_rejects_a_regular_file_even_with_its_recorded_identity() {
+        let root = undo_fixture_root("shortcut-regular-replacement");
+        let source = root.join("original.bin");
+        let replacement = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(replacement.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        std::fs::write(&replacement, b"USER REPLACEMENT").unwrap();
+        let replacement_identity = crate::platform::file_identity(&replacement).unwrap();
+        let (manifest_dir, token) =
+            synthetic_shortcut_manifest(&root, &source, &replacement, replacement_identity);
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert_eq!(std::fs::read(&replacement).unwrap(), b"USER REPLACEMENT");
+        assert!(shortcut_manifest_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_manifest_commit_failure_removes_the_just_created_link() {
+        let root = undo_fixture_root("shortcut-commit-failure");
+        let source = root.join("Incoming").join("original.bin");
+        let link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &source.to_string_lossy());
+        let manifest_dir = root.join("shortcut-undo");
+        let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), true)
+            .with_shortcut_undo_dir(manifest_dir.clone())
+            .with_fail_next_shortcut_manifest_commit();
+
+        let result = apply
+            .apply(&[move_fixture(
+                1,
+                &source.to_string_lossy(),
+                &link.to_string_lossy(),
+            )])
+            .unwrap();
+
+        if result.privilege_error.is_none() {
+            assert_eq!((result.applied, result.failed), (0, 1));
+            assert!(result.shortcut_undo_token.is_none());
+            assert!(std::fs::symlink_metadata(&link).is_err());
+            let manifests = std::fs::read_dir(&manifest_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(std::result::Result::ok)
+                        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "ndjson"))
+                        .count()
+                })
+                .unwrap_or(0);
+            assert_eq!(manifests, 0);
+        }
+        assert!(source.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn shortcut_staging_crash_fixture(
+        tag: &str,
+        record_identity: bool,
+        commit: bool,
+        publish: bool,
+    ) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, String)> {
+        let root = undo_fixture_root(tag);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let final_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(final_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let mut manifest =
+            ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        let mut prepared = manifest
+            .prepare_intent(
+                1,
+                &source.to_string_lossy(),
+                &final_link,
+                source_identity,
+            )
+            .unwrap();
+        let staged_link = PathBuf::from(&prepared.intent.staging_link);
+        match make_symlink(
+            &source.to_string_lossy(),
+            &staged_link,
+            source_identity,
+            &canonical_root,
+            false,
+        ) {
+            Ok(SymlinkOutcome::Created) => {}
+            Ok(SymlinkOutcome::AlreadyPresent) => panic!("staging fixture unexpectedly existed"),
+            Err(ApplyError::Privilege(_)) => {
+                let _ = std::fs::remove_dir_all(root);
+                return None;
+            }
+            Err(ApplyError::Other(error)) => panic!("creating staged shortcut: {error:#}"),
+        }
+        let link_identity = shortcut_link_identity(&staged_link).unwrap();
+        if record_identity {
+            manifest
+                .record_staged_identity(&mut prepared, link_identity)
+                .unwrap();
+        }
+        if commit {
+            manifest
+                .append_committed(
+                    1,
+                    &source.to_string_lossy(),
+                    &final_link,
+                    Some(&staged_link),
+                    source_identity,
+                    link_identity,
+                )
+                .unwrap();
+        }
+        if publish {
+            rename_staged_shortcut(
+                &staged_link,
+                &final_link,
+                &source,
+                source_identity,
+                link_identity,
+                &canonical_root,
+            )
+            .unwrap();
+        }
+        let intent_path = prepared.path;
+        let token = manifest.finish().unwrap();
+        Some((
+            root,
+            manifest_dir,
+            source,
+            final_link,
+            staged_link,
+            intent_path,
+            token,
+        ))
+    }
+
+    #[test]
+    fn shortcut_recovery_removes_an_intent_created_before_any_link() {
+        let root = undo_fixture_root("shortcut-intent-only");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let final_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(final_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let manifest = ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        let prepared = manifest
+            .prepare_intent(
+                1,
+                &source.to_string_lossy(),
+                &final_link,
+                source_identity,
+            )
+            .unwrap();
+        let token = manifest.finish().unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let first = apply.undo_shortcuts(&token).unwrap();
+        let retry = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((first.applied, first.failed, first.planned), (1, 0, Some(1)));
+        assert_eq!(
+            (retry.applied, retry.failed, retry.planned),
+            (first.applied, first.failed, first.planned)
+        );
+        assert!(!prepared.path.exists());
+        assert!(std::fs::symlink_metadata(&final_link).is_err());
+        assert!(shortcut_receipt_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_removes_identity_bound_staged_link_before_manifest_commit() {
+        let Some((root, manifest_dir, _source, final_link, staged_link, intent_path, token)) =
+            shortcut_staging_crash_fixture("shortcut-staged-before-commit", true, false, false)
+        else {
+            return;
+        };
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed, result.planned), (1, 0, Some(1)));
+        assert!(std::fs::symlink_metadata(&staged_link).is_err());
+        assert!(!intent_path.exists());
+        assert!(std::fs::symlink_metadata(&final_link).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_replays_committed_staged_link_before_final_rename() {
+        let Some((root, manifest_dir, _source, final_link, staged_link, intent_path, token)) =
+            shortcut_staging_crash_fixture("shortcut-committed-before-rename", true, true, false)
+        else {
+            return;
+        };
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed, result.planned), (2, 0, Some(2)));
+        assert!(std::fs::symlink_metadata(&staged_link).is_err());
+        assert!(!intent_path.exists());
+        assert!(std::fs::symlink_metadata(&final_link).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_replays_final_link_after_rename_before_intent_removal() {
+        let Some((root, manifest_dir, _source, final_link, staged_link, intent_path, token)) =
+            shortcut_staging_crash_fixture("shortcut-renamed-before-intent-delete", true, true, true)
+        else {
+            return;
+        };
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed, result.planned), (2, 0, Some(2)));
+        assert!(std::fs::symlink_metadata(&staged_link).is_err());
+        assert!(!intent_path.exists());
+        assert!(std::fs::symlink_metadata(&final_link).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_preserves_staged_link_without_a_durable_identity() {
+        let Some((root, manifest_dir, _source, final_link, staged_link, intent_path, token)) =
+            shortcut_staging_crash_fixture("shortcut-staged-before-identity", false, false, false)
+        else {
+            return;
+        };
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let error = apply.undo_shortcuts(&token).unwrap_err();
+
+        assert!(error.to_string().contains("no durably recorded link identity"));
+        assert!(shortcut_link_identity(&staged_link).is_ok());
+        assert!(intent_path.exists());
+        assert!(std::fs::symlink_metadata(&final_link).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_rejects_a_replaced_staging_directory() {
+        let root = undo_fixture_root("shortcut-replaced-staging-dir");
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let manifest = ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        let staging_dir = manifest.staging_dir.clone();
+        let token = manifest.token.clone();
+        drop(manifest);
+        let preserved = staging_dir.with_extension("preserved");
+        std::fs::rename(&staging_dir, &preserved).unwrap();
+        std::fs::create_dir(&staging_dir).unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let error = apply.undo_shortcuts(&token).unwrap_err();
+
+        assert!(error.to_string().contains("replaced or is unsafe"));
+        assert!(preserved.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_preserves_an_unexpected_staged_regular_file() {
+        let root = undo_fixture_root("shortcut-regular-staged-object");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let final_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(final_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let manifest = ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        let prepared = manifest
+            .prepare_intent(
+                1,
+                &source.to_string_lossy(),
+                &final_link,
+                source_identity,
+            )
+            .unwrap();
+        let staged_link = PathBuf::from(&prepared.intent.staging_link);
+        std::fs::write(&staged_link, b"DO NOT DELETE").unwrap();
+        let token = manifest.finish().unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let error = apply.undo_shortcuts(&token).unwrap_err();
+
+        assert!(error.to_string().contains("no durably recorded link identity"));
+        assert_eq!(std::fs::read(&staged_link).unwrap(), b"DO NOT DELETE");
+        assert!(prepared.path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_recovery_rejects_an_oversized_intent() {
+        let root = undo_fixture_root("shortcut-oversized-intent");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("original.bin");
+        let final_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(final_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let manifest_dir = root.join("shortcut-undo");
+        let manifest = ShortcutUndoManifest::create(&manifest_dir, &canonical_root).unwrap();
+        let prepared = manifest
+            .prepare_intent(
+                1,
+                &source.to_string_lossy(),
+                &final_link,
+                source_identity,
+            )
+            .unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&prepared.path)
+            .unwrap();
+        file.set_len(0).unwrap();
+        file.write_all(&vec![b'x'; MAX_SHORTCUT_RECORD_BYTES + 1])
+            .unwrap();
+        file.sync_all().unwrap();
+        let token = manifest.finish().unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let error = apply.undo_shortcuts(&token).unwrap_err();
+
+        assert!(error.to_string().contains("bounded regular file"));
+        assert!(prepared.path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_manifest_scanner_rejects_an_oversized_line() {
+        let root = undo_fixture_root("shortcut-oversized-manifest-line");
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let manifest = ShortcutUndoManifest::create(&root.join("shortcut-undo"), &canonical_root)
+            .unwrap();
+        let ShortcutUndoManifest {
+            mut file,
+            path,
+            staging_dir,
+            ..
+        } = manifest;
+        file.write_all(&vec![b'x'; MAX_SHORTCUT_RECORD_BYTES + 1])
+            .unwrap();
+        file.write_all(b"\n").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let error = match scan_shortcut_undo_manifest(&path) {
+            Ok(_) => panic!("oversized shortcut manifest line was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("exceeds"));
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(staging_dir.parent().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_shortcut_undo_can_retry_to_a_durable_success() {
+        let root = undo_fixture_root("shortcut-cancel-retry");
+        let source = root.join("original.bin");
+        let missing_link = root.join("Preview").join("original.bin");
+        std::fs::create_dir_all(missing_link.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"ORIGINAL").unwrap();
+        let identity = crate::platform::file_identity(&source).unwrap();
+        let (manifest_dir, token) =
+            synthetic_shortcut_manifest(&root, &source, &missing_link, identity);
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let cancelled = RestructureApply::new(db.clone(), root.clone(), false)
+            .with_cancel(Arc::new(AtomicBool::new(true)))
+            .with_shortcut_undo_dir(manifest_dir.clone())
+            .undo_shortcuts(&token)
+            .unwrap();
+        let retry = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir.clone())
+            .undo_shortcuts(&token)
+            .unwrap();
+
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.remaining, Some(1));
+        assert_eq!((retry.applied, retry.failed, retry.planned), (1, 0, Some(1)));
+        assert!(shortcut_receipt_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_removes_only_its_links_and_preserves_real_move_journal() {
+        let Some((root, manifest_dir, source, link, token)) =
+            shortcut_undo_fixture("shortcut-undo")
+        else {
+            return;
+        };
+        let real_move_journal = root.join("restructure_undo.ndjson");
+        std::fs::write(&real_move_journal, b"real-move-journal").unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_undo_journal_path(real_move_journal.clone())
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed), (1, 0));
+        assert_eq!(result.planned, Some(1));
+        assert!(!result.cancelled);
+        assert!(source.exists());
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(
+            std::fs::read(&real_move_journal).unwrap(),
+            b"real-move-journal"
+        );
+        assert!(!shortcut_manifest_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_never_deletes_a_replacement_regular_file() {
+        let Some((root, manifest_dir, _source, link, token)) =
+            shortcut_undo_fixture("shortcut-replaced")
+        else {
+            return;
+        };
+        std::fs::remove_file(&link).unwrap();
+        std::fs::write(&link, b"USER REPLACEMENT").unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert_eq!(std::fs::read(&link).unwrap(), b"USER REPLACEMENT");
+        assert!(shortcut_manifest_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_never_deletes_a_recreated_matching_symlink() {
+        let Some((root, manifest_dir, source, link, token)) =
+            shortcut_undo_fixture("shortcut-recreated")
+        else {
+            return;
+        };
+        let original_identity = shortcut_link_identity(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let source_identity = crate::platform::file_identity(&source).unwrap();
+        let recreated_identity = (0..32)
+            .find_map(|attempt| {
+                let filler = link
+                    .parent()
+                    .unwrap()
+                    .join(format!("identity-filler-{attempt}.bin"));
+                std::fs::write(&filler, b"filler").unwrap();
+                assert_eq!(
+                    make_symlink(
+                        &source.to_string_lossy(),
+                        &link,
+                        source_identity,
+                        &canonical_root,
+                        false,
+                    )
+                    .unwrap(),
+                    SymlinkOutcome::Created
+                );
+                let identity = shortcut_link_identity(&link).unwrap();
+                if identity == original_identity {
+                    std::fs::remove_file(&link).unwrap();
+                    None
+                } else {
+                    Some(identity)
+                }
+            })
+            .expect("filesystem repeatedly reused the deleted shortcut identity");
+        assert_ne!(recreated_identity, original_identity);
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(symlink_target_matches(&link, &source).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_never_deletes_a_repointed_symlink() {
+        let Some((root, manifest_dir, _source, link, token)) =
+            shortcut_undo_fixture("shortcut-repointed")
+        else {
+            return;
+        };
+        let other_source = root.join("other.bin");
+        std::fs::write(&other_source, b"OTHER").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        let canonical_root = canonicalize_safely(&root).unwrap();
+        let other_identity = crate::platform::file_identity(&other_source).unwrap();
+        assert_eq!(
+            make_symlink(
+                &other_source.to_string_lossy(),
+                &link,
+                other_identity,
+                &canonical_root,
+                false,
+            )
+            .unwrap(),
+            SymlinkOutcome::Created
+        );
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert_eq!((result.applied, result.failed), (0, 1));
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(symlink_target_matches(&link, &other_source).unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelled_shortcut_undo_keeps_manifest_and_link_for_retry() {
+        let Some((root, manifest_dir, _source, link, token)) =
+            shortcut_undo_fixture("shortcut-cancel")
+        else {
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(true));
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_cancel(cancel)
+            .with_shortcut_undo_dir(manifest_dir.clone());
+
+        let result = apply.undo_shortcuts(&token).unwrap();
+
+        assert!(result.cancelled);
+        assert_eq!((result.applied, result.failed), (0, 0));
+        assert_eq!(result.remaining, Some(1));
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(shortcut_manifest_path(&manifest_dir, &token)
+            .unwrap()
+            .exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_undo_rejects_a_manifest_from_another_library_root() {
+        let Some((root, manifest_dir, _source, link, token)) =
+            shortcut_undo_fixture("shortcut-root")
+        else {
+            return;
+        };
+        let other_root = undo_fixture_root("shortcut-other-root");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let db = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let apply = RestructureApply::new(db, other_root.clone(), false)
+            .with_shortcut_undo_dir(manifest_dir);
+
+        assert!(apply.undo_shortcuts(&token).is_err());
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(other_root);
+    }
+
+    #[test]
+    fn apply_requires_an_existing_absolute_library_root() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let apply =
+            RestructureApply::new(Arc::new(Mutex::new(conn)), PathBuf::from("relative"), false);
+        assert!(apply.apply(&[]).is_err());
     }
 }

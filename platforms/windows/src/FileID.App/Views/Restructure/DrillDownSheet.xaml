@@ -11,6 +11,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:FileID.ViewModels"
     mc:Ignorable="d"
     MinWidth="640"
     MinHeight="440">
@@ -34,11 +35,58 @@
         <ScrollViewer Grid.Row="2"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollMode="Disabled">
-            <ItemsRepeater x:Name="FileRepeater">
-                <ItemsRepeater.Layout>
-                    <StackLayout Orientation="Vertical" Spacing="6"/>
-                </ItemsRepeater.Layout>
-            </ItemsRepeater>
+            <Grid>
+                <ItemsRepeater x:Name="FileRepeater">
+                    <ItemsRepeater.Layout>
+                        <StackLayout Orientation="Vertical" Spacing="6"/>
+                    </ItemsRepeater.Layout>
+                </ItemsRepeater>
+
+                <ItemsRepeater x:Name="SelectionRepeater"
+                               Visibility="Collapsed"
+                               ElementPrepared="OnSelectionElementPrepared">
+                    <ItemsRepeater.Layout>
+                        <StackLayout Orientation="Vertical" Spacing="4"/>
+                    </ItemsRepeater.Layout>
+                    <ItemsRepeater.ItemTemplate>
+                        <DataTemplate x:DataType="vm:RestructureFileRowVm">
+                            <Grid Padding="10,7"
+                                  ColumnSpacing="10"
+                                  Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                  ToolTipService.ToolTip="{x:Bind FromToTooltip}"
+                                  AutomationProperties.Name="{x:Bind FileName}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <CheckBox Grid.Column="0"
+                                          MinWidth="0"
+                                          IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                                          Click="OnSelectionCheckClicked"
+                                          AutomationProperties.Name="{x:Bind FileName}"
+                                          AutomationProperties.HelpText="Include this file in the restructure."/>
+                                <FontIcon Grid.Column="1"
+                                          Glyph="{x:Bind FileGlyph}"
+                                          FontSize="15"
+                                          Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                          VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="2"
+                                            Spacing="1"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind FileName}"
+                                               Style="{StaticResource CaptionTextBlockStyle}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Text="{x:Bind FromLabel}"
+                                               FontSize="11"
+                                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                               TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsRepeater.ItemTemplate>
+                </ItemsRepeater>
+            </Grid>
         </ScrollViewer>
     </Grid>
 </UserControl>

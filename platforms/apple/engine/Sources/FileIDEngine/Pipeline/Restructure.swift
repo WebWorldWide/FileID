@@ -219,7 +219,10 @@ public enum Restructure {
         }
 
         let summary = try await planDB.read { db -> (
-            total: Int, categories: [RestructureCategoryCount], folders: FolderClassificationCounts
+            total: Int,
+            categories: [RestructureCategoryCount],
+            confidence: RestructureConfidenceCounts,
+            folders: FolderClassificationCounts
         ) in
             let total = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM raw_moves r
@@ -235,15 +238,46 @@ public enum Restructure {
                     RestructureCategoryCount(
                         category: $0["category"] ?? "", count: $0["n"] ?? 0)
                 }
+            let confidence = try Row.fetchOne(db, sql: """
+                SELECT
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='auto' THEN 1 ELSE 0 END),0)
+                    AS auto_count,
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='review' THEN 1 ELSE 0 END),0)
+                    AS review_count,
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='ask' THEN 1 ELSE 0 END),0)
+                    AS ask_count,
+                  COALESCE(SUM(CASE
+                    WHEN lower(r.confidence) NOT IN ('auto','review','ask') THEN 1 ELSE 0 END),0)
+                    AS unknown_count
+                FROM raw_moves r
+                JOIN folder_tiers t ON t.folder=r.source_folder
+                WHERE t.tier <> 'Anchor'
+                """).map {
+                    RestructureConfidenceCounts(
+                        auto: $0["auto_count"] ?? 0,
+                        review: $0["review_count"] ?? 0,
+                        ask: $0["ask_count"] ?? 0,
+                        unknown: $0["unknown_count"] ?? 0)
+                } ?? RestructureConfidenceCounts(auto: 0, review: 0, ask: 0, unknown: 0)
+            let confidenceTotal =
+                confidence.auto + confidence.review + confidence.ask + confidence.unknown
+            guard confidenceTotal == total else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
             func tierCount(_ tier: String) throws -> Int {
                 try Int.fetchOne(
                     db, sql: "SELECT COUNT(*) FROM folder_tiers WHERE tier=?",
                     arguments: [tier]) ?? 0
             }
-            return (total, categories, FolderClassificationCounts(
-                anchorFolders: try tierCount("Anchor"),
-                mixedFolders: try tierCount("Mixed"),
-                junkFolders: try tierCount("Junk")))
+            return (
+                total,
+                categories,
+                confidence,
+                FolderClassificationCounts(
+                    anchorFolders: try tierCount("Anchor"),
+                    mixedFolders: try tierCount("Mixed"),
+                    junkFolders: try tierCount("Junk"))
+            )
         }
 
         let stored = try await planDB.read { db in
@@ -281,7 +315,8 @@ public enum Restructure {
             folderClassifications: summary.folders,
             planID: truncated ? stored.planID : nil,
             totalMoves: truncated ? summary.total : nil,
-            truncated: truncated)
+            truncated: truncated,
+            confidenceCounts: summary.confidence)
     }
 
     /// Build proposals for every image in the library. The caller (UI)
@@ -563,6 +598,25 @@ public enum Restructure {
             self.mixedFolders = mixedFolders
             self.junkFolders = junkFolders
         }
+    }
+
+    static func confidenceCounts<S: Sequence>(
+        _ confidences: S
+    ) -> RestructureConfidenceCounts where S.Element == String {
+        var auto = 0
+        var review = 0
+        var ask = 0
+        var unknown = 0
+        for confidence in confidences {
+            switch confidence.lowercased() {
+            case "auto": auto += 1
+            case "review": review += 1
+            case "ask": ask += 1
+            default: unknown += 1
+            }
+        }
+        return RestructureConfidenceCounts(
+            auto: auto, review: review, ask: ask, unknown: unknown)
     }
 
     /// Per-source-folder tier labels + rolled-up Anchor/Mixed/Junk counts from the

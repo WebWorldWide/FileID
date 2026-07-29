@@ -1028,6 +1028,129 @@ fn restore_batch_from_recycle_bin(prepared: &[PreparedRestore]) -> Vec<RestoreOu
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RevertMergeOutcome {
+    person_id: Option<i64>,
+    moved: u32,
+    already_restored: u32,
+    stale: u32,
+}
+
+fn apply_revert_merge(
+    conn: &rusqlite::Connection,
+    payload: &ipc::RevertMergePayload,
+    now: f64,
+) -> anyhow::Result<RevertMergeOutcome> {
+    let tx = conn.unchecked_transaction()?;
+    let requested: std::collections::BTreeSet<i64> =
+        payload.face_ids_to_revert.iter().copied().collect();
+    anyhow::ensure!(!requested.is_empty(), "merge undo contains no face IDs");
+    let source_exists = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?1)",
+        [payload.source_person_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let mut owner_of =
+        tx.prepare("SELECT (SELECT person_id FROM face_prints WHERE id = ?1)")?;
+    let mut owners = Vec::with_capacity(requested.len());
+    for &face_id in &requested {
+        owners.push((
+            face_id,
+            owner_of.query_row([face_id], |row| row.get::<_, Option<i64>>(0))?,
+        ));
+    }
+    drop(owner_of);
+    let already_source = owners
+        .iter()
+        .filter(|(_, owner)| *owner == Some(payload.source_person_id))
+        .count();
+    let destination_owned = owners
+        .iter()
+        .filter(|(_, owner)| *owner == Some(payload.destination_person_id))
+        .count();
+    let new_pid = if source_exists && already_source > 0 {
+        Some(payload.source_person_id)
+    } else if destination_owned == 0 {
+        None
+    } else if !source_exists {
+        tx.execute(
+            "INSERT INTO persons (id, file_count, created_at) VALUES (?1, 0, ?2)",
+            rusqlite::params![payload.source_person_id, now],
+        )?;
+        Some(payload.source_person_id)
+    } else {
+        tx.execute(
+            "INSERT INTO persons (file_count, created_at) VALUES (0, ?1)",
+            [now],
+        )?;
+        Some(tx.last_insert_rowid())
+    };
+    let mut update = tx.prepare(
+        "UPDATE face_prints SET person_id = ?1 \
+         WHERE id = ?2 AND person_id = ?3",
+    )?;
+    let mut moved = 0u32;
+    let mut already_restored = 0u32;
+    let mut stale = 0u32;
+    for (face_id, owner) in owners {
+        if owner == new_pid && new_pid.is_some() {
+            already_restored += 1;
+        } else if owner == Some(payload.destination_person_id) {
+            let Some(new_pid) = new_pid else {
+                stale += 1;
+                continue;
+            };
+            let changed = update.execute(rusqlite::params![
+                new_pid,
+                face_id,
+                payload.destination_person_id
+            ])?;
+            if changed == 1 {
+                moved += 1;
+            } else {
+                stale += 1;
+            }
+        } else {
+            stale += 1;
+        }
+    }
+    drop(update);
+    if moved > 0 || already_restored > 0 {
+        let person_a = payload
+            .source_person_id
+            .min(payload.destination_person_id);
+        let person_b = payload
+            .source_person_id
+            .max(payload.destination_person_id);
+        tx.execute(
+            "DELETE FROM face_verifications \
+             WHERE person_a = ?1 AND person_b = ?2 \
+               AND same_person = 1 AND vlm_model = 'user-merged'",
+            rusqlite::params![person_a, person_b],
+        )?;
+    }
+    let mut affected_people = vec![payload.destination_person_id];
+    if let Some(new_pid) = new_pid {
+        affected_people.push(new_pid);
+    }
+    affected_people.sort_unstable();
+    affected_people.dedup();
+    for pid in affected_people {
+        tx.execute(
+            "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
+             FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
+            [pid],
+        )?;
+    }
+    tx.commit()?;
+    Ok(RevertMergeOutcome {
+        person_id: new_pid,
+        moved,
+        already_restored,
+        stale,
+    })
+}
+
 pub(crate) async fn handle_revert_merge(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -1035,60 +1158,33 @@ pub(crate) async fn handle_revert_merge(
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
         let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
-        // Attempt to reclaim the original person id. rows_changed == 0 means
-        // OR IGNORE fired: the id was recycled by SQLite for a DIFFERENT person
-        // after the prior merge deleted the original row. In that case a SELECT
-        // would return the wrong person and all reverted faces would land there.
-        // Instead allocate a fresh row so faces always go to the right person.
-        // (T-2 fix)
-        let rows_changed = tx.execute(
-            "INSERT OR IGNORE INTO persons (id, file_count, created_at) VALUES (?1, 0, ?2)",
-            rusqlite::params![payload.source_person_id, now],
-        )?;
-        let new_pid: i64 = if rows_changed > 0 {
-            payload.source_person_id
+        let outcome = apply_revert_merge(&conn, &payload, now)?;
+        let complete = outcome.stale == 0;
+        let restored = outcome.moved + outcome.already_restored;
+        let target = outcome
+            .person_id
+            .map(|person_id| format!("person #{person_id}"))
+            .unwrap_or_else(|| "a restored person".into());
+        let message = if complete {
+            format!("Restored {restored} face print(s) to {target}")
         } else {
-            tx.execute(
-                "INSERT INTO persons (file_count, created_at) VALUES (0, ?1)",
-                rusqlite::params![now],
-            )?;
-            tx.last_insert_rowid()
+            format!(
+                "Restored {restored} face print(s) to {target}; skipped {} stale or missing face(s)",
+                outcome.stale
+            )
         };
-        let mut update = tx.prepare("UPDATE face_prints SET person_id = ?1 WHERE id = ?2")?;
-        let mut moved = 0u32;
-        for fid in &payload.face_ids_to_revert {
-            update.execute(rusqlite::params![new_pid, fid])?;
-            moved += 1;
-        }
-        drop(update);
-        // Recompute EACH person's file_count from its OWN faces. A single
-        // `WHERE id IN (?1, ?2)` with the subquery bound to ?1 set the
-        // destination person's count to the SOURCE person's face count (the
-        // subquery's person_id is fixed to ?1 for both rows) — a wrong count
-        // until the next re-cluster. Two correlated updates fix each row. (audit recheck)
-        for pid in [new_pid, payload.destination_person_id] {
-            let _ = tx.execute(
-                "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
-                 FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
-                rusqlite::params![pid],
-            );
-        }
-        tx.commit()?;
         Ok(BulkActionResult {
             action: "revertMerge".into(),
-            succeeded: 1,
-            failed: 0,
+            succeeded: u32::from(complete),
+            failed: u32::from(!complete),
             messages: vec![BulkActionItem {
                 file_id: None,
-                ok: true,
-                message: Some(format!(
-                    "Restored {moved} face print(s) to person #{new_pid}"
-                )),
+                ok: complete,
+                message: Some(message),
             }],
         })
     })
@@ -1100,6 +1196,217 @@ pub(crate) async fn handle_revert_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn revert_merge_test_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE persons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                created_at DOUBLE NOT NULL
+             );
+             CREATE TABLE face_prints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id INTEGER NOT NULL,
+                person_id INTEGER
+             );
+             CREATE TABLE face_verifications (
+                person_a INTEGER NOT NULL,
+                person_b INTEGER NOT NULL,
+                same_person INTEGER NOT NULL,
+                confidence DOUBLE NOT NULL,
+                vlm_model TEXT NOT NULL,
+                verified_at DOUBLE NOT NULL,
+                PRIMARY KEY (person_a, person_b)
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn add_person(conn: &rusqlite::Connection, person_id: i64) {
+        conn.execute(
+            "INSERT INTO persons (id, file_count, created_at) VALUES (?1, 0, 1.0)",
+            [person_id],
+        )
+        .unwrap();
+    }
+
+    fn add_face(
+        conn: &rusqlite::Connection,
+        face_id: i64,
+        file_id: i64,
+        person_id: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO face_prints (id, file_id, person_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![face_id, file_id, person_id],
+        )
+        .unwrap();
+    }
+
+    fn face_owner(conn: &rusqlite::Connection, face_id: i64) -> Option<i64> {
+        conn.query_row(
+            "SELECT person_id FROM face_prints WHERE id = ?1",
+            [face_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn add_merge_verification(
+        conn: &rusqlite::Connection,
+        person_a: i64,
+        person_b: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO face_verifications (
+                person_a, person_b, same_person, confidence, vlm_model, verified_at
+             ) VALUES (?1, ?2, 1, 1.0, 'user-merged', 1.0)",
+            rusqlite::params![person_a.min(person_b), person_a.max(person_b)],
+        )
+        .unwrap();
+    }
+
+    fn merge_verification_count(conn: &rusqlite::Connection, person_a: i64, person_b: i64) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM face_verifications WHERE person_a = ?1 AND person_b = ?2",
+            rusqlite::params![person_a.min(person_b), person_a.max(person_b)],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn revert_payload(face_ids: Vec<i64>) -> ipc::RevertMergePayload {
+        ipc::RevertMergePayload {
+            source_person_id: 10,
+            destination_person_id: 20,
+            face_ids_to_revert: face_ids,
+        }
+    }
+
+    #[test]
+    fn revert_merge_exact_replay_is_idempotent() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 20);
+        add_face(&conn, 101, 1, 20);
+        add_face(&conn, 102, 2, 20);
+        add_merge_verification(&conn, 10, 20);
+        add_merge_verification(&conn, 10, 30);
+        let payload = revert_payload(vec![101, 102]);
+
+        assert_eq!(
+            apply_revert_merge(&conn, &payload, 2.0).unwrap(),
+            RevertMergeOutcome {
+                person_id: Some(10),
+                moved: 2,
+                already_restored: 0,
+                stale: 0,
+            }
+        );
+        assert_eq!(
+            apply_revert_merge(&conn, &payload, 3.0).unwrap(),
+            RevertMergeOutcome {
+                person_id: Some(10),
+                moved: 0,
+                already_restored: 2,
+                stale: 0,
+            }
+        );
+        assert_eq!(face_owner(&conn, 101), Some(10));
+        assert_eq!(face_owner(&conn, 102), Some(10));
+        assert_eq!(merge_verification_count(&conn, 10, 20), 0);
+        assert_eq!(merge_verification_count(&conn, 10, 30), 1);
+    }
+
+    #[test]
+    fn revert_merge_partial_replay_finishes_on_original_source() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 10);
+        add_person(&conn, 20);
+        add_face(&conn, 101, 1, 10);
+        add_face(&conn, 102, 2, 20);
+
+        assert_eq!(
+            apply_revert_merge(&conn, &revert_payload(vec![101, 102]), 2.0).unwrap(),
+            RevertMergeOutcome {
+                person_id: Some(10),
+                moved: 1,
+                already_restored: 1,
+                stale: 0,
+            }
+        );
+        assert_eq!(face_owner(&conn, 101), Some(10));
+        assert_eq!(face_owner(&conn, 102), Some(10));
+    }
+
+    #[test]
+    fn revert_merge_recycled_source_id_allocates_a_fresh_person() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 10);
+        add_person(&conn, 20);
+        add_face(&conn, 900, 9, 10);
+        add_face(&conn, 101, 1, 20);
+        add_face(&conn, 102, 2, 20);
+
+        let outcome =
+            apply_revert_merge(&conn, &revert_payload(vec![101, 102]), 2.0).unwrap();
+        let restored_person = outcome.person_id.unwrap();
+        assert_ne!(restored_person, 10);
+        assert_ne!(restored_person, 20);
+        assert_eq!(outcome.moved, 2);
+        assert_eq!(outcome.stale, 0);
+        assert_eq!(face_owner(&conn, 900), Some(10));
+        assert_eq!(face_owner(&conn, 101), Some(restored_person));
+        assert_eq!(face_owner(&conn, 102), Some(restored_person));
+    }
+
+    #[test]
+    fn revert_merge_never_steals_reassigned_or_missing_faces() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 20);
+        add_person(&conn, 30);
+        add_face(&conn, 101, 1, 20);
+        add_face(&conn, 102, 2, 30);
+
+        let outcome =
+            apply_revert_merge(&conn, &revert_payload(vec![101, 102, 999]), 2.0).unwrap();
+        assert_eq!(
+            outcome,
+            RevertMergeOutcome {
+                person_id: Some(10),
+                moved: 1,
+                already_restored: 0,
+                stale: 2,
+            }
+        );
+        assert_eq!(face_owner(&conn, 101), Some(10));
+        assert_eq!(face_owner(&conn, 102), Some(30));
+    }
+
+    #[test]
+    fn revert_merge_all_stale_failure_preserves_manual_merge_constraint() {
+        let conn = revert_merge_test_db();
+        add_person(&conn, 20);
+        add_person(&conn, 30);
+        add_face(&conn, 102, 2, 30);
+        add_merge_verification(&conn, 10, 20);
+
+        let outcome =
+            apply_revert_merge(&conn, &revert_payload(vec![102, 999]), 2.0).unwrap();
+
+        assert_eq!(
+            outcome,
+            RevertMergeOutcome {
+                person_id: None,
+                moved: 0,
+                already_restored: 0,
+                stale: 2,
+            }
+        );
+        assert_eq!(face_owner(&conn, 102), Some(30));
+        assert_eq!(merge_verification_count(&conn, 10, 20), 1);
+    }
 
     #[test]
     #[cfg(any(windows, target_os = "linux"))]

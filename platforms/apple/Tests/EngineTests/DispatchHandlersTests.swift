@@ -125,6 +125,39 @@ struct DispatchHandlersTests {
         #expect(plan.folderClassifications?.junkFolders == 0)
     }
 
+    @Test("restructurePlan DTO publishes complete confidence totals")
+    func restructurePlanConfidenceCounts() throws {
+        let proposals = [
+            RestructureProposal(fileID: 1, oldPath: "/a/1.jpg",
+                                newPath: "/lib/1.jpg", bucket: "photo",
+                                confidence: "auto"),
+            RestructureProposal(fileID: 2, oldPath: "/a/2.jpg",
+                                newPath: "/lib/2.jpg", bucket: "photo",
+                                confidence: "AUTO"),
+            RestructureProposal(fileID: 3, oldPath: "/a/3.jpg",
+                                newPath: "/lib/3.jpg", bucket: "photo",
+                                confidence: "review"),
+            RestructureProposal(fileID: 4, oldPath: "/a/4.jpg",
+                                newPath: "/lib/4.jpg", bucket: "photo",
+                                confidence: "ask"),
+            RestructureProposal(fileID: 5, oldPath: "/a/5.jpg",
+                                newPath: "/lib/5.jpg", bucket: "photo",
+                                confidence: "")
+        ]
+        let planResult = Restructure.PlanResult(
+            proposals: proposals, tierByFolder: [:],
+            anchorFolders: 0, mixedFolders: 1, junkFolders: 0)
+        let plan = FileIDEngineMain.restructurePlan(
+            from: planResult, libraryRoot: "/lib")
+        let counts = try #require(plan.confidenceCounts)
+
+        #expect(counts.auto == 2)
+        #expect(counts.review == 1)
+        #expect(counts.ask == 1)
+        #expect(counts.unknown == 1)
+        #expect(counts.auto + counts.review + counts.ask + counts.unknown == plan.moves.count)
+    }
+
     // F-C1-004 lockstep: a homogeneous source folder the semantic butler actively
     // relocated classifies Anchor, but because it is being EMPTIED (not kept) it must
     // be remapped to Mixed when exempt — so it neither inflates the "Keep" tile nor

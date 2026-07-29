@@ -18,6 +18,10 @@ public sealed record EngineInfo(
     [property: JsonPropertyName("physicalMemoryGB")] double PhysicalMemoryGB,
     HardwareInfo? Hardware = null);
 
+public sealed record HealthCheckResult(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    int Pid);
+
 public sealed record RestructurePlan(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
@@ -28,9 +32,16 @@ public sealed record RestructurePlan(
     [property: JsonPropertyName("planID")]
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PlanId = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? TotalMoves = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Truncated = false);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Truncated = false,
+    RestructureConfidenceCounts? ConfidenceCounts = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
+
+public sealed record RestructureConfidenceCounts(
+    ulong Auto,
+    ulong Review,
+    ulong Ask,
+    ulong Unknown);
 
 public sealed record FolderClassificationCounts(
     uint AnchorFolders,
@@ -40,7 +51,11 @@ public sealed record FolderClassificationCounts(
 public sealed record RestructureApplyResult(
     uint Applied,
     uint Failed,
-    string? PrivilegeError = null);
+    string? PrivilegeError = null,
+    bool Cancelled = false,
+    ulong? Planned = null,
+    ulong? Remaining = null,
+    string? ShortcutUndoToken = null);
 
 public sealed record BulkActionResult(
     string Action,
