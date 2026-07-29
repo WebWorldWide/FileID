@@ -151,14 +151,16 @@
                               BorderThickness="1"
                               Padding="12"
                               Tag="{x:Bind ClusterId}"
+                              IsTabStop="True"
                               AutomationProperties.Name="{x:Bind Caption}"
-                              AutomationProperties.HelpText="Double-tap to edit name and faces; drag onto another person to merge."
+                              AutomationProperties.HelpText="Press Enter to edit name and faces, or open the context menu for more actions."
                               CanDrag="True"
                               AllowDrop="True"
                               DragStarting="OnClusterDragStarting"
                               DragOver="OnClusterDragOver"
                               DragLeave="OnClusterDragLeave"
                               Drop="OnClusterDrop"
+                              KeyDown="OnClusterKeyDown"
                               DoubleTapped="OnClusterDoubleTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>

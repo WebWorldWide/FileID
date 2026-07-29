@@ -445,8 +445,9 @@ public sealed partial class MainWindow : Window
     private void WireKeyboardShortcuts()
     {
         // Ctrl+O — pick folder
-        AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, args) =>
         {
+            args.Handled = true;
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var result = await FolderPickerService.PickFolderAsync(hwnd);
             if (result.Path is not null)
@@ -460,10 +461,11 @@ public sealed partial class MainWindow : Window
         // fire-and-forget Task. The visible symptom of the swallow was
         // "press Ctrl+R, nothing happens" when the engine had failed
         // to load models.
-        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, args) =>
         {
             var vm = AppViewModel.Instance;
             if (!vm.HasFolder) return;
+            args.Handled = true;
             try
             {
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay,
@@ -477,11 +479,21 @@ public sealed partial class MainWindow : Window
 
         // Ctrl+Shift+S — toggle sidebar
         AddAccelerator(VirtualKey.S, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift,
-            (_, _) => AppViewModel.Instance.ToggleSidebar());
+            (_, args) =>
+            {
+                args.Handled = true;
+                AppViewModel.Instance.ToggleSidebar();
+            });
 
         // Ctrl+Z — undo last destructive action.
-        AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(((FrameworkElement)Content).XamlRoot)
+                || !Services.UndoStack.Instance.CanUndo)
+            {
+                return;
+            }
+            args.Handled = true;
             var label = await Services.UndoStack.Instance.UndoAsync();
             if (!string.IsNullOrEmpty(label))
             {
@@ -495,13 +507,22 @@ public sealed partial class MainWindow : Window
         // ONLY the OEM comma. (Previous version also registered Decimal,
         // which made numpad-period jump to Settings — surprise.)
         AddAccelerator((VirtualKey)0xBC, VirtualKeyModifiers.Control,
-            (_, _) => AppViewModel.Instance.ActiveTab = SidebarTab.Settings);
+            (_, args) =>
+            {
+                args.Handled = true;
+                AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
+            });
 
         // Ctrl+F — focus search. The accelerator is reserved here so the
         // LibraryView wiring is a one-liner (raise an event the LibraryView
         // subscribes to).
         AddAccelerator(VirtualKey.F, VirtualKeyModifiers.Control,
-            (_, _) => SearchFocusRequested?.Invoke(this, EventArgs.Empty));
+            (_, args) =>
+            {
+                if (SearchFocusRequested is null) return;
+                args.Handled = true;
+                SearchFocusRequested.Invoke(this, EventArgs.Empty);
+            });
 
         // Alt+1..6 — jump to tab. Windows-native QoL addition (per
         // shared/docs/DECISIONS.md 2026-05-02 entry).
@@ -509,8 +530,9 @@ public sealed partial class MainWindow : Window
         {
             int idx = i;
             var key = (VirtualKey)((int)VirtualKey.Number1 + i);
-            AddAccelerator(key, VirtualKeyModifiers.Menu, (_, _) =>
+            AddAccelerator(key, VirtualKeyModifiers.Menu, (_, args) =>
             {
+                args.Handled = true;
                 AppViewModel.Instance.ActiveTab = SidebarTab.All[idx];
             });
         }
@@ -532,7 +554,6 @@ public sealed partial class MainWindow : Window
         accel.Invoked += (s, e) =>
         {
             handler(s, e);
-            e.Handled = true;
         };
         ((FrameworkElement)Content).KeyboardAccelerators.Add(accel);
     }
@@ -575,17 +596,20 @@ public sealed partial class MainWindow : Window
 
     private async Task RunCloseSequenceAsync()
     {
+        var acknowledgedPendingIds =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         bool proceed;
         try
         {
-            proceed = await ConfirmCloseWithPendingChangesAsync();
+            proceed = await ConfirmCloseWithPendingChangesAsync(
+                acknowledgedPendingIds);
         }
         catch (Exception ex)
         {
-            // The confirm dialog is best-effort; a failure to show it must
-            // never make the window unclosable. Fall through to shutdown.
+            // The confirmation is a safety gate. If WinUI refuses a second
+            // ContentDialog, keep the window open instead of losing history.
             DebugLog.Warn("Close-confirm dialog failed: " + ex.Message);
-            proceed = true;
+            proceed = false;
         }
 
         if (!proceed)
@@ -600,19 +624,122 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        // Stop the engine and WAIT so the WAL checkpoint lands before
-        // process exit (bounded — a hung engine can't wedge close).
+        EngineClient.ApplicationCloseStopLease? closeStop = null;
         try
         {
-            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(5));
+            closeStop = await EngineClient.Instance.StopForApplicationCloseAsync(
+                TimeSpan.FromSeconds(5));
         }
         catch (Exception ex)
         {
             DebugLog.Warn("Engine stop during close failed: " + ex.Message);
         }
+
+        if (closeStop?.Stopped != true)
+        {
+            await AbortCloseAfterEngineStopAsync(
+                closeStop,
+                "FileID couldn't confirm that its engine stopped. "
+                + "The window will stay open so the catalog writer is not orphaned.");
+            return;
+        }
+
+        try
+        {
+            await DrainCloseDispatcherAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Close dispatcher drain failed: " + ex.Message);
+            await AbortCloseAfterEngineStopAsync(
+                closeStop,
+                "FileID couldn't finish processing its last engine updates. "
+                + "The window will stay open so pending undo history is not lost.");
+            return;
+        }
+
+        while (Services.ChangeLog.Instance.PendingCount > 0
+            && HasUnacknowledgedPendingChanges(acknowledgedPendingIds))
+        {
+            try
+            {
+                proceed = await ConfirmCloseWithPendingChangesAsync(
+                    acknowledgedPendingIds);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Late close-confirm dialog failed: " + ex.Message);
+                proceed = false;
+            }
+            if (!proceed)
+            {
+                await AbortCloseAfterEngineStopAsync(closeStop);
+                return;
+            }
+        }
+
         try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
+        if (!closeStop.TryCommit())
+        {
+            await AbortCloseAfterEngineStopAsync(
+                closeStop,
+                "FileID detected that its engine was still active. "
+                + "The window will stay open; try closing again.");
+            return;
+        }
         _closeFinalized = true;
         Close();
+    }
+
+    private async Task DrainCloseDispatcherAsync()
+    {
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var drained = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!DispatcherQueue.TryEnqueue(() => drained.TrySetResult()))
+            {
+                throw new InvalidOperationException(
+                    "The UI dispatcher rejected the close drain.");
+            }
+            await drained.Task;
+        }
+    }
+
+    private async Task AbortCloseAfterEngineStopAsync(
+        EngineClient.ApplicationCloseStopLease? closeStop,
+        string? message = null)
+    {
+        try
+        {
+            if (closeStop is not null)
+            {
+                await closeStop.AbortAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine restart after aborted close failed: " + ex.Message);
+        }
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            try
+            {
+                await new ContentDialog
+                {
+                    XamlRoot = (Content as FrameworkElement)?.XamlRoot,
+                    Title = "FileID is still running",
+                    Content = message,
+                    CloseButtonText = "OK",
+                    DefaultButton = ContentDialogButton.Close,
+                }.ShowAsync();
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Close-blocked dialog failed: " + ex.Message);
+            }
+        }
+        _closeSequenceRunning = false;
     }
 
     /// <summary>Returns true when the close should proceed; false to stay
@@ -623,21 +750,24 @@ public sealed partial class MainWindow : Window
     /// await is deliberate: a second close attempt in flight then no-ops in
     /// OnAppWindowClosing instead of starting a second teardown whose second
     /// ContentDialog.ShowAsync throws and tears the window down mid-await.</summary>
-    private async Task<bool> ConfirmCloseWithPendingChangesAsync()
+    private async Task<bool> ConfirmCloseWithPendingChangesAsync(
+        System.Collections.Generic.HashSet<string> acknowledgedPendingIds)
     {
         {
             var settings = AppViewModel.Instance.Settings;
-            if (Services.ChangeLog.Instance.UndoableCount > 0
+            var pendingIds = UnacknowledgedPendingChangeIds(
+                acknowledgedPendingIds);
+            if (pendingIds.Count > 0
                 && settings.ConfirmCloseOnPendingChanges
                 && !Program.AutoExitAfterScan)
             {
-                var n = Services.ChangeLog.Instance.UndoableCount;
+                var n = pendingIds.Count;
                 var dontAsk = new CheckBox { Content = "Don't ask me again" };
                 var body = new StackPanel { Spacing = 12 };
                 body.Children.Add(new TextBlock
                 {
-                    Text = $"You made {n} change{(n == 1 ? "" : "s")} this session that can still be undone. "
-                        + "Once FileID closes, they become permanent.",
+                    Text = $"You made {n} change{(n == 1 ? "" : "s")} this session with undo still pending. "
+                        + "Review them before closing; once FileID closes, their undo history is lost.",
                     TextWrapping = TextWrapping.Wrap,
                 });
                 body.Children.Add(dontAsk);
@@ -674,10 +804,35 @@ public sealed partial class MainWindow : Window
                 {
                     return false; // Cancel — abort the close entirely
                 }
-                // Secondary (Close anyway) proceeds.
             }
+            acknowledgedPendingIds.UnionWith(pendingIds);
             return true;
         }
+    }
+
+    private static bool HasUnacknowledgedPendingChanges(
+        System.Collections.Generic.HashSet<string> acknowledgedPendingIds)
+        => UnacknowledgedPendingChangeIds(acknowledgedPendingIds).Count > 0;
+
+    private static System.Collections.Generic.HashSet<string>
+        UnacknowledgedPendingChangeIds(
+            System.Collections.Generic.HashSet<string> acknowledgedPendingIds)
+    {
+        var pendingIds =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in Services.ChangeLog.Instance.Snapshot())
+        {
+            if (entry.Status is not (
+                    Services.ChangeStatus.Undoable
+                    or Services.ChangeStatus.Undoing
+                    or Services.ChangeStatus.UndoFailed)
+                || acknowledgedPendingIds.Contains(entry.Id))
+            {
+                continue;
+            }
+            pendingIds.Add(entry.Id);
+        }
+        return pendingIds;
     }
 
     private void OnClosed(object sender, WindowEventArgs e)

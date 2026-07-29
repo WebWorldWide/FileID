@@ -1,4 +1,4 @@
-// Tests for QueryEmbeddingCache — the bounded LRU that lets ClipSearchService
+﻿// Tests for QueryEmbeddingCache — the bounded LRU that lets ClipSearchService
 // skip the IPC + CLIP text-encode round-trip when an identical query string was
 // already embedded. Pure logic, no engine / UI thread.
 

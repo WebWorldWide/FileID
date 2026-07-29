@@ -31,6 +31,7 @@ public sealed partial class RestructureView : UserControl
     private const int InlineFileCap = 30;
 
     private readonly ObservableCollection<RestructureRecommendationVm> _recommendations = new();
+    private readonly ObservableCollection<RestructureLargePlanCategoryVm> _largePlanCategories = new();
     private readonly Dictionary<long, RestructureFileRowVm> _allFileRows = new();
     private readonly Dictionary<RestructureOutcome, List<RestructureFileRowVm>> _filesByOutcome = new();
     private readonly Dictionary<RestructureOutcome, RestructureRecommendationVm> _recByOutcome = new();
@@ -49,7 +50,9 @@ public sealed partial class RestructureView : UserControl
     private static readonly HashSet<long> _selectedFileIds = new();
 
     private bool _unloaded;
+    private bool _subscribed;
     private bool _suppressRecompute;
+    private bool _planIntegrityBlocked;
     // R6-04: static so the in-flight-apply guard survives the view's per-tab-switch
     // recreation (mirrors the existing static _deselectedFileIds). _applyingPlan is
     // the plan currently being applied; SyncPlan compares against it to tell a
@@ -62,6 +65,7 @@ public sealed partial class RestructureView : UserControl
     // re-plan) must NOT release _applying: a second concurrent apply truncates
     // the first run's undo journal (open_undo_journal_truncating).
     private static bool _applyInFlight;
+    private static bool _applyingAsShortcuts;
     // R6-06: the EngineClient.SpawnGeneration captured when the in-flight apply
     // was sent. If the generation moves while the guard is engaged, the engine
     // process that owned the apply (or its post-apply re-plan) is gone — its
@@ -69,6 +73,9 @@ public sealed partial class RestructureView : UserControl
     // guard instead of leaving Apply disabled for the rest of the session
     // (e.g. the external drive was unplugged mid-apply and the engine died).
     private static int _applyingSpawnGen;
+    private static bool _planning;
+    private static string? _planningRoot;
+    private static int _planningSpawnGen;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     // H2: the exact plan instance SyncPlan rendered the reviewed rows from.
@@ -102,18 +109,31 @@ public sealed partial class RestructureView : UserControl
         _reorgBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         _idleTileStroke = new SolidColorBrush(Windows.UI.Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF));
 
-        EngineClient.Instance.PropertyChanged += OnEngineChanged;
-        AppViewModel.Instance.PropertyChanged += OnAppChanged;
-        Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+        SubscribeEvents();
         WireApplyBarHoverSprings();
         Loaded += OnLoaded;
-        Unloaded += (_, _) =>
-        {
-            _unloaded = true;
-            EngineClient.Instance.PropertyChanged -= OnEngineChanged;
-            AppViewModel.Instance.PropertyChanged -= OnAppChanged;
-            Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
-        };
+        Unloaded += OnUnloaded;
+    }
+
+    private void SubscribeEvents()
+    {
+        if (_subscribed) return;
+        EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        AppViewModel.Instance.PropertyChanged += OnAppChanged;
+        Services.ChangeLog.Instance.Changed += OnChangeLogChanged;
+        Sankey.RibbonInvoked += OnSankeyRibbonInvoked;
+        _subscribed = true;
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _unloaded = true;
+        if (!_subscribed) return;
+        EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+        AppViewModel.Instance.PropertyChanged -= OnAppChanged;
+        Services.ChangeLog.Instance.Changed -= OnChangeLogChanged;
+        Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
+        _subscribed = false;
     }
 
     // Normalized library-root equality (trailing-separator- and case-
@@ -141,14 +161,26 @@ public sealed partial class RestructureView : UserControl
                 () =>
                 {
                     if (_unloaded) return;
-                    if (EngineClient.Instance.LastRestructurePlan is not null)
-                    {
-                        EngineClient.Instance.InvalidateRestructurePlan();
-                    }
+                    EngineClient.Instance.InvalidateRestructurePlan();
                     SyncPlan();
                     SyncUndoAffordance();
                     ApplyStatusText.Text = string.Empty;
+                    var folder = AppViewModel.Instance.FolderPath;
+                    if (!string.IsNullOrEmpty(folder))
+                    {
+                        _ = RequestPlanForFolderAsync(folder, "folder change");
+                    }
                 }));
+        });
+
+    private void OnChangeLogChanged(object? sender, EventArgs e)
+        => DebugLog.SafeRun("RestructureView.OnChangeLogChanged", () =>
+        {
+            if (_unloaded) return;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!_unloaded) SyncUndoAffordance();
+            });
         });
 
     // macOS parity (RestructureApplyBar.swift): gold primary + outline secondary
@@ -178,8 +210,9 @@ public sealed partial class RestructureView : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnLoaded), async () =>
         {
+            _unloaded = false;
+            SubscribeEvents();
             _ = RefreshDeepAnalyzeHintAsync();
-            if (_unloaded) return;
             SyncUndoAffordance();   // R2: reflect any pending undoable run on open
             // R6-05: the apply result/error is delivered via live PropertyChanged,
             // but leaving the Restructure tab mid-apply unsubscribes this view
@@ -216,22 +249,7 @@ public sealed partial class RestructureView : UserControl
                 PlanStatusText.Text = "Pick a library folder in the sidebar to plan a reorganization.";
                 return;
             }
-            PlanStatusText.Text = "Computing plan...";
-            // A freshly computed plan supersedes any prior selection intent.
-            _deselectedFileIds.Clear();
-            _selectedFileIds.Clear();
-            try
-            {
-                await EngineClient.Instance.PlanRestructureAsync(folder);
-            }
-            catch (Exception ex)
-            {
-                // SendCommandAsync can throw if the engine pipe is dead. Without
-                // this the status freezes on "Computing plan..." forever (the
-                // plan event never arrives). Recover to a clear message.
-                DebugLog.Warn("PlanRestructure (OnLoaded) send failed: " + ex.Message);
-                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
-            }
+            await RequestPlanForFolderAsync(folder, "open");
         });
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -243,6 +261,13 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.LastRestructurePlan):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncPlan(); });
+                    break;
+                case nameof(EngineClient.RestructurePlanDiscardedSignal):
+                    DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (!_unloaded) SyncDiscardedPlan();
+                    });
                     break;
                 case nameof(EngineClient.LastRestructureApplyResult):
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
@@ -283,13 +308,9 @@ public sealed partial class RestructureView : UserControl
                             if (_unloaded) return;
                             if (!string.IsNullOrEmpty(folder))
                             {
-                                // This recompute supersedes any prior plan, so the
-                                // user's selection intent from the old plan must not
-                                // leak forward (see _deselectedFileIds).
-                                _deselectedFileIds.Clear();
-                                _selectedFileIds.Clear();
-                                try { await EngineClient.Instance.PlanRestructureAsync(folder!); }
-                                catch (Exception ex) { DebugLog.Warn("Restructure auto-regen failed: " + ex.Message); }
+                                await RequestPlanForFolderAsync(
+                                    folder!,
+                                    "Deep Analyze refresh");
                             }
                         });
                     }
@@ -298,21 +319,35 @@ public sealed partial class RestructureView : UserControl
         });
 
     private async void OnSankeyRibbonInvoked(object? sender, (string Source, string Category) ribbon)
-    {
-        var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null) return;
-        var sheet = new DrillDownSheet();
-        sheet.SetSankeyFilter(plan, ribbon.Source, ribbon.Category);
-        var dialog = new ContentDialog
+        => await DebugLog.SafeRunAsync(nameof(OnSankeyRibbonInvoked), async () =>
         {
-            XamlRoot = XamlRoot,
-            Title = "Files in this flow",
-            Content = sheet,
-            CloseButtonText = "Done",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
-    }
+            var plan = _renderedPlan;
+            if (plan is null || !IsFrozenPlanCurrent(
+                    plan,
+                    EngineClient.Instance.LastRestructurePlan,
+                    _renderedPlan))
+            {
+                SyncPlan();
+                ApplyStatusText.Text =
+                    "The plan changed before the flow details opened — review the updated plan.";
+                await ShowAlertAsync(
+                    "Plan updated",
+                    "The reorganization plan changed while you were reviewing it. " +
+                    "The updated flow is on screen now; open its details again.");
+                return;
+            }
+            var sheet = new DrillDownSheet();
+            sheet.SetSankeyFilter(plan, ribbon.Source, ribbon.Category);
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Files in this flow",
+                Content = sheet,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        });
 
     // ---- Plan rendering -------------------------------------------------
 
@@ -326,9 +361,18 @@ public sealed partial class RestructureView : UserControl
         }
         if (!RootsMatch(plan.LibraryRoot, AppViewModel.Instance.FolderPath))
         {
+            CompletePlanningState();
             EngineClient.Instance.InvalidateRestructurePlan();
             ClearPlanPresentation();
-            PlanStatusText.Text = "This plan was superseded. Generate a plan for the current library.";
+            var currentRoot = AppViewModel.Instance.FolderPath;
+            if (string.IsNullOrEmpty(currentRoot))
+            {
+                PlanStatusText.Text = "This plan was superseded. Pick a library folder to plan again.";
+            }
+            else
+            {
+                _ = RequestPlanForFolderAsync(currentRoot, "folder switch");
+            }
             return;
         }
 
@@ -354,6 +398,21 @@ public sealed partial class RestructureView : UserControl
             _applyingPlan = null;
         }
 
+        CompletePlanningState();
+        var integrity = RestructurePlanPresentation.InspectPreview(plan);
+        _planIntegrityBlocked = !integrity.IsSafe;
+        if (_planIntegrityBlocked)
+        {
+            DebugLog.Warn($"Restructure plan preview failed integrity checks: {integrity.Summary}");
+        }
+        if (plan.Truncated)
+        {
+            SyncLargePlan(plan);
+            return;
+        }
+
+        LargePlanCard.Visibility = Visibility.Collapsed;
+        _largePlanCategories.Clear();
         _allFileRows.Clear();
         _filesByOutcome.Clear();
         _recByOutcome.Clear();
@@ -372,9 +431,7 @@ public sealed partial class RestructureView : UserControl
             list.Add(row);
         }
 
-        int moveCount = plan.Truncated
-            ? (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue)
-            : plan.Moves.Count;
+        int moveCount = plan.Moves.Count;
         int keepFolders = (int)(plan.FolderClassifications?.AnchorFolders ?? 0);
         int tidyFiles = CountOf(RestructureOutcome.Tidy);
         int reorgFiles = CountOf(RestructureOutcome.Reorganize);
@@ -419,8 +476,13 @@ public sealed partial class RestructureView : UserControl
         Sankey.SetPlan(plan);
         TreeDiff.SetPlan(plan);
         int srcCount = DistinctAllSourceFolders(plan);
-        int dstCount = plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        SankeyHeroStat.Text = $"{srcCount} source{(srcCount == 1 ? "" : "s")} -> {dstCount} destination{(dstCount == 1 ? "" : "s")}";
+        int bucketCount = plan.Moves
+            .Select(m => m.Category)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        SankeyHeroStat.Text =
+            $"{srcCount} source folder{(srcCount == 1 ? "" : "s")} → " +
+            $"{bucketCount} organization bucket{(bucketCount == 1 ? "" : "s")}";
 
         bool hasContent = moveCount > 0 || keepFolders > 0;
         bool hasMoves = moveCount > 0;
@@ -461,13 +523,152 @@ public sealed partial class RestructureView : UserControl
         RecomputeSelection();
     }
 
-    private void ClearPlanPresentation()
+    private void SyncDiscardedPlan()
     {
-        _renderedPlan = null;
+        var folder = AppViewModel.Instance.FolderPath;
+        if (string.IsNullOrWhiteSpace(folder))
+        {
+            CompletePlanningState();
+            ClearPlanPresentation();
+            return;
+        }
+
+        _planning = true;
+        _planningRoot = folder;
+        _planningSpawnGen = EngineClient.Instance.SpawnGeneration;
+        PlanBusyIndicator.IsActive = true;
+        PlanBusyIndicator.Visibility = Visibility.Visible;
+        ReplanButton.IsEnabled = false;
+        PlanStatusText.Text =
+            "Library inputs changed while planning — updating to a fresh plan…";
+    }
+
+    private void SyncLargePlan(RestructurePlan plan)
+    {
         _allFileRows.Clear();
         _filesByOutcome.Clear();
         _recByOutcome.Clear();
         _recommendations.Clear();
+        _largePlanCategories.Clear();
+        Sankey.SetPlan(null);
+        TreeDiff.SetPlan(null);
+
+        var totalMoves = RestructurePlanPresentation.TotalMoves(plan);
+        var hasCompleteConfidenceCounts =
+            RestructurePlanPresentation.TryGetCompleteConfidenceCounts(
+                plan,
+                out var confidenceCounts);
+        var categoryCount =
+            RestructurePlanPresentation.CategoryCount(plan.CategoryCounts);
+        var topCategories =
+            RestructurePlanPresentation.TopCategories(plan.CategoryCounts);
+        foreach (var category in topCategories)
+        {
+            _largePlanCategories.Add(category);
+        }
+
+        LargePlanMoveCount.Text = totalMoves.ToString("N0");
+        LargePlanSummaryText.Text =
+            $"{totalMoves:N0} proposals across {categoryCount:N0} " +
+            $"organization bucket{(categoryCount == 1 ? "" : "s")} are stored outside the UI.";
+        LargePlanBucketCount.Text =
+            $"{categoryCount:N0} bucket{(categoryCount == 1 ? "" : "s")}";
+        LargePlanMoreBucketsText.Text = categoryCount > topCategories.Count
+            ? $"Showing the top {topCategories.Count:N0} organization buckets. " +
+              $"{categoryCount - topCategories.Count:N0} more stay bounded in the engine. " +
+              "These are semantic group totals, not destination folders."
+            : "All organization-bucket totals are shown. These are semantic groups, not destination folders.";
+
+        if (hasCompleteConfidenceCounts)
+        {
+            LargePlanAutoCount.Text = confidenceCounts.Auto.ToString("N0");
+            LargePlanReviewCount.Text = confidenceCounts.Review.ToString("N0");
+            LargePlanAskCount.Text = confidenceCounts.Ask.ToString("N0");
+            var unknownDetail = confidenceCounts.Unknown > 0
+                ? $" {confidenceCounts.Unknown:N0} proposals with unknown confidence are also held back."
+                : string.Empty;
+            LargePlanConfidenceDetailText.Text =
+                "Review and Needs approval proposals cannot be inspected or selected individually " +
+                "in this bounded large-plan view; plan a smaller folder for per-file review." +
+                unknownDetail;
+        }
+        else
+        {
+            LargePlanAutoCount.Text = "—";
+            LargePlanReviewCount.Text = "—";
+            LargePlanAskCount.Text = "—";
+            LargePlanConfidenceDetailText.Text =
+                "The engine did not provide authoritative full-plan confidence totals. " +
+                "Apply is disabled; generate a fresh plan before making changes.";
+        }
+
+        var integrity = RestructurePlanPresentation.InspectPreview(plan);
+        var driveRootWarning = RestructurePlanPresentation.IsDriveRoot(plan.LibraryRoot)
+            ? $" The selected library is the drive root '{plan.LibraryRoot}', so FileID may create or " +
+              "reorganize top-level folders across that drive. Choose a narrower folder for finer review."
+            : string.Empty;
+        LargePlanSafetyText.Text = !integrity.IsSafe
+            ? $"Apply is blocked because the visible sample failed basic path checks: {integrity.Summary}. " +
+              "That sample never proves the unseen stored proposals are safe. " +
+              $"The selected library root is '{plan.LibraryRoot}'. Generate a fresh plan before making any changes."
+            : !hasCompleteConfidenceCounts
+                ? "The visible sample does not prove the unseen stored proposals are safe. " +
+                  "Apply remains disabled until a fresh plan supplies complete confidence totals."
+                : "The visible sample does not prove the unseen stored proposals are safe. " +
+                  "Immediately before the first change, the engine preflights every stored proposal. " +
+                  "Only after that full preflight succeeds does it run Auto moves as one crash-journaled batch; " +
+                  "Review, Needs approval, and unknown-confidence proposals stay put. " +
+                  "Real moves can be reversed with Undo last run. Shortcut runs leave originals in place and " +
+                  "appear in Recent Changes, but their links must be removed manually." + driveRootWarning;
+
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            LargePlanCard,
+            $"Large plan ready: {totalMoves:N0} proposals across {categoryCount:N0} organization buckets. " +
+            (hasCompleteConfidenceCounts
+                ? $"{confidenceCounts.Auto:N0} Auto, {confidenceCounts.Review:N0} Review, " +
+                  $"{confidenceCounts.Ask:N0} Needs approval. "
+                : "Full-plan confidence totals are unavailable. ") +
+            (integrity.IsSafe && hasCompleteConfidenceCounts
+                ? "Only Auto moves will apply after a full engine preflight."
+                : "Apply is blocked."));
+
+        KeepValue.Text = (plan.FolderClassifications?.AnchorFolders ?? 0).ToString("N0");
+        KeepHint.Text = "folders kept intact";
+        TidyValue.Text = "0";
+        TidyHint.Text = string.Empty;
+        ReorgValue.Text = "0";
+        ReorgHint.Text = string.Empty;
+        SankeyHeroStat.Text = string.Empty;
+        StatHero.Visibility = Visibility.Collapsed;
+        ViewModeToggle.Visibility = Visibility.Collapsed;
+        UnifiedSurface.Visibility = Visibility.Collapsed;
+        NothingToMoveCard.Visibility = Visibility.Collapsed;
+        LargePlanCard.Visibility = Visibility.Visible;
+        UpdateStayingPut((int)(plan.FolderClassifications?.AnchorFolders ?? 0));
+
+        PlanStatusText.Text = !integrity.IsSafe
+            ? "Plan blocked: duplicate, invalid, or outside-library paths were detected in its visible sample."
+            : !hasCompleteConfidenceCounts
+                ? "Plan blocked: authoritative full-plan confidence totals are unavailable. Generate it again."
+                : confidenceCounts.Auto == 0
+                    ? $"Large plan ready, but none of its {totalMoves:N0} proposals are Auto-confidence. " +
+                      "Plan a smaller folder to inspect Review and Needs approval items."
+                    : $"Large plan ready: {confidenceCounts.Auto:N0} Auto moves can apply; " +
+                      $"{confidenceCounts.Review + confidenceCounts.Ask + confidenceCounts.Unknown:N0} proposals stay put.";
+        RecomputeSelection();
+    }
+
+    private void ClearPlanPresentation()
+    {
+        _renderedPlan = null;
+        _planIntegrityBlocked = false;
+        _allFileRows.Clear();
+        _filesByOutcome.Clear();
+        _recByOutcome.Clear();
+        _recommendations.Clear();
+        _largePlanCategories.Clear();
+        Sankey.SetPlan(null);
+        TreeDiff.SetPlan(null);
         KeepValue.Text = "0";
         KeepHint.Text = string.Empty;
         TidyValue.Text = "0";
@@ -478,14 +679,24 @@ public sealed partial class RestructureView : UserControl
         StatHero.Visibility = Visibility.Collapsed;
         ViewModeToggle.Visibility = Visibility.Collapsed;
         UnifiedSurface.Visibility = Visibility.Collapsed;
+        LargePlanCard.Visibility = Visibility.Collapsed;
+        LargePlanAutoCount.Text = "—";
+        LargePlanReviewCount.Text = "—";
+        LargePlanAskCount.Text = "—";
+        LargePlanConfidenceDetailText.Text = string.Empty;
         NothingToMoveCard.Visibility = Visibility.Collapsed;
         StayingPutCard.Visibility = Visibility.Collapsed;
         ApplyBarSelectedCount.Text = "0";
         ApplyBarTotalCount.Text = "0";
+        ApplyBarOfText.Visibility = Visibility.Visible;
+        ApplyBarTotalCount.Visibility = Visibility.Visible;
+        ApplyBarSelectionLabel.Text = "selected";
         ApplyBarHint.Text = "Generate a plan to enable Apply.";
-        ApplySymlinkButtonText.Text = "Apply as shortcuts";
+        ApplySymlinkButtonText.Text = "Create shortcuts";
+        ApplyMovesButtonText.Text = "Convert to real moves";
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
+        CancelApplyButton.Visibility = Visibility.Collapsed;
         PlanStatusText.Text = string.IsNullOrEmpty(AppViewModel.Instance.FolderPath)
             ? "Pick a library folder in the sidebar to plan a reorganization."
             : "No current plan for this library — generate a new plan.";
@@ -544,24 +755,92 @@ public sealed partial class RestructureView : UserControl
     /// IsSelected flags, and reconcile each card's approve state. The count and
     /// the move set ApplyAsync sends both read the same _allFileRows, so they
     /// can never diverge (the macOS toggleSkip invariant).</summary>
+    internal static T? ResolveRepeaterItem<T>(object? itemsSource, int index)
+        where T : class
+    {
+        if (index < 0) return null;
+        if (itemsSource is IReadOnlyList<T> readOnly && index < readOnly.Count)
+        {
+            return readOnly[index];
+        }
+        if (itemsSource is IList<T> list && index < list.Count)
+        {
+            return list[index];
+        }
+        return null;
+    }
+
+    private void OnRecommendationElementPrepared(
+        ItemsRepeater sender,
+        ItemsRepeaterElementPreparedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnRecommendationElementPrepared), () =>
+        {
+            if (args.Element is not FrameworkElement element) return;
+            element.DataContext =
+                ResolveRepeaterItem<RestructureRecommendationVm>(sender.ItemsSource, args.Index);
+        });
+
+    private void OnFileElementPrepared(
+        ItemsRepeater sender,
+        ItemsRepeaterElementPreparedEventArgs args)
+        => DebugLog.SafeRun(nameof(OnFileElementPrepared), () =>
+        {
+            if (args.Element is not FrameworkElement element) return;
+            element.DataContext =
+                ResolveRepeaterItem<RestructureFileRowVm>(sender.ItemsSource, args.Index);
+        });
+
     private void RecomputeSelection()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan?.Truncated == true)
         {
-            int storedTotal = (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue);
-            bool storedHasWork = storedTotal > 0 && !string.IsNullOrWhiteSpace(plan.PlanId);
+            var storedTotal = RestructurePlanPresentation.TotalMoves(plan);
+            var hasCompleteConfidenceCounts =
+                RestructurePlanPresentation.TryGetCompleteConfidenceCounts(
+                    plan,
+                    out var confidenceCounts);
+            bool storedHasWork = RestructurePlanPresentation.CanApplyStoredPlan(
+                plan,
+                !_planIntegrityBlocked);
             ApplySymlinkButton.IsEnabled = storedHasWork && !_applying;
             ApplyMovesButton.IsEnabled = storedHasWork && !_applying;
-            ApplyBarSelectedCount.Text = storedTotal.ToString("N0");
+            ApplyBarSelectedCount.Text = hasCompleteConfidenceCounts
+                ? confidenceCounts.Auto.ToString("N0")
+                : "—";
+            ApplyBarOfText.Visibility = Visibility.Collapsed;
+            ApplyBarTotalCount.Visibility = Visibility.Collapsed;
+            ApplyBarSelectionLabel.Text = "Auto eligible";
             ApplyBarTotalCount.Text = storedTotal.ToString("N0");
-            ApplySymlinkButtonText.Text = storedHasWork ? $"Apply as shortcuts ({storedTotal:N0})" : "Apply as shortcuts";
-            ApplyStatusText.Text = storedHasWork
-                ? $"Ready to apply all {storedTotal:N0} moves from the engine-stored plan into '{plan.LibraryRoot}'."
-                : "The stored plan is unavailable. Generate it again.";
-            ApplyBarHint.Text = "Large plans apply as one complete, crash-journaled run · Moves are undoable.";
+            ApplySymlinkButtonText.Text = storedHasWork
+                ? "Create Auto shortcuts"
+                : "Create shortcuts";
+            ApplyMovesButtonText.Text = storedHasWork
+                ? "Move Auto files"
+                : "Convert to real moves";
+            ApplyStatusText.Text = _planIntegrityBlocked
+                ? "Apply blocked: the visible sample contains duplicate, invalid, or outside-library paths."
+                : !hasCompleteConfidenceCounts
+                    ? "Apply blocked: authoritative full-plan confidence totals are unavailable."
+                    : string.IsNullOrWhiteSpace(plan.PlanId)
+                        ? "Apply blocked: the stored plan handle is unavailable. Generate it again."
+                        : confidenceCounts.Auto == 0
+                            ? "Nothing can apply automatically. Review and Needs approval proposals stay put; " +
+                              "plan a smaller folder to inspect them."
+                            : $"Ready to apply {confidenceCounts.Auto:N0} Auto moves into '{plan.LibraryRoot}'. " +
+                              $"{confidenceCounts.Review + confidenceCounts.Ask + confidenceCounts.Unknown:N0} " +
+                              "Review, Needs approval, or unknown-confidence proposals stay put.";
+            ApplyBarHint.Text = _planIntegrityBlocked
+                ? "Generate a fresh plan before applying"
+                : hasCompleteConfidenceCounts
+                    ? "Full engine preflight immediately before first change · Auto only"
+                    : "Generate a fresh plan before applying";
             return;
         }
+        ApplyBarOfText.Visibility = Visibility.Visible;
+        ApplyBarTotalCount.Visibility = Visibility.Visible;
+        ApplyBarSelectionLabel.Text = "selected";
+        ApplyMovesButtonText.Text = "Convert to real moves";
         int total = plan?.Moves.Count ?? 0;
         int selected = 0;
         foreach (var kv in _filesByOutcome)
@@ -575,20 +854,24 @@ public sealed partial class RestructureView : UserControl
             }
         }
 
-        bool hasWork = selected > 0;
+        bool hasWork = selected > 0 && !_planIntegrityBlocked;
         // Single-flight: while an apply is in flight the buttons stay disabled
         // even if a checkbox toggle re-runs this, so a stale plan can't be
         // re-applied (F-C5-003).
         ApplySymlinkButton.IsEnabled = hasWork && !_applying;
         ApplyMovesButton.IsEnabled = hasWork && !_applying;
         ApplyBarSelectedCount.Text = selected.ToString("N0");
-        ApplySymlinkButtonText.Text = hasWork ? $"Apply as shortcuts ({selected:N0})" : "Apply as shortcuts";
-        ApplyStatusText.Text = hasWork
-            ? $"Ready to apply {selected:N0} of {total:N0} into '{plan?.LibraryRoot}'."
-            : "Select at least one file to apply.";
-        ApplyBarHint.Text = total > 0
-            ? "Shortcuts leave originals in place · Moves are permanent but undoable."
-            : "Generate a plan to enable Apply.";
+        ApplySymlinkButtonText.Text = hasWork ? $"Create shortcuts ({selected:N0})" : "Create shortcuts";
+        ApplyStatusText.Text = _planIntegrityBlocked
+            ? "Apply blocked: duplicate, invalid, or outside-library paths were detected."
+            : hasWork
+                ? $"Ready to apply {selected:N0} of {total:N0} into '{plan?.LibraryRoot}'."
+                : "Select at least one file to apply.";
+        ApplyBarHint.Text = _planIntegrityBlocked
+            ? "Generate a fresh plan before applying"
+            : total > 0
+                ? "Shortcuts add links (manual removal) · Real moves use one-click Undo"
+                : "Generate a plan to enable Apply.";
         StepChip1Bg.Background = hasWork
             ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
@@ -599,11 +882,24 @@ public sealed partial class RestructureView : UserControl
         {
             if (sender is CheckBox cb && cb.DataContext is RestructureFileRowVm f)
             {
-                f.IsSelected = cb.IsChecked == true;
-                if (f.IsSelected) { _deselectedFileIds.Remove(f.FileId); _selectedFileIds.Add(f.FileId); }
-                else { _selectedFileIds.Remove(f.FileId); _deselectedFileIds.Add(f.FileId); }
+                SetFileSelection(f, cb.IsChecked == true);
             }
         });
+
+    private void SetFileSelection(RestructureFileRowVm file, bool isSelected)
+    {
+        if (isSelected)
+        {
+            _deselectedFileIds.Remove(file.FileId);
+            _selectedFileIds.Add(file.FileId);
+        }
+        else
+        {
+            _selectedFileIds.Remove(file.FileId);
+            _deselectedFileIds.Add(file.FileId);
+        }
+        file.IsSelected = isSelected;
+    }
 
     private void OnRecReviewClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRecReviewClicked), () =>
@@ -624,9 +920,7 @@ public sealed partial class RestructureView : UserControl
                 _suppressRecompute = true;
                 foreach (var f in files)
                 {
-                    f.IsSelected = approve;
-                    if (approve) { _deselectedFileIds.Remove(f.FileId); _selectedFileIds.Add(f.FileId); }
-                    else { _selectedFileIds.Remove(f.FileId); _deselectedFileIds.Add(f.FileId); }
+                    SetFileSelection(f, approve);
                 }
                 _suppressRecompute = false;
             }
@@ -634,28 +928,76 @@ public sealed partial class RestructureView : UserControl
         });
 
     private async void OnSeeAllClicked(object sender, RoutedEventArgs e)
-    {
-        if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm) return;
-        var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null) return;
-        var title = vm.Outcome switch
+        => await DebugLog.SafeRunAsync(nameof(OnSeeAllClicked), async () =>
         {
-            RestructureOutcome.Tidy => "Tidying - files moving out of mixed folders",
-            RestructureOutcome.Reorganize => "Reorganizing - files leaving generic folders",
-            _ => "Files staying put",
-        };
-        var sheet = new DrillDownSheet();
-        sheet.SetOutcomeFilter(plan, vm.Outcome, title);
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Files in this group",
-            Content = sheet,
-            CloseButtonText = "Done",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
-    }
+            if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm)
+            {
+                return;
+            }
+            var plan = _renderedPlan;
+            var livePlan = EngineClient.Instance.LastRestructurePlan;
+            var hasCurrentCard = _recByOutcome.TryGetValue(vm.Outcome, out var currentVm)
+                                 && IsCurrentRecommendation(vm, currentVm);
+            if (!IsFrozenPlanCurrent(plan, livePlan, _renderedPlan) || !hasCurrentCard)
+            {
+                SyncPlan();
+                ApplyStatusText.Text =
+                    "The plan changed before the file details opened — review the updated plan.";
+                await ShowAlertAsync(
+                    "Plan updated",
+                    "The reorganization plan changed while you were reviewing it. " +
+                    "The updated recommendations are on screen now; open See all again.");
+                return;
+            }
+            if (!_filesByOutcome.TryGetValue(vm.Outcome, out var rows))
+            {
+                return;
+            }
+            var title = vm.Outcome switch
+            {
+                RestructureOutcome.Tidy => "Tidying — files moving out of mixed folders",
+                RestructureOutcome.Reorganize => "Reorganizing — files leaving generic folders",
+                _ => "Files staying put",
+            };
+            var sheet = new DrillDownSheet();
+            var staleDetailSurfaced = false;
+            sheet.SetOutcomeFilter(
+                rows,
+                title,
+                (row, isSelected) =>
+                {
+                    var stillCurrent =
+                        IsFrozenPlanCurrent(
+                            plan,
+                            EngineClient.Instance.LastRestructurePlan,
+                            _renderedPlan)
+                        && _recByOutcome.TryGetValue(vm.Outcome, out var renderedVm)
+                        && IsCurrentRecommendation(vm, renderedVm);
+                    if (stillCurrent)
+                    {
+                        SetFileSelection(row, isSelected);
+                        return;
+                    }
+                    if (staleDetailSurfaced) return;
+                    staleDetailSurfaced = true;
+                    SyncPlan();
+                    ApplyStatusText.Text =
+                        "The plan changed while file details were open — review the updated plan.";
+                    _ = ShowAlertAsync(
+                        "Plan updated",
+                        "That file list belonged to an older reorganization plan, so the selection was not changed. " +
+                        "Close it and open See all from the updated recommendation.");
+                });
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Files in this group",
+                Content = sheet,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        });
 
     // ---- Hover cross-highlight ------------------------------------------
 
@@ -713,20 +1055,40 @@ public sealed partial class RestructureView : UserControl
     private async Task RefreshDeepAnalyzeHintAsync()
     {
         if (EngineClient.Instance.DeepAnalyzeCommandInFlight) return;
-        int captioned = 0, total = 0;
+        var libraryRoot = AppViewModel.Instance.FolderPath;
+        if (string.IsNullOrWhiteSpace(libraryRoot))
+        {
+            MissingContentModelsBanner.Visibility = Visibility.Collapsed;
+            DeepAnalyzeHintBanner.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var stats = default(RestructureQualityStats);
         try
         {
-            (captioned, total) = await Task.Run(QueryCaptionedFraction).ConfigureAwait(true);
+            stats = await Task.Run(
+                () => QueryRestructureQuality(libraryRoot)).ConfigureAwait(true);
         }
-        catch { /* keep zeros -> banner hidden */ }
+        catch { }
 
-        if (_unloaded) return;
+        if (_unloaded
+            || !RootsMatch(libraryRoot, AppViewModel.Instance.FolderPath))
+        {
+            return;
+        }
+        bool missingContentSignals = stats.Available
+            && RestructurePlanPresentation.HasMissingContentSignals(
+                stats.ContentEligible,
+                stats.ClipEmbeddings,
+                stats.TextEmbeddings);
         bool show = !_deepAnalyzeHintDismissed
-            && total > 0
-            && (double)captioned / total < 0.4
+            && !missingContentSignals
+            && stats.Total > 0
+            && (double)stats.Captioned / stats.Total < 0.4
             && !EngineClient.Instance.DeepAnalyzeCommandInFlight;
         try
         {
+            MissingContentModelsBanner.Visibility =
+                missingContentSignals ? Visibility.Visible : Visibility.Collapsed;
             DeepAnalyzeHintBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
@@ -756,11 +1118,25 @@ public sealed partial class RestructureView : UserControl
         }
     }
 
-    private static (int captioned, int total) QueryCaptionedFraction()
+    internal readonly record struct RestructureQualityStats(
+        bool Available,
+        int Captioned,
+        int Total,
+        int ContentEligible,
+        int ClipEmbeddings,
+        int TextEmbeddings);
+
+    private static RestructureQualityStats QueryRestructureQuality(
+        string libraryRoot)
     {
         try
         {
-            if (!System.IO.File.Exists(AppPaths.DbPath)) return (0, 0);
+            if (!System.IO.File.Exists(AppPaths.DbPath)
+                || string.IsNullOrWhiteSpace(libraryRoot))
+            {
+                return default;
+            }
+            var normalizedRoot = libraryRoot.TrimEnd('\\', '/');
             using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                 new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                 {
@@ -768,21 +1144,58 @@ public sealed partial class RestructureView : UserControl
                     Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
                 }.ToString());
             conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText =
-                "SELECT COUNT(*), " +
-                "SUM(CASE WHEN vlm_description IS NOT NULL AND vlm_description <> '' THEN 1 ELSE 0 END) " +
-                "FROM files WHERE failed = 0";
-            using var reader = cmd.ExecuteReader();
-            if (reader.Read())
-            {
-                int total = reader.IsDBNull(0) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(0)), int.MaxValue);
-                int captioned = reader.IsDBNull(1) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(1)), int.MaxValue);
-                return (captioned, total);
-            }
-            return (0, 0);
+            return QueryRestructureQuality(conn, normalizedRoot);
         }
-        catch { return (0, 0); }
+        catch { return default; }
+    }
+
+    internal static RestructureQualityStats QueryRestructureQuality(
+        Microsoft.Data.Sqlite.SqliteConnection conn,
+        string libraryRoot)
+    {
+        var normalizedRoot = libraryRoot.TrimEnd('\\', '/');
+        using var cmd = conn.CreateCommand();
+        const string deepEligible =
+            "(kind IN ('image', 'video', 'pdf', 'audio')"
+            + " OR (kind = 'model' AND lower(path_text) LIKE '%.obj'))";
+        const string textEligible =
+            "(kind IN ('doc', 'pdf') AND EXISTS ("
+            + "SELECT 1 FROM doc_text dt WHERE dt.file_id = scoped.id))";
+        const string embeddingEligible =
+            "(kind IN ('image', 'video')"
+            + " OR (kind = 'model' AND lower(path_text) LIKE '%.obj')"
+            + " OR " + textEligible + ")";
+        cmd.CommandText =
+            "WITH scoped AS (" +
+            " SELECT id, kind, path_text, vlm_full_model FROM files WHERE failed = 0 AND (" +
+            "   path_text = $root COLLATE NOCASE OR (" +
+            "     substr(path_text, 1, length($root)) = $root COLLATE NOCASE" +
+            "     AND substr(path_text, length($root) + 1, 1) IN ('\\', '/')" +
+            "   )" +
+            " )" +
+            ")" +
+            " SELECT SUM(CASE WHEN " + deepEligible + " THEN 1 ELSE 0 END)," +
+            " SUM(CASE WHEN " + deepEligible +
+            "   AND vlm_full_model IS NOT NULL AND vlm_full_model <> '' THEN 1 ELSE 0 END)," +
+            " SUM(CASE WHEN " + embeddingEligible + " THEN 1 ELSE 0 END)," +
+            " SUM(CASE WHEN (kind IN ('image', 'video')" +
+            "   OR (kind = 'model' AND lower(path_text) LIKE '%.obj')) AND EXISTS (" +
+            "   SELECT 1 FROM clip_embeddings ce WHERE ce.file_id = scoped.id" +
+            " ) THEN 1 ELSE 0 END)," +
+            " SUM(CASE WHEN " + textEligible + " AND EXISTS (" +
+            "   SELECT 1 FROM text_embeddings te WHERE te.file_id = scoped.id" +
+            " ) THEN 1 ELSE 0 END)" +
+            " FROM scoped";
+        cmd.Parameters.AddWithValue("$root", normalizedRoot);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return default;
+
+        int total = reader.IsDBNull(0) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(0)), int.MaxValue);
+        int captioned = reader.IsDBNull(1) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(1)), int.MaxValue);
+        int eligible = reader.IsDBNull(2) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(2)), int.MaxValue);
+        int clip = reader.IsDBNull(3) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(3)), int.MaxValue);
+        int text = reader.IsDBNull(4) ? 0 : (int)Math.Min(Convert.ToInt64(reader.GetValue(4)), int.MaxValue);
+        return new RestructureQualityStats(true, captioned, total, eligible, clip, text);
     }
 
     private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
@@ -808,6 +1221,70 @@ public sealed partial class RestructureView : UserControl
             DeepAnalyzeHintBanner.Visibility = Visibility.Collapsed;
         });
 
+    private void OnOpenModelsSettingsClicked(object sender, RoutedEventArgs e)
+        => AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
+
+    private void BeginOrUpdatePlanningState(string folder)
+    {
+        if (_planning)
+        {
+            _planningRoot = folder;
+            _deselectedFileIds.Clear();
+            _selectedFileIds.Clear();
+            PlanBusyIndicator.IsActive = true;
+            PlanBusyIndicator.Visibility = Visibility.Visible;
+            ReplanButton.IsEnabled = false;
+            PlanStatusText.Text = "Updating the plan with the latest library inputs…";
+            return;
+        }
+
+        _planning = true;
+        _planningRoot = folder;
+        _planningSpawnGen = EngineClient.Instance.SpawnGeneration;
+        _deselectedFileIds.Clear();
+        _selectedFileIds.Clear();
+        PlanBusyIndicator.IsActive = true;
+        PlanBusyIndicator.Visibility = Visibility.Visible;
+        ReplanButton.IsEnabled = false;
+        PlanStatusText.Text = "Computing plan…";
+    }
+
+    private void CompletePlanningState()
+    {
+        _planning = false;
+        _planningRoot = null;
+        PlanBusyIndicator.IsActive = false;
+        PlanBusyIndicator.Visibility = Visibility.Collapsed;
+        ReplanButton.IsEnabled = !_applying;
+    }
+
+    private async Task<bool> RequestPlanForFolderAsync(string folder, string origin)
+    {
+        BeginOrUpdatePlanningState(folder);
+
+        try
+        {
+            await EngineClient.Instance.PlanRestructureAsync(folder);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            CompletePlanningState();
+            DebugLog.Warn($"PlanRestructure ({origin}) send failed: {ex.Message}");
+            PlanStatusText.Text =
+                "Couldn't start planning — the engine isn't responding. Try restarting the app.";
+            return false;
+        }
+    }
+
+    private async Task ReplanAfterApplyAsync(string folder)
+    {
+        if (await RequestPlanForFolderAsync(folder, "post-apply")) return;
+
+        _applying = false;
+        if (!_unloaded) RecomputeSelection();
+    }
+
     // ---- Plan / Apply ---------------------------------------------------
 
     private async void OnPlanClicked(object sender, RoutedEventArgs e)
@@ -819,19 +1296,7 @@ public sealed partial class RestructureView : UserControl
                 PlanStatusText.Text = "Pick a library folder in the sidebar first.";
                 return;
             }
-            PlanStatusText.Text = "Computing plan...";
-            // A freshly computed plan supersedes any prior selection intent.
-            _deselectedFileIds.Clear();
-            _selectedFileIds.Clear();
-            try
-            {
-                await EngineClient.Instance.PlanRestructureAsync(folder);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("PlanRestructure (OnPlanClicked) send failed: " + ex.Message);
-                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
-            }
+            await RequestPlanForFolderAsync(folder, "Re-plan");
         });
 
     private async void OnApplySymlinksClicked(object sender, RoutedEventArgs e) => await ApplyAsync(useSymlinks: true);
@@ -845,7 +1310,43 @@ public sealed partial class RestructureView : UserControl
         // applied" alarm). Guard + disable until the result (and re-plan) land.
         if (_applying) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null || plan.Moves.Count == 0) return;
+        if (plan is null) return;
+        RestructureConfidenceCounts? fullConfidenceCounts = null;
+        if (plan.Truncated)
+        {
+            if (!RestructurePlanPresentation.TryGetCompleteConfidenceCounts(
+                    plan,
+                    out fullConfidenceCounts))
+            {
+                ApplyStatusText.Text =
+                    "Apply blocked: authoritative full-plan confidence totals are unavailable.";
+                await ShowAlertAsync(
+                    "Generate a fresh plan",
+                    "This stored plan cannot prove how many Auto, Review, and Needs approval proposals it contains. " +
+                    "Nothing was changed. Generate a fresh plan before applying.");
+                return;
+            }
+            if (fullConfidenceCounts.Auto == 0)
+            {
+                ApplyStatusText.Text =
+                    "There are no Auto-confidence proposals to apply. Plan a smaller folder for per-file review.";
+                return;
+            }
+        }
+        else if (plan.Moves.Count == 0)
+        {
+            return;
+        }
+        if (_planIntegrityBlocked)
+        {
+            ApplyStatusText.Text =
+                "Apply blocked: generate a fresh plan that passes path and collision safety checks.";
+            await ShowAlertAsync(
+                "Plan failed safety checks",
+                "FileID found duplicate, invalid, or outside-library paths in this plan. " +
+                "Nothing was changed. Generate a fresh plan before applying.");
+            return;
+        }
 
         // CRITICAL: hard guard — the plan's own library root MUST equal the
         // currently active library. If the folder was switched/cleared/wiped
@@ -891,20 +1392,58 @@ public sealed partial class RestructureView : UserControl
                 if (row.IsSelected) sel.Add(row.Move);
             }
         }
-        if (plan.Truncated && string.IsNullOrWhiteSpace(plan.PlanId)) return;
+        if (plan.Truncated && string.IsNullOrWhiteSpace(plan.PlanId))
+        {
+            ApplyStatusText.Text =
+                "Apply blocked: the engine no longer has this stored plan. Generate it again.";
+            await ShowAlertAsync(
+                "Generate the plan again",
+                "The bounded plan no longer has a valid engine handle. Nothing was changed.");
+            return;
+        }
         if (!plan.Truncated && sel.Count == 0) return;
-        int applyCount = plan.Truncated
-            ? (int)Math.Min(plan.TotalMoves ?? (ulong)plan.Moves.Count, int.MaxValue)
-            : sel.Count;
+
+        if (!useSymlinks)
+        {
+            var confirmed = await ConfirmRealMovesAsync(
+                plan,
+                plan.Truncated ? fullConfidenceCounts!.Auto : (ulong)sel.Count);
+            if (!confirmed) return;
+            if (_applying) return;
+            if (!IsFrozenPlanCurrent(
+                    plan,
+                    EngineClient.Instance.LastRestructurePlan,
+                    _renderedPlan) ||
+                !RootsMatch(plan.LibraryRoot, AppViewModel.Instance.FolderPath))
+            {
+                SyncPlan();
+                ApplyStatusText.Text =
+                    "The plan changed while confirmation was open — review it and try again.";
+                await ShowAlertAsync(
+                    "Plan updated",
+                    "The plan changed before FileID could apply the frozen reviewed set. " +
+                    "Nothing was moved. Review the updated plan and confirm again.");
+                return;
+            }
+        }
+
         _applying = true;
         _applyInFlight = true;
+        _applyingAsShortcuts = useSymlinks;
         _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
         _applyingSpawnGen = EngineClient.Instance.SpawnGeneration; // R6-06
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
-        ApplyStatusText.Text = useSymlinks
-            ? $"Creating {applyCount:N0} symlinks..."
-            : $"Moving {applyCount:N0} files...";
+        ReplanButton.IsEnabled = false;
+        CancelApplyButton.IsEnabled = true;
+        CancelApplyButton.Visibility = Visibility.Visible;
+        ApplyStatusText.Text = plan.Truncated
+            ? useSymlinks
+                ? $"Creating {fullConfidenceCounts!.Auto:N0} Auto shortcuts after full preflight…"
+                : $"Moving {fullConfidenceCounts!.Auto:N0} Auto files after full preflight…"
+            : useSymlinks
+                ? $"Creating {sel.Count:N0} shortcuts…"
+                : $"Moving {sel.Count:N0} files…";
         try
         {
             await EngineClient.Instance.ApplyRestructureAsync(
@@ -918,6 +1457,9 @@ public sealed partial class RestructureView : UserControl
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
             _applyInFlight = false;
             _applying = false;
+            _applyingAsShortcuts = false;
+            CancelApplyButton.Visibility = Visibility.Collapsed;
+            ReplanButton.IsEnabled = true;
             RecomputeSelection();
             ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
             await ShowAlertAsync("Couldn't apply changes",
@@ -929,17 +1471,108 @@ public sealed partial class RestructureView : UserControl
     // R2 reversibility: show/hide the "Undo last run" button from the engine's
     // CanUndoRestructure flag (set after an apply that moved files, cleared once
     // undone). Mirrors macOS RestructureView's canUndoRestructure affordance.
+    private async Task<bool> ConfirmRealMovesAsync(
+        RestructurePlan plan,
+        ulong selectedCount)
+    {
+        if (XamlRoot is null)
+        {
+            DebugLog.Warn("Restructure confirmation skipped because XamlRoot is null.");
+            return false;
+        }
+
+        var title =
+            $"Move {selectedCount:N0} file{(selectedCount == 1 ? "" : "s")}?";
+        var rootScope =
+            $"The selected library root is '{plan.LibraryRoot}'. " +
+            (RestructurePlanPresentation.IsDriveRoot(plan.LibraryRoot)
+                ? "This is a drive root, so FileID may create or reorganize top-level folders across " +
+                  "the drive. Cancel and choose a narrower folder if you want finer review. "
+                : string.Empty);
+        var message = plan.Truncated
+            ? rootScope +
+              $"FileID will move exactly {selectedCount:N0} Auto-confidence " +
+              $"file{(selectedCount == 1 ? "" : "s")} from the frozen stored plan. " +
+              "The visible sample does not validate the unseen plan. Immediately before the first move, " +
+              "the engine preflights every stored proposal; if that full preflight fails, nothing moves. " +
+              "Review, Needs approval, and unknown-confidence proposals stay put. " +
+              "Every completed move is journaled and Undo last run can reverse the batch."
+            : rootScope +
+              $"FileID will move the exact {selectedCount:N0} reviewed " +
+              $"file{(selectedCount == 1 ? "" : "s")} now. " +
+              "Every completed move is journaled and Undo last run can reverse the batch.";
+
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = title,
+                Content = message,
+                PrimaryButtonText = "Move files",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Restructure confirmation failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    private async void OnCancelApplyClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnCancelApplyClicked), async () =>
+        {
+            if (!_applyInFlight) return;
+
+            CancelApplyButton.IsEnabled = false;
+            ApplyStatusText.Text =
+                "Stopping safely after the current file… completed moves remain undoable.";
+            try
+            {
+                await EngineClient.Instance.CancelRestructureApplyAsync();
+            }
+            catch (Exception ex)
+            {
+                CancelApplyButton.IsEnabled = true;
+                ApplyStatusText.Text = "Couldn't send the stop request — the engine isn't responding.";
+                DebugLog.Warn("Cancel restructure apply send failed: " + ex.Message);
+                await ShowAlertAsync(
+                    "Couldn't stop applying",
+                    "FileID couldn't reach the engine. Completed moves are still journaled; " +
+                    "use Undo last run after the operation finishes or the engine restarts.");
+            }
+        });
+
     private void SyncUndoAffordance()
     {
         var canUndo = EngineClient.Instance.CanUndoRestructure
             && RootsMatch(EngineClient.Instance.UndoRestructureRoot, AppViewModel.Instance.FolderPath);
         UndoButton.Visibility = canUndo ? Visibility.Visible : Visibility.Collapsed;
-        UndoButton.IsEnabled = canUndo;
+        UndoButton.IsEnabled = CanStartRestructureUndo(
+            canUndo,
+            Services.ChangeLog.Instance.IsUndoInFlight,
+            EngineClient.Instance.UndoRestructureInFlight);
     }
 
     private async void OnUndoClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnUndoClicked), async () =>
         {
+            var canUndoForRoot = EngineClient.Instance.CanUndoRestructure
+                && RootsMatch(
+                    EngineClient.Instance.UndoRestructureRoot,
+                    AppViewModel.Instance.FolderPath);
+            if (!CanStartRestructureUndo(
+                    canUndoForRoot,
+                    Services.ChangeLog.Instance.IsUndoInFlight,
+                    EngineClient.Instance.UndoRestructureInFlight))
+            {
+                SyncUndoAffordance();
+                return;
+            }
+
             var root = EngineClient.Instance.UndoRestructureRoot
                        ?? EngineClient.Instance.LastRestructurePlan?.LibraryRoot
                        ?? AppViewModel.Instance.FolderPath;
@@ -952,23 +1585,41 @@ public sealed partial class RestructureView : UserControl
                 // the changes sheet shows this apply as Undone (the engine
                 // journal persists across launches, so the log may be empty —
                 // fall back to the direct command then).
-                Services.ChangeLogEntry? logEntry = null;
-                foreach (var candidate in Services.ChangeLog.Instance.Snapshot())
+                var logEntry = FindLatestRestructureUndoEntry(
+                    Services.ChangeLog.Instance.Snapshot());
+                if (logEntry is not null
+                    && string.IsNullOrWhiteSpace(
+                        EngineClient.Instance.UndoRestructureShortcutToken))
                 {
-                    if (candidate.Kind == Services.ChangeKind.Restructure
-                        && candidate.Status == Services.ChangeStatus.Undoable)
+                    bool undone;
+                    if (logEntry.Status == Services.ChangeStatus.UndoFailed)
                     {
-                        logEntry = candidate;
-                        break;
+                        undone = await Services.ChangeLog.Instance.RetryAsync(logEntry);
                     }
-                }
-                if (logEntry is not null)
-                {
-                    await Services.ChangeLog.Instance.UndoAsync(logEntry);
+                    else
+                    {
+                        undone = await Services.ChangeLog.Instance.UndoAsync(logEntry);
+                    }
+                    if (!undone)
+                    {
+                        SyncUndoAffordance();
+                        if (Services.ChangeLog.Instance.IsUndoInFlight)
+                        {
+                            ApplyStatusText.Text =
+                                "Another undo is still running — try again when it finishes.";
+                        }
+                        else
+                        {
+                            ApplyStatusText.Text =
+                                "Undo didn't complete — fix the reported issue and try Undo again.";
+                        }
+                    }
                 }
                 else
                 {
-                    await EngineClient.Instance.UndoRestructureAsync(root!);
+                    await EngineClient.Instance.UndoRestructureAsync(
+                        root!,
+                        EngineClient.Instance.UndoRestructureShortcutToken);
                 }
             }
             catch (Exception ex)
@@ -980,6 +1631,19 @@ public sealed partial class RestructureView : UserControl
                 UndoButton.IsEnabled = true;
             }
         });
+
+    internal static bool CanStartRestructureUndo(
+        bool canUndoForRoot,
+        bool changeLogUndoInFlight,
+        bool engineUndoInFlight)
+        => canUndoForRoot && !changeLogUndoInFlight && !engineUndoInFlight;
+
+    internal static Services.ChangeLogEntry? FindLatestRestructureUndoEntry(
+        IEnumerable<Services.ChangeLogEntry> entries)
+        => entries.FirstOrDefault(entry =>
+            entry.Kind == Services.ChangeKind.Restructure
+            && entry.Status is Services.ChangeStatus.Undoable
+                or Services.ChangeStatus.UndoFailed);
 
     private void SyncApplyResult()
     {
@@ -995,21 +1659,19 @@ public sealed partial class RestructureView : UserControl
         // this branch leaves _applying / _applyInFlight untouched.
         if (EngineClient.Instance.LastRestructureApplyResultWasUndo)
         {
+            var wasShortcutUndo =
+                EngineClient.Instance.LastRestructureApplyResultWasShortcutUndo;
             SyncUndoAffordance();
             // The undo moved files back, so the on-screen plan is stale — refresh
             // it, mirroring the post-apply regenerate. Fire-and-forget; log a
             // faulted send instead of stranding (PlanRestructureAsync faults its
             // Task rather than throwing synchronously).
             var undoFolder = AppViewModel.Instance.FolderPath;
-            if (!string.IsNullOrEmpty(undoFolder))
+            if (!wasShortcutUndo
+                && r.Applied > 0
+                && !string.IsNullOrEmpty(undoFolder))
             {
-                _ = EngineClient.Instance.PlanRestructureAsync(undoFolder!).ContinueWith(t =>
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        if (_unloaded) return;
-                        DebugLog.Warn("Restructure post-undo re-plan failed: "
-                            + t.Exception?.GetBaseException().Message);
-                    }), TaskContinuationOptions.OnlyOnFaulted);
+                _ = RequestPlanForFolderAsync(undoFolder!, "post-undo");
             }
             if (!string.IsNullOrEmpty(r.PrivilegeError))
             {
@@ -1017,20 +1679,34 @@ public sealed partial class RestructureView : UserControl
                 _ = ShowAlertAsync("Couldn't undo changes", r.PrivilegeError!);
                 return;
             }
-            ApplyStatusText.Text = r.Failed == 0
-                ? $"Undid the last restructure - {r.Applied:N0} file{(r.Applied == 1 ? "" : "s")} moved back to where they were."
-                : $"Undo finished with problems - {r.Applied:N0} moved back, {r.Failed:N0} couldn't be restored. Check %LOCALAPPDATA%\\FileID\\logs\\.";
-            if (r.Failed > 0)
+            ApplyStatusText.Text = FormatUndoCompletion(r, wasShortcutUndo);
+            if (r.Cancelled)
             {
-                _ = ShowAlertAsync("Some items couldn't be restored",
-                    $"Undo moved back {r.Applied:N0}, but {r.Failed:N0} couldn't be returned to their original location. " +
-                    "Close any app using those files or restore the missing folder, then click Undo again. " +
-                    "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+                _ = ShowAlertAsync(
+                    "Undo stopped",
+                    FormatUndoCompletion(r, wasShortcutUndo));
+            }
+            else if (r.Failed > 0)
+            {
+                _ = ShowAlertAsync(
+                    wasShortcutUndo
+                        ? "Some shortcuts couldn't be removed"
+                        : "Some items couldn't be restored",
+                    wasShortcutUndo
+                        ? $"Removed {r.Applied:N0}, but {r.Failed:N0} shortcuts couldn't be safely removed. " +
+                          "Check that the links still point to the original files, then retry from Recent Changes. " +
+                          "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl."
+                        : $"Undo moved back {r.Applied:N0}, but {r.Failed:N0} couldn't be returned to their original location. " +
+                          "Close any app using those files or restore the missing folder, then click Undo again. " +
+                          "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
             }
             return;
         }
 
+        var appliedAsShortcuts = _applyingAsShortcuts;
+        _applyingAsShortcuts = false;
         _applyInFlight = false;
+        CancelApplyButton.Visibility = Visibility.Collapsed;
 
         // Anything actually moved -> the current plan is stale (real moves
         // updated the DB; applied rows must leave the view). Re-plan, exactly as
@@ -1041,14 +1717,56 @@ public sealed partial class RestructureView : UserControl
         // moved, release it now so the user can retry.
         if (r.Applied > 0)
         {
+            EngineClient.Instance.InvalidateRestructurePlan();
+
+            var undoRoot = _applyingPlan?.LibraryRoot
+                           ?? EngineClient.Instance.LastRestructurePlan?.LibraryRoot
+                           ?? AppViewModel.Instance.FolderPath;
+            if (appliedAsShortcuts)
+            {
+                var shortcutUndoToken = r.ShortcutUndoToken;
+                if (!string.IsNullOrWhiteSpace(shortcutUndoToken)
+                    && !string.IsNullOrWhiteSpace(undoRoot))
+                {
+                    Services.UndoStack.Instance.Push(
+                        $"create {r.Applied:N0} restructure shortcut{(r.Applied == 1 ? "" : "s")}",
+                        Services.ChangeKind.RestructureShortcuts,
+                        async () =>
+                        {
+                            try
+                            {
+                                return await EngineClient.Instance
+                                    .UndoRestructureAndWaitAsync(
+                                        undoRoot!,
+                                        shortcutUndoToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                DebugLog.Warn(
+                                    "Undo restructure shortcuts send failed: " +
+                                    ex.Message);
+                                return false;
+                            }
+                        });
+                }
+                else
+                {
+                    Services.ChangeLog.Instance.RecordNotUndoable(
+                        $"create {r.Applied:N0} restructure shortcut{(r.Applied == 1 ? "" : "s")}",
+                        Services.ChangeKind.RestructureShortcuts,
+                        "The engine did not return a shortcut undo token; remove the links manually.");
+                }
+            }
+
             // Session change log: a confirmed apply is undoable via the
             // engine's inverse-move journal. Pushing a Restructure entry
             // auto-marks any older restructure entry "superseded" (the
             // journal is truncate-per-batch — only the latest replays).
-            var undoRoot = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
-                           ?? AppViewModel.Instance.FolderPath;
             if (!string.IsNullOrEmpty(undoRoot)
-                && EngineClient.Instance.CanUndoRestructure)
+                && ShouldRecordUndoableRestructureChange(
+                    appliedAsShortcuts,
+                    r.Applied,
+                    EngineClient.Instance.CanUndoRestructure))
             {
                 Services.UndoStack.Instance.Push(
                     $"reorganize {r.Applied:N0} file{(r.Applied == 1 ? "" : "s")}",
@@ -1071,20 +1789,7 @@ public sealed partial class RestructureView : UserControl
             var folder = AppViewModel.Instance.FolderPath;
             if (!string.IsNullOrEmpty(folder))
             {
-                // OBSERVE the re-plan Task rather than discarding it: PlanRestructureAsync
-                // faults its returned Task (frame-too-large/not-Ready/pipe IO all run
-                // async) and never throws synchronously, so a sync try/catch is dead
-                // code -- a faulted send would leave the single-flight guard stuck and
-                // the Apply buttons disabled forever. Release + log on the UI thread.
-                _ = EngineClient.Instance.PlanRestructureAsync(folder!).ContinueWith(t =>
-                    DispatcherQueue.TryEnqueue(() =>
-                    {
-                        if (_unloaded) return;
-                        DebugLog.Warn("Restructure post-apply re-plan failed: "
-                            + t.Exception?.GetBaseException().Message);
-                        _applying = false;
-                        RecomputeSelection();
-                    }), TaskContinuationOptions.OnlyOnFaulted);
+                _ = ReplanAfterApplyAsync(folder!);
             }
             else
             {
@@ -1104,10 +1809,15 @@ public sealed partial class RestructureView : UserControl
             _ = ShowAlertAsync("Couldn't apply changes", r.PrivilegeError!);
             return;
         }
-        ApplyStatusText.Text = r.Failed == 0
-            ? $"Applied {r.Applied:N0} moves successfully."
-            : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
-        if (r.Failed == 0 && r.Applied > 0)
+        ApplyStatusText.Text = FormatApplyCompletion(r, appliedAsShortcuts);
+        if (r.Cancelled)
+        {
+            _ = ShowAlertAsync(
+                "Restructure stopped",
+                FormatApplyCompletion(r, appliedAsShortcuts) +
+                "\n\nGenerate a fresh plan before applying again so the proposals match what is now on disk.");
+        }
+        else if (!appliedAsShortcuts && r.Failed == 0 && r.Applied > 0)
         {
             StepChip2Bg.Background = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
             StepChip2Bg.BorderThickness = new Thickness(0);
@@ -1119,11 +1829,22 @@ public sealed partial class RestructureView : UserControl
             // L3: do NOT claim the originals are unchanged — the engine can count a
             // file as failed that WAS physically moved (move succeeded, DB path
             // update failed). Point the user at rescan/Undo to reconcile instead.
-            _ = ShowAlertAsync("Some changes couldn't be applied",
-                $"Applied {r.Applied:N0}, but {r.Failed:N0} couldn't be fully applied. A few of those may have been moved but not fully recorded - " +
-                "run a rescan to reconcile, or Undo to restore.\n\n" +
-                "This usually means a file was open, already moved, or you don't have permission to write the destination. " +
-                "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
+            if (appliedAsShortcuts)
+            {
+                _ = ShowAlertAsync(
+                    "Some shortcuts couldn't be created",
+                    $"Created {r.Applied:N0}, but {r.Failed:N0} shortcuts failed. Original files stayed in place. " +
+                    "This usually means a link already exists or FileID cannot write to that folder. " +
+                    "Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then generate a fresh plan.");
+            }
+            else
+            {
+                _ = ShowAlertAsync("Some changes couldn't be applied",
+                    $"Applied {r.Applied:N0}, but {r.Failed:N0} couldn't be fully applied. A few of those may have been moved but not fully recorded - " +
+                    "run a rescan to reconcile, or Undo to restore.\n\n" +
+                    "This usually means a file was open, already moved, or you don't have permission to write the destination. " +
+                    "Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then try again.");
+            }
         }
     }
 
@@ -1143,6 +1864,7 @@ public sealed partial class RestructureView : UserControl
         if (undoError)
         {
             EngineClient.Instance.UndoRestructureInFlight = false;
+            EngineClient.Instance.UndoRestructureInFlightWasShortcut = false;
             UndoButton.IsEnabled = EngineClient.Instance.CanUndoRestructure;
             ApplyStatusText.Text = "Undo didn't complete - try again.";
             _ = ShowAlertAsync("Couldn't undo changes",
@@ -1152,7 +1874,12 @@ public sealed partial class RestructureView : UserControl
             return;
         }
 
-        if (!planError) _applyInFlight = false;
+        if (!planError)
+        {
+            _applyInFlight = false;
+            _applyingAsShortcuts = false;
+            CancelApplyButton.Visibility = Visibility.Collapsed;
+        }
         // The apply itself, or the post-apply re-plan, failed - release the
         // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
         // Except a plan failure while an apply is STILL in flight: releasing
@@ -1160,12 +1887,14 @@ public sealed partial class RestructureView : UserControl
         if (!_applyInFlight)
         {
             _applying = false;
+            ReplanButton.IsEnabled = true;
             RecomputeSelection();
         }
 
         if (planError)
         {
-            PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
+            CompletePlanningState();
+            PlanStatusText.Text = "Planning didn't complete — try again, or run a fresh scan.";
             _ = ShowAlertAsync("Couldn't plan the reorganization",
                 string.IsNullOrWhiteSpace(err.Message)
                     ? "FileID couldn't compute a reorganization plan. Try again, or run a fresh scan first."
@@ -1193,8 +1922,16 @@ public sealed partial class RestructureView : UserControl
     // drive killing the engine mid-apply is the daily-user repro).
     private void SyncEngineLifecycle()
     {
+        var currentGeneration = EngineClient.Instance.SpawnGeneration;
+        if (_planning && _planningSpawnGen != currentGeneration)
+        {
+            CompletePlanningState();
+            PlanStatusText.Text =
+                "The engine restarted before planning finished. Generate the plan again.";
+        }
+
         if (!ShouldReleaseApplyGuardOnEngineChange(
-                _applying || _applyInFlight, _applyingSpawnGen, EngineClient.Instance.SpawnGeneration))
+                _applying || _applyInFlight, _applyingSpawnGen, currentGeneration))
         {
             return;
         }
@@ -1202,7 +1939,9 @@ public sealed partial class RestructureView : UserControl
         bool applyWasInFlight = _applyInFlight;
         _applyInFlight = false;
         _applying = false;
+        _applyingAsShortcuts = false;
         _applyingPlan = null;
+        CancelApplyButton.Visibility = Visibility.Collapsed;
         RecomputeSelection();
         if (applyWasInFlight)
         {
@@ -1225,6 +1964,102 @@ public sealed partial class RestructureView : UserControl
 
     private static string Count(int n, string noun)
         => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
+
+    internal static bool IsFrozenPlanCurrent(
+        object? frozenPlan,
+        object? livePlan,
+        object? renderedPlan)
+        => frozenPlan is not null
+           && ReferenceEquals(frozenPlan, livePlan)
+           && ReferenceEquals(frozenPlan, renderedPlan);
+
+    internal static bool IsCurrentRecommendation(
+        RestructureRecommendationVm? invoked,
+        RestructureRecommendationVm? rendered)
+        => invoked is not null && ReferenceEquals(invoked, rendered);
+
+    internal static bool ShouldRecordUndoableRestructureChange(
+        bool appliedAsShortcuts,
+        uint applied,
+        bool canUndoThisRun)
+        => !appliedAsShortcuts && applied > 0 && canUndoThisRun;
+
+    internal static string FormatApplyCompletion(
+        RestructureApplyResult result,
+        bool appliedAsShortcuts)
+    {
+        if (result.Cancelled)
+        {
+            var remaining = result.Remaining is { } count
+                ? $"{count:N0} eligible proposal{(count == 1 ? "" : "s")} stayed unchanged."
+                : "Unprocessed proposals stayed unchanged.";
+            return appliedAsShortcuts
+                ? $"Stopped safely after creating {result.Applied:N0} shortcut" +
+                  $"{(result.Applied == 1 ? "" : "s")}. Originals stayed put; {remaining}"
+                : $"Stopped safely after moving {result.Applied:N0} file" +
+                  $"{(result.Applied == 1 ? "" : "s")}. Completed moves remain undoable; {remaining}";
+        }
+
+        if (result.Failed == 0)
+        {
+            return appliedAsShortcuts
+                ? $"Created {result.Applied:N0} shortcut{(result.Applied == 1 ? "" : "s")}; originals stayed put."
+                : $"Moved {result.Applied:N0} file{(result.Applied == 1 ? "" : "s")} successfully.";
+        }
+
+        return appliedAsShortcuts
+            ? $"Created {result.Applied:N0} shortcuts; {result.Failed:N0} failed. " +
+              "Check %LOCALAPPDATA%\\FileID\\logs\\."
+            : $"Moved {result.Applied:N0}; {result.Failed:N0} failed. " +
+              "Check %LOCALAPPDATA%\\FileID\\logs\\.";
+    }
+
+    internal static string FormatUndoCompletion(
+        RestructureApplyResult result,
+        bool wasShortcutUndo = false)
+    {
+        var verb = wasShortcutUndo ? "removing" : "restoring";
+        var item = wasShortcutUndo ? "shortcut" : "file";
+        if (result.Cancelled)
+        {
+            if (result.Remaining == 0)
+            {
+                return $"Undo stopped after {verb} {result.Applied:N0} {item}" +
+                       $"{(result.Applied == 1 ? "" : "s")}. No moves remain.";
+            }
+            var remaining = result.Remaining is { } count
+                ? wasShortcutUndo
+                    ? $"{count:N0} shortcut{(count == 1 ? "" : "s")} still need to be undone."
+                    : $"{count:N0} move{(count == 1 ? "" : "s")} still need to be undone."
+                : wasShortcutUndo
+                    ? "Some shortcuts still need to be undone."
+                    : "Some moves still need to be undone.";
+            return $"Undo stopped after {verb} {result.Applied:N0} {item}" +
+                   $"{(result.Applied == 1 ? "" : "s")}. {remaining} Click Undo again to continue.";
+        }
+
+        if (result.Failed > 0)
+        {
+            return wasShortcutUndo
+                ? $"Undo finished with problems — {result.Applied:N0} shortcuts removed, " +
+                  $"{result.Failed:N0} couldn't be safely removed. Check %LOCALAPPDATA%\\FileID\\logs\\."
+                : $"Undo finished with problems — {result.Applied:N0} moved back, " +
+                  $"{result.Failed:N0} couldn't be restored. Check %LOCALAPPDATA%\\FileID\\logs\\.";
+        }
+
+        if (result.Applied > 0)
+        {
+            return wasShortcutUndo
+                ? $"Removed {result.Applied:N0} restructure shortcut" +
+                  $"{(result.Applied == 1 ? "" : "s")}."
+                : $"Undid the last restructure — {result.Applied:N0} file" +
+                  $"{(result.Applied == 1 ? "" : "s")} moved back to where they were.";
+        }
+
+        return wasShortcutUndo
+            ? "No shortcuts were removed. Undo remains available; check the engine log and try again."
+            : "Nothing was restored. Undo remains available; check the engine log and try again.";
+    }
 
     // R6-05: a completion (apply-result or engine-error) is "unhandled" when it's
     // present and not the reference we last surfaced. EngineClient.Set swaps in a

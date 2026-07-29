@@ -188,7 +188,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
-        if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped))
+        if (e.PropertyName is nameof(DuplicateMember.IsKeeper)
+            or nameof(DuplicateMember.IsSelectedForTrash)
+            or nameof(DuplicateGroup.IsSkipped))
         {
             DispatcherQueue.TryEnqueue(() => OnPropertyChanged(nameof(HeaderStats)));
         }
@@ -328,9 +330,21 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             if (IsSimilarMode)
             {
                 int skippedSimilar = 0;
+                int selectedSimilar = 0;
                 foreach (var g in ViewModel.Groups) if (g.IsSkipped) skippedSimilar++;
+                foreach (var g in ViewModel.Groups)
+                {
+                    foreach (var member in g.Members)
+                    {
+                        if (member.IsSelectedForTrash) selectedSimilar++;
+                    }
+                }
                 int activeSimilar = ViewModel.Groups.Count - skippedSimilar;
                 var msg = $"{activeSimilar} similar group{(activeSimilar == 1 ? "" : "s")} • review each before deleting — NOT byte-identical";
+                if (selectedSimilar > 0)
+                {
+                    msg += $" • {selectedSimilar} file{(selectedSimilar == 1 ? "" : "s")} explicitly selected";
+                }
                 return skippedSimilar > 0 ? $"{msg} • {skippedSimilar} skipped" : msg;
             }
             long files = 0;
@@ -392,7 +406,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 g.IsSkipped = false;
                 for (int i = 0; i < g.Members.Count; i++)
                 {
-                    g.Members[i].IsKeeper = (i == 0);
+                    g.Members[i].IsKeeper = !g.IsSimilar && i == 0;
+                    g.Members[i].IsSelectedForTrash = false;
                 }
             }
             OnPropertyChanged(nameof(HeaderStats));
@@ -422,41 +437,29 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
 
-    // WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
-    // inherit the parent Grid's DataContext, so the prior version's
-    // `item.DataContext as DuplicateGroup` always returned null and every
-    // per-group action silently no-op'd. Fix: cache the right-tapped group's
-    // ContentHash (the group's stable identity) at the moment the context menu
-    // is invoked, then re-resolve the live instance at action time. Caching the
-    // instance itself goes stale: a background scan refresh (MergeByContentHash)
-    // replaces a group's instance whenever its member set changes, detaching the
-    // cached copy from ViewModel.Groups while the flyout is still open — the
-    // MenuFlyout doesn't block the dispatcher — so the action would mutate a
-    // discarded instance and silently no-op again.
-    private string? _lastRightTappedHash;
-
-    private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupRightTapped), () =>
+    private void OnGroupFlyoutOpening(object sender, object e)
+        => DebugLog.SafeRun(nameof(OnGroupFlyoutOpening), () =>
     {
-        if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
+        if (sender is not MenuFlyout flyout) return;
+        var contentHash = (flyout.Target as FrameworkElement)?.DataContext is DuplicateGroup group
+            ? group.ContentHash
+            : null;
+        foreach (var item in flyout.Items)
         {
-            _lastRightTappedHash = g.ContentHash;
+            if (item is FrameworkElement element) element.Tag = contentHash;
         }
     });
 
-    // Resolve the live group by the cached ContentHash so every per-group action
-    // hits the instance currently in ViewModel.Groups, not a snapshot a mid-flyout
-    // refresh may have replaced; no-op safely if the group is gone.
     private DuplicateGroup? GroupFromFlyoutItem(object sender) =>
-        _lastRightTappedHash is null
-            ? null
-            : ViewModel.Groups.FirstOrDefault(g => g.ContentHash == _lastRightTappedHash);
+        sender is FrameworkElement { Tag: string contentHash }
+            ? ViewModel.Groups.FirstOrDefault(group => group.ContentHash == contentHash)
+            : null;
 
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnGroupKeepFirst), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.Members.Count == 0) return;
+        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
         for (int i = 0; i < grp.Members.Count; i++)
         {
             grp.Members[i].IsKeeper = (i == 0);
@@ -467,7 +470,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun(nameof(OnGroupKeepShallowest), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.Members.Count == 0) return;
+        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
         // Within a byte-identical group every member is the same size, so "keep
         // largest" was always a no-op (kept index 0). Keep the copy in the
         // least-nested / most-canonical location instead: fewest path
@@ -498,7 +501,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun(nameof(OnGroupInvert), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.Members.Count == 0) return;
+        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
         var currentIdx = -1;
         for (int i = 0; i < grp.Members.Count; i++)
         {
@@ -565,15 +568,18 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         long selectedBytes = 0;
         foreach (var group in groups)
         {
-            var keeper = group.Members.FirstOrDefault(member => member.IsKeeper);
-            var victims = group.Members
-                .Where(member => !member.IsKeeper)
+            var keeper = CleanupSelectionPolicy.RetainedCopy(group);
+            var victims = CleanupSelectionPolicy.SelectedVictims(group)
                 .Select(member => new ExactCleanupFile(member.Id, member.Path, member.SizeBytes))
                 .ToArray();
             if (victims.Length == 0) continue;
             if (keeper is null)
             {
-                await ShowAlertAsync("Choose a keeper", "Every duplicate group must retain one unselected keeper before files can be trashed.");
+                await ShowAlertAsync(
+                    similar ? "Keep at least one copy" : "Choose a keeper",
+                    similar
+                        ? "A visually similar group cannot trash every visible copy. Clear at least one Trash checkbox, review that retained copy, and try again."
+                        : "Every duplicate group must retain one unselected keeper before files can be trashed.");
                 return;
             }
             foreach (var victim in victims)
@@ -593,18 +599,23 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (selectedCount == 0)
         {
             await ShowAlertAsync(
-                "Nothing to trash",
-                "Every file in the active groups is marked as a keeper, so there are no non-keepers to move to the Recycle Bin.");
+                similar ? "Select copies to trash" : "Nothing to trash",
+                similar
+                    ? "Nothing in Similar mode is pre-selected. Check Trash only on the visually similar copies you reviewed and explicitly want to move to the Recycle Bin."
+                    : "Every file in the active groups is marked as a keeper, so there are no non-keepers to move to the Recycle Bin.");
             return;
         }
 
+        var confirmationText = similar
+            ? $"{selectedCount} explicitly selected file{(selectedCount == 1 ? "" : "s")} ({FormatSize(selectedBytes)}) will move to the Recycle Bin. These files are visually similar, not byte-identical, and FileID will not byte-verify them. Unchecked copies stay in place."
+            : $"{selectedCount} non-keeper file{(selectedCount == 1 ? "" : "s")} ({FormatSize(selectedBytes)}) will move to the Recycle Bin." +
+                (recoverable ? " They stay recoverable from there." : string.Empty);
         var confirm = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = confirmTitle,
-            Content = $"{selectedCount} non-keeper file{(selectedCount == 1 ? "" : "s")} ({FormatSize(selectedBytes)}) will move to the Recycle Bin." +
-                (recoverable ? " They stay recoverable from there." : string.Empty),
-            PrimaryButtonText = "Move to Recycle Bin",
+            Title = similar ? "Move selected similar copies?" : confirmTitle,
+            Content = confirmationText,
+            PrimaryButtonText = similar ? "Move Selected Copies" : "Move to Recycle Bin",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
@@ -647,7 +658,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             reverse: async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
-                try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
+                try { return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); }
                 catch { return false; }
             });
 

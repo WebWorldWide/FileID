@@ -14,6 +14,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 {
     private bool _unloaded;
     private bool _initializingToggles;
+    private readonly System.Collections.Generic.Dictionary<string, long> _excludedPurgeGenerations =
+        new(StringComparer.OrdinalIgnoreCase);
+    private long _nextExcludedPurgeGeneration;
 
     /// <summary> expose the singleton ModelInstallerService so
     /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
@@ -110,8 +113,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Content = "✕",
                 Tag = path,
                 Padding = new Thickness(6, 2, 6, 2),
+                IsEnabled = !_excludedPurgeGenerations.ContainsKey(path),
             };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Stop excluding " + path);
+            if (!remove.IsEnabled)
+            {
+                ToolTipService.SetToolTip(remove,
+                    "Wait for FileID to finish applying this exclusion.");
+            }
             remove.Click += OnRemoveExcludedFolderClicked;
             Grid.SetColumn(remove, 1);
             grid.Children.Add(label);
@@ -162,6 +171,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             var updated = new System.Collections.Generic.List<string>(vm.Settings.ExcludedFolders) { picked };
             vm.Settings.ExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
             vm.Settings.Save();
+            var purgeGeneration = ++_nextExcludedPurgeGeneration;
+            _excludedPurgeGenerations[picked] = purgeGeneration;
             PopulateExcludedFolders();
 
             // Purge-immediately ruling: the Library reflects the exclusion now,
@@ -171,22 +182,50 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             {
                 var reply = await EngineClient.Instance
                     .PurgeExcludedAndWaitAsync(new[] { picked }).ConfigureAwait(true);
-                ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
-                    ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
-                    : "Excluded. This folder will be skipped from now on.");
+                if (IsCurrentExcludedPurge(picked, purgeGeneration))
+                {
+                    ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
+                        ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
+                        : "Excluded. This folder will be skipped from now on.");
+                }
             }
             catch (Exception ex)
             {
                 DebugLog.Warn($"[SETTINGS] purgeExcluded didn't confirm: {ex.Message}");
-                ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
-                    "Excluded. The library will fully reflect this at the next scan.");
+                if (IsCurrentExcludedPurge(picked, purgeGeneration))
+                {
+                    ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
+                        "Excluded. The library will fully reflect this at the next scan.");
+                }
+            }
+            finally
+            {
+                if (_excludedPurgeGenerations.TryGetValue(picked, out var current)
+                    && current == purgeGeneration)
+                {
+                    _excludedPurgeGenerations.Remove(picked);
+                    if (!_unloaded) PopulateExcludedFolders();
+                }
             }
         });
+
+    private bool IsCurrentExcludedPurge(string path, long generation)
+        => !_unloaded
+            && _excludedPurgeGenerations.TryGetValue(path, out var current)
+            && current == generation
+            && AppViewModel.Instance.Settings.ExcludedFolders.Exists(
+                existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase));
 
     private void OnRemoveExcludedFolderClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRemoveExcludedFolderClicked), () =>
         {
             if (sender is not Button button || button.Tag is not string path) return;
+            if (_excludedPurgeGenerations.ContainsKey(path))
+            {
+                ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
+                    "FileID is still applying this exclusion. Try again when it finishes.");
+                return;
+            }
             var vm = AppViewModel.Instance;
             var updated = new System.Collections.Generic.List<string>();
             foreach (var existing in vm.Settings.ExcludedFolders)

@@ -9,8 +9,8 @@
 //   - Entries are never silently dropped: an undo failure marks the entry
 //     UndoFailed (with the reason) and leaves it visible for retry.
 //   - Undone entries stay in the list as a session activity record.
-//   - Capacity is 500 (vs 16); overflowing entries lose only their reverse
-//     closure (→ NotUndoable "history limit"), not their history line.
+//   - Reverse capacity is 500 (vs 16); overflowing entries lose only their
+//     reverse closure (→ NotUndoable "history limit"), not their history line.
 //   - A new Restructure entry marks older Restructure entries NotUndoable:
 //     the engine keeps a single truncate-per-batch inverse-move journal, so
 //     only the latest apply is engine-undoable.
@@ -33,6 +33,7 @@ internal enum ChangeKind
     Rename,
     Trash,
     Restructure,
+    RestructureShortcuts,
     PeopleMerge,
     Tags,
     Other,
@@ -41,6 +42,7 @@ internal enum ChangeKind
 internal enum ChangeStatus
 {
     Undoable,
+    Undoing,
     Undone,
     UndoFailed,
     NotUndoable,
@@ -48,14 +50,20 @@ internal enum ChangeStatus
 
 internal sealed class ChangeLogEntry : INotifyPropertyChanged
 {
-    internal ChangeLogEntry(string label, ChangeKind kind, Func<Task<bool>> reverse)
+    internal ChangeLogEntry(
+        string label,
+        ChangeKind kind,
+        Func<Task<bool>>? reverse,
+        ChangeStatus status = ChangeStatus.Undoable,
+        string? statusDetail = null)
     {
         Id = Guid.NewGuid().ToString("N");
         Timestamp = DateTimeOffset.Now;
         Label = label;
         Kind = kind;
         _reverse = reverse;
-        _status = ChangeStatus.Undoable;
+        _status = status;
+        _statusDetail = statusDetail;
     }
 
     public string Id { get; }
@@ -71,7 +79,7 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
         {
             if (_status == value) return;
             _status = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status)));
+            RaisePropertyChanged(nameof(Status));
         }
     }
 
@@ -84,7 +92,7 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
         {
             if (_statusDetail == value) return;
             _statusDetail = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusDetail)));
+            RaisePropertyChanged(nameof(StatusDetail));
         }
     }
 
@@ -98,19 +106,44 @@ internal sealed class ChangeLogEntry : INotifyPropertyChanged
 
     internal void RestoreReverseAfterFailure(Func<Task<bool>> reverse) => _reverse = reverse;
 
+    internal bool HasReverse => _reverse is not null;
+
     internal void DropReverse() => _reverse = null;
 
+    private bool _supersededDuringUndo;
+    internal void MarkSupersededDuringUndo() => _supersededDuringUndo = true;
+
+    internal bool ConsumeSupersededDuringUndo()
+    {
+        var superseded = _supersededDuringUndo;
+        _supersededDuringUndo = false;
+        return superseded;
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void RaisePropertyChanged(string propertyName)
+    {
+        var subscribers = PropertyChanged;
+        if (subscribers is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        foreach (PropertyChangedEventHandler subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(this, args); }
+            catch (Exception ex) { DebugLog.Warn($"Change-log entry subscriber failed for {propertyName}: {ex.Message}"); }
+        }
+    }
 }
 
 internal sealed class ChangeLog : INotifyPropertyChanged
 {
     public static ChangeLog Instance { get; } = new();
 
-    private const int Capacity = 500;
+    private const int ReverseCapacity = 500;
     private readonly object _gate = new();
     // Newest first.
     private readonly LinkedList<ChangeLogEntry> _entries = new();
+    private bool _undoInFlight;
 
     /// <summary>Entries still undoable — drives the close-confirm gate and
     /// the shell badge.</summary>
@@ -130,6 +163,30 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         }
     }
 
+    /// <summary>Entries whose outcome is still pending at close time. A failed
+    /// undo remains pending because it can be retried, and an in-flight undo
+    /// remains pending until its terminal result is known.</summary>
+    public int PendingCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                var n = 0;
+                foreach (var e in _entries)
+                {
+                    if (IsPending(e.Status)) n++;
+                }
+                return n;
+            }
+        }
+    }
+
+    public bool IsUndoInFlight
+    {
+        get { lock (_gate) { return _undoInFlight; } }
+    }
+
     public int Count { get { lock (_gate) { return _entries.Count; } } }
 
     public ChangeLogEntry? MostRecentUndoable
@@ -138,6 +195,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
         {
             lock (_gate)
             {
+                if (_undoInFlight) return null;
                 foreach (var e in _entries)
                 {
                     if (e.Status == ChangeStatus.Undoable) return e;
@@ -171,23 +229,35 @@ internal sealed class ChangeLog : INotifyPropertyChanged
                 // apply — only the latest batch can be replayed.
                 foreach (var e in _entries)
                 {
-                    if (e.Kind == ChangeKind.Restructure && e.Status == ChangeStatus.Undoable)
+                    if (e.Kind != ChangeKind.Restructure) continue;
+                    if (e.Status is ChangeStatus.Undoable or ChangeStatus.UndoFailed)
                     {
-                        e.Status = ChangeStatus.NotUndoable;
-                        e.StatusDetail = "Superseded — only the most recent restructure can be undone.";
-                        e.DropReverse();
+                        MarkRestructureSuperseded(e);
+                    }
+                    else if (e.Status == ChangeStatus.Undoing)
+                    {
+                        e.MarkSupersededDuringUndo();
                     }
                 }
             }
             _entries.AddFirst(entry);
-            while (_entries.Count > Capacity)
-            {
-                var oldest = _entries.Last!.Value;
-                _entries.RemoveLast();
-                // Keep nothing alive that could pin big closures; the entry
-                // itself is dropped from history at the cap.
-                oldest.DropReverse();
-            }
+            TrimReverseClosuresLocked();
+        }
+        OnChanged();
+        return entry;
+    }
+
+    public ChangeLogEntry RecordNotUndoable(string label, ChangeKind kind, string detail)
+    {
+        var entry = new ChangeLogEntry(
+            label,
+            kind,
+            reverse: null,
+            status: ChangeStatus.NotUndoable,
+            statusDetail: detail);
+        lock (_gate)
+        {
+            _entries.AddFirst(entry);
         }
         OnChanged();
         return entry;
@@ -197,34 +267,40 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     /// Failure marks the entry UndoFailed with the reason and re-arms the
     /// closure so the user can retry (e.g. after closing an Explorer window
     /// that locked the file).</summary>
-    public async Task<bool> UndoAsync(ChangeLogEntry entry)
+    public Task<bool> UndoAsync(ChangeLogEntry entry)
+        => UndoCoreAsync(entry, retryFailed: false);
+
+    /// <summary>Retry a failed undo without exposing a transient Undoable state
+    /// that another global undo could consume first.</summary>
+    public Task<bool> RetryAsync(ChangeLogEntry entry)
+        => UndoCoreAsync(entry, retryFailed: true);
+
+    private async Task<bool> UndoCoreAsync(ChangeLogEntry entry, bool retryFailed)
     {
         Func<Task<bool>>? reverse;
         lock (_gate)
         {
-            if (entry.Status != ChangeStatus.Undoable) return false;
-            // Taking the closure marks the entry in-flight: a concurrent
-            // UndoAsync on the same entry sees null and no-ops without
-            // touching Status (the first attempt owns the outcome).
+            var eligible = retryFailed
+                ? entry.Status == ChangeStatus.UndoFailed
+                : entry.Status == ChangeStatus.Undoable;
+            if (!eligible || _undoInFlight) return false;
             reverse = entry.TakeReverseForUndo();
             if (reverse is null) return false;
+            _undoInFlight = true;
+            entry.StatusDetail = null;
+            entry.Status = ChangeStatus.Undoing;
         }
+        OnChanged();
         try
         {
             var ok = await reverse().ConfigureAwait(false);
             lock (_gate)
             {
-                if (ok)
-                {
-                    entry.Status = ChangeStatus.Undone;
-                    entry.StatusDetail = null;
-                }
-                else
-                {
-                    entry.StatusDetail = "The engine couldn't reverse this change.";
-                    entry.RestoreReverseAfterFailure(reverse);
-                    entry.Status = ChangeStatus.UndoFailed;
-                }
+                CompleteUndoLocked(
+                    entry,
+                    reverse,
+                    ok,
+                    "The engine couldn't reverse this change.");
             }
             OnChanged();
             return ok;
@@ -234,27 +310,37 @@ internal sealed class ChangeLog : INotifyPropertyChanged
             DebugLog.Warn($"Undo of '{entry.Label}' threw: {ex.Message}");
             lock (_gate)
             {
-                entry.StatusDetail = ex.Message;
-                entry.RestoreReverseAfterFailure(reverse);
-                entry.Status = ChangeStatus.UndoFailed;
+                CompleteUndoLocked(entry, reverse, succeeded: false, ex.Message);
             }
             OnChanged();
             return false;
         }
     }
 
-    /// <summary>Retry a failed undo: re-arm and run again.</summary>
-    public Task<bool> RetryAsync(ChangeLogEntry entry)
+    private void CompleteUndoLocked(
+        ChangeLogEntry entry,
+        Func<Task<bool>> reverse,
+        bool succeeded,
+        string failureDetail)
     {
-        lock (_gate)
+        _undoInFlight = false;
+        var superseded = entry.ConsumeSupersededDuringUndo();
+        if (succeeded)
         {
-            if (entry.Status == ChangeStatus.UndoFailed)
-            {
-                entry.Status = ChangeStatus.Undoable;
-            }
+            entry.StatusDetail = null;
+            entry.Status = ChangeStatus.Undone;
+            return;
         }
-        OnChanged();
-        return UndoAsync(entry);
+
+        if (superseded)
+        {
+            MarkRestructureSuperseded(entry);
+            return;
+        }
+
+        entry.StatusDetail = failureDetail;
+        entry.RestoreReverseAfterFailure(reverse);
+        entry.Status = ChangeStatus.UndoFailed;
     }
 
     public void Clear()
@@ -275,8 +361,59 @@ internal sealed class ChangeLog : INotifyPropertyChanged
 
     private void OnChanged()
     {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(UndoableCount)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
-        Changed?.Invoke(this, EventArgs.Empty);
+        RaisePropertyChanged(nameof(UndoableCount));
+        RaisePropertyChanged(nameof(PendingCount));
+        RaisePropertyChanged(nameof(IsUndoInFlight));
+        RaisePropertyChanged(nameof(Count));
+
+        var subscribers = Changed;
+        if (subscribers is null) return;
+        foreach (EventHandler subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(this, EventArgs.Empty); }
+            catch (Exception ex) { DebugLog.Warn($"Change-log subscriber failed: {ex.Message}"); }
+        }
+    }
+
+    private void RaisePropertyChanged(string propertyName)
+    {
+        var subscribers = PropertyChanged;
+        if (subscribers is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        foreach (PropertyChangedEventHandler subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(this, args); }
+            catch (Exception ex) { DebugLog.Warn($"Change-log property subscriber failed for {propertyName}: {ex.Message}"); }
+        }
+    }
+
+    private static bool IsPending(ChangeStatus status)
+        => status is ChangeStatus.Undoable or ChangeStatus.Undoing or ChangeStatus.UndoFailed;
+
+    private static void MarkRestructureSuperseded(ChangeLogEntry entry)
+    {
+        entry.DropReverse();
+        entry.StatusDetail = "Superseded — only the most recent restructure can be undone.";
+        entry.Status = ChangeStatus.NotUndoable;
+    }
+
+    private void TrimReverseClosuresLocked()
+    {
+        var reverseCount = 0;
+        foreach (var entry in _entries)
+        {
+            if (entry.HasReverse) reverseCount++;
+        }
+        if (reverseCount <= ReverseCapacity) return;
+
+        for (var node = _entries.Last; node is not null && reverseCount > ReverseCapacity; node = node.Previous)
+        {
+            var entry = node.Value;
+            if (!entry.HasReverse) continue;
+            entry.DropReverse();
+            entry.StatusDetail = "History limit — this older change can no longer be undone.";
+            entry.Status = ChangeStatus.NotUndoable;
+            reverseCount--;
+        }
     }
 }

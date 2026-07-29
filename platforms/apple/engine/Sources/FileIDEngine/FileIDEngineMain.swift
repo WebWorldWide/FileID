@@ -256,6 +256,14 @@ struct FileIDEngineMain {
         case .cancelScan:
             await coordinator.requestCancel()
             JSONLog.shared.info(ev: "cancel_requested")
+        case .cancelRestructure:
+            await coordinator.requestRestructureCancel()
+            JSONLog.shared.info(ev: "restructure_cancel_requested")
+        case .healthCheck(let requestID):
+            await sink.emit(.healthCheckResult(HealthCheckResult(
+                requestID: requestID,
+                pid: ProcessInfo.processInfo.processIdentifier
+            )))
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))
@@ -584,7 +592,8 @@ struct FileIDEngineMain {
                                 folderClassifications: legacyPlan.folderClassifications,
                                 planID: stored.planID,
                                 totalMoves: legacyPlan.moves.count,
-                                truncated: true)
+                                truncated: true,
+                                confidenceCounts: legacyPlan.confidenceCounts)
                         }
                         plan = legacyPlan
                     }
@@ -667,7 +676,7 @@ struct FileIDEngineMain {
             }
             await coordinator.attachRestructure(applyTask, token: restructureToken)
 
-        case .undoRestructure(let libraryRoot):
+        case .undoRestructure(let libraryRoot, _):
             // Reverse the last apply by replaying the engine's on-disk undo
             // journal. Same machinery as apply (real moves, cancellable, terminal
             // restructureApplyResult), so register it the same way. (R2)
@@ -1595,7 +1604,8 @@ struct FileIDEngineMain {
 
     /// Build the IPC `RestructurePlan` DTO from engine proposals: map each
     /// proposal to a `RestructureMove` and roll up per-bucket category counts
-    /// (descending by count, then category for a stable order). Per-move `tier`
+    /// plus full-plan confidence totals. Categories sort by descending count,
+    /// then category for a stable order. Per-move `tier`
     /// (Anchor/Mixed/Junk) and the rolled-up `folderClassifications` are derived
     /// from `Restructure.classifyFolders` so the app renders the
     /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
@@ -1621,12 +1631,15 @@ struct FileIDEngineMain {
         let categoryCounts = counts
             .map { RestructureCategoryCount(category: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
+        let confidenceCounts = Restructure.confidenceCounts(
+            plan.proposals.lazy.map(\.confidence))
         return RestructurePlan(
             libraryRoot: libraryRoot, moves: moves,
             categoryCounts: categoryCounts,
             folderClassifications: FolderClassificationCounts(
                 anchorFolders: plan.anchorFolders, mixedFolders: plan.mixedFolders,
-                junkFolders: plan.junkFolders))
+                junkFolders: plan.junkFolders),
+            confidenceCounts: confidenceCounts)
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.

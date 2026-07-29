@@ -48,6 +48,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
         ("v18_restructure_feedback",     V18_RESTRUCTURE_FEEDBACK),
         ("v19_files_text_stage_done",    V19_FILES_TEXT_STAGE_DONE),
+        ("v20_vlm_full_model",           V20_VLM_FULL_MODEL),
     ]
 }
 
@@ -193,6 +194,10 @@ CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedbac
 // v19_files_text_stage_done migration.
 const V19_FILES_TEXT_STAGE_DONE: &str = "
 ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;
+";
+
+const V20_VLM_FULL_MODEL: &str = "
+ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
 ";
 
 /// Apply every registered migration that hasn't been applied yet, in
@@ -475,7 +480,17 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 19, "expected 19 applied migrations");
+        assert_eq!(n, 20, "expected 20 applied migrations");
+
+        let full_model_column: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT type, [notnull], dflt_value \
+                 FROM pragma_table_info('files') WHERE name='vlm_full_model'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(full_model_column, ("TEXT".into(), 0, None));
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -544,7 +559,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 19);
+        assert_eq!(n, 20);
     }
 
     /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
@@ -637,7 +652,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 19] = [
+        const CANONICAL: [&str; 20] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -657,6 +672,7 @@ mod tests {
             "v17_face_verification_stable_keys",
             "v18_restructure_feedback",
             "v19_files_text_stage_done",
+            "v20_vlm_full_model",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

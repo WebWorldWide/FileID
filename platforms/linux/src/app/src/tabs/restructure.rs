@@ -677,9 +677,10 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             let sent =
                 engine
                     .borrow_mut()
-                    .send(CommandPayload::UndoRestructure(UndoRestructurePayload {
-                        library_root: root,
-                    }));
+                .send(CommandPayload::UndoRestructure(UndoRestructurePayload {
+                    library_root: root,
+                    shortcut_undo_token: None,
+                }));
             if sent.is_err() {
                 {
                     let mut s = state.borrow_mut();

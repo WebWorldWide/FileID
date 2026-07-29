@@ -1,4 +1,4 @@
-// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
+﻿// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
 // produced for single-positional cases AND that `discoveryComplete` (the
 // only named-parameter case) is NOT `_0`-wrapped.
 
@@ -27,6 +27,22 @@ public class IpcEventTests
         Assert.Equal(1234, ready.Info.Pid);
         Assert.Equal(14u, ready.Info.WorkerCap);
         Assert.Equal(16.0, ready.Info.PhysicalMemoryGB);
+    }
+
+    [Fact]
+    public void HealthCheckResult_WrapsAndPreservesExactRequestIDCasing()
+    {
+        var ev = IpcEvent.Now(new HealthCheckResultEvent(
+            new HealthCheckResult("health-request", 4321)));
+        var json = IpcCoder.Encode(ev);
+
+        Assert.Contains("\"healthCheckResult\":{\"_0\":{\"requestID\":\"health-request\",\"pid\":4321}}", json);
+        Assert.DoesNotContain("\"requestId\"", json);
+
+        var result = Assert.IsType<HealthCheckResultEvent>(
+            IpcCoder.Decode<IpcEvent>(json).Payload).Result;
+        Assert.Equal("health-request", result.RequestId);
+        Assert.Equal(4321, result.Pid);
     }
 
     [Fact]

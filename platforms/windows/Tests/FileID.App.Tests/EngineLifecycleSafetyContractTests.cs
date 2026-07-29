@@ -7,23 +7,333 @@ public sealed class EngineLifecycleSafetyContractTests
 {
     private static readonly string RepoRoot = FindRepoRoot();
 
-    [Fact]
-    public void PersistedRestructureUndoRequiresAtLeastOneValidEntry()
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void PersistedRestructureUndoRequiresAtLeastOneValidEntry(int version)
     {
         var path = Path.Combine(Path.GetTempPath(), $"fileid-undo-{Guid.NewGuid():N}.ndjson");
         var root = Path.Combine(Path.GetTempPath(), "FileID-library");
         try
         {
-            File.WriteAllText(path, $"{{\"version\":2,\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n");
+            File.WriteAllText(path, $"{{\"version\":{version},\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n");
             Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
 
-            File.AppendAllText(path, "{\"file_id\":1,\"from\":\"a\",\"to\":\"b\"}\n");
+            var identity = version == 3
+                ? ",\"source_identity\":{\"volume\":1,\"file\":2}"
+                : "";
+            File.AppendAllText(
+                path,
+                $"{{\"file_id\":1,\"from\":\"a\",\"to\":\"b\"{identity}}}\n");
             Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void PersistedRestructureUndoFallsBackToSingleOwnedPriorJournal()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"fileid-undo-prior-{Guid.NewGuid():N}");
+        var path = Path.Combine(directory, "restructure_undo.ndjson");
+        var root = Path.Combine(Path.GetTempPath(), "FileID-library");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var header =
+                $"{{\"version\":3,\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n";
+            File.WriteAllText(path, header);
+            var prior = Path.Combine(
+                directory,
+                $".restructure_undo.ndjson.prior-{Guid.NewGuid():D}");
+            File.WriteAllText(
+                prior,
+                header
+                + "{\"file_id\":1,\"from\":\"a\",\"to\":\"b\","
+                + "\"source_identity\":{\"volume\":1,\"file\":2}}\n");
+            var priorUpdated = new DateTime(2026, 7, 29, 10, 30, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(prior, priorUpdated);
+
+            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Equal(
+                priorUpdated,
+                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+
+            File.Delete(path);
+            Assert.Equal(
+                priorUpdated,
+                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+
+            File.WriteAllText(
+                Path.Combine(
+                    directory,
+                    $".restructure_undo.ndjson.prior-{Guid.NewGuid():D}"),
+                header
+                + "{\"file_id\":2,\"from\":\"c\",\"to\":\"d\","
+                + "\"source_identity\":{\"volume\":1,\"file\":3}}\n");
+            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void PersistedShortcutUndoAcceptsValidCommittedManifest(int version)
+    {
+        var directory = NewTempDirectory("fileid-shortcut-valid");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var token = Guid.NewGuid().ToString("D");
+        try
+        {
+            WriteShortcutManifest(directory, root, token, version);
+
+            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+
+            Assert.True(persisted.HasValue);
+            Assert.Equal(root, persisted.Value.LibraryRoot);
+            Assert.Equal(token, persisted.Value.Token);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoValidatesEveryCommittedEntry()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-all-entries");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var token = Guid.NewGuid().ToString("D");
+        try
+        {
+            var path = WriteShortcutManifest(directory, root, token, version: 3);
+            var validEntry = File.ReadAllLines(path)[1];
+            File.AppendAllText(path, validEntry + "\n");
+            Assert.Equal(
+                token,
+                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+
+            WriteShortcutManifest(directory, root, token, version: 3);
+            File.AppendAllText(path, "{\"file_id\":2}\n");
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+
+            WriteShortcutManifest(directory, root, token, version: 3);
+            File.AppendAllText(path, new string('x', 64 * 1024 + 1) + "\n");
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+
+            WriteShortcutManifest(directory, root, token, version: 3);
+            using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write))
+            {
+                stream.Write(new byte[] { 0xff, (byte)'\n' });
+            }
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+
+            WriteShortcutManifest(directory, root, token, version: 3);
+            File.AppendAllText(path, "{\"file_id\":");
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoRequiresCanonicalStagingLinkName()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-staging-name");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var token = Guid.NewGuid().ToString("D");
+        try
+        {
+            WriteShortcutManifest(
+                directory,
+                root,
+                token,
+                version: 3,
+                stagingLinkName: "not-a-guid.link");
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+
+            WriteShortcutManifest(
+                directory,
+                root,
+                token,
+                version: 3,
+                stagingLinkName: Path.Combine(
+                    "nested",
+                    Guid.NewGuid().ToString("D") + ".link"));
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoDiscoversValidPendingV3Intent()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-intent");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var token = Guid.NewGuid().ToString("D");
+        try
+        {
+            WriteShortcutManifest(
+                directory,
+                root,
+                token,
+                version: 3,
+                headerOnly: true,
+                writeIntent: true);
+
+            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+
+            Assert.True(persisted.HasValue);
+            Assert.Equal(token, persisted.Value.Token);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoSkipsCorruptManifestAndKeepsValidToken()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-mixed");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var validToken = Guid.NewGuid().ToString("D");
+        try
+        {
+            WriteShortcutManifest(directory, root, validToken, version: 3);
+            File.WriteAllText(
+                Path.Combine(directory, Guid.NewGuid().ToString("D") + ".ndjson"),
+                "{\"version\":3");
+            File.WriteAllText(
+                Path.Combine(directory, Guid.NewGuid().ToString("D") + ".ndjson"),
+                new string('x', 64 * 1024 + 1) + "\n");
+            File.WriteAllBytes(
+                Path.Combine(directory, Guid.NewGuid().ToString("D") + ".ndjson"),
+                new byte[] { 0xff, (byte)'\n' });
+            var truncatedToken = Guid.NewGuid().ToString("D");
+            var truncatedPath = WriteShortcutManifest(
+                directory,
+                root,
+                truncatedToken,
+                version: 2);
+            File.WriteAllText(
+                truncatedPath,
+                File.ReadAllText(truncatedPath).TrimEnd('\n'));
+
+            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+
+            Assert.True(persisted.HasValue);
+            Assert.Equal(validToken, persisted.Value.Token);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoUsesLifoAndFailsClosedOnTimestampTie()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-lifo");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var olderToken = Guid.NewGuid().ToString("D");
+        var newerToken = Guid.NewGuid().ToString("D");
+        try
+        {
+            var olderPath = WriteShortcutManifest(directory, root, olderToken, version: 2);
+            var newerPath = WriteShortcutManifest(directory, root, newerToken, version: 2);
+            var olderTime = new DateTime(2026, 7, 29, 12, 0, 0, DateTimeKind.Utc);
+            var newerTime = olderTime.AddMinutes(1);
+            File.SetLastWriteTimeUtc(olderPath, olderTime);
+            File.SetLastWriteTimeUtc(newerPath, newerTime);
+
+            Assert.Equal(
+                newerToken,
+                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+            Assert.Equal(
+                olderToken,
+                EngineClient.ReadPersistedShortcutUndo(directory, newerToken)?.Token);
+
+            File.SetLastWriteTimeUtc(newerPath, olderTime);
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoRejectsMissingSourceIdentityAndReparseAttributes()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-identity");
+        var root = Path.Combine(Path.GetTempPath(), $"FileID-library-{Guid.NewGuid():N}");
+        var token = Guid.NewGuid().ToString("D");
+        try
+        {
+            WriteShortcutManifest(
+                directory,
+                root,
+                token,
+                version: 3,
+                includeSourceIdentity: false);
+
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.False(EngineClient.IsRegularPersistedUndoFileAttributes(
+                FileAttributes.ReparsePoint));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PersistedShortcutUndoBoundsManifestEnumeration()
+    {
+        var directory = NewTempDirectory("fileid-shortcut-bound");
+        try
+        {
+            for (var i = 0; i <= 1024; i++)
+            {
+                File.WriteAllText(
+                    Path.Combine(directory, Guid.NewGuid().ToString("D") + ".ndjson"),
+                    "");
+            }
+
+            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SuccessfulShortcutUndoRescansForNextPersistedToken()
+    {
+        var client = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
+
+        Assert.Contains(
+            "RefreshPersistedRestructureUndo(UndoRestructureShortcutToken);",
+            client,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -70,14 +380,15 @@ public sealed class EngineLifecycleSafetyContractTests
 
         Assert.Contains("public async Task<bool> StopAndWaitForExitAsync", commands, StringComparison.Ordinal);
         Assert.Contains("return false;", commands, StringComparison.Ordinal);
-        Assert.Contains("if (!await StopAndWaitForExitAsync", commands, StringComparison.Ordinal);
+        Assert.Contains("if (!await StopAndWaitForExitCoreAsync", commands, StringComparison.Ordinal);
         Assert.Contains("restart was aborted", commands, StringComparison.Ordinal);
-        Assert.Contains("restartAfterLateExit ? 1 : 0", commands, StringComparison.Ordinal);
+        Assert.Contains("shouldRun: restartAfterLateExit", commands, StringComparison.Ordinal);
+        Assert.Contains("ArmExpectedExitRestart(intent.Revision)", commands, StringComparison.Ordinal);
         Assert.Contains("Volatile.Read(ref _isStarting) == 0", commands, StringComparison.Ordinal);
 
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
-        Assert.Contains("Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1", client, StringComparison.Ordinal);
+        Assert.Contains("ResolveCurrentExpectedExitRestartRevision()", client, StringComparison.Ordinal);
         Assert.Contains("StartAfterLateExpectedExitAsync", client, StringComparison.Ordinal);
     }
 
@@ -117,7 +428,8 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
 
-        Assert.Contains("StdoutLoopAsync(p.StandardOutput, generation, ct)", client, StringComparison.Ordinal);
+        Assert.Contains("startedProcess.StandardOutput", client, StringComparison.Ordinal);
+        Assert.Contains("generation,", client, StringComparison.Ordinal);
         var start = client.IndexOf("public async Task StartAsync()", StringComparison.Ordinal);
         var exitedCleanup = client.IndexOf("if (_process is { HasExited: true })", start, StringComparison.Ordinal);
         var resetScanState = client.IndexOf("ResetProcessBoundScanState();", exitedCleanup, StringComparison.Ordinal);
@@ -326,7 +638,7 @@ public sealed class EngineLifecycleSafetyContractTests
         var pin = client.IndexOf("new FileStream(enginePath, FileMode.Open, FileAccess.Read, FileShare.Read)", StringComparison.Ordinal);
         var lease = client.IndexOf("using var spawnPinLease = spawnPin;", pin, StringComparison.Ordinal);
         var verify = client.IndexOf("var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(", lease, StringComparison.Ordinal);
-        var spawn = client.IndexOf("p = Process.Start(psi)", verify, StringComparison.Ordinal);
+        var spawn = client.IndexOf("startedProcess = Process.Start(psi)", verify, StringComparison.Ordinal);
 
         Assert.True(pin >= 0 && lease > pin && verify > lease && spawn > verify,
             "Signed builds must deny engine writes/deletes before trust verification and retain the lease through spawn.");
@@ -388,6 +700,73 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("<StackLayout Spacing=\"4\" />", queueXaml, StringComparison.Ordinal);
         Assert.Contains("MaxHeight=\"280\"", queueXaml, StringComparison.Ordinal);
     }
+
+    private static string NewTempDirectory(string prefix)
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            $"{prefix}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
+
+    private static string WriteShortcutManifest(
+        string directory,
+        string root,
+        string token,
+        int version,
+        bool includeSourceIdentity = true,
+        bool headerOnly = false,
+        bool writeIntent = false,
+        string? stagingLinkName = null)
+    {
+        var stagingDirectory = Path.Combine(
+            root,
+            ".fileid-restructure-shortcut-staging",
+            token);
+        var identity = "{\"volume\":1,\"file\":2}";
+        var header = version == 3
+            ? $"{{\"version\":3,\"library_root\":{Json(root)},"
+                + $"\"token\":{Json(token)},\"staging_dir\":{Json(stagingDirectory)},"
+                + $"\"staging_dir_identity\":{identity}}}\n"
+            : $"{{\"version\":2,\"library_root\":{Json(root)},"
+                + $"\"token\":{Json(token)}}}\n";
+        var path = Path.Combine(directory, token + ".ndjson");
+        if (!headerOnly)
+        {
+            var entry = $"{{\"file_id\":1,\"source\":{Json(Path.Combine(root, "source.jpg"))},"
+                + $"\"link\":{Json(Path.Combine(root, "Organized", "source.jpg"))},"
+                + (version == 3
+                    ? $"\"staging_link\":{Json(Path.Combine(
+                        stagingDirectory,
+                        stagingLinkName ?? Guid.NewGuid().ToString("D") + ".link"))},"
+                    : "")
+                + (includeSourceIdentity ? $"\"source_identity\":{identity}," : "")
+                + $"\"link_identity\":{identity}}}\n";
+            File.WriteAllText(path, header + entry);
+            return path;
+        }
+
+        File.WriteAllText(path, header);
+        if (writeIntent)
+        {
+            Directory.CreateDirectory(stagingDirectory);
+            var operationId = Guid.NewGuid().ToString("D");
+            var intent = $"{{\"version\":1,\"token\":{Json(token)},"
+                + $"\"operation_id\":{Json(operationId)},\"file_id\":1,"
+                + $"\"source\":{Json(Path.Combine(root, "source.jpg"))},"
+                + $"\"link\":{Json(Path.Combine(root, "Organized", "source.jpg"))},"
+                + $"\"staging_link\":{Json(Path.Combine(stagingDirectory, operationId + ".link"))},"
+                + $"\"source_identity\":{identity}}}\n";
+            File.WriteAllText(
+                Path.Combine(stagingDirectory, operationId + ".intent.json"),
+                intent);
+        }
+        return path;
+    }
+
+    private static string Json(string value)
+        => System.Text.Json.JsonSerializer.Serialize(value);
 
     private static string PathInRepo(params string[] parts)
         => Path.Combine([RepoRoot, .. parts]);

@@ -5,7 +5,7 @@
 //! those modules.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ipc::{
     self, sink::Sink, EngineError, EventPayload, FolderClassificationCounts, IpcEvent,
-    RestructureCategoryCount, RestructureMove as IpcMove, RestructurePlan, Wrap,
+    RestructureCategoryCount, RestructureConfidenceCounts, RestructureMove as IpcMove,
+    RestructurePlan, Wrap,
 };
 use crate::pipeline::discovery::FileKind;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
@@ -39,7 +40,7 @@ fn large_plan_stream_threshold() -> i64 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(LARGE_PLAN_STREAM_THRESHOLD)
 }
-const STORED_PLAN_VERSION: u8 = 1;
+const STORED_PLAN_VERSION: u8 = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,17 +51,63 @@ struct StoredPlanHeader {
 }
 
 struct StoredPlanMoveIter {
-    lines: std::io::Lines<BufReader<File>>,
+    reader: BufReader<File>,
+    moves_offset: u64,
+    total_moves: usize,
+    remaining: usize,
+    finished: bool,
+}
+
+impl StoredPlanMoveIter {
+    fn rewind(&mut self) -> anyhow::Result<()> {
+        self.reader
+            .seek(SeekFrom::Start(self.moves_offset))
+            .context("rewinding validated restructure plan")?;
+        self.remaining = self.total_moves;
+        self.finished = false;
+        Ok(())
+    }
 }
 
 impl Iterator for StoredPlanMoveIter {
     type Item = anyhow::Result<IpcMove>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.lines.next().map(|line| {
-            let line = line.context("reading persisted restructure plan")?;
-            serde_json::from_str(&line).context("decoding persisted restructure move")
-        })
+        if self.finished {
+            return None;
+        }
+        let mut line = String::new();
+        if self.remaining == 0 {
+            self.finished = true;
+            return match self.reader.read_line(&mut line) {
+                Ok(0) => None,
+                Ok(_) => Some(Err(anyhow::anyhow!(
+                    "persisted restructure plan contains more moves than declared"
+                ))),
+                Err(error) => Some(Err(error).context("reading persisted restructure plan")),
+            };
+        }
+        match self.reader.read_line(&mut line) {
+            Ok(0) => {
+                let missing = self.remaining;
+                self.remaining = 0;
+                self.finished = true;
+                Some(Err(anyhow::anyhow!(
+                    "persisted restructure plan ended early ({missing} moves missing)"
+                )))
+            }
+            Ok(_) => {
+                self.remaining -= 1;
+                Some(
+                    serde_json::from_str(&line).context("decoding persisted restructure move"),
+                )
+            }
+            Err(error) => {
+                self.remaining = 0;
+                self.finished = true;
+                Some(Err(error).context("reading persisted restructure plan"))
+            }
+        }
     }
 }
 
@@ -73,17 +120,60 @@ fn write_stored_plan(
     library_root: &str,
     moves: impl IntoIterator<Item = anyhow::Result<IpcMove>>,
     total_moves: usize,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<(String, Vec<IpcMove>)> {
     let dir = crate::paths::restructure_plans_dir()?;
-    write_stored_plan_in(&dir, library_root, moves, total_moves)
+    write_stored_plan_in_with_cancel(&dir, library_root, moves, total_moves, cancel)
 }
 
+fn reserve_collision_free_destination(
+    move_: &mut IpcMove,
+    claims: &mut crate::pipeline::restructure_apply::DestinationClaims,
+) -> anyhow::Result<bool> {
+    if ipc_move_is_noop(move_) {
+        return Ok(false);
+    }
+    let reserved = claims.reserve(Path::new(&move_.destination))?;
+    if reserved == Path::new(&move_.destination) {
+        return Ok(false);
+    }
+    move_.destination = reserved.to_string_lossy().into_owned();
+    Ok(true)
+}
+
+fn ipc_move_is_noop(move_: &IpcMove) -> bool {
+    roots_equal(&move_.source, &move_.destination)
+}
+
+fn proposed_move_is_noop(move_: &restructure::ProposedMove) -> bool {
+    roots_equal(
+        &move_.source.to_string_lossy(),
+        &move_.destination.to_string_lossy(),
+    )
+}
+
+#[cfg(test)]
 fn write_stored_plan_in(
     dir: &std::path::Path,
     library_root: &str,
     moves: impl IntoIterator<Item = anyhow::Result<IpcMove>>,
     total_moves: usize,
 ) -> anyhow::Result<(String, Vec<IpcMove>)> {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    write_stored_plan_in_with_cancel(dir, library_root, moves, total_moves, &cancel)
+}
+
+fn write_stored_plan_in_with_cancel(
+    dir: &std::path::Path,
+    library_root: &str,
+    moves: impl IntoIterator<Item = anyhow::Result<IpcMove>>,
+    total_moves: usize,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> anyhow::Result<(String, Vec<IpcMove>)> {
+    anyhow::ensure!(
+        !cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "restructure planning cancelled"
+    );
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating restructure plan directory {}", dir.display()))?;
     // Only one plan is actionable in the UI at a time. Remove stale spools so
@@ -117,16 +207,46 @@ fn write_stored_plan_in(
     writer.write_all(b"\n")?;
     let mut preview = Vec::with_capacity(RESTRUCTURE_PREVIEW_CAP);
     let write_result = (|| -> anyhow::Result<()> {
+        let mut written = 0usize;
+        let mut destination_claims =
+            crate::pipeline::restructure_apply::DestinationClaims::default();
+        let mut adjusted_destinations = 0usize;
         for move_ in moves {
-            let move_ = move_?;
+            anyhow::ensure!(
+                !cancel.load(std::sync::atomic::Ordering::Relaxed),
+                "restructure planning cancelled"
+            );
+            let mut move_ = move_?;
+            if ipc_move_is_noop(&move_) {
+                continue;
+            }
+            if reserve_collision_free_destination(&mut move_, &mut destination_claims)? {
+                adjusted_destinations += 1;
+            }
             if preview.len() < RESTRUCTURE_PREVIEW_CAP {
                 preview.push(move_.clone());
             }
             serde_json::to_writer(&mut writer, &move_)?;
             writer.write_all(b"\n")?;
+            written += 1;
         }
+        anyhow::ensure!(
+            written == total_moves,
+            "persisted restructure plan declared {total_moves} moves but produced {written}"
+        );
+        anyhow::ensure!(
+            !cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "restructure planning cancelled"
+        );
         writer.flush()?;
         writer.get_ref().sync_all()?;
+        if adjusted_destinations > 0 {
+            tracing::info!(
+                adjusted_destinations,
+                total_moves,
+                "[RESTRUCTURE] made planned destinations collision-free"
+            );
+        }
         Ok(())
     })();
     if let Err(error) = write_result {
@@ -142,34 +262,102 @@ fn write_stored_plan_in(
             final_path.display()
         )
     })?;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = std::fs::remove_file(&final_path);
+        anyhow::bail!("restructure planning cancelled");
+    }
     Ok((plan_id, preview))
 }
 
-/// Design §6: 'ask'-tier moves require explicit per-file consent and must
-/// never ride a bulk apply of a stored (paged/truncated) plan — the app's
-/// preview shows at most 5,000 rows, so the user cannot have reviewed them.
-/// Stream errors pass through untouched so a corrupt spool still fails loudly.
-/// A schema-carried tier selection is queued for the next IPC rev.
-/// (audit 2026-07-14)
-fn exclude_ask_tier<'a>(
-    moves: impl Iterator<Item = anyhow::Result<IpcMove>> + 'a,
-    skipped_ask: &'a mut usize,
-) -> impl Iterator<Item = anyhow::Result<IpcMove>> + 'a {
-    moves.filter(|entry| match entry {
-        Ok(m) if m.confidence.eq_ignore_ascii_case("ask") => {
-            *skipped_ask += 1;
-            false
-        }
-        _ => true,
-    })
+#[derive(Debug, Default)]
+struct StoredPlanTiers {
+    auto: usize,
+    review: usize,
+    ask: usize,
+    unknown: usize,
 }
 
-fn open_stored_plan(
-    plan_id: &str,
-    expected_root: &str,
-) -> anyhow::Result<(StoredPlanMoveIter, usize)> {
-    let dir = crate::paths::restructure_plans_dir()?;
-    open_stored_plan_in(&dir, plan_id, expected_root)
+impl StoredPlanTiers {
+    fn observe(&mut self, confidence: &str) {
+        if confidence.eq_ignore_ascii_case("auto") {
+            self.auto += 1;
+        } else if confidence.eq_ignore_ascii_case("review") {
+            self.review += 1;
+        } else if confidence.eq_ignore_ascii_case("ask") {
+            self.ask += 1;
+        } else {
+            self.unknown += 1;
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.auto
+            .saturating_add(self.review)
+            .saturating_add(self.ask)
+            .saturating_add(self.unknown)
+    }
+
+    fn as_ipc(&self) -> RestructureConfidenceCounts {
+        RestructureConfidenceCounts {
+            auto: self.auto as u64,
+            review: self.review as u64,
+            ask: self.ask as u64,
+            unknown: self.unknown as u64,
+        }
+    }
+}
+
+fn inspect_stored_plan(
+    mut moves: impl Iterator<Item = anyhow::Result<IpcMove>>,
+    preflight: &mut crate::pipeline::restructure_apply::ForwardBatchPreflight<'_>,
+) -> anyhow::Result<Option<StoredPlanTiers>> {
+    let mut tiers = StoredPlanTiers::default();
+    let mut index = 0usize;
+    loop {
+        if preflight.is_cancelled() {
+            return Ok(None);
+        }
+        let Some(move_) = moves.next() else {
+            break;
+        };
+        let move_ = move_?;
+        if preflight.is_cancelled() {
+            return Ok(None);
+        }
+        tiers.observe(&move_.confidence);
+        if move_.confidence.eq_ignore_ascii_case("auto") {
+            preflight.validate(&move_).with_context(|| {
+                format!(
+                    "eligible stored restructure plan move {} failed preflight",
+                    index + 1
+                )
+            })?;
+        }
+        index += 1;
+    }
+    Ok(Some(tiers))
+}
+
+fn cancelled_apply_result() -> ipc::RestructureApplyResult {
+    ipc::RestructureApplyResult {
+        applied: 0,
+        failed: 0,
+        privilege_error: None,
+        cancelled: true,
+        planned: None,
+        remaining: None,
+        shortcut_undo_token: None,
+    }
+}
+
+fn auto_tier_only(
+    moves: impl Iterator<Item = anyhow::Result<IpcMove>>,
+) -> impl Iterator<Item = anyhow::Result<IpcMove>> {
+    moves.filter(|entry| match entry {
+        Ok(move_) if move_.confidence.eq_ignore_ascii_case("auto") => true,
+        Ok(_) => false,
+        Err(_) => true,
+    })
 }
 
 fn open_stored_plan_in(
@@ -178,34 +366,142 @@ fn open_stored_plan_in(
     expected_root: &str,
 ) -> anyhow::Result<(StoredPlanMoveIter, usize)> {
     let path = plan_path_in(dir, plan_id)?;
-    let file = File::open(&path)
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        options.share_mode(FILE_SHARE_READ.0);
+    }
+    let file = options
+        .open(&path)
         .with_context(|| format!("opening restructure plan {}", path.display()))?;
-    let mut lines = BufReader::new(file).lines();
-    let header_line = lines
-        .next()
-        .context("persisted restructure plan is empty")??;
+    let mut reader = BufReader::new(file);
+    let mut header_line = String::new();
+    anyhow::ensure!(
+        reader
+            .read_line(&mut header_line)
+            .context("reading persisted restructure plan header")?
+            > 0,
+        "persisted restructure plan is empty"
+    );
     let header: StoredPlanHeader =
         serde_json::from_str(&header_line).context("decoding restructure plan header")?;
     anyhow::ensure!(
         header.version == STORED_PLAN_VERSION,
-        "unsupported restructure plan version {}",
-        header.version
+        "stored restructure plan version {} cannot be applied safely by engine version {}; re-plan before applying",
+        header.version,
+        STORED_PLAN_VERSION
     );
     anyhow::ensure!(
         roots_equal(&header.library_root, expected_root),
         "restructure plan belongs to a different library root"
     );
-    Ok((StoredPlanMoveIter { lines }, header.total_moves))
+    let moves_offset = reader
+        .stream_position()
+        .context("locating persisted restructure plan moves")?;
+    Ok((
+        StoredPlanMoveIter {
+            reader,
+            moves_offset,
+            total_moves: header.total_moves,
+            remaining: header.total_moves,
+            finished: false,
+        },
+        header.total_moves,
+    ))
+}
+
+fn apply_stored_plan(
+    plan_id: &str,
+    expected_root: &str,
+    apply: &RestructureApply,
+) -> anyhow::Result<(ipc::RestructureApplyResult, StoredPlanTiers, usize)> {
+    let dir = crate::paths::restructure_plans_dir()?;
+    apply_stored_plan_in(&dir, plan_id, expected_root, apply)
+}
+
+fn validate_stored_plan_in(
+    dir: &Path,
+    plan_id: &str,
+    expected_root: &str,
+    apply: &RestructureApply,
+) -> anyhow::Result<(Option<StoredPlanMoveIter>, StoredPlanTiers, usize)> {
+    let (mut stored_moves, total) = open_stored_plan_in(dir, plan_id, expected_root)?;
+    let mut preflight = apply.begin_forward_preflight()?;
+    let Some(tiers) = inspect_stored_plan(stored_moves.by_ref(), &mut preflight)? else {
+        return Ok((None, StoredPlanTiers::default(), total));
+    };
+    anyhow::ensure!(
+        tiers.total() == total,
+        "stored restructure plan tier count does not match its declared total"
+    );
+    stored_moves.rewind()?;
+    Ok((Some(stored_moves), tiers, total))
+}
+
+fn apply_stored_plan_in(
+    dir: &Path,
+    plan_id: &str,
+    expected_root: &str,
+    apply: &RestructureApply,
+) -> anyhow::Result<(ipc::RestructureApplyResult, StoredPlanTiers, usize)> {
+    let (stored_moves, tiers, total) =
+        validate_stored_plan_in(dir, plan_id, expected_root, apply)?;
+    let Some(stored_moves) = stored_moves else {
+        return Ok((cancelled_apply_result(), tiers, total));
+    };
+    let result = apply.apply_iter(auto_tier_only(stored_moves), Some(tiers.auto))?;
+    Ok((result, tiers, total))
+}
+
+fn apply_inline_plan(
+    apply: &RestructureApply,
+    moves: Vec<IpcMove>,
+) -> anyhow::Result<ipc::RestructureApplyResult> {
+    let mut preflight = apply.begin_forward_preflight()?;
+    for (index, move_) in moves.iter().enumerate() {
+        if preflight.is_cancelled() {
+            return Ok(cancelled_apply_result());
+        }
+        preflight
+            .validate(move_)
+            .with_context(|| format!("inline restructure move {} failed preflight", index + 1))?;
+    }
+    let total = moves.len();
+    apply.apply_iter(moves.into_iter().map(Ok), Some(total))
 }
 
 fn roots_equal(left: &str, right: &str) -> bool {
-    if left == right {
+    if left.eq_ignore_ascii_case(right) {
         return true;
     }
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+fn single_person_name(names: Option<&str>) -> Option<String> {
+    let mut names = names
+        .into_iter()
+        .flat_map(|names| names.split('\x1F'))
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let name = names.next()?.to_string();
+    names.next().is_none().then_some(name)
+}
+
+fn unambiguous_person_name(
+    names: Option<&str>,
+    face_count: i64,
+    named_face_count: i64,
+    named_person_count: i64,
+) -> Option<String> {
+    (face_count > 0 && face_count == named_face_count && named_person_count == 1)
+        .then(|| single_person_name(names))
+        .flatten()
 }
 
 fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
@@ -220,12 +516,12 @@ fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify
         _ => FileKind::Other,
     };
     let names: Option<String> = row.get(8)?;
-    let person_name = names
-        .as_deref()
-        .and_then(|s| s.split('\x1F').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let person_name = unambiguous_person_name(
+        names.as_deref(),
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    );
     Ok(FileForClassify {
         file_id: row.get(0)?,
         source: PathBuf::from(row.get::<_, String>(1)?),
@@ -239,7 +535,12 @@ fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify
     })
 }
 
-fn folder_tier(folder: &str, total: i64, top: i64) -> &'static str {
+fn folder_tier(
+    folder: &str,
+    library_root: &str,
+    total: i64,
+    top: i64,
+) -> &'static str {
     let name = Path::new(folder)
         .file_name()
         .and_then(|name| name.to_str())
@@ -249,6 +550,9 @@ fn folder_tier(folder: &str, total: i64, top: i64) -> &'static str {
         name.as_str(),
         "downloads"
             | "downloaded"
+            | "desktop"
+            | "unsorted"
+            | "inbox"
             | "new folder"
             | "untitled"
             | "temp"
@@ -261,6 +565,8 @@ fn folder_tier(folder: &str, total: i64, top: i64) -> &'static str {
     );
     if generic || total <= 2 {
         "Junk"
+    } else if roots_equal(folder, library_root) {
+        "Mixed"
     } else if top.saturating_mul(100) >= total.saturating_mul(80) {
         "Anchor"
     } else {
@@ -332,15 +638,27 @@ fn sweep_stale_planning_scratch(dir: &Path) {
 fn plan_large_library(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     library_root: &str,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<RestructurePlan> {
     let dir = crate::paths::restructure_plans_dir()?;
-    plan_large_library_in(db, library_root, &dir)
+    plan_large_library_in_with_cancel(db, library_root, &dir, cancel)
 }
 
+#[cfg(test)]
 fn plan_large_library_in(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     library_root: &str,
     dir: &Path,
+) -> anyhow::Result<RestructurePlan> {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    plan_large_library_in_with_cancel(db, library_root, dir, &cancel)
+}
+
+fn plan_large_library_in_with_cancel(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    library_root: &str,
+    dir: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<RestructurePlan> {
     std::fs::create_dir_all(dir)?;
     sweep_stale_planning_scratch(dir);
@@ -375,6 +693,10 @@ fn plan_large_library_in(
         let mut sequence = 0_i64;
         let mut last_id = i64::MIN;
         loop {
+            anyhow::ensure!(
+                !cancel.load(std::sync::atomic::Ordering::Relaxed),
+                "restructure planning cancelled"
+            );
             // Keyset-page the shared connection so a million-file plan does not
             // monopolize the engine's single SQLite mutex for the whole scan.
             // Each lock holds only while 4,096 compact metadata rows are copied.
@@ -408,6 +730,10 @@ fn plan_large_library_in(
                 break;
             }
         }
+        anyhow::ensure!(
+            !cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "restructure planning cancelled"
+        );
         tx.commit()?;
 
         let mut anchor = 0_u32;
@@ -426,7 +752,7 @@ fn plan_large_library_in(
                 let folder: String = row.get(0)?;
                 let total: i64 = row.get(1)?;
                 let top: i64 = row.get(2)?;
-                let tier = folder_tier(&folder, total, top);
+                let tier = folder_tier(&folder, library_root, total, top);
                 match tier {
                     "Anchor" => anchor = anchor.saturating_add(1),
                     "Mixed" => mixed = mixed.saturating_add(1),
@@ -439,9 +765,10 @@ fn plan_large_library_in(
         let category_counts = {
             let mut stmt = plan_db.prepare(
                 "SELECT r.category, COUNT(*) AS n
-                 FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
-                 WHERE t.tier <> 'Anchor'
-                 GROUP BY r.category ORDER BY n DESC, r.category ASC",
+                  FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
+                  WHERE t.tier <> 'Anchor'
+                    AND r.source COLLATE NOCASE <> r.destination
+                  GROUP BY r.category ORDER BY n DESC, r.category ASC",
             )?;
             let counts = stmt.query_map([], |row| {
                 let count: i64 = row.get(1)?;
@@ -455,18 +782,55 @@ fn plan_large_library_in(
         };
         let total_moves: i64 = plan_db.query_row(
             "SELECT COUNT(*) FROM raw_moves r
-             JOIN folder_tiers t ON t.folder=r.source_folder
-             WHERE t.tier <> 'Anchor'",
+              JOIN folder_tiers t ON t.folder=r.source_folder
+              WHERE t.tier <> 'Anchor'
+                AND r.source COLLATE NOCASE <> r.destination",
             [],
             |row| row.get(0),
         )?;
+        let confidence_counts = plan_db.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN LOWER(r.confidence)='auto' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN LOWER(r.confidence)='review' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN LOWER(r.confidence)='ask' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN LOWER(r.confidence) NOT IN ('auto','review','ask')
+                                  THEN 1 ELSE 0 END),0)
+             FROM raw_moves r
+             JOIN folder_tiers t ON t.folder=r.source_folder
+             WHERE t.tier <> 'Anchor'
+               AND r.source COLLATE NOCASE <> r.destination",
+            [],
+            |row| {
+                Ok(RestructureConfidenceCounts {
+                    auto: row.get::<_, i64>(0)?.max(0) as u64,
+                    review: row.get::<_, i64>(1)?.max(0) as u64,
+                    ask: row.get::<_, i64>(2)?.max(0) as u64,
+                    unknown: row.get::<_, i64>(3)?.max(0) as u64,
+                })
+            },
+        )?;
+        anyhow::ensure!(
+            confidence_counts
+                .auto
+                .saturating_add(confidence_counts.review)
+                .saturating_add(confidence_counts.ask)
+                .saturating_add(confidence_counts.unknown)
+                == total_moves.max(0) as u64,
+            "large restructure confidence totals do not match the plan"
+        );
 
         let (plan_id, preview) = {
+            anyhow::ensure!(
+                !cancel.load(std::sync::atomic::Ordering::Relaxed),
+                "restructure planning cancelled"
+            );
             let mut stmt = plan_db.prepare(
                 "SELECT r.file_id,r.source,r.destination,r.category,t.tier,
                         r.confidence,r.reason
                  FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
-                 WHERE t.tier <> 'Anchor' ORDER BY r.seq",
+                 WHERE t.tier <> 'Anchor'
+                   AND r.source COLLATE NOCASE <> r.destination
+                 ORDER BY r.seq",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(IpcMove {
@@ -479,11 +843,12 @@ fn plan_large_library_in(
                     reason: row.get(6)?,
                 })
             })?;
-            write_stored_plan_in(
+            write_stored_plan_in_with_cancel(
                 dir,
                 library_root,
                 rows.map(|row| row.map_err(anyhow::Error::from)),
                 total_moves.max(0) as usize,
+                cancel,
             )?
         };
 
@@ -500,6 +865,7 @@ fn plan_large_library_in(
             truncated,
             moves: preview,
             category_counts,
+            confidence_counts: Some(confidence_counts),
             folder_classifications: Some(FolderClassificationCounts {
                 anchor_folders: anchor,
                 mixed_folders: mixed,
@@ -515,7 +881,8 @@ fn plan_large_library_in(
 /// from a deduped, ordered correlated subquery — NOT
 /// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
 /// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
-/// char(31)-separated list; the row reader takes the first.
+/// char(31)-separated list; only an unambiguous single-person result enables
+/// the People rule so group photos are not auto-filed under an arbitrary name.
 const PLAN_FILES_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
    f.location_lat, f.location_lon, f.has_text,
@@ -524,11 +891,22 @@ const PLAN_FILES_SQL: &str = "SELECT
               FROM persons p
               JOIN face_prints fp ON fp.person_id = p.id
              WHERE fp.file_id = f.id
-               AND p.name IS NOT NULL AND p.name <> ''
-             ORDER BY p.name)) AS names
+               AND p.name IS NOT NULL AND TRIM(p.name) <> ''
+             ORDER BY p.name)) AS names,
+   (SELECT COUNT(*) FROM face_prints fp
+     WHERE fp.file_id = f.id) AS face_count,
+   (SELECT COUNT(*) FROM face_prints fp
+      JOIN persons p ON p.id = fp.person_id
+     WHERE fp.file_id = f.id
+       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_face_count,
+   (SELECT COUNT(DISTINCT fp.person_id) FROM face_prints fp
+      JOIN persons p ON p.id = fp.person_id
+     WHERE fp.file_id = f.id
+       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_person_count
  FROM files f
  WHERE f.failed = 0
-   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
  ORDER BY f.id";
 
 const PLAN_FILES_PAGE_SQL: &str = "SELECT
@@ -539,11 +917,22 @@ const PLAN_FILES_PAGE_SQL: &str = "SELECT
               FROM persons p
               JOIN face_prints fp ON fp.person_id = p.id
              WHERE fp.file_id = f.id
-               AND p.name IS NOT NULL AND p.name <> ''
-             ORDER BY p.name)) AS names
+               AND p.name IS NOT NULL AND TRIM(p.name) <> ''
+             ORDER BY p.name)) AS names,
+   (SELECT COUNT(*) FROM face_prints fp
+     WHERE fp.file_id = f.id) AS face_count,
+   (SELECT COUNT(*) FROM face_prints fp
+      JOIN persons p ON p.id = fp.person_id
+     WHERE fp.file_id = f.id
+       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_face_count,
+   (SELECT COUNT(DISTINCT fp.person_id) FROM face_prints fp
+      JOIN persons p ON p.id = fp.person_id
+     WHERE fp.file_id = f.id
+       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_person_count
  FROM files f
  WHERE f.failed = 0
-   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
    AND f.id > ?4
  ORDER BY f.id
  LIMIT ?5";
@@ -597,7 +986,9 @@ fn load_capped_embeddings(
         "SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
          JOIN files f ON f.id = ce.file_id
          WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')
-           AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))",
+           AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+                OR (f.path_text COLLATE NOCASE >= ?2
+                    AND f.path_text COLLATE NOCASE < ?3))",
     )?;
     let rows = stmt.query_map(rusqlite::params![bounds.0, bounds.1, bounds.2], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -630,7 +1021,9 @@ fn load_text_embeddings(
         "SELECT te.file_id, te.embedding FROM text_embeddings te
          JOIN files f ON f.id = te.file_id
          WHERE f.failed = 0 AND f.kind IN ('doc', 'pdf')
-           AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))",
+           AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+                OR (f.path_text COLLATE NOCASE >= ?2
+                    AND f.path_text COLLATE NOCASE < ?3))",
     )?;
     let rows = stmt.query_map(rusqlite::params![bounds.0, bounds.1, bounds.2], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
@@ -654,16 +1047,29 @@ fn load_text_embeddings(
 fn absorb_semantic_moves(
     moves: Vec<restructure::ProposedMove>,
     moved: &mut std::collections::HashSet<i64>,
-    semantic_source_folders: &mut std::collections::HashSet<PathBuf>,
     proposed: &mut Vec<restructure::ProposedMove>,
 ) {
     for m in &moves {
         moved.insert(m.file_id);
-        if let Some(parent) = m.source.parent() {
-            semantic_source_folders.insert(parent.to_path_buf());
-        }
     }
     proposed.extend(moves);
+}
+
+async fn stop_cancelled_plan(
+    sink: &Sink,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
+    if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "plan_restructure_cancelled".into(),
+        message: "Restructure planning was cancelled.".into(),
+        path: None,
+        model_kind: None,
+    }))))
+    .await;
+    true
 }
 
 /// Walk the `files` table for the picked library root, classify each file,
@@ -674,8 +1080,23 @@ pub(crate) async fn handle_plan_restructure(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::PlanRestructurePayload,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let library_root = payload.library_root.clone();
+    let library_root_path = Path::new(&library_root);
+    if !library_root_path.is_absolute() || !library_root_path.is_dir() {
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "plan_restructure_root".into(),
+            message: "Restructure planning requires an existing absolute library root.".into(),
+            path: None,
+            model_kind: None,
+        }))))
+        .await;
+        return;
+    }
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
+    }
     let supports_paged_plans = payload.supports_paged_plans;
     let query_root = library_root.clone();
     let db_for_semantic = std::sync::Arc::clone(&db);
@@ -686,25 +1107,46 @@ pub(crate) async fn handle_plan_restructure(
     if supports_paged_plans {
         let count_db = std::sync::Arc::clone(&db);
         let count_root = library_root.clone();
-        let scoped_count = tokio::task::spawn_blocking(move || -> rusqlite::Result<i64> {
+        let count_cancel = std::sync::Arc::clone(&cancel);
+        let scoped_count = tokio::task::spawn_blocking(move || -> anyhow::Result<i64> {
+            anyhow::ensure!(
+                !count_cancel.load(std::sync::atomic::Ordering::Relaxed),
+                "restructure planning cancelled"
+            );
             let conn = count_db.lock();
             let bounds = plan_root_bounds(&count_root);
-            conn.query_row(
+            Ok(conn.query_row(
                 "SELECT COUNT(*) FROM files f WHERE f.failed=0
-                 AND (?1='' OR f.path_text=?1 OR (f.path_text>=?2 AND f.path_text<?3))",
+                 AND (?1='' OR f.path_text COLLATE NOCASE=?1
+                      OR (f.path_text COLLATE NOCASE>=?2
+                          AND f.path_text COLLATE NOCASE<?3))",
                 rusqlite::params![bounds.0, bounds.1, bounds.2],
                 |row| row.get(0),
-            )
+            )?)
         })
         .await;
         match scoped_count {
             Ok(Ok(count)) if count > large_plan_stream_threshold() => {
                 let plan_db = std::sync::Arc::clone(&db);
                 let plan_root = library_root.clone();
+                let plan_cancel = std::sync::Arc::clone(&cancel);
                 let planned = tokio::task::spawn_blocking(move || {
-                    plan_large_library(&plan_db, &plan_root)
+                    plan_large_library(&plan_db, &plan_root, &plan_cancel)
                 })
                 .await;
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok(Ok(plan)) = &planned {
+                        if let Some(plan_id) = plan.plan_id.as_deref() {
+                            if let Ok(dir) = crate::paths::restructure_plans_dir() {
+                                if let Ok(path) = plan_path_in(&dir, plan_id) {
+                                    let _ = std::fs::remove_file(path);
+                                }
+                            }
+                        }
+                    }
+                    let _ = stop_cancelled_plan(&sink, &cancel).await;
+                    return;
+                }
                 match planned {
                     Ok(Ok(plan)) => {
                         sink.send(IpcEvent::now(EventPayload::RestructurePlan(Wrap::new(plan))))
@@ -742,47 +1184,27 @@ pub(crate) async fn handle_plan_restructure(
             }
         }
     }
+    let query_cancel = std::sync::Arc::clone(&cancel);
     let files: Vec<FileForClassify> =
-        match tokio::task::spawn_blocking(move || -> rusqlite::Result<Vec<FileForClassify>> {
+        match tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<FileForClassify>> {
             let conn = db.lock();
             let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
             let (root, prefix, upper) = plan_root_bounds(&query_root);
-            let rows = stmt.query_map(rusqlite::params![root, prefix, upper], |row| {
-                let kind_str: String = row.get(2)?;
-                let kind = match kind_str.as_str() {
-                    "image" => FileKind::Image,
-                    "video" => FileKind::Video,
-                    "pdf" => FileKind::Pdf,
-                    "doc" => FileKind::Doc,
-                    "audio" => FileKind::Audio,
-                    "model" => FileKind::Model,
-                    _ => FileKind::Other,
-                };
-                let modified: Option<f64> = row.get(3)?;
-                let created: Option<f64> = row.get(4)?;
-                let names: Option<String> = row.get(8)?;
-                let person_name = names
-                    .as_deref()
-                    .and_then(|s| s.split('\x1F').next())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                Ok(FileForClassify {
-                    file_id: row.get(0)?,
-                    source: PathBuf::from(row.get::<_, String>(1)?),
-                    kind,
-                    modified_unix: modified.unwrap_or(0.0),
-                    created_unix: created,
-                    person_name,
-                    location_lat: row.get(5)?,
-                    location_lon: row.get(6)?,
-                    has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
-                })
-            })?;
-            let mut out = Vec::new();
-            for r in rows {
-                out.push(r?);
+            let rows = stmt.query_map(
+                rusqlite::params![root, prefix, upper],
+                plan_row_to_file,
+            )?;
+            let mut files = Vec::new();
+            for (index, row) in rows.enumerate() {
+                if index % LARGE_PLAN_CHUNK == 0 {
+                    anyhow::ensure!(
+                        !query_cancel.load(std::sync::atomic::Ordering::Relaxed),
+                        "restructure planning cancelled"
+                    );
+                }
+                files.push(row?);
             }
-            Ok(out)
+            Ok(files)
         })
         .await
         {
@@ -815,8 +1237,6 @@ pub(crate) async fn handle_plan_restructure(
             }
         };
 
-    let library_root_path = std::path::Path::new(&library_root);
-
     // Butler P1: semantic + learn-your-style classification for image files that
     // have a CLIP embedding; everything else (and density-clustering noise)
     // falls back to the rule cascade. See pipeline/restructure_semantic.rs.
@@ -830,12 +1250,17 @@ pub(crate) async fn handle_plan_restructure(
     // grows unbounded under pressure. (audit F-C6-016)
     let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
     let signal_bounds = plan_root_bounds(&library_root);
+    let signal_cancel = std::sync::Arc::clone(&cancel);
     let signals = tokio::task::spawn_blocking(
-        move || -> rusqlite::Result<(
+        move || -> anyhow::Result<(
             std::collections::HashMap<i64, Vec<f32>>,
             std::collections::HashMap<i64, Vec<String>>,
             std::collections::HashMap<i64, Vec<f32>>,
         )> {
+            anyhow::ensure!(
+                !signal_cancel.load(std::sync::atomic::Ordering::Relaxed),
+                "restructure planning cancelled"
+            );
             let conn = db_for_semantic.lock();
             let embeddings = load_capped_embeddings(&conn, embedding_cap, &signal_bounds)?;
             let text_embeddings =
@@ -849,7 +1274,9 @@ pub(crate) async fn handle_plan_restructure(
                 "SELECT DISTINCT t.file_id, t.tag FROM tags t
                  JOIN files f ON f.id = t.file_id
                  WHERE t.source IN ('auto','vlm','user') AND f.failed = 0
-                   AND (?1 = '' OR f.path_text = ?1 OR (f.path_text >= ?2 AND f.path_text < ?3))
+                   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
+                        OR (f.path_text COLLATE NOCASE >= ?2
+                            AND f.path_text COLLATE NOCASE < ?3))
                  LIMIT ?4",
             )?;
             let tag_cap = embedding_cap.saturating_mul(8).min(i64::MAX as usize) as i64;
@@ -862,7 +1289,13 @@ pub(crate) async fn handle_plan_restructure(
                 ],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
             )?;
-            for r in trows {
+            for (index, r) in trows.enumerate() {
+                if index % LARGE_PLAN_CHUNK == 0 {
+                    anyhow::ensure!(
+                        !signal_cancel.load(std::sync::atomic::Ordering::Relaxed),
+                        "restructure planning cancelled"
+                    );
+                }
                 let (id, tag) = r?;
                 // Load tags for ALL files, not just embedded images: the R1
                 // non-image semantic pass consults them for documents/video/audio
@@ -875,6 +1308,9 @@ pub(crate) async fn handle_plan_restructure(
         },
     )
     .await;
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
+    }
     let (mut embeddings, mut tags_map, mut text_embeddings) = match signals {
         Ok(Ok(v)) => v,
         Ok(Err(err)) => {
@@ -918,12 +1354,6 @@ pub(crate) async fn handle_plan_restructure(
         })
         .collect();
 
-    // Source folders the semantic butler actively claimed (every file relocated
-    // into a content group). These classify Anchor on destination-category
-    // homogeneity but are real relocations, not in-place anchors — exempt them
-    // from the anchor strip so their highest-confidence moves survive. (F-C1-004)
-    let mut semantic_source_folders: std::collections::HashSet<PathBuf> =
-        std::collections::HashSet::new();
     let mut proposed = Vec::new();
     let mut moved: std::collections::HashSet<i64> = std::collections::HashSet::new();
     // Files a semantic pass examined and deliberately left in place (already
@@ -948,7 +1378,10 @@ pub(crate) async fn handle_plan_restructure(
             .filter(|p| !restructure_semantic::is_junk_prototype_folder(&p.path))
             .collect();
         let moves = restructure_semantic::semantic_classify(&semantic_files, &protos, library_root_path, &mut used_group_names, &mut settled);
-        absorb_semantic_moves(moves, &mut moved, &mut semantic_source_folders, &mut proposed);
+        absorb_semantic_moves(moves, &mut moved, &mut proposed);
+    }
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
     }
 
     // Butler R3: document-content pass. Cluster documents by their BGE text embedding
@@ -973,7 +1406,10 @@ pub(crate) async fn handle_plan_restructure(
             .collect();
         let doc_moves =
             restructure_semantic::classify_documents(&doc_files, library_root_path, &mut used_group_names, &mut settled);
-        absorb_semantic_moves(doc_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
+        absorb_semantic_moves(doc_moves, &mut moved, &mut proposed);
+    }
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
     }
 
     // Butler R1: non-image semantic pass. Cluster everything the doc + image passes didn't
@@ -996,7 +1432,10 @@ pub(crate) async fn handle_plan_restructure(
             .collect();
         let ni_moves =
             restructure_semantic::classify_non_image(&non_image_files, library_root_path, &mut used_group_names, &mut settled);
-        absorb_semantic_moves(ni_moves, &mut moved, &mut semantic_source_folders, &mut proposed);
+        absorb_semantic_moves(ni_moves, &mut moved, &mut proposed);
+    }
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
     }
 
     // Rule cascade for everything neither semantic pass claimed or settled.
@@ -1006,6 +1445,9 @@ pub(crate) async fn handle_plan_restructure(
         .cloned()
         .collect();
     proposed.extend(classify(&rule_files, library_root_path));
+    if stop_cancelled_plan(&sink, &cancel).await {
+        return;
+    }
 
     // Learn-from-corrections: upgrade any planned move toward a folder the user has
     // previously filed similar files into (the v18 restructure_feedback memory,
@@ -1017,7 +1459,12 @@ pub(crate) async fn handle_plan_restructure(
 
     // Engine-authoritative folder classification, computed on the FULL proposal
     // set so the Keep/Tidy/Reorganize tile counts stay accurate.
-    let folder_class = restructure::classify_folders(&proposed);
+    let folder_class = restructure::classify_folders(&proposed, library_root_path);
+    let semantic_action_folders: std::collections::HashSet<PathBuf> = proposed
+        .iter()
+        .filter(|move_| moved.contains(&move_.file_id) && !proposed_move_is_noop(move_))
+        .filter_map(|move_| move_.source.parent().map(Path::to_path_buf))
+        .collect();
     let mut anchor = 0u32;
     let mut mixed = 0u32;
     let mut junk = 0u32;
@@ -1026,12 +1473,10 @@ pub(crate) async fn handle_plan_restructure(
     let mut tier_by_folder: std::collections::HashMap<PathBuf, &'static str> =
         std::collections::HashMap::with_capacity(folder_class.len());
     for f in &folder_class {
-        // An exempted Anchor folder is the butler actively relocating its files
-        // into a content group — it is NOT kept in place, so it must not inflate
-        // the "Keep" tile or label its moves Anchor. Count + tier it as Mixed so
-        // the tile and the surviving moves agree. (F-C1-004)
+        // A folder with an actionable semantic relocation is not wholly kept in
+        // place, even if its full proposal histogram classifies Anchor.
         let classification = if matches!(f.classification, FolderClassification::Anchor)
-            && semantic_source_folders.contains(&f.source_folder)
+            && semantic_action_folders.contains(&f.source_folder)
         {
             &FolderClassification::Mixed
         } else {
@@ -1060,18 +1505,27 @@ pub(crate) async fn handle_plan_restructure(
     // just above) tells the user they're left untouched. Drop their moves so the
     // plan the app applies can never silently relocate a file the UI promised
     // would stay put — without this, default-selected Anchor rows were applied.
-    // Folders the semantic butler actively claimed are exempt: their homogeneity
-    // is a real relocation, not an in-place anchor, so stripping would eat the
-    // best proposals. (audit A1/A3, F-C1-004)
+    // Only exact semantic proposals are exempt. Exempting their whole source
+    // folder also relocated unrelated rule-cascade siblings from an Anchor.
     let proposed = restructure::strip_anchor_folder_moves_except(
         proposed,
         &folder_class,
-        &semantic_source_folders,
+        &moved,
     );
+    let proposed: Vec<_> = proposed
+        .into_iter()
+        .filter(|move_| !proposed_move_is_noop(move_))
+        .collect();
     let category_summary = restructure::category_counts(&proposed);
+    let mut confidence_tiers = StoredPlanTiers::default();
+    for move_ in &proposed {
+        confidence_tiers.observe(move_.confidence.as_str());
+    }
+    let confidence_counts = confidence_tiers.as_ipc();
 
     let total_moves = proposed.len();
     let library_root_for_spool = library_root.clone();
+    let encode_cancel = std::sync::Arc::clone(&cancel);
     let encoded = tokio::task::spawn_blocking(move || {
         let moves = proposed.into_iter().map(|m| {
                 let tier = m
@@ -1092,13 +1546,36 @@ pub(crate) async fn handle_plan_restructure(
         if supports_paged_plans && total_moves > RESTRUCTURE_PREVIEW_CAP {
             let (plan_id, preview) =
                 write_stored_plan(
-                    &library_root_for_spool,
-                    moves.map(Ok),
-                    total_moves,
-                )?;
+                &library_root_for_spool,
+                moves.map(Ok),
+                total_moves,
+                &encode_cancel,
+            )?;
             Ok::<_, anyhow::Error>((Some(plan_id), preview, Some(total_moves as u64), true))
         } else {
-            Ok((None, moves.collect(), None, false))
+            let mut claims =
+                crate::pipeline::restructure_apply::DestinationClaims::default();
+                let mut adjusted_destinations = 0usize;
+                let moves = moves
+                    .map(|mut move_| -> anyhow::Result<IpcMove> {
+                        anyhow::ensure!(
+                            !encode_cancel.load(std::sync::atomic::Ordering::Relaxed),
+                            "restructure planning cancelled"
+                        );
+                        if reserve_collision_free_destination(&mut move_, &mut claims)? {
+                            adjusted_destinations += 1;
+                        }
+                        Ok(move_)
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+            if adjusted_destinations > 0 {
+                tracing::info!(
+                    adjusted_destinations,
+                    total_moves,
+                    "[RESTRUCTURE] made planned destinations collision-free"
+                );
+            }
+            Ok((None, moves, None, false))
         }
     })
     .await;
@@ -1128,6 +1605,18 @@ pub(crate) async fn handle_plan_restructure(
         }
     };
 
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some(plan_id) = plan_id.as_deref() {
+            if let Ok(dir) = crate::paths::restructure_plans_dir() {
+                if let Ok(path) = plan_path_in(&dir, plan_id) {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let _ = stop_cancelled_plan(&sink, &cancel).await;
+        return;
+    }
+
     let plan = RestructurePlan {
         library_root,
         plan_id,
@@ -1141,6 +1630,7 @@ pub(crate) async fn handle_plan_restructure(
                 count: c.count,
             })
             .collect(),
+        confidence_counts: Some(confidence_counts),
         folder_classifications: Some(FolderClassificationCounts {
             anchor_folders: anchor,
             mixed_folders: mixed,
@@ -1163,9 +1653,16 @@ pub(crate) async fn handle_undo_restructure(
 ) {
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<ipc::RestructureApplyResult> {
-            let apply = RestructureApply::new(db, PathBuf::from(payload.library_root), false)
+            let apply = RestructureApply::new(
+                db,
+                PathBuf::from(payload.library_root),
+                false,
+            )
                 .with_cancel(cancel);
-            apply.undo_last()
+            match payload.shortcut_undo_token {
+                Some(token) => apply.undo_shortcuts(&token),
+                None => apply.undo_last(),
+            }
         },
     )
     .await;
@@ -1206,7 +1703,7 @@ pub(crate) async fn handle_apply_restructure(
 ) {
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<ipc::RestructureApplyResult> {
-            // F-C6-013 wiring: inject the shared cancel flag the CancelScan
+            // F-C6-013 wiring: inject the operation token the CancelRestructure
             // dispatch arm sets, so a long apply is actually stoppable. Before
             // this, the apply built a fresh never-set flag and the cooperative
             // cancel poll was dead in production. (The flag is reset to false in
@@ -1223,27 +1720,34 @@ pub(crate) async fn handle_apply_restructure(
                 PathBuf::from(&library_root),
                 use_symlinks,
             )
-            .with_cancel(cancel);
+            .with_cancel(cancel)
+            .with_strict_destinations();
             if let Some(plan_id) = plan_id {
                 anyhow::ensure!(moves.is_empty(), "paged plan apply must not also include moves");
-                let (moves, total) = open_stored_plan(&plan_id, &library_root)?;
-                let mut skipped_ask = 0usize;
-                let moves = exclude_ask_tier(moves, &mut skipped_ask);
-                let result = apply.apply_iter(moves, Some(total));
-                if skipped_ask > 0 {
+                let (result, tiers, total) =
+                    apply_stored_plan(&plan_id, &library_root, &apply)?;
+                if result.cancelled {
                     tracing::info!(
-                        skipped_ask,
-                        "[RESTRUCTURE] excluded ask-tier moves from bulk stored-plan apply"
+                        total,
+                        "[RESTRUCTURE] stored-plan validation cancelled before apply"
+                    );
+                } else {
+                    tracing::info!(
+                        eligible_auto = tiers.auto,
+                        held_review = tiers.review,
+                        held_ask = tiers.ask,
+                        held_unknown = tiers.unknown,
+                        total,
+                        "[RESTRUCTURE] validated stored-plan bulk eligibility"
                     );
                 }
-                result
+                Ok(result)
             } else {
                 // Inline moves are exactly the rows the user reviewed and kept
                 // selected in WinUI, so an Ask-tier row here carries explicit
                 // consent. Only stored/truncated plans need the server-side Ask
                 // exclusion because most of those rows were never displayed.
-                let total = moves.len();
-                apply.apply_iter(moves.into_iter().map(Ok), Some(total))
+                apply_inline_plan(&apply, moves)
             }
         },
     )
@@ -1381,6 +1885,50 @@ mod tests {
         assert_eq!(ids, [1, 2]);
     }
 
+    #[test]
+    fn planner_scope_is_case_insensitive_and_sibling_prefix_safe() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(
+                 id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT,
+                 modified_at REAL, created_at REAL,
+                 location_lat REAL, location_lon REAL,
+                 has_text INTEGER, failed INTEGER DEFAULT 0);
+             CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             INSERT INTO files(id,path_text,kind,failed) VALUES
+                 (1,'c:\\library\\a.jpg','image',0),
+                 (2,'c:\\library\\nested\\b.jpg','image',0),
+                 (3,'c:\\library-old\\not-ours.jpg','image',0),
+                 (4,'c:\\other\\c.jpg','image',0);",
+        )
+        .unwrap();
+        let (root, prefix, upper) = plan_root_bounds("C:\\LIBRARY\\");
+        let ids: Vec<i64> = conn
+            .prepare(PLAN_FILES_SQL)
+            .unwrap()
+            .query_map(
+                rusqlite::params![root.clone(), prefix.clone(), upper.clone()],
+                |row| row.get(0),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let paged_ids: Vec<i64> = conn
+            .prepare(PLAN_FILES_PAGE_SQL)
+            .unwrap()
+            .query_map(
+                rusqlite::params![root, prefix, upper, i64::MIN, 10],
+                |row| row.get(0),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(ids, [1, 2]);
+        assert_eq!(paged_ids, ids);
+    }
+
     /// Every tier must cap the resident map; larger machines get a larger
     /// quality sample, never an unbounded full-table allocation.
     #[test]
@@ -1433,6 +1981,34 @@ mod tests {
     }
 
     #[test]
+    fn signal_queries_use_the_same_case_insensitive_scope_as_planning() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files(
+                 id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT, failed INTEGER DEFAULT 0);
+             CREATE TABLE clip_embeddings(file_id INTEGER PRIMARY KEY, embedding BLOB);
+             CREATE TABLE text_embeddings(file_id INTEGER PRIMARY KEY, embedding BLOB);
+             INSERT INTO files(id,path_text,kind,failed) VALUES
+                 (1,'c:\\library\\photo.jpg','image',0),
+                 (2,'c:\\library-old\\photo.jpg','image',0),
+                 (3,'c:\\library\\report.pdf','pdf',0),
+                 (4,'c:\\library-old\\report.pdf','pdf',0);
+             INSERT INTO clip_embeddings(file_id,embedding) VALUES
+                 (1,x'00000000'),(2,x'00000000');
+             INSERT INTO text_embeddings(file_id,embedding) VALUES
+                 (3,x'00000000'),(4,x'00000000');",
+        )
+        .unwrap();
+        let bounds = plan_root_bounds("C:\\LIBRARY");
+
+        let image = load_capped_embeddings(&conn, 10, &bounds).unwrap();
+        let text = load_text_embeddings(&conn, 10, &bounds).unwrap();
+
+        assert_eq!(image.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(text.keys().copied().collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
     fn stored_plan_preview_is_bounded_and_root_bound() {
         let dir = std::env::temp_dir().join(format!(
             "fileid-plan-spool-{}-{}",
@@ -1467,14 +2043,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn stored_plan_reader_rejects_legacy_v1_with_replan_guidance() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-plan-version-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root = dir.join("library").to_string_lossy().into_owned();
+        let (plan_id, _) = write_stored_plan_in(
+            &dir,
+            &root,
+            std::iter::empty::<anyhow::Result<IpcMove>>(),
+            0,
+        )
+        .unwrap();
+        let path = plan_path_in(&dir, &plan_id).unwrap();
+        let legacy_header = StoredPlanHeader {
+            version: 1,
+            library_root: root.clone(),
+            total_moves: 0,
+        };
+        std::fs::write(
+            &path,
+            format!("{}\n", serde_json::to_string(&legacy_header).unwrap()),
+        )
+        .unwrap();
+
+        let error = open_stored_plan_in(&dir, &plan_id, &root)
+            .err()
+            .expect("legacy plan must be rejected before any moves are read");
+        let message = error.to_string();
+        assert!(message.contains("plan version 1"));
+        assert!(message.contains(&format!("engine version {STORED_PLAN_VERSION}")));
+        assert!(message.contains("re-plan before applying"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Full paged-plan loop: spool a plan over real files, reopen it by
     /// planID, and stream it through `apply_iter` — the exact path a
     /// truncated GUI plan takes when the app applies with planID + empty
     /// moves. Guards the spool/apply seam the piecewise tests can't.
-    /// Design §6: 'ask'-tier moves in a STORED plan must never bulk-apply —
-    /// the truncated-plan UI cannot have shown them for review. (audit 2026-07-14)
+    /// Review/Ask rows beyond the bounded preview have not received per-file
+    /// consent, so an engine-owned stored plan may bulk-apply Auto rows only.
     #[test]
-    fn stored_plan_bulk_apply_excludes_ask_tier_moves() {
+    fn stored_plan_bulk_apply_is_auto_only() {
         let root = std::env::temp_dir().join(format!(
             "fileid-spool-ask-{}-{}",
             std::process::id(),
@@ -1518,25 +2131,30 @@ mod tests {
         let root_text = root.to_string_lossy().into_owned();
         let (plan_id, _preview) =
             write_stored_plan_in(&spool_dir, &root_text, moves.into_iter().map(Ok), 3).unwrap();
-        let (stream, stored_total) =
-            open_stored_plan_in(&spool_dir, &plan_id, &root_text).unwrap();
-
-        let mut skipped_ask = 0usize;
-        let gated = exclude_ask_tier(stream, &mut skipped_ask);
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
         let apply =
             crate::pipeline::restructure_apply::RestructureApply::new(db, root.clone(), false);
-        let result = apply.apply_iter(gated, Some(stored_total)).unwrap();
+        let (stream, tiers, stored_total) =
+            validate_stored_plan_in(&spool_dir, &plan_id, &root_text, &apply).unwrap();
+        let gated = auto_tier_only(stream.expect("validation completed"));
+        assert_eq!(stored_total, 3);
+        let result = apply.apply_iter(gated, Some(tiers.auto)).unwrap();
 
-        assert_eq!(result.applied, 2, "auto + review apply");
+        assert_eq!(result.applied, 1, "only Auto rows may bulk-apply");
         assert_eq!(result.failed, 0);
-        assert_eq!(skipped_ask, 1, "the ask move was excluded, not failed");
+        assert_eq!(tiers.auto, 1);
+        assert_eq!(tiers.review, 1);
+        assert_eq!(tiers.ask, 1);
+        assert_eq!(tiers.unknown, 0);
         assert!(
             incoming.join("1.jpg").exists(),
             "ask-tier file must remain untouched"
         );
+        assert!(
+            incoming.join("2.jpg").exists(),
+            "review-tier file must remain untouched"
+        );
         assert!(root.join("Sorted").join("0.jpg").exists());
-        assert!(root.join("Sorted").join("2.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1690,6 +2308,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn cancelled_large_plan_removes_its_planning_scratch() {
+        use std::sync::atomic::AtomicBool;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-cancelled-plan-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let cancel = AtomicBool::new(true);
+
+        let error = plan_large_library_in_with_cancel(&db, "/library", &dir, &cancel)
+            .expect_err("a pre-cancelled large plan must stop before reading the library");
+        assert!(error.to_string().contains("planning cancelled"));
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.path().to_string_lossy().contains("planning.sqlite")),
+            "cancelled planning must remove its scratch database"
+        );
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("ndjson")),
+            "cancelled planning must not publish an applyable plan"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// F-C6-013 dispatch wiring: `handle_apply_restructure` must honor the
     /// cancel flag the CancelScan arm sets. Before the wiring it built a fresh
     /// never-set flag and ignored cancellation entirely — this calls the
@@ -1742,5 +2393,636 @@ mod tests {
             "no move performed under a pre-set cancel"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn invalid_held_row_does_not_poison_a_valid_auto_apply() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-spool-held-poison-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let incoming = root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let source = incoming.join("auto.jpg");
+        std::fs::write(&source, b"auto").unwrap();
+        let source_text = source.to_string_lossy().into_owned();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files
+                (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
+             VALUES (1,?1,1,4,1.0,'image','jpg',0,?2)",
+            rusqlite::params![
+                source_text,
+                crate::platform::file_ref(&source).unwrap() as i64
+            ],
+        )
+        .unwrap();
+        let destination = root.join("Sorted").join("auto.jpg");
+        let held = IpcMove {
+            file_id: 999,
+            source: root
+                .join("incoming")
+                .join("missing.jpg")
+                .to_string_lossy()
+                .into_owned(),
+            destination: root
+                .join("Sorted")
+                .join("missing.jpg")
+                .to_string_lossy()
+                .into_owned(),
+            category: "photo".into(),
+            tier: Some("Mixed".into()),
+            confidence: "review".into(),
+            reason: None,
+        };
+        let auto = IpcMove {
+            file_id: 1,
+            source: source.to_string_lossy().into_owned(),
+            destination: destination.to_string_lossy().into_owned(),
+            category: "photo".into(),
+            tier: Some("Mixed".into()),
+            confidence: "auto".into(),
+            reason: None,
+        };
+        let root_text = root.to_string_lossy().into_owned();
+        let plan_dir = root.join("plans");
+        let (plan_id, _) = write_stored_plan_in(
+            &plan_dir,
+            &root_text,
+            [Ok(held), Ok(auto)],
+            2,
+        )
+        .unwrap();
+        let apply = RestructureApply::new(
+            std::sync::Arc::new(parking_lot::Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_undo_journal_path(root.join("undo.ndjson"));
+
+        let (result, tiers, total) =
+            apply_stored_plan_in(&plan_dir, &plan_id, &root_text, &apply).unwrap();
+
+        assert_eq!((result.applied, result.failed), (1, 0));
+        assert_eq!(total, 2);
+        assert_eq!((tiers.auto, tiers.review), (1, 1));
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"auto");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stored_plan_preflight_cancellation_is_truthful_and_retryable() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let root = std::env::temp_dir().join(format!(
+            "fileid-spool-preflight-cancel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let incoming = root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let source = incoming.join("a.jpg");
+        std::fs::write(&source, b"payload").unwrap();
+        let destination = root.join("Sorted").join("a.jpg");
+        let root_text = root.to_string_lossy().into_owned();
+        let plan_dir = root.join("plans");
+        let (plan_id, _) = write_stored_plan_in(
+            &plan_dir,
+            &root_text,
+            std::iter::once(Ok(IpcMove {
+                file_id: 1,
+                source: source.to_string_lossy().into_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: "auto".into(),
+                reason: None,
+            })),
+            1,
+        )
+        .unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let apply = RestructureApply::new(
+            Arc::new(parking_lot::Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_cancel(cancel);
+
+        let (result, tiers, total) =
+            apply_stored_plan_in(&plan_dir, &plan_id, &root_text, &apply).unwrap();
+
+        assert!(result.cancelled);
+        assert_eq!((result.applied, result.failed), (0, 0));
+        assert_eq!((result.planned, result.remaining), (None, None));
+        assert_eq!(tiers.total(), 0);
+        assert_eq!(total, 1);
+        assert!(source.exists());
+        assert!(!destination.exists());
+        assert!(
+            plan_path_in(&plan_dir, &plan_id).unwrap().exists(),
+            "cancellation keeps the plan available for a retry"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn person_routing_requires_every_face_to_share_one_named_identity() {
+        assert_eq!(
+            unambiguous_person_name(Some("Alice"), 1, 1, 1),
+            Some("Alice".to_string())
+        );
+        assert_eq!(
+            unambiguous_person_name(Some("Alice"), 2, 2, 1),
+            Some("Alice".to_string()),
+            "multiple faces assigned to the same person remain unambiguous"
+        );
+        assert_eq!(
+            unambiguous_person_name(Some("Alice"), 2, 1, 1),
+            None,
+            "a named plus unassigned face must not auto-file under the named person"
+        );
+        assert_eq!(
+            unambiguous_person_name(Some("Alice"), 2, 2, 2),
+            None,
+            "different person IDs sharing one display name remain ambiguous"
+        );
+        assert_eq!(
+            unambiguous_person_name(Some(" Alice \u{1f} Bob "), 2, 2, 2),
+            None
+        );
+        assert_eq!(unambiguous_person_name(Some("\u{1f}  "), 1, 0, 0), None);
+    }
+
+    #[test]
+    fn plan_query_rejects_named_unknown_and_same_name_identity_ambiguity() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files
+                (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+             VALUES
+                (1,'/library/one.jpg',1,1,1.0,'image','jpg',0),
+                (2,'/library/two.jpg',2,1,1.0,'image','jpg',0),
+                (3,'/library/three.jpg',3,1,1.0,'image','jpg',0);
+             INSERT INTO persons(id,name,file_count,created_at) VALUES
+                (1,'Alice',0,1.0),
+                (2,'Alice',0,1.0);
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES
+                (1,1,1,x'00','{}'),
+                (2,1,NULL,x'00','{}'),
+                (3,2,1,x'00','{}'),
+                (4,2,2,x'00','{}'),
+                (5,3,1,x'00','{}'),
+                (6,3,1,x'00','{}');",
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare(PLAN_FILES_SQL).unwrap();
+        let files = stmt
+            .query_map(rusqlite::params!["", "", ""], plan_row_to_file)
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].person_name, None);
+        assert_eq!(files[1].person_name, None);
+        assert_eq!(files[2].person_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn selected_library_root_is_never_a_large_plan_anchor() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-root-tier-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let child = root.join("Existing Album");
+        std::fs::create_dir_all(&child).unwrap();
+        let root_text = root.to_string_lossy();
+        let child_text = child.to_string_lossy();
+
+        assert_eq!(folder_tier(&root_text, &root_text, 100, 100), "Mixed");
+        assert_eq!(
+            folder_tier(&child_text, &root_text, 100, 100),
+            "Anchor"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn desktop_unsorted_and_inbox_are_junk_in_large_plan_tiering() {
+        for name in ["Desktop", "Unsorted", "Inbox"] {
+            assert_eq!(
+                folder_tier(
+                    &format!("C:\\Library\\{name}"),
+                    "C:\\Library",
+                    100,
+                    100
+                ),
+                "Junk"
+            );
+        }
+    }
+
+    #[test]
+    fn large_plan_counts_and_spool_exclude_in_place_intents() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-large-plan-noops-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = root
+            .join("Photos")
+            .join("2024")
+            .join("March")
+            .join("a.jpg");
+        let actionable = root.join("Inbox").join("b.jpg");
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for (id, path) in [(1_i64, canonical), (2_i64, actionable)] {
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed)
+                 VALUES (?1,?2,?3,1,1710504000.0,1.0,'image','jpg',0)",
+                rusqlite::params![id, path.to_string_lossy(), id],
+            )
+            .unwrap();
+        }
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let plan_dir = root.join("plans");
+
+        let plan =
+            plan_large_library_in(&db, &root.to_string_lossy(), &plan_dir).unwrap();
+
+        assert_eq!(plan.moves.len(), 1);
+        assert!(
+            plan.moves
+                .iter()
+                .all(|move_| !ipc_move_is_noop(move_))
+        );
+        assert_eq!(
+            plan.category_counts
+                .iter()
+                .map(|count| count.count as u64)
+                .sum::<u64>(),
+            1
+        );
+        let confidence = plan.confidence_counts.unwrap();
+        assert_eq!(
+            confidence
+                .auto
+                .saturating_add(confidence.review)
+                .saturating_add(confidence.ask)
+                .saturating_add(confidence.unknown),
+            1
+        );
+        assert_eq!(plan.total_moves, None);
+        assert_eq!(plan.plan_id, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_plan_destinations_are_collision_free_before_preview_and_apply() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-plan-collisions-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let plan_dir = root.join("plans");
+        std::fs::create_dir_all(root.join("Sorted")).unwrap();
+        let target = root.join("Sorted").join("UserManual.pdf");
+        std::fs::write(&target, b"pre-existing").unwrap();
+        let total = 33usize;
+        let moves = (0..total).map(|index| IpcMove {
+            file_id: index as i64,
+            source: root
+                .join("incoming")
+                .join(format!("{index}.pdf"))
+                .to_string_lossy()
+                .into_owned(),
+            destination: target.to_string_lossy().into_owned(),
+            category: "document".into(),
+            tier: Some("Mixed".into()),
+            confidence: "auto".into(),
+            reason: None,
+        });
+        let root_text = root.to_string_lossy().into_owned();
+
+        let (plan_id, preview) =
+            write_stored_plan_in(&plan_dir, &root_text, moves.map(Ok), total).unwrap();
+
+        assert_eq!(
+            preview[0].destination,
+            root.join("Sorted")
+                .join("UserManual (2).pdf")
+                .to_string_lossy()
+        );
+        assert_eq!(
+            preview[total - 1].destination,
+            root.join("Sorted")
+                .join("UserManual (34).pdf")
+                .to_string_lossy()
+        );
+        let (stream, total) =
+            open_stored_plan_in(&plan_dir, &plan_id, &root_text).unwrap();
+        let stored = stream.collect::<anyhow::Result<Vec<_>>>().unwrap();
+        assert_eq!(total, 33);
+        let unique: std::collections::HashSet<_> = stored
+            .iter()
+            .map(|move_| move_.destination.to_lowercase())
+            .collect();
+        assert_eq!(unique.len(), stored.len());
+        assert!(
+            stored
+                .iter()
+                .all(|move_| Path::new(&move_.destination) != target),
+            "the pre-existing destination must never be claimed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_plan_late_row_tampering_fails_before_any_move_or_journal() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-plan-preflight-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let incoming = root.join("incoming");
+        let plan_dir = root.join("plans");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let mut moves = Vec::new();
+        for index in 0..4 {
+            let source = incoming.join(format!("{index}.jpg"));
+            std::fs::write(&source, format!("payload-{index}")).unwrap();
+            let source_text = source.to_string_lossy().into_owned();
+            let file_ref = crate::platform::file_ref(&source).unwrap() as i64;
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
+                 VALUES (?1,?2,?3,10,1.0,'image','jpg',0,?4)",
+                rusqlite::params![index + 1, source_text, index + 1, file_ref],
+            )
+            .unwrap();
+            moves.push(IpcMove {
+                file_id: index + 1,
+                source: source_text,
+                destination: root
+                    .join("Sorted")
+                    .join(format!("{index}.jpg"))
+                    .to_string_lossy()
+                    .into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: "auto".into(),
+                reason: None,
+            });
+        }
+        let root_text = root.to_string_lossy().into_owned();
+        let (plan_id, _) = write_stored_plan_in(
+            &plan_dir,
+            &root_text,
+            moves.iter().cloned().map(Ok),
+            moves.len(),
+        )
+        .unwrap();
+        let plan_path = plan_path_in(&plan_dir, &plan_id).unwrap();
+        let original = std::fs::read_to_string(&plan_path).unwrap();
+        let original_lines: Vec<String> = original.lines().map(str::to_string).collect();
+        let original_last: IpcMove =
+            serde_json::from_str(original_lines.last().unwrap()).unwrap();
+        let write_last = |move_: &IpcMove| {
+            let mut lines = original_lines.clone();
+            *lines.last_mut().unwrap() = serde_json::to_string(move_).unwrap();
+            std::fs::write(&plan_path, format!("{}\n", lines.join("\n"))).unwrap();
+        };
+
+        let journal_path = root.join("undo.json");
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let apply = RestructureApply::new(db, root.clone(), false)
+            .with_strict_destinations()
+            .with_undo_journal_path(journal_path.clone());
+        let assert_rejected = |expected: &str| {
+            let error = apply_stored_plan_in(&plan_dir, &plan_id, &root_text, &apply)
+                .expect_err("tampered plan must fail before apply");
+            let detail = format!("{error:#}");
+            assert!(
+                detail.contains(expected),
+                "unexpected preflight error: {detail}"
+            );
+            for index in 0..4 {
+                assert_eq!(
+                    std::fs::read_to_string(incoming.join(format!("{index}.jpg"))).unwrap(),
+                    format!("payload-{index}")
+                );
+                let destination = root.join("Sorted").join(format!("{index}.jpg"));
+                if destination.exists() {
+                    assert_eq!(
+                        std::fs::read(&destination).unwrap(),
+                        b"appeared after planning",
+                        "preflight must not create or replace a destination"
+                    );
+                }
+            }
+            assert!(
+                !journal_path.exists(),
+                "preflight failure must not create or replace an undo journal"
+            );
+        };
+
+        let mut tampered = original_last.clone();
+        tampered.file_id = moves[0].file_id;
+        write_last(&tampered);
+        assert_rejected("duplicate file ID");
+
+        tampered = original_last.clone();
+        tampered.source = moves[0].source.clone();
+        write_last(&tampered);
+        assert_rejected("duplicate source");
+
+        tampered = original_last.clone();
+        tampered.destination = root
+            .parent()
+            .unwrap()
+            .join("outside.jpg")
+            .to_string_lossy()
+            .into_owned();
+        write_last(&tampered);
+        assert_rejected("outside the selected library root");
+
+        tampered = original_last.clone();
+        tampered.destination = Path::new(&moves[0].destination)
+            .parent()
+            .unwrap()
+            .join("0.JPG")
+            .to_string_lossy()
+            .into_owned();
+        write_last(&tampered);
+        assert_rejected("duplicate destination");
+
+        tampered = original_last.clone();
+        std::fs::create_dir_all(root.join("Sorted")).unwrap();
+        std::fs::write(&tampered.destination, b"appeared after planning").unwrap();
+        write_last(&tampered);
+        assert_rejected("no longer collision-free");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_plan_writer_rejects_a_declared_count_mismatch() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-plan-count-write-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let move_ = IpcMove {
+            file_id: 1,
+            source: root.join("a.jpg").to_string_lossy().into_owned(),
+            destination: root.join("Sorted/a.jpg").to_string_lossy().into_owned(),
+            category: "photo".into(),
+            tier: None,
+            confidence: "auto".into(),
+            reason: None,
+        };
+
+        let error = write_stored_plan_in(
+            &root,
+            &root.to_string_lossy(),
+            std::iter::once(Ok(move_)),
+            2,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("declared 2 moves but produced 1")
+        );
+        assert!(
+            std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("ndjson"))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_plan_writer_never_previews_or_persists_noops() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-plan-noop-write-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root_text = root.to_string_lossy().into_owned();
+        let no_op_path = root.join("Photos").join("a.jpg").to_string_lossy().into_owned();
+        let no_op = IpcMove {
+            file_id: 1,
+            source: no_op_path.clone(),
+            destination: no_op_path,
+            category: "photo".into(),
+            tier: Some("Anchor".into()),
+            confidence: "auto".into(),
+            reason: None,
+        };
+        let actionable = IpcMove {
+            file_id: 2,
+            source: root.join("Inbox").join("b.jpg").to_string_lossy().into_owned(),
+            destination: root.join("Photos").join("b.jpg").to_string_lossy().into_owned(),
+            category: "photo".into(),
+            tier: Some("Junk".into()),
+            confidence: "review".into(),
+            reason: None,
+        };
+
+        let (plan_id, preview) = write_stored_plan_in(
+            &root,
+            &root_text,
+            [Ok(no_op), Ok(actionable.clone())],
+            1,
+        )
+        .unwrap();
+        let (stored, total) = open_stored_plan_in(&root, &plan_id, &root_text).unwrap();
+        let stored = stored.collect::<anyhow::Result<Vec<_>>>().unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].file_id, actionable.file_id);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].file_id, actionable.file_id);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stored_plan_reader_rejects_clean_truncation_and_extra_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "fileid-plan-count-read-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root_text = root.to_string_lossy().into_owned();
+        let make_move = |id| IpcMove {
+            file_id: id,
+            source: root.join(format!("{id}.jpg")).to_string_lossy().into_owned(),
+            destination: root
+                .join("Sorted")
+                .join(format!("{id}.jpg"))
+                .to_string_lossy()
+                .into_owned(),
+            category: "photo".into(),
+            tier: None,
+            confidence: "auto".into(),
+            reason: None,
+        };
+        let (plan_id, preview) = write_stored_plan_in(
+            &root,
+            &root_text,
+            [Ok(make_move(1)), Ok(make_move(2))],
+            2,
+        )
+        .unwrap();
+        let path = plan_path_in(&root, &plan_id).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<_> = original.lines().collect();
+        lines.pop();
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let (stream, _) = open_stored_plan_in(&root, &plan_id, &root_text).unwrap();
+        let results: Vec<_> = stream.collect();
+        assert_eq!(results.len(), 2);
+        assert!(results[1]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("ended early"));
+
+        std::fs::write(
+            &path,
+            format!(
+                "{original}{}\n",
+                serde_json::to_string(&preview[0]).unwrap()
+            ),
+        )
+        .unwrap();
+        let (stream, _) = open_stored_plan_in(&root, &plan_id, &root_text).unwrap();
+        let results: Vec<_> = stream.collect();
+        assert_eq!(results.len(), 3);
+        assert!(results[2]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("more moves than declared"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

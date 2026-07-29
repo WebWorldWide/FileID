@@ -4,6 +4,7 @@
 
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -75,45 +76,90 @@ internal sealed partial class EngineClient
             // A failed command does not poison the FIFO for later commands.
         }
 
-        await Task.Run(() =>
+        Process? processAtWrite = null;
+        try
         {
-            ct.ThrowIfCancellationRequested();
-            var cmd = IpcCommand.New(payload);
-            var bytes = IpcCoder.EncodeLine(cmd);
-            DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
-            if (bytes.Length > MaxIpcFrameBytes)
+            await Task.Run(() =>
             {
-                var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
-                DebugLog.Warn("[IPC OUT] " + msg);
-                throw new InvalidOperationException(msg);
-            }
-            try
-            {
-                lock (_writeLock)
+                ct.ThrowIfCancellationRequested();
+                var cmd = IpcCommand.New(payload);
+                var bytes = IpcCoder.EncodeLine(cmd);
+                DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
+                if (bytes.Length > MaxIpcFrameBytes)
                 {
-                    if (generation != SpawnGeneration)
-                    {
-                        var msg = $"Engine changed while {commandKind} was queued; refusing to send it to the replacement process.";
-                        DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
-                        throw new InvalidOperationException(msg);
-                    }
-                    if (_stdin is null)
-                    {
-                        DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
-                        throw new InvalidOperationException("Engine not running.");
-                    }
-                    onWriteStarted?.Invoke();
-                    _stdin.BaseStream.Write(bytes, 0, bytes.Length);
-                    _stdin.BaseStream.Flush();
+                    var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
+                    DebugLog.Warn("[IPC OUT] " + msg);
+                    throw new InvalidOperationException(msg);
                 }
-                DebugLog.Info($"[IPC OUT] {commandKind} flushed to engine stdin.");
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn($"[IPC OUT] {commandKind} threw on send: {ex.Message}");
-                throw;
-            }
-        }, ct).ConfigureAwait(false);
+                try
+                {
+                    lock (_writeLock)
+                    {
+                        if (generation != SpawnGeneration)
+                        {
+                            var msg = $"Engine changed while {commandKind} was queued; refusing to send it to the replacement process.";
+                            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
+                            throw new InvalidOperationException(msg);
+                        }
+                        processAtWrite = _process;
+                        if (_stdin is null)
+                        {
+                            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
+                            throw new InvalidOperationException("Engine not running.");
+                        }
+                        onWriteStarted?.Invoke();
+                        _stdin.BaseStream.Write(bytes, 0, bytes.Length);
+                        _stdin.BaseStream.Flush();
+                    }
+                    DebugLog.Info($"[IPC OUT] {commandKind} flushed to engine stdin.");
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn($"[IPC OUT] {commandKind} threw on send: {ex.Message}");
+                    throw;
+                }
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (processAtWrite is not null)
+        {
+            await HandleTransportFailureAsync(
+                $"stdin write/flush for {commandKind}",
+                ex,
+                processAtWrite,
+                generation).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task SendUndoCommandWithChannelRetryAsync(
+        CommandPayload payload,
+        CancellationToken ct = default)
+    {
+        await EnsureCommandChannelReadyAsync(
+            TimeSpan.FromSeconds(45),
+            ct).ConfigureAwait(false);
+
+        var writeStarted = 0;
+        try
+        {
+            await SendCommandAsync(
+                payload,
+                () => Interlocked.Exchange(ref writeStarted, 1),
+                ct).ConfigureAwait(false);
+            return;
+        }
+        catch when (Volatile.Read(ref writeStarted) == 0
+                    && !ct.IsCancellationRequested)
+        {
+            DebugLog.Warn(
+                $"[ENGINE-UNDO] {payload.GetType().Name} failed before its " +
+                "first byte was written; recovering the channel and retrying once.");
+        }
+
+        await EnsureCommandChannelReadyAsync(
+            TimeSpan.FromSeconds(45),
+            ct).ConfigureAwait(false);
+        await SendCommandAsync(payload, ct).ConfigureAwait(false);
     }
 
     internal static bool RequiresHealthyGpu(CommandPayload payload) => payload is
@@ -455,6 +501,19 @@ internal sealed partial class EngineClient
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
     public async Task ShutdownAsync()
     {
+        using var intent = _lifecycle.Begin(shouldRun: false);
+        await RunLifecycleIntentAsync(
+            intent,
+            () => ShutdownCoreAsync(
+                intent,
+                restartAfterExpectedExit: false))
+            .ConfigureAwait(false);
+    }
+
+    private async Task ShutdownCoreAsync(
+        EngineLifecycleIntent intent,
+        bool restartAfterExpectedExit)
+    {
         // BUG-6: mark this exit as user-initiated so OnProcessExited
         // doesn't count it as a crash + auto-respawn.
         //
@@ -467,14 +526,25 @@ internal sealed partial class EngineClient
         // user-initiated exit — no auto-respawn, engine stays dead. Now
         // we set the flag only AFTER SendCommandAsync succeeds, and clear
         // it if SendCommandAsync throws.
-        Interlocked.Exchange(ref _restartAfterExpectedExit, 0);
+        ThrowIfLifecycleIntentSuperseded(intent);
+        if (restartAfterExpectedExit)
+        {
+            ArmExpectedExitRestart(intent.Revision);
+        }
+        else
+        {
+            ClearExpectedExitRestart();
+        }
         var expectedProcess = _process;
         Interlocked.Exchange(ref _expectedExitProcess, expectedProcess);
         Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
         Interlocked.Exchange(ref _expectingExit, 1);
         try
         {
-            await SendCommandAsync(new ShutdownCommand()).ConfigureAwait(false);
+            ThrowIfLifecycleIntentSuperseded(intent);
+            await SendCommandAsync(
+                new ShutdownCommand(),
+                intent.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -482,6 +552,7 @@ internal sealed partial class EngineClient
             Interlocked.Exchange(ref _expectingExit, 0);
             throw;
         }
+        ThrowIfLifecycleIntentSuperseded(intent);
     }
 
     /// <summary>Send ShutdownCommand and wait for the engine process to
@@ -492,9 +563,123 @@ internal sealed partial class EngineClient
         bool restartAfterLateExit = false,
         CancellationToken ct = default)
     {
+        using var intent = _lifecycle.Begin(
+            shouldRun: restartAfterLateExit,
+            caller: ct);
+        return await RunLifecycleIntentAsync(
+            intent,
+            () => StopAndWaitForExitCoreAsync(
+                timeout,
+                restartAfterLateExit,
+                intent))
+            .ConfigureAwait(false);
+    }
+
+    internal sealed class ApplicationCloseStopLease
+    {
+        private readonly EngineClient _owner;
+        private readonly long _revision;
+        private readonly bool _resumeOnAbort;
+        private int _state;
+
+        internal ApplicationCloseStopLease(
+            EngineClient owner,
+            long revision,
+            bool resumeOnAbort,
+            bool stopped)
+        {
+            _owner = owner;
+            _revision = revision;
+            _resumeOnAbort = resumeOnAbort;
+            Stopped = stopped;
+        }
+
+        internal bool Stopped { get; }
+
+        internal bool TryCommit()
+        {
+            if (Volatile.Read(ref _state) != 0
+                || !_owner.CanFinalizeApplicationClose(_revision))
+            {
+                return false;
+            }
+            return Interlocked.CompareExchange(ref _state, 2, 0) == 0;
+        }
+
+        internal async Task AbortAsync()
+        {
+            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
+            {
+                return;
+            }
+            if (!_owner._lifecycle.ReleaseTerminalStop(_revision)
+                || !_resumeOnAbort)
+            {
+                return;
+            }
+            await _owner.StartAsync().ConfigureAwait(false);
+        }
+    }
+
+    internal async Task<ApplicationCloseStopLease> StopForApplicationCloseAsync(
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        EngineLifecycleIntent? intent = null;
         try
         {
-            await ShutdownAsync().ConfigureAwait(false);
+            intent = _lifecycle.BeginTerminalStop(ct);
+            using (intent)
+            {
+                var stopped = await RunLifecycleIntentAsync(
+                    intent,
+                    () => StopAndWaitForExitCoreAsync(
+                        timeout,
+                        restartAfterLateExit: false,
+                        intent))
+                    .ConfigureAwait(false);
+                return new ApplicationCloseStopLease(
+                    this,
+                    intent.Revision,
+                    intent.PreviousShouldRun,
+                    stopped);
+            }
+        }
+        catch
+        {
+            if (intent is not null
+                && _lifecycle.ReleaseTerminalStop(intent.Revision)
+                && intent.PreviousShouldRun)
+            {
+                try
+                {
+                    await StartAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn(
+                        "[ENGINE] Could not restore the engine after close stop failed: "
+                        + ex.Message);
+                }
+            }
+            throw;
+        }
+    }
+
+    private async Task<bool> StopAndWaitForExitCoreAsync(
+        TimeSpan timeout,
+        bool restartAfterLateExit,
+        EngineLifecycleIntent intent)
+    {
+        try
+        {
+            await ShutdownCoreAsync(intent, restartAfterLateExit)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (intent.Token.IsCancellationRequested || !intent.IsCurrent)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -503,25 +688,18 @@ internal sealed partial class EngineClient
         }
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        while (sw.Elapsed < timeout && !ct.IsCancellationRequested)
+        while (sw.Elapsed < timeout)
         {
+            ThrowIfLifecycleIntentSuperseded(intent);
             var process = _process;
             if ((process is null || process.HasExited) && Volatile.Read(ref _isStarting) == 0)
             {
                 DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited and no start is in flight after {sw.ElapsedMilliseconds}ms.");
                 return true;
             }
-            await Task.Delay(100, ct).ConfigureAwait(false);
+            await Task.Delay(100, intent.Token).ConfigureAwait(false);
         }
-        ct.ThrowIfCancellationRequested();
-        Interlocked.Exchange(ref _restartAfterExpectedExit, restartAfterLateExit ? 1 : 0);
-        if (restartAfterLateExit && (_process is null || _process.HasExited))
-        {
-            if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
-            {
-                await StartAfterLateExpectedExitAsync().ConfigureAwait(false);
-            }
-        }
+        ThrowIfLifecycleIntentSuperseded(intent);
         DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process or startup is still active.");
         return false;
     }
@@ -537,26 +715,45 @@ internal sealed partial class EngineClient
     public async Task RestartAsync(CancellationToken ct = default)
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
-        if (!await StopAndWaitForExitAsync(
-                TimeSpan.FromSeconds(10), ct: ct, restartAfterLateExit: true).ConfigureAwait(false))
+        using var intent = _lifecycle.Begin(
+            shouldRun: true,
+            caller: ct);
+        await RunLifecycleIntentAsync(intent, async () =>
         {
-            throw new TimeoutException("The existing engine did not stop; restart was aborted.");
-        }
+            if (!await StopAndWaitForExitCoreAsync(
+                    TimeSpan.FromSeconds(10),
+                    restartAfterLateExit: true,
+                    intent: intent).ConfigureAwait(false))
+            {
+                throw new TimeoutException(
+                    "The existing engine did not stop; restart was aborted.");
+            }
 
-        // Force a fresh spawn. StartAsync is idempotent if a process is
-        // already running, but here we explicitly want a new one. If the
-        // backoff path already kicked off StartAsync, this call is a
-        // no-op (the _isStarting gate dedupes).
-        DebugLog.Info("[ENGINE] RestartAsync: requesting fresh spawn.");
-        try { await StartAsync().ConfigureAwait(false); }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("[ENGINE] StartAsync threw during restart: " + ex.Message);
-        }
+            ThrowIfLifecycleIntentSuperseded(intent);
+            DebugLog.Info("[ENGINE] RestartAsync: requesting fresh spawn.");
+            try
+            {
+                await StartCoreAsync(intent.Revision, intent.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+                when (intent.Token.IsCancellationRequested || !intent.IsCurrent)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn(
+                    "[ENGINE] StartAsync threw during restart: " + ex.Message);
+            }
 
-        // Wait for the new process to reach Ready.
-        await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-        DebugLog.Info("[ENGINE] RestartAsync complete; engine is Ready.");
+            ThrowIfLifecycleIntentSuperseded(intent);
+            await WaitForReadyAsync(
+                TimeSpan.FromSeconds(30),
+                intent.Token).ConfigureAwait(false);
+            DebugLog.Info(
+                "[ENGINE] RestartAsync complete; engine is Ready.");
+        }).ConfigureAwait(false);
     }
     public Task RunFaceClusteringAsync() => SendCommandAsync(new RunFaceClusteringCommand());
 
@@ -649,6 +846,8 @@ internal sealed partial class EngineClient
         var tcs = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var terminal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var leaseReleased = 0;
+        var sendCompleted = false;
+        var ownerGeneration = -1;
         IDisposable? sendRegistration = null;
         PropertyChangedEventHandler? handler = null;
         void ReleaseLease()
@@ -668,7 +867,10 @@ internal sealed partial class EngineClient
                 tcs.TrySetResult(r);
                 terminal.TrySetResult();
             }
-            else if (e.PropertyName == nameof(State) && State != LifecycleState.Ready)
+            else if ((e.PropertyName is nameof(State) or nameof(SpawnGeneration))
+                     && sendCompleted
+                     && (State != LifecycleState.Ready
+                         || SpawnGeneration != ownerGeneration))
             {
                 tcs.TrySetException(new InvalidOperationException(
                     $"Engine stopped before confirming '{actionPrefix}'."));
@@ -676,7 +878,6 @@ internal sealed partial class EngineClient
             }
         };
         var releaseAfterReturn = true;
-        var sendCompleted = false;
         try
         {
             // Reset first so a value-equal reply still re-fires PropertyChanged.
@@ -688,7 +889,15 @@ internal sealed partial class EngineClient
             sendRegistration = beforeSend?.Invoke();
             PropertyChanged += handler;
             await send().ConfigureAwait(false);
+            ownerGeneration = SpawnGeneration;
             sendCompleted = true;
+            if (State != LifecycleState.Ready
+                || SpawnGeneration != ownerGeneration)
+            {
+                tcs.TrySetException(new InvalidOperationException(
+                    $"Engine stopped before confirming '{actionPrefix}'."));
+                terminal.TrySetResult();
+            }
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(timeout);
             using var reg = cts.Token.Register(() =>
@@ -1181,7 +1390,16 @@ internal sealed partial class EngineClient
     public async Task PlanRestructureAsync(string libraryRoot)
     {
         LastError = null;
-        await SendCommandAsync(new PlanRestructureCommand(libraryRoot, SupportsPagedPlans: true));
+        var revision = CaptureRestructurePlanRevision();
+        try
+        {
+            await SendCommandAsync(new PlanRestructureCommand(libraryRoot, SupportsPagedPlans: true));
+        }
+        catch
+        {
+            AbandonRestructurePlanRevision(revision);
+            throw;
+        }
     }
 
     public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves,
@@ -1204,9 +1422,14 @@ internal sealed partial class EngineClient
             throw;
         }
     }
+    public Task CancelRestructureApplyAsync()
+        => SendCommandAsync(new CancelRestructureCommand());
+
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
     /// on-disk undo journal. A partial result stays retryable. (R2)</summary>
-    public async Task UndoRestructureAsync(string libraryRoot)
+    public async Task UndoRestructureAsync(
+        string libraryRoot,
+        string? shortcutUndoToken = null)
     {
         if (UndoRestructureInFlight)
         {
@@ -1217,15 +1440,21 @@ internal sealed partial class EngineClient
         LastError = null;
         // Clear the flag if the send faults (engine not Ready) — else it latches and
         // mis-attributes the next apply's result as the undo's. (audit R2-app)
+        var isShortcutUndo = !string.IsNullOrWhiteSpace(shortcutUndoToken);
         UndoRestructureInFlight = true;
+        UndoRestructureInFlightWasShortcut = isShortcutUndo;
         try
         {
-            var undoRoot = UndoRestructureRoot ?? libraryRoot;
-            await SendCommandAsync(new UndoRestructureCommand(undoRoot)).ConfigureAwait(false);
+            var undoRoot = isShortcutUndo
+                ? libraryRoot
+                : UndoRestructureRoot ?? libraryRoot;
+            await SendUndoCommandWithChannelRetryAsync(
+                new UndoRestructureCommand(undoRoot, shortcutUndoToken)).ConfigureAwait(false);
         }
         catch
         {
             UndoRestructureInFlight = false;
+            UndoRestructureInFlightWasShortcut = false;
             throw;
         }
     }
@@ -1235,27 +1464,33 @@ internal sealed partial class EngineClient
     /// false so ChangeLog keeps the entry retryable.</summary>
     public async Task<bool> UndoRestructureAndWaitAsync(
         string libraryRoot,
+        string? shortcutUndoToken = null,
         TimeSpan? timeout = null,
         CancellationToken ct = default)
     {
+        var expectsShortcutUndo = !string.IsNullOrWhiteSpace(shortcutUndoToken);
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var ownerGeneration = SpawnGeneration;
+        var ownerGeneration = -1;
+        var commandSent = 0;
         PropertyChangedEventHandler? handler = null;
         handler = (_, e) =>
         {
             if (e.PropertyName == nameof(LastRestructureApplyResult)
                 && LastRestructureApplyResultWasUndo
+                && LastRestructureApplyResultWasShortcutUndo == expectsShortcutUndo
                 && LastRestructureApplyResult is { } result)
             {
-                tcs.TrySetResult(result.Failed == 0 && string.IsNullOrWhiteSpace(result.PrivilegeError));
+                tcs.TrySetResult(IsSuccessfulRestructureUndoResult(result));
             }
             else if (e.PropertyName == nameof(LastError)
                      && LastError?.Kind == "undo_restructure")
             {
                 tcs.TrySetResult(false);
             }
-            else if (e.PropertyName == nameof(State)
-                     && (State == LifecycleState.Crashed || SpawnGeneration != ownerGeneration))
+            else if ((e.PropertyName is nameof(State) or nameof(SpawnGeneration))
+                     && Volatile.Read(ref commandSent) == 1
+                     && (State != LifecycleState.Ready
+                         || SpawnGeneration != ownerGeneration))
             {
                 tcs.TrySetResult(false);
             }
@@ -1264,9 +1499,19 @@ internal sealed partial class EngineClient
         PropertyChanged += handler;
         try
         {
-            await UndoRestructureAsync(libraryRoot).ConfigureAwait(false);
+            await UndoRestructureAsync(libraryRoot, shortcutUndoToken).ConfigureAwait(false);
+            ownerGeneration = SpawnGeneration;
+            Volatile.Write(ref commandSent, 1);
+            if (State != LifecycleState.Ready
+                || SpawnGeneration != ownerGeneration)
+            {
+                tcs.TrySetResult(false);
+            }
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(timeout ?? TimeSpan.FromMinutes(30));
+            if (timeout is { } bounded && bounded != Timeout.InfiniteTimeSpan)
+            {
+                timeoutCts.CancelAfter(bounded);
+            }
             try
             {
                 return await tcs.Task.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
@@ -1282,6 +1527,16 @@ internal sealed partial class EngineClient
             PropertyChanged -= handler;
         }
     }
+
+    internal static bool IsSuccessfulRestructureUndoResult(
+        RestructureApplyResult result)
+        => result.Applied > 0
+            && result.Failed == 0
+            && string.IsNullOrWhiteSpace(result.PrivilegeError)
+            && !result.Cancelled
+            && result.Remaining is null or 0
+            && (!result.Planned.HasValue
+                || result.Applied >= result.Planned.Value);
 
     public Task ApplyTagsAsync(IReadOnlyList<long> fileIds, IReadOnlyList<string> tags, string mode = "add") =>
         SendCommandAsync(new ApplyTagsCommand(fileIds, tags, mode));
@@ -1398,14 +1653,15 @@ internal sealed partial class EngineClient
     /// <see cref="WaitForBulkActionResultAsync"/>; the IPC wire shape is
     /// unchanged (still a single restoreFromTrash command). The UndoStack
     /// listener captures the same reply independently.</summary>
-    public async Task RestoreFromTrashAsync(string batchId)
+    public async Task<bool> RestoreFromTrashAsync(string batchId)
     {
         try
         {
             var result = await WaitForBulkActionResultAsync(
                 "restoreFromTrash",
-                () => SendCommandAsync(new RestoreFromTrashCommand(batchId)),
-                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                () => SendUndoCommandWithChannelRetryAsync(
+                    new RestoreFromTrashCommand(batchId)),
+                Timeout.InfiniteTimeSpan).ConfigureAwait(false);
             if (result.Failed > 0)
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
@@ -1415,6 +1671,7 @@ internal sealed partial class EngineClient
                     $"Restored {result.Succeeded}; {result.Failed} couldn't be brought back{detail}.",
                     null));
             }
+            return IsSuccessfulRestoreResult(result);
         }
         catch (TimeoutException)
         {
@@ -1431,8 +1688,18 @@ internal sealed partial class EngineClient
         }
     }
 
-    public Task RevertMergeAsync(long sourcePersonId, long destPersonId, IReadOnlyList<long> faceIdsToRevert) =>
-        SendCommandAsync(new RevertMergeCommand(sourcePersonId, destPersonId, faceIdsToRevert));
+    internal static bool IsSuccessfulRestoreResult(BulkActionResult result)
+        => result.Succeeded > 0 && result.Failed == 0;
+
+    public Task RevertMergeAsync(
+        long sourcePersonId,
+        long destPersonId,
+        IReadOnlyList<long> faceIdsToRevert) =>
+        SendUndoCommandWithChannelRetryAsync(
+            new RevertMergeCommand(
+                sourcePersonId,
+                destPersonId,
+                faceIdsToRevert));
 
     /// <summary>Ask the engine to render a video keyframe out-of-process; it
     /// replies with a <c>thumbnailGenerated</c> event that lands on

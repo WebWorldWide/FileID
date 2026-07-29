@@ -1368,6 +1368,7 @@ public final class ReadStore: @unchecked Sendable {
             vlmDescription: r["vlm_description"],
             vlmProposedName: r["vlm_proposed_name"],
             vlmModel: r["vlm_model"],
+            vlmFullModel: r["vlm_full_model"],
             vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSince1970: $0) }
         )
     }
@@ -1382,7 +1383,7 @@ public final class ReadStore: @unchecked Sendable {
             let pending = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM files
                 WHERE kind IN ('image', 'pdf') AND failed = 0
-                  AND (vlm_model IS NULL OR vlm_model != ?)
+                  AND (vlm_full_model IS NULL OR vlm_full_model != ?)
                 """, arguments: [modelKey]) ?? 0
             return (total, pending)
         }) ?? (0, 0)

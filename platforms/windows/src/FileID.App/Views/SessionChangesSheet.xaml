@@ -18,7 +18,8 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    MinWidth="560"
+    MinWidth="320"
+    MaxWidth="480"
     MinHeight="360">
 
     <Grid RowSpacing="12" Padding="4">
@@ -46,7 +47,8 @@
                            TextWrapping="Wrap"
                            Text="No changes yet — anything FileID renames, moves, or trashes will show up here."
                            Visibility="Visible" />
-                <ItemsControl x:Name="RowsHost" />
+                <ItemsControl x:Name="RowsHost"
+                              HorizontalContentAlignment="Stretch" />
             </StackPanel>
         </ScrollViewer>
     </Grid>

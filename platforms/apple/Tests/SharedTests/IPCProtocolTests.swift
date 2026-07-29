@@ -16,6 +16,8 @@ struct IPCProtocolTests {
             .pauseScan,
             .resumeScan,
             .cancelScan,
+            .cancelRestructure,
+            .healthCheck(requestID: "health-check-1"),
             .requestStatus,
             .shutdown
         ]
@@ -32,6 +34,55 @@ struct IPCProtocolTests {
             let decodedPayloadJSON = try IPCCoder.encoder.encode(decoded.payload)
             #expect(originalPayloadJSON == decodedPayloadJSON)
         }
+    }
+
+    @Test("Health check result preserves request correlation and process ID")
+    func healthCheckResultRoundTrip() throws {
+        let event = IPCEvent(payload: .healthCheckResult(HealthCheckResult(
+            requestID: "health-check-1",
+            pid: 4242
+        )))
+        let line = try IPCCoder.encodeLine(event)
+        let decoded = try IPCCoder.decoder.decode(IPCEvent.self, from: Data(line.dropLast()))
+        guard case .healthCheckResult(let result) = decoded.payload else {
+            Issue.record("Decoded payload was not .healthCheckResult")
+            return
+        }
+        #expect(result.requestID == "health-check-1")
+        #expect(result.pid == 4242)
+    }
+
+    @Test("Restructure plan confidence totals survive JSON round-trip")
+    func restructureConfidenceCountsRoundTrip() throws {
+        let plan = RestructurePlan(
+            libraryRoot: "/Users/adam/photos",
+            moves: [],
+            categoryCounts: [],
+            confidenceCounts: RestructureConfidenceCounts(
+                auto: 17, review: 5, ask: 2, unknown: 1))
+        let encoded = try IPCCoder.encoder.encode(plan)
+        let decoded = try IPCCoder.decoder.decode(RestructurePlan.self, from: encoded)
+        let counts = try #require(decoded.confidenceCounts)
+
+        #expect(counts.auto == 17)
+        #expect(counts.review == 5)
+        #expect(counts.ask == 2)
+        #expect(counts.unknown == 1)
+    }
+
+    @Test("Older restructure plans decode without confidence totals")
+    func legacyRestructurePlanWithoutConfidenceCounts() throws {
+        let json = Data(#"""
+            {
+              "libraryRoot": "/Users/adam/photos",
+              "moves": [],
+              "categoryCounts": []
+            }
+            """#.utf8)
+        let plan = try IPCCoder.decoder.decode(RestructurePlan.self, from: json)
+
+        #expect(plan.confidenceCounts == nil)
+        #expect(!plan.truncated)
     }
 
     @Test("Event: progress payload survives round-trip with all fields")

@@ -50,9 +50,9 @@
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Button Click="OnResetKeepersClicked"
-                            AutomationProperties.Name="Reset keepers"
-                            AutomationProperties.HelpText="Re-mark the first member of every group as keeper, clearing any user overrides."
-                            ToolTipService.ToolTip="Re-mark the first member of every group as keeper, clearing any user overrides.">
+                            AutomationProperties.Name="Reset cleanup choices"
+                            AutomationProperties.HelpText="Restore default keeper choices and clear Similar-mode trash selections."
+                            ToolTipService.ToolTip="Restore default keeper choices and clear Similar-mode trash selections.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE7A7;" />
                             <TextBlock Text="Reset" />
@@ -137,17 +137,12 @@
                               Padding="16"
                               Tag="{x:Bind ContentHash}"
                               AutomationProperties.Name="{x:Bind Caption, Mode=OneWay}"
-                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions."
-                              RightTapped="OnGroupRightTapped">
-                            <!-- Per-group right-click action menu.
-                                 RightTapped seeds the current-group cache so
-                                 MenuFlyoutItem clicks (which don't inherit
-                                 DataContext on WinUI 3) can resolve to the
-                                 correct DuplicateGroup. -->
+                              AutomationProperties.HelpText="Duplicate group. Open the context menu for review and trash actions.">
                             <Grid.ContextFlyout>
-                                <MenuFlyout>
+                                <MenuFlyout Opening="OnGroupFlyoutOpening">
                                     <MenuFlyoutItem Text="Keep first"
                                                     Click="OnGroupKeepFirst"
+                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Mark only the first member as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
@@ -155,6 +150,7 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Keep shallowest path"
                                                     Click="OnGroupKeepShallowest"
+                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Mark the copy in the least-nested folder as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE8AB;" />
@@ -162,14 +158,16 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Invert keeper"
                                                     Click="OnGroupInvert"
+                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Pick the next member as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE72C;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutSeparator Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}" />
                                     <MenuFlyoutItem Text="Skip group"
                                                     Click="OnGroupSkip"
+                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Exclude this group from 'Trash non-keepers'.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE894;" />
@@ -177,15 +175,16 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Unskip group"
                                                     Click="OnGroupUnskip"
+                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Re-include this group in 'Trash non-keepers'.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutSeparator />
-                                    <MenuFlyoutItem Text="Trash this group only"
+                                    <MenuFlyoutSeparator Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}" />
+                                    <MenuFlyoutItem Text="{x:Bind TrashActionText, Mode=OneTime}"
                                                     Click="OnGroupTrashNow"
-                                                    ToolTipService.ToolTip="Move every non-keeper member to the Recycle Bin.">
+                                                    ToolTipService.ToolTip="{x:Bind TrashActionHelpText, Mode=OneTime}">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE74D;" />
                                         </MenuFlyoutItem.Icon>
@@ -255,12 +254,19 @@
                                                                Style="{StaticResource CaptionTextBlockStyle}"
                                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                                                HorizontalAlignment="Center" />
-                                                    <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
-                                                                 IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
-                                                                 Content="Keep"
+                                                     <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
+                                                                  IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
+                                                                  Visibility="{x:Bind KeeperVisibility, Mode=OneTime}"
+                                                                  Content="Keep"
                                                                  AutomationProperties.Name="{x:Bind FileName}"
-                                                                 AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
-                                                                 HorizontalAlignment="Center" />
+                                                                  AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
+                                                                  HorizontalAlignment="Center" />
+                                                     <CheckBox IsChecked="{x:Bind IsSelectedForTrash, Mode=TwoWay}"
+                                                               Visibility="{x:Bind TrashSelectionVisibility, Mode=OneTime}"
+                                                               Content="Trash"
+                                                               AutomationProperties.Name="{x:Bind FileName}"
+                                                               AutomationProperties.HelpText="Explicitly select this visually similar copy to move to the Recycle Bin."
+                                                               HorizontalAlignment="Center" />
                                                 </StackPanel>
                                             </DataTemplate>
                                         </ItemsRepeater.ItemTemplate>

@@ -3,15 +3,19 @@
 //! persons as unknown, find merge suggestions. They share the
 //! `emit_bulk_result` tail so the wire shape stays uniform.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Context;
+use rusqlite::OptionalExtension;
 
 use crate::ipc::{
     self, sink::Sink, BulkActionItem, BulkActionResult, EngineError, EventPayload, IpcEvent,
     MergeSuggestion, MergeSuggestions, TagMode, Wrap,
 };
-use crate::pipeline::face_clustering::{MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS_LOW};
+use crate::pipeline::face_clustering::{
+    corroborated_fragment_match, FaceRow, MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS_LOW,
+};
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
@@ -1129,6 +1133,199 @@ pub(crate) async fn handle_trash_files(
     emit_bulk_result(&sink, "trashFiles", result).await;
 }
 
+#[derive(Debug, Clone)]
+struct ManualMergeAnchor {
+    face_id: i64,
+    file_id: i64,
+    bbox: String,
+}
+
+fn manual_merge_anchor(
+    tx: &rusqlite::Transaction<'_>,
+    person_id: i64,
+) -> anyhow::Result<ManualMergeAnchor> {
+    tx.query_row(
+        "SELECT fp.id, fp.file_id, fp.bbox \
+         FROM face_prints fp \
+         WHERE fp.person_id = ?1 \
+         ORDER BY (fp.id = (SELECT representative_face_id FROM persons WHERE id = ?1)) DESC, \
+                  (fp.arcface_embedding IS NOT NULL) DESC, \
+                  COALESCE(fp.face_quality, 0) DESC, fp.id ASC \
+         LIMIT 1",
+        [person_id],
+        |row| {
+            Ok(ManualMergeAnchor {
+                face_id: row.get(0)?,
+                file_id: row.get(1)?,
+                bbox: row.get(2)?,
+            })
+        },
+    )
+    .with_context(|| format!("person #{person_id} has no face anchor to merge"))
+}
+
+fn resolve_merge_verification_face(
+    tx: &rusqlite::Transaction<'_>,
+    legacy: Option<i64>,
+    file_id: Option<i64>,
+    bbox: Option<String>,
+) -> anyhow::Result<Option<i64>> {
+    if let (Some(file_id), Some(bbox)) = (file_id, bbox) {
+        let mut statement = tx.prepare(
+            "SELECT id FROM face_prints \
+             WHERE file_id = ?1 AND bbox = ?2 \
+             ORDER BY id LIMIT 2",
+        )?;
+        let ids = statement
+            .query_map(rusqlite::params![file_id, bbox], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        match ids.as_slice() {
+            [id] => return Ok(Some(*id)),
+            [_, _, ..] => anyhow::bail!("manual merge found an ambiguous verification anchor"),
+            [] => {}
+        }
+    }
+    let Some(legacy) = legacy else {
+        return Ok(None);
+    };
+    tx.query_row(
+        "SELECT id FROM face_prints WHERE id = ?1",
+        [legacy],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn persist_manual_merge_constraint(
+    tx: &rusqlite::Transaction<'_>,
+    source_person_id: i64,
+    destination_person_id: i64,
+) -> anyhow::Result<()> {
+    let source_anchor = manual_merge_anchor(tx, source_person_id)?;
+    let destination_anchor = manual_merge_anchor(tx, destination_person_id)?;
+    let contradictory_rows = {
+        let mut statement = tx.prepare(
+            "SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
+             FROM face_verifications \
+             WHERE same_person = 0 \
+               AND ((face_a IS NOT NULL AND face_b IS NOT NULL) \
+                    OR (file_a IS NOT NULL AND bbox_a IS NOT NULL \
+                        AND file_b IS NOT NULL AND bbox_b IS NOT NULL))",
+        )?;
+        let collected = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        collected
+    };
+    let expected_pair = if source_person_id < destination_person_id {
+        (source_person_id, destination_person_id)
+    } else {
+        (destination_person_id, source_person_id)
+    };
+    let mut contradictory_keys = Vec::new();
+    for (person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b) in
+        contradictory_rows
+    {
+        let (Some(face_a), Some(face_b)) = (
+            resolve_merge_verification_face(tx, face_a, file_a, bbox_a)?,
+            resolve_merge_verification_face(tx, face_b, file_b, bbox_b)?,
+        ) else {
+            continue;
+        };
+        let owner_a = tx
+            .query_row(
+                "SELECT person_id FROM face_prints WHERE id = ?1",
+                [face_a],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        let owner_b = tx
+            .query_row(
+                "SELECT person_id FROM face_prints WHERE id = ?1",
+                [face_b],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        let current_pair = match (owner_a, owner_b) {
+            (Some(a), Some(b)) if a != b => {
+                if a < b {
+                    Some((a, b))
+                } else {
+                    Some((b, a))
+                }
+            }
+            _ => None,
+        };
+        if current_pair == Some(expected_pair) {
+            contradictory_keys.push((person_a, person_b));
+        }
+    }
+    contradictory_keys.sort_unstable();
+    contradictory_keys.dedup();
+    for (person_a, person_b) in contradictory_keys {
+        tx.execute(
+            "DELETE FROM face_verifications \
+             WHERE person_a = ?1 AND person_b = ?2 AND same_person = 0",
+            rusqlite::params![person_a, person_b],
+        )?;
+    }
+
+    let (person_a, person_b, anchor_a, anchor_b) =
+        if source_person_id < destination_person_id {
+            (
+                source_person_id,
+                destination_person_id,
+                source_anchor,
+                destination_anchor,
+            )
+        } else {
+            (
+                destination_person_id,
+                source_person_id,
+                destination_anchor,
+                source_anchor,
+            )
+        };
+    let verified_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
+    tx.execute(
+        "INSERT OR REPLACE INTO face_verifications \
+         (person_a, person_b, same_person, confidence, vlm_model, verified_at, \
+          face_a, face_b, file_a, bbox_a, file_b, bbox_b) \
+         VALUES (?1, ?2, 1, 1.0, 'user-merged', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            person_a,
+            person_b,
+            verified_at,
+            anchor_a.face_id,
+            anchor_b.face_id,
+            anchor_a.file_id,
+            anchor_a.bbox,
+            anchor_b.file_id,
+            anchor_b.bbox,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Merge two person clusters: every face_print with person_id = source is
 /// reassigned to destination, then the source person row is deleted.
 pub(crate) async fn handle_merge_clusters(
@@ -1177,6 +1374,7 @@ pub(crate) async fn handle_merge_clusters(
                 }],
             });
         }
+        persist_manual_merge_constraint(&tx, src, dst)?;
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
@@ -1502,6 +1700,138 @@ pub(crate) async fn handle_mark_persons_different(
 /// genuine same-person fragments that over-split stranded above the Pass-1
 /// threshold. Pairs already confirmed-different in face_verifications are
 /// filtered out so the suggested-merges sheet doesn't keep re-prompting.
+#[derive(Debug, Clone)]
+struct SuggestionPerson {
+    person_id: i64,
+    anchor_face_id: i64,
+    member_count: i64,
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuggestionCandidate {
+    similarity: f32,
+    a: usize,
+    b: usize,
+    corroborated: bool,
+}
+
+fn decode_unit_embedding(blob: &[u8]) -> Option<Vec<f32>> {
+    if blob.is_empty() || blob.len() % 4 != 0 {
+        return None;
+    }
+    let mut embedding = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        let value = f32::from_le_bytes(chunk.try_into().ok()?);
+        if !value.is_finite() {
+            return None;
+        }
+        embedding.push(value);
+    }
+    let norm = embedding
+        .iter()
+        .map(|value| value * value)
+        .sum::<f32>()
+        .sqrt();
+    if !norm.is_finite() || norm <= f32::MIN_POSITIVE {
+        return None;
+    }
+    for value in &mut embedding {
+        *value /= norm;
+    }
+    Some(embedding)
+}
+
+fn suggestion_cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return -1.0;
+    }
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn suggestion_candidates(people: &[SuggestionPerson]) -> Vec<SuggestionCandidate> {
+    const HNSW_THRESHOLD: usize = 2_000;
+    const INITIAL_K: usize = 64;
+    const MAX_K: usize = 512;
+    if people.len() <= HNSW_THRESHOLD {
+        let mut candidates = Vec::new();
+        for i in 0..people.len() {
+            for j in (i + 1)..people.len() {
+                let similarity =
+                    suggestion_cosine(&people[i].embedding, &people[j].embedding);
+                if (MERGE_SUGGEST_COS_LOW..MERGE_SUGGEST_COS_HIGH).contains(&similarity) {
+                    candidates.push(SuggestionCandidate {
+                        similarity,
+                        a: i,
+                        b: j,
+                        corroborated: false,
+                    });
+                }
+            }
+        }
+        return candidates;
+    }
+    let mut dimensions: HashMap<usize, usize> = HashMap::new();
+    for person in people {
+        *dimensions.entry(person.embedding.len()).or_default() += 1;
+    }
+    let Some((&modal_dimension, _)) = dimensions.iter().max_by_key(|(_, count)| *count) else {
+        return Vec::new();
+    };
+    let indexed: Vec<usize> = people
+        .iter()
+        .enumerate()
+        .filter_map(|(index, person)| {
+            (person.embedding.len() == modal_dimension).then_some(index)
+        })
+        .collect();
+    let index = crate::util::hnsw_index::build(
+        indexed
+            .iter()
+            .map(|&person_index| (people[person_index].embedding.clone(), person_index))
+            .collect(),
+    );
+    let mut searcher = crate::util::hnsw_index::Searcher::default();
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for &i in &indexed {
+        let mut k = (INITIAL_K + 1).min(indexed.len());
+        let hits = loop {
+            let hits = searcher.top_k(&index, &people[i].embedding, k);
+            let saturated = k < indexed.len()
+                && hits.iter().filter(|(j, _)| *j != i).all(|(j, _)| {
+                    suggestion_cosine(&people[i].embedding, &people[*j].embedding)
+                        >= MERGE_SUGGEST_COS_LOW
+                });
+            if saturated && k < MAX_K.min(indexed.len()) {
+                k = (k * 2).min(MAX_K).min(indexed.len());
+                continue;
+            }
+            break hits;
+        };
+        for (j, _) in hits {
+            if i == j {
+                continue;
+            }
+            let pair = if i < j { (i, j) } else { (j, i) };
+            if !seen.insert(pair) {
+                continue;
+            }
+            let similarity =
+                suggestion_cosine(&people[pair.0].embedding, &people[pair.1].embedding);
+            if (MERGE_SUGGEST_COS_LOW..MERGE_SUGGEST_COS_HIGH).contains(&similarity) {
+                candidates.push(SuggestionCandidate {
+                    similarity,
+                    a: pair.0,
+                    b: pair.1,
+                    corroborated: false,
+                });
+            }
+        }
+    }
+    candidates
+}
+
 pub(crate) async fn handle_find_merge_suggestions(
     sink: Sink,
     db_path: std::path::PathBuf,
@@ -1517,47 +1847,31 @@ pub(crate) async fn handle_find_merge_suggestions(
         // current by clustering + handle_merge_clusters.
         // Scope the prepared statement so its borrow of `conn` ends here,
         // letting the writer lock be released before the cosine sweep below.
-        let rows: Vec<(i64, i64, i64, Vec<u8>)> = {
+        let rows: Vec<(i64, i64, i64, Option<Vec<u8>>, Vec<u8>)> = {
             let mut stmt = conn.prepare(
-                "SELECT p.id, rep.id, COUNT(fpc.id), rep.arcface_embedding
+                "SELECT p.id, rep.id, COUNT(fpc.id), p.centroid, rep.arcface_embedding
                  FROM persons p
                  JOIN face_prints rep
                    ON rep.id = p.representative_face_id AND rep.arcface_embedding IS NOT NULL
                  JOIN face_prints fpc ON fpc.person_id = p.id
+                 WHERE COALESCE(p.is_unknown, 0) = 0
                  GROUP BY p.id",
             )?;
             // Bind to a local so the borrowing iterator temporary is dropped at
             // this `;` — before `stmt` — letting the block return an owned Vec.
-            let collected: Vec<(i64, i64, i64, Vec<u8>)> = stmt
+            let collected: Vec<(i64, i64, i64, Option<Vec<u8>>, Vec<u8>)> = stmt
                 .query_map([], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
                         r.get::<_, i64>(1)?,
                         r.get::<_, i64>(2)?,
-                        r.get::<_, Vec<u8>>(3).unwrap_or_default(),
+                        r.get::<_, Option<Vec<u8>>>(3)?,
+                        r.get::<_, Vec<u8>>(4).unwrap_or_default(),
                     ))
                 })?
                 .filter_map(|r| r.ok())
-                .filter(|(_, _, _, blob)| !blob.is_empty() && blob.len() % 4 == 0)
                 .collect();
             collected
-        };
-
-        let decode = |blob: &[u8]| -> Vec<f32> {
-            blob.chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        };
-        // Length guard: a dimension mismatch must never masquerade as a
-        // near-merge. zip() silently truncates to the shorter slice, inflating
-        // the dot product; returning -1.0 is safely excluded by the
-        // MERGE_SUGGEST_COS_LOW band check below so a mismatched pair is never
-        // suggested (#17).
-        let cos = |a: &[f32], b: &[f32]| -> f32 {
-            if a.len() != b.len() {
-                return -1.0;
-            }
-            a.iter().zip(b).map(|(x, y)| x * y).sum()
         };
 
         // "Different people" verdicts. Person-keyed pairs cover legacy rows;
@@ -1677,55 +1991,172 @@ pub(crate) async fn handle_find_merge_suggestions(
             }
         }
 
-        let embeddings: Vec<(i64, i64, i64, Vec<f32>)> = rows
+        let people: Vec<SuggestionPerson> = rows
             .into_iter()
-            .map(|(pid, anchor_id, count, blob)| (pid, anchor_id, count, decode(&blob)))
+            .filter_map(|(person_id, anchor_face_id, member_count, centroid, representative)| {
+                let embedding = centroid
+                    .as_deref()
+                    .and_then(decode_unit_embedding)
+                    .or_else(|| decode_unit_embedding(&representative))?;
+                Some(SuggestionPerson {
+                    person_id,
+                    anchor_face_id,
+                    member_count,
+                    embedding,
+                })
+            })
             .collect();
 
         // Every DB read is done; the O(P²) cosine sweep below is pure in-memory
         // math. Release the single-writer lock so the (potentially multi-second
         // on a large over-split library) sweep doesn't serialize other writes.
-        drop(conn);
-
-        let mut pairs: Vec<MergeSuggestion> = Vec::new();
-        for i in 0..embeddings.len() {
-            for j in (i + 1)..embeddings.len() {
-                let (pa, anchor_a, count_a, ref ea) = embeddings[i];
-                let (pb, anchor_b, count_b, ref eb) = embeddings[j];
-                let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
-                let fk = if anchor_a < anchor_b {
-                    (anchor_a, anchor_b)
-                } else {
-                    (anchor_b, anchor_a)
-                };
-                if verified_persons.contains(&pk)
-                    || verified_faces.contains(&fk)
-                    || verified_membership_persons.contains(&pk)
-                {
+        let mut candidates = suggestion_candidates(&people);
+        candidates.retain(|candidate| {
+            let a = &people[candidate.a];
+            let b = &people[candidate.b];
+            let person_pair = if a.person_id < b.person_id {
+                (a.person_id, b.person_id)
+            } else {
+                (b.person_id, a.person_id)
+            };
+            let face_pair = if a.anchor_face_id < b.anchor_face_id {
+                (a.anchor_face_id, b.anchor_face_id)
+            } else {
+                (b.anchor_face_id, a.anchor_face_id)
+            };
+            !verified_persons.contains(&person_pair)
+                && !verified_faces.contains(&face_pair)
+                && !verified_membership_persons.contains(&person_pair)
+        });
+        let is_fragment_pair = |candidate: &SuggestionCandidate| {
+            let a = people[candidate.a].member_count;
+            let b = people[candidate.b].member_count;
+            a.min(b) <= 12 && a.max(b) > 12
+        };
+        let mut evidence_candidates: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| is_fragment_pair(candidate).then_some(index))
+            .collect();
+        evidence_candidates.sort_by(|&a, &b| {
+            candidates[b]
+                .similarity
+                .total_cmp(&candidates[a].similarity)
+                .then_with(|| a.cmp(&b))
+        });
+        evidence_candidates.truncate(1_000);
+        let evidence_person_ids: HashSet<i64> = evidence_candidates
+            .iter()
+            .flat_map(|&index| {
+                let candidate = candidates[index];
+                [
+                    people[candidate.a].person_id,
+                    people[candidate.b].person_id,
+                ]
+            })
+            .collect();
+        let mut faces_by_person: HashMap<i64, Vec<FaceRow>> = HashMap::new();
+        let evidence_person_ids: Vec<i64> = evidence_person_ids.into_iter().collect();
+        for person_chunk in evidence_person_ids.chunks(900) {
+            let placeholders =
+                std::iter::repeat_n("?", person_chunk.len()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT fp.person_id, fp.id, fp.file_id, f.content_hash, \
+                        fp.arcface_embedding, COALESCE(fp.face_quality, 0.0) \
+                 FROM face_prints fp \
+                 JOIN files f ON f.id = fp.file_id \
+                 WHERE fp.person_id IN ({placeholders}) \
+                   AND fp.arcface_embedding IS NOT NULL \
+                 ORDER BY fp.person_id, fp.id"
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(person_chunk.iter().copied()),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, f64>(5)?,
+                    ))
+                },
+            )?;
+            for row in rows {
+                let (person_id, face_id, file_id, content_hash, blob, quality) = row?;
+                let Some(embedding) = decode_unit_embedding(&blob) else {
                     continue;
-                }
-                let s = cos(ea, eb);
-                if s >= MERGE_SUGGEST_COS_LOW && s < MERGE_SUGGEST_COS_HIGH {
-                    pairs.push(MergeSuggestion {
-                        source_person_id: pa,
-                        destination_person_id: pb,
-                        similarity: s,
-                        source_anchor_face_id: anchor_a,
-                        destination_anchor_face_id: anchor_b,
-                        source_member_count: count_a,
-                        destination_member_count: count_b,
+                };
+                faces_by_person
+                    .entry(person_id)
+                    .or_default()
+                    .push(FaceRow {
+                        face_id,
+                        file_id,
+                        content_hash,
+                        embedding,
+                        quality: quality as f32,
                     });
-                }
             }
         }
-        pairs.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        if pairs.len() > 50 {
-            pairs.truncate(50);
+        for index in evidence_candidates {
+            let candidate = &mut candidates[index];
+            let a = &people[candidate.a];
+            let b = &people[candidate.b];
+            let (source, target) = if a.member_count <= b.member_count {
+                (a, b)
+            } else {
+                (b, a)
+            };
+            candidate.corroborated = match (
+                faces_by_person.get(&source.person_id),
+                faces_by_person.get(&target.person_id),
+            ) {
+                (Some(source_faces), Some(target_faces)) => {
+                    corroborated_fragment_match(source_faces, target_faces)
+                }
+                _ => false,
+            };
         }
+        drop(conn);
+
+        candidates.sort_by(|a, b| {
+            b.corroborated
+                .cmp(&a.corroborated)
+                .then_with(|| is_fragment_pair(b).cmp(&is_fragment_pair(a)))
+                .then_with(|| b.similarity.total_cmp(&a.similarity))
+                .then_with(|| {
+                    people[a.a]
+                        .person_id
+                        .cmp(&people[b.a].person_id)
+                        .then_with(|| people[a.b].person_id.cmp(&people[b.b].person_id))
+                })
+        });
+        let pairs: Vec<MergeSuggestion> = candidates
+            .into_iter()
+            .take(50)
+            .map(|candidate| {
+                let a = &people[candidate.a];
+                let b = &people[candidate.b];
+                let (source, destination) = if (a.member_count, std::cmp::Reverse(a.person_id))
+                    <= (b.member_count, std::cmp::Reverse(b.person_id))
+                {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                MergeSuggestion {
+                    source_person_id: source.person_id,
+                    destination_person_id: destination.person_id,
+                    similarity: candidate.similarity,
+                    source_anchor_face_id: source.anchor_face_id,
+                    destination_anchor_face_id: destination.anchor_face_id,
+                    source_member_count: source.member_count,
+                    destination_member_count: destination.member_count,
+                }
+            })
+            .collect();
 
         Ok(MergeSuggestions { pairs })
     })
@@ -1772,6 +2203,101 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-bulk-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn manual_merge_db() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE persons (id INTEGER PRIMARY KEY, representative_face_id INTEGER);\
+                 CREATE TABLE face_prints (\
+                    id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, bbox TEXT NOT NULL,\
+                    person_id INTEGER, arcface_embedding BLOB, face_quality REAL\
+                 );\
+                 CREATE TABLE face_verifications (\
+                    person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,\
+                    same_person INTEGER NOT NULL, confidence REAL NOT NULL,\
+                    vlm_model TEXT NOT NULL, verified_at REAL NOT NULL,\
+                    face_a INTEGER, face_b INTEGER,\
+                    file_a INTEGER, bbox_a TEXT, file_b INTEGER, bbox_b TEXT,\
+                    PRIMARY KEY(person_a, person_b)\
+                 );\
+                 INSERT INTO persons(id, representative_face_id) VALUES (10, 1), (20, 3), (30, 5);\
+                 INSERT INTO face_prints(\
+                    id, file_id, bbox, person_id, arcface_embedding, face_quality\
+                 ) VALUES\
+                    (1, 101, 'a', 10, x'00', 0.9),\
+                    (2, 102, 'b', 10, x'00', 0.8),\
+                    (3, 103, 'c', 20, x'00', 0.9),\
+                    (4, 104, 'd', 20, x'00', 0.8),\
+                    (5, 105, 'e', 30, x'00', 0.9);",
+            )
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn manual_merge_persists_one_edge_and_removes_only_direct_conflicts() {
+        let mut connection = manual_merge_db();
+        connection
+            .execute_batch(
+                "INSERT INTO face_verifications(\
+                    person_a, person_b, same_person, confidence, vlm_model, verified_at,\
+                    face_a, face_b, file_a, bbox_a, file_b, bbox_b\
+                 ) VALUES\
+                    (100, 200, 0, 1.0, 'user-verified', 1.0, 99, 98, 101, 'a', 103, 'c'),\
+                    (100, 300, 0, 1.0, 'user-verified', 1.0, 2, 5, 102, 'b', 105, 'e');",
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        persist_manual_merge_constraint(&transaction, 10, 20).unwrap();
+        transaction.commit().unwrap();
+
+        let stored = connection
+            .query_row(
+                "SELECT same_person, vlm_model, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
+                 FROM face_verifications WHERE person_a = 10 AND person_b = 20",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (1, "user-merged".into(), 1, 3, 101, "a".into(), 103, "c".into())
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM face_verifications \
+                     WHERE person_a = 100 AND person_b = 200",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT same_person FROM face_verifications \
+                     WHERE person_a = 100 AND person_b = 300",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2276,6 +2802,92 @@ mod tests {
         assert_eq!(result.inner.succeeded, 0);
         assert_eq!(result.inner.failed, 1);
         assert!(result.inner.messages.iter().all(|item| !item.ok));
+    }
+
+    fn test_suggestion_person(person_id: i64, embedding: Vec<f32>) -> SuggestionPerson {
+        SuggestionPerson {
+            person_id,
+            anchor_face_id: person_id + 10_000,
+            member_count: 3,
+            embedding,
+        }
+    }
+
+    fn unit_embedding(mut embedding: Vec<f32>) -> Vec<f32> {
+        let norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        for value in &mut embedding {
+            *value /= norm;
+        }
+        embedding
+    }
+
+    #[test]
+    fn suggestion_small_catalog_uses_exact_centroid_cosine() {
+        let people = vec![
+            test_suggestion_person(1, vec![1.0, 0.0]),
+            test_suggestion_person(2, vec![0.8, 0.6]),
+            test_suggestion_person(3, vec![0.0, 1.0]),
+        ];
+        let candidates = suggestion_candidates(&people);
+        let pairs: HashSet<(usize, usize)> = candidates
+            .iter()
+            .map(|candidate| (candidate.a, candidate.b))
+            .collect();
+        assert_eq!(pairs, HashSet::from([(0, 1), (1, 2)]));
+        assert!(candidates
+            .iter()
+            .any(|candidate| (candidate.similarity - 0.8).abs() < 1e-6));
+    }
+
+    #[test]
+    fn suggestion_hnsw_expands_past_32_dense_neighbors() {
+        const DIM: usize = 128;
+        let mut query = vec![0.0; DIM];
+        query[0] = 1.0;
+        let mut people = vec![test_suggestion_person(1, query)];
+        for index in 0..80usize {
+            let similarity = 0.94 - index as f32 * 0.0005;
+            let mut embedding = vec![0.0; DIM];
+            embedding[0] = similarity;
+            embedding[1 + index % (DIM - 1)] = (1.0 - similarity * similarity).sqrt();
+            people.push(test_suggestion_person(index as i64 + 2, embedding));
+        }
+        let valid_index = people.len();
+        let mut valid = vec![0.0; DIM];
+        valid[0] = 0.80;
+        valid[DIM - 1] = 0.60;
+        people.push(test_suggestion_person(9_000, valid));
+        while people.len() <= 2_000 {
+            let index = people.len();
+            let mut filler = vec![0.0; DIM];
+            filler[1 + index % (DIM - 1)] = 1.0;
+            filler[(1 + index * 17) % (DIM - 1) + 1] += 0.01;
+            people.push(test_suggestion_person(
+                index as i64 + 20_000,
+                unit_embedding(filler),
+            ));
+        }
+        let candidates = suggestion_candidates(&people);
+        assert!(candidates
+            .iter()
+            .any(|candidate| (candidate.a, candidate.b) == (0, valid_index)));
+    }
+
+    #[test]
+    fn suggestion_embedding_decode_normalizes_and_rejects_corruption() {
+        let blob: Vec<u8> = [3.0f32, 4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let decoded = decode_unit_embedding(&blob).unwrap();
+        assert!((decoded[0] - 0.6).abs() < 1e-6);
+        assert!((decoded[1] - 0.8).abs() < 1e-6);
+        assert!(decode_unit_embedding(&[0, 1, 2]).is_none());
+        assert!(decode_unit_embedding(&[0; 8]).is_none());
     }
 
     #[test]

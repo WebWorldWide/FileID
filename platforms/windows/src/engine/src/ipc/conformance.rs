@@ -15,14 +15,15 @@ use super::{
     DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload,
     EmbedImageQueryPayload, EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload,
     ExactTrashIdentity, FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
-    HardwareInfo, HardwareReprobed, IpcCommand, IpcEvent, JobCategory, LibraryWiped, LogLevel,
-    LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload, MergeClustersPayload,
+    HardwareInfo, HardwareReprobed, HealthCheckPayload, HealthCheckResult, IpcCommand, IpcEvent,
+    JobCategory, LibraryWiped, LogLevel, LogLine, MarkPersonsAsUnknownPayload,
+    MarkPersonsDifferentPayload, MergeClustersPayload,
     MergeSuggestion, MergeSuggestions, ModelDownloadProgress, PlanRestructurePayload,
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
-    RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
-    PurgeExcludedPayload, StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload,
-    UndoRestructurePayload, Wrap,
+    RestructureConfidenceCounts, RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete,
+    ScanPhase, ScanProgress, PurgeExcludedPayload, StartScanPayload, TagMode, ThumbnailGenerated,
+    TrashFilesPayload, UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
@@ -191,6 +192,8 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::PauseScan(_) => "pauseScan",
         CommandPayload::ResumeScan(_) => "resumeScan",
         CommandPayload::CancelScan(_) => "cancelScan",
+        CommandPayload::CancelRestructure(_) => "cancelRestructure",
+        CommandPayload::HealthCheck(_) => "healthCheck",
         CommandPayload::RequestStatus(_) => "requestStatus",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
@@ -227,6 +230,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Ready(_) => "ready",
+        EventPayload::HealthCheckResult(_) => "healthCheckResult",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -303,6 +307,10 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::PauseScan(Empty {}),
         CommandPayload::ResumeScan(Empty {}),
         CommandPayload::CancelScan(Empty {}),
+        CommandPayload::CancelRestructure(Empty {}),
+        CommandPayload::HealthCheck(HealthCheckPayload {
+            request_id: "health-check-1".into(),
+        }),
         CommandPayload::RequestStatus(Empty {}),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
@@ -332,6 +340,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         }),
         CommandPayload::UndoRestructure(UndoRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
+            shortcut_undo_token: None,
         }),
         CommandPayload::ApplyRestructure(ApplyRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
@@ -419,6 +428,10 @@ fn event_exemplars() -> Vec<EventPayload> {
             worker_cap: 14,
             physical_memory_gb: 32.0,
             hardware: Some(hardware_info()),
+        })),
+        EventPayload::HealthCheckResult(Wrap::new(HealthCheckResult {
+            request_id: "health-check-1".into(),
+            pid: 4242,
         })),
         EventPayload::Progress(Wrap::new(ScanProgress {
             session_id: "s-1".into(),
@@ -539,6 +552,12 @@ fn event_exemplars() -> Vec<EventPayload> {
                 category: "Photos/2024/01".into(),
                 count: 1,
             }],
+            confidence_counts: Some(RestructureConfidenceCounts {
+                auto: 700_000,
+                review: 200_000,
+                ask: 90_000,
+                unknown: 10_000,
+            }),
             folder_classifications: Some(FolderClassificationCounts {
                 anchor_folders: 1,
                 mixed_folders: 2,
@@ -549,6 +568,10 @@ fn event_exemplars() -> Vec<EventPayload> {
             applied: 10,
             failed: 1,
             privilege_error: Some("Developer Mode required for symlinks".into()),
+            cancelled: true,
+            planned: Some(20),
+            remaining: Some(9),
+            shortcut_undo_token: None,
         })),
         EventPayload::BulkActionResult(Wrap::new(BulkActionResult {
             action: "trashFiles:00000000-0000-0000-0000-000000000000".into(),

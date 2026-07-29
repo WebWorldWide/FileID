@@ -700,7 +700,8 @@ public final class EngineClient {
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
-        case .bulkActionResult,
+        case .healthCheckResult,
+             .bulkActionResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
