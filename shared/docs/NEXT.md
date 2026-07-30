@@ -63,10 +63,23 @@ Resume in this order:
    5-100x); and raising `pass1_cosine` 0.50->0.70 barely shrinks the blob (81%->35% of faces still
    chained) while singletons go 10%->39%. The root cause is that Pass 1 uses mutual-kNN +
    CONNECTED COMPONENTS, which has no diameter bound, so chaining is scale-free.
-   **The fix is a diameter-bounded linkage — average/complete-linkage agglomerative with a
-   distance cutoff, or a real density method — not a constant.** Do not retune constants again;
-   that path is measured and exhausted. Validate with the label-free criterion that made all this
-   provable: a cluster containing an anti-correlated face pair (cosine < 0) cannot be one identity.
+   Two further levers were then measured. A CENTROID-LINKAGE GUARD (edges strongest-first,
+   refuse a union whose component centroids are below a threshold) is the best result found —
+   largest blob 16,226 -> 9,931 and mixed faces 81% -> 58% — but raises singletons 10.3% -> 14.8%
+   (~6,000 more unclustered faces at full scale), which worsens the very "same person is split up"
+   complaint, so it is NOT shipped. Raising the pre-cluster quality gate 0.25 -> 0.35 only gets the
+   blob to 6,645 while dropping 43% of faces from clustering.
+   **Root cause is an EMBEDDER ceiling, not tuning.** Same-person pairs measure mean cosine 0.744
+   when both faces are quality >= 0.35 but only 0.438 when either is < 0.30, and this corpus is
+   old/scanned with quality capped ~0.42 (p50 0.357) — while the hardest different-person
+   lookalikes reach ~0.55. The distributions overlap, and no threshold or linkage rule separates
+   overlapping distributions. **The real fix is a stronger face embedder** (modern
+   ArcFace/AdaFace-class, better on low-quality scans) via `MODELS.md`: weights, license vetting,
+   ONNX/CoreML export, hardware validation. Add the centroid-linkage guard on top of that, gated on
+   a labelled check that real identities did not fragment. Do NOT retune constants again — five
+   levers are measured and exhausted (full tables in DECISIONS.md 2026-07-29). The label-free
+   criterion that made this provable: a cluster containing an anti-correlated face pair
+   (cosine < 0) cannot be a single identity.
 4. **The People-grid size floor shipped for Windows only.** `PeopleViewModel.MinFacesPerCluster = 6`
    hides <=5-face duplicate-burst fragments (2,271 of 3,108 clusters), always shows NAMED clusters
    regardless of size, ignores `excluded` faces, and discloses the withheld count. **Not yet

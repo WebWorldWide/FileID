@@ -68,7 +68,7 @@ struct MigrationParityTests {
 
         try migrator.migrate(q)
         try migrator.migrate(q)
-        let state: (
+        let observed: (
             migrationCount: Int,
             provenance: String?,
             fullModel: String?,
@@ -99,7 +99,7 @@ struct MigrationParityTests {
                 declaredType, notNull, defaultValue
             )
         }
-        let state = try #require(state)
+        let state = try #require(observed)
 
         #expect(state.migrationCount == 20)
         #expect(state.provenance == "qwen3-vl-4b")

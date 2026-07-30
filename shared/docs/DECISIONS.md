@@ -54,12 +54,53 @@ Raising the threshold barely dents the blob while singletons quadruple. Chaining
 scale-free — in a family library there are always enough intermediate faces to
 bridge. There is no value of this constant that yields clean identities.
 
-**Conclusion: the over-merge half needs a diameter-bounded linkage (average- or
-complete-linkage agglomerative with a distance cutoff, or a genuine density method),
-not a constant. That is an algorithm replacement plus labelled validation, so it was
-NOT attempted here.** Shipping any of the above would have traded a visible
-pathology for a worse one on a day with no time to validate. The measurements are
-recorded so the next attempt starts from evidence.
+**5. A centroid-linkage guard helps materially but does not solve it — and is NOT
+shipped.** The most promising variant tested: keep the same mutual-kNN edge set, but
+process edges strongest-first and REFUSE a union whose two components' running
+centroids are below a link threshold (turning single linkage into centroid linkage,
+which does have a diameter bound). Running centroid sums make the guard O(dim) per
+merge, so it is cheap enough for the real pipeline. On the same 20,000-face
+subsample:
+
+    variant                clusters  largest  singletons  faces in anti-corr clusters
+    today (single-linkage)     2596    16226      10.3%           81.1%
+    guarded @ 0.45            3726    12279      13.8%           61.8%
+    guarded @ 0.50            4079     9931      14.8%           58.3%
+    guarded @ 0.55            5215     9129      20.2%           52.6%
+    guarded @ 0.60            6612     8099      26.7%           44.2%
+
+Genuinely the best result of the five — it nearly halves the worst pathology. It is
+still NOT shipped, deliberately: a ~10,000-face blob survives, and singletons rise
+10.3% -> 14.8% (~45% relative, roughly 6,000 more unclustered faces at full corpus
+scale). More unclustered faces means MORE "the same person is split up", which is
+the complaint this work exists to fix — so on a day with no ability to validate
+against named ground truth, it trades the stated problem for a subtler one. Ship it
+only alongside a labelled check that real identities did not fragment.
+
+**6. Why none of it converges: the embeddings themselves do not separate these
+identities.** Using small (6-150 face) clusters as a same-person proxy, measured
+mean pairwise cosine for same-person pairs, split by face quality:
+
+    both faces quality >= 0.35 : 0.744   (n=71,063)
+    either face quality <  0.30 : 0.438   (n=19,449)
+
+The code's existing note is confirmed: low-quality faces carry little identity
+signal, and this corpus is old/scanned with quality capped ~0.42 (p50 0.357). Since
+the hardest different-person lookalike pairs reach ~0.55, the same-person and
+different-person distributions OVERLAP substantially. No threshold, linkage rule, or
+split heuristic can separate overlapping distributions. Raising the pre-cluster
+quality gate 0.25 -> 0.35 confirms this from the other side: the blob only falls to
+6,645 while 43.1% of faces stop clustering entirely — a bad trade.
+
+**Conclusion: the over-merge half is an EMBEDDER ceiling, not a tuning bug.** The
+real fix is a stronger face embedder (a modern ArcFace/AdaFace-class model with
+better discriminative power on low-quality scans), which is a `MODELS.md` change:
+new weights, license vetting, ONNX/CoreML export, and on-hardware validation. A
+diameter-bounded linkage (item 5) is worth having on top, but is not sufficient
+alone. NOTHING in this area was shipped beyond the two measured-safe items below.
+Shipping any of items 1-5 would have traded a visible pathology for a worse one on
+a day with no time to validate. All measurements are recorded so the next attempt
+starts from evidence rather than repeating these five dead ends.
 
 **What DID ship, both measured safe:**
 

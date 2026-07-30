@@ -2741,15 +2741,24 @@ mod tests {
 
     #[test]
     fn desktop_unsorted_and_inbox_are_junk_in_large_plan_tiering() {
+        // Build the paths with the NATIVE separator. Hardcoded "C:\Library\Desktop"
+        // silently mistests on Linux: backslash is a legal filename character
+        // there, so `file_name()` yields the whole string and the junk basename is
+        // never seen — the folder tiers as "Anchor" and the assertion fails for a
+        // reason unrelated to the tiering rule. (The engine is cross-platform and
+        // this suite runs on Linux CI too.)
+        let root = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Library")
+        } else {
+            std::path::PathBuf::from("/Library")
+        };
+        let root_text = root.to_string_lossy();
         for name in ["Desktop", "Unsorted", "Inbox"] {
+            let folder = root.join(name);
             assert_eq!(
-                folder_tier(
-                    &format!("C:\\Library\\{name}"),
-                    "C:\\Library",
-                    100,
-                    100
-                ),
-                "Junk"
+                folder_tier(&folder.to_string_lossy(), &root_text, 100, 100),
+                "Junk",
+                "{name} must tier as Junk"
             );
         }
     }
