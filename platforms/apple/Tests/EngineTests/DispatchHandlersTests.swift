@@ -112,10 +112,11 @@ struct DispatchHandlersTests {
 
         #expect(out.range(of: errNeedle) != nil,
                 "a non-nil shortcutUndoToken must be rejected with an undo_restructure error")
+        // Single string literal: #expect's second parameter is a `Comment`, which
+        // is ExpressibleByStringLiteral — a `+` concatenation is an expression, not
+        // a literal, so it fails to convert.
         #expect(out.range(of: resultNeedle) != nil,
-                "the rejection must still emit a terminal restructureApplyResult so " +
-                "EngineClient's undoRestructureInFlight flag clears (audit R2-app) instead " +
-                "of latching forever")
+                "the rejection must still emit a terminal restructureApplyResult so EngineClient's undoRestructureInFlight flag clears (audit R2-app) instead of latching forever")
 
         // Exactly ONE terminal result must appear — if the rejection had fallen
         // through to undoLast() instead of returning early, THAT call would emit
