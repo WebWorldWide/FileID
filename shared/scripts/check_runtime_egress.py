@@ -189,7 +189,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/windows/src/engine/src/shell/video.rs": "18f912718d3b5ee9bb441ebad0b3fdf7d25828bc4e8facbd34a27d6ad18be40f",
     "platforms/windows/src/engine/src/util/content_hash.rs": "4b7317c9de3702200252178f1e2a781914151b5bc4c5d670d289ed8771e58d39",
     "platforms/windows/src/engine/src/util/path_safety.rs": "5b9b528f24aa322804d4a6153721ee03e2f3b7898ecfa0918cfbd1c63f1f6b8a",
-    "platforms/windows/src/engine/src/commands/restructure.rs": "6997a7918a78d6dac36648f90acf0aa7a9ed23729e10ff62f6ee203ed74be3ae",
+    "platforms/windows/src/engine/src/commands/restructure.rs": "9fbe34e02070dedfe9c2a6c39fc89237a11d6c4475a62e45dbe0bd9b0a528d93",
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "5f9a580c2c53abbac71d00780fcaf1005f206ce83b501a2db3308aae2f45efcd",
 }
 SAFE_NETWORK_CALLER_FILES = {
