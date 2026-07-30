@@ -55,16 +55,24 @@ Resume in this order:
    computed by querying the frozen 2026-07-29 Adlon catalog directly — no actual re-scan with the
    new gate has run. Re-scan (or find a cheaper re-cluster-only path if the embeddings can be
    reused) and confirm real People-tab quality improves, not just the predicted SQL counts.
-3. **The mega-cluster problem is still open and is the bigger of the two face complaints.** 16
-   clusters absorb 83,381 faces via kNN connected-components chaining (measured mega-cluster
-   intra-cosine ~0.39, barely above inter-mega-cluster ~0.21-0.29 — these are chained, not
-   cohesive). Needs labelled ground truth before touching `pass1_cosine`/`k_nn`/
-   `AUTOMERGE_COS_DEFAULT` — `identity_clustering.rs`'s own comments document a prior regression
-   from tuning blind, twice.
-4. **People tab has no minimum-cluster-size filter.** 3,108 raw clusters, unfiltered, is the other
-   half of "too many leftover faces" the face-size fix alone doesn't solve. Deliberately deferred
-   this session (wasn't one of the owner's three explicit asks); needs a small design pass across
-   all three GUIs since none currently has an analogous pattern to port.
+3. **The mega-cluster OVER-MERGE problem is still open — and now has a bounded diagnosis.** 16
+   clusters absorb 83,381 faces. On 2026-07-29 four candidate fixes were measured and all
+   REJECTED with numbers (see DECISIONS.md 2026-07-29 "Face clustering"): Pass-3 depth is not the
+   constraint (identical output at depth 7/12/16/24); adding a pairwise-cohesion floor to Pass 3
+   never converges (every variant leaves 2.9k-5.7k-face residual blobs AND inflates cluster count
+   5-100x); and raising `pass1_cosine` 0.50->0.70 barely shrinks the blob (81%->35% of faces still
+   chained) while singletons go 10%->39%. The root cause is that Pass 1 uses mutual-kNN +
+   CONNECTED COMPONENTS, which has no diameter bound, so chaining is scale-free.
+   **The fix is a diameter-bounded linkage — average/complete-linkage agglomerative with a
+   distance cutoff, or a real density method — not a constant.** Do not retune constants again;
+   that path is measured and exhausted. Validate with the label-free criterion that made all this
+   provable: a cluster containing an anti-correlated face pair (cosine < 0) cannot be one identity.
+4. **The People-grid size floor shipped for Windows only.** `PeopleViewModel.MinFacesPerCluster = 6`
+   hides <=5-face duplicate-burst fragments (2,271 of 3,108 clusters), always shows NAMED clusters
+   regardless of size, ignores `excluded` faces, and discloses the withheld count. **Not yet
+   mirrored to macOS (`PeopleView.swift`) or Linux (`tabs/people.rs`)** — both still render every
+   cluster. Port it; the SQL predicate and its four pinning tests
+   (`PeopleClusterFilterTests.cs`) are the reference.
 5. **kNN tie-break nondeterminism is unfixed** in `face_clustering.rs` and
    `restructure_semantic.rs` (comparators don't consult index as a tiebreak — `select_nth_unstable_by`
    is an unstable partition, so ties can resolve differently across stdlib/arch builds). The
