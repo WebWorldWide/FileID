@@ -33,6 +33,12 @@ public sealed partial class PersonDetailSheet : UserControl
     private long _personId;
     private readonly ObservableCollection<FaceTile> _faces = new();
 
+    /// Most face crops rendered at once. A chained cluster can hold tens of
+    /// thousands of faces (26,422 in the worst measured case); decoding that many
+    /// JPEGs would wedge the UI thread. Whatever this hides is disclosed in the
+    /// header rather than silently dropped.
+    private const int FacePreviewCap = 200;
+
     public PersonDetailSheet()
     {
         InitializeComponent();
@@ -119,7 +125,12 @@ public sealed partial class PersonDetailSheet : UserControl
                 // Pull every face id for this cluster + check for an on-disk JPEG.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT 200";
+                    // Bounded on purpose: a chained cluster can hold tens of
+                    // thousands of faces (26,422 in the worst real case), and
+                    // decoding that many crops would wedge the UI. Highest-quality
+                    // first so the cap keeps the most legible faces. The count is
+                    // disclosed below — never silently truncate.
+                    cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT " + FacePreviewCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     cmd.Parameters.AddWithValue("@id", personId);
                     using var r = cmd.ExecuteReader();
                     while (r.Read())
@@ -158,7 +169,9 @@ public sealed partial class PersonDetailSheet : UserControl
                 MiddleBox.Text = result.Middle;
                 LastBox.Text = result.Last;
                 SuffixBox.Text = result.Suffix;
-                MemberCountText.Text = $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
+                MemberCountText.Text = result.MemberCount > result.Faces.Count
+                    ? $"{result.MemberCount} faces clustered — showing the {result.Faces.Count} clearest."
+                    : $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
             }
             _faces.Clear();
             foreach (var f in result.Faces) _faces.Add(f);

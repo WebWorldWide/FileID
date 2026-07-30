@@ -153,7 +153,7 @@
                               Tag="{x:Bind ClusterId}"
                               IsTabStop="True"
                               AutomationProperties.Name="{x:Bind Caption}"
-                              AutomationProperties.HelpText="Press Enter to edit name and faces, or open the context menu for more actions."
+                              AutomationProperties.HelpText="Click, or press Enter, to see every face in this group and edit its name. Drag onto another group to merge."
                               CanDrag="True"
                               AllowDrop="True"
                               DragStarting="OnClusterDragStarting"
@@ -161,7 +161,7 @@
                               DragLeave="OnClusterDragLeave"
                               Drop="OnClusterDrop"
                               KeyDown="OnClusterKeyDown"
-                              DoubleTapped="OnClusterDoubleTapped">
+                              Tapped="OnClusterTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem Text="Edit name + faces"

@@ -35,7 +35,33 @@
                        Text="Pairs of clusters that look similar. Confirm a merge if they're the same person, or mark them different so we don't ask again." />
         </StackPanel>
 
-        <ScrollViewer Grid.Row="1"
+        <!-- Busy state. findMergeSuggestions emits only a terminal event (no
+             per-step progress), so this is deliberately an INDETERMINATE ring
+             rather than a percentage bar we'd have to invent. On a library with
+             thousands of clusters the search takes real time, and without this
+             the sheet showed a static line of text and read as frozen. -->
+        <StackPanel x:Name="BusyPanel"
+                    Grid.Row="1"
+                    Visibility="Collapsed"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="12">
+            <ProgressRing x:Name="BusyRing"
+                          IsActive="False"
+                          Width="44" Height="44"
+                          Foreground="{ThemeResource GoldBrush}" />
+            <TextBlock x:Name="BusyText"
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       MaxWidth="360"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Text="Comparing face clusters…" />
+        </StackPanel>
+
+        <ScrollViewer x:Name="PairScroller"
+                      Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollMode="Disabled">
             <ItemsRepeater x:Name="PairRepeater"
