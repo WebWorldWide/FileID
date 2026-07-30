@@ -274,7 +274,23 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             if (_unloaded) return;
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(FooterVisibility));
+            SyncHiddenSmallClusters();
         });
+
+    private void SyncHiddenSmallClusters()
+    {
+        int hidden = ViewModel.HiddenSmallClusterCount;
+        if (hidden <= 0)
+        {
+            HiddenSmallClustersText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        HiddenSmallClustersText.Text =
+            $"{hidden:N0} more small face groups (fewer than {PeopleViewModel.MinFacesPerCluster} " +
+            "photos each) are hidden — these are usually several shots of the same moment rather " +
+            "than distinct people. They're still searchable, and naming one brings it back here.";
+        HiddenSmallClustersText.Visibility = Visibility.Visible;
+    }
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnClustersCollectionChanged", () =>

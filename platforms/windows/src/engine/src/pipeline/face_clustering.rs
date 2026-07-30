@@ -12,7 +12,7 @@
 //      Pass-1 kNN connected components ≥ pass1_cosine, Pass-2 margin-gated
 //      outlier assignment, Pass-3 2-means split of low-cohesion clusters.
 //   3. `consolidate()` folds near-certain duplicate clusters by CENTROID cosine
-//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.88), respecting user "different
+//      ≥ FILEID_FACE_AUTOMERGE_COS (default 0.75), respecting user "different
 //      people" verdicts. Anchor per cluster = highest-quality member face.
 //   4. The handler persists `persons` + `face_prints.person_id` in one tx and
 //      emits `FaceClusteringResult`. `face_verifications` is only READ here
@@ -21,12 +21,20 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Lower bound for surfacing MERGE suggestions in the People tab. A 0.32 floor
-/// flooded the sheet with anchor pairs deep in impostor territory — empirically
-/// (identity_clustering.rs) genuine same-person SFace cosine sits at 0.88–0.95
-/// and the hardest different-person (lookalike) pairs top out near ~0.55, so a
-/// low floor is mostly noise. 0.55 keeps the genuinely-uncertain band (plausible
-/// cross-pose same person, plus the hardest impostors worth a human glance) and
-/// drops the rest — fewer, more actionable suggestions.
+/// flooded the sheet with anchor pairs deep in impostor territory, so a low floor
+/// is mostly noise. 0.55 keeps the genuinely-uncertain band (plausible cross-pose
+/// same person, plus the hardest impostors worth a human glance) and drops the
+/// rest — fewer, more actionable suggestions.
+///
+/// NOTE (2026-07-29): the earlier claim here that "genuine same-person SFace
+/// cosine sits at 0.88-0.95" is NOT true of a real family library, and was the
+/// premise behind the old 0.88 auto-merge bar. Measured on the Adlon catalog,
+/// clusters of <=150 faces (overwhelmingly single identities) have mean PAIRWISE
+/// cosine 0.71-0.86 with p10 0.54-0.78, and centroid-to-centroid cosine between
+/// genuinely-same-person fragments runs well below 0.88 — which is why
+/// consolidate at 0.88 fired only 3 times across 3,092 clusters. See
+/// AUTOMERGE_COS_DEFAULT below. This band (0.55..0.97) is unchanged and remains
+/// the right "ask a human" range.
 pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
 
 /// Upper bound for surfacing MERGE suggestions in the People tab. Previously
@@ -207,14 +215,33 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
 /// Centroids (means of all member embeddings) are denoised, so this is safer
 /// than any single anchor-to-anchor comparison.
 ///
-/// Kept high (0.88) after the 2026-07-05 label-driven Pass-1 retune (now 0.50 +
-/// mutual-kNN + quality gate — see identity_clustering.rs). With mutual-kNN cores
-/// already pure and fragmentation low, consolidate is a light touch; a HIGH bar
-/// keeps it from re-merging the residual low-quality-noise clusters. Measured on
-/// the labelled set, this config gave People-tab precision/recall = 1.0. (Prior
-/// note, superseded: raising 0.75→0.88 in the cohesion-only pass kept coherent
-/// (cohesion≥0.75) clusters high instead of collapsing back to ~14%.
-pub const AUTOMERGE_COS_DEFAULT: f32 = 0.88;
+/// **0.75 as of 2026-07-29, lowered from 0.88 on corpus measurement.** The prior
+/// 0.88 rationale assumed "genuine same-person SFace cosine sits at 0.88-0.95",
+/// which does not hold on a real family library: at 0.88 consolidate performed
+/// only **3 merges across 3,092 non-mega clusters** — effectively inert, which is
+/// why the same person stayed split across thousands of duplicate-burst clusters
+/// (the owner's "tons are the same people" complaint).
+///
+/// Re-measured on the 2026-07-29 Adlon catalog, judging each candidate merge by a
+/// LABEL-FREE safety criterion: a merge is unsafe if the merged cluster gains an
+/// anti-correlated face pair (cosine < 0), which a single identity cannot contain.
+///
+///     automerge   merges   unsafe merges
+///       0.88          3        0          (shipped before — inert)
+///       0.78         78        0
+///       0.75        140        0          <- chosen
+///       0.70        329        1          <- safety margin ends here
+///
+/// 0.75 gives 47x more same-person recovery than 0.88 with zero identity mixing,
+/// and keeps a real margin above 0.70 where the first unsafe merge appears. It
+/// cannot re-glue the known mega-clusters: their pairwise centroid cosines measure
+/// 0.21-0.29, far below any threshold in this table.
+///
+/// Centroids (means of all member embeddings) are denoised, so this is safer than
+/// any single anchor-to-anchor comparison. Consolidate also still respects user
+/// "different people" verdicts and protected named clusters, so lowering the bar
+/// cannot override an explicit human decision.
+pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
 
 /// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
 /// clamped to [0.70, 1.0]. A value ≥ 1.0 disables consolidation (no two

@@ -7,6 +7,88 @@
 
 ---
 
+## 2026-07-29 — Face clustering: auto-merge lowered 0.88 -> 0.75, People grid gets a size floor, and mega-cluster splitting is deliberately NOT attempted
+
+Investigating "thousands of leftover faces, tons are the same people" produced four
+measurements on the 2026-07-29 Adlon catalog. Recording all of them, including the
+negative results, because they bound what is worth trying next.
+
+**1. The mega-clusters are provably wrong, and centroid cohesion cannot see it.**
+16 clusters hold 83,381 faces (largest 26,422). Pass 3 splits on mean
+cosine-to-centroid < 0.60 — and these score 0.61-0.74, so 9 of 16 PASS. Centroid
+cohesion is not scale-invariant: in a large diffuse cluster the centroid becomes a
+generic "average face" direction that every member sits ~0.62 from. Measured by
+size band (mean pairwise cosine / pairwise minimum):
+
+    <=150 faces (780 clusters):  pairwise 0.71-0.86, min +0.43..+0.78
+    >=151 faces  (57 clusters):  pairwise 0.23-0.55, min -0.12..-0.25
+
+Every large cluster contains ANTI-CORRELATED face pairs. Two faces at cosine -0.15
+cannot be one identity — a label-free contradiction, not a threshold opinion.
+
+**2. Raising the Pass-3 split depth does nothing.** `pass3_max_splits` is a
+recursion-DEPTH cap (decremented into both children), so 7 caps a cluster at 2^7
+leaves. Faithfully simulating `validate_and_split` at depth 7/12/16/24 on the four
+largest clusters returned byte-identical output: 1 part each. They never split
+because they pass the centroid bar on the first check. Depth was never the
+constraint.
+
+**3. Adding a pairwise-cohesion floor to Pass 3 does not converge.** Tried
+p10>=0.35, p10>=0.45, p2>=0.20, min>=0.00, min>=0.10 with depth 40. Every variant
+still left multi-thousand-face residual parts (largest 2,920-5,734) AND 16-26 parts
+containing anti-correlated pairs, while inflating 6 clusters into 248-837 and
+producing 1-30 new <=2-face fragments. Recursive 2-means cannot recover identity
+boundaries; bisecting a chained manifold does not cut where identities do.
+
+**4. Retuning the Pass-1 link threshold is worse, not better.** The root cause is
+Pass 1: mutual-kNN + connected components has no diameter bound, so A~B~C~D chains
+merge people who are themselves dissimilar. Simulated on a fixed 20,000-face
+subsample:
+
+    pass1   clusters  largest  singletons   faces in anti-correlated clusters
+     0.50      2596    16226    10.3%        81.1%     <- shipped
+     0.60      6032    10140    24.6%        50.7%
+     0.70      9222     6949    38.6%        34.7%
+
+Raising the threshold barely dents the blob while singletons quadruple. Chaining is
+scale-free — in a family library there are always enough intermediate faces to
+bridge. There is no value of this constant that yields clean identities.
+
+**Conclusion: the over-merge half needs a diameter-bounded linkage (average- or
+complete-linkage agglomerative with a distance cutoff, or a genuine density method),
+not a constant. That is an algorithm replacement plus labelled validation, so it was
+NOT attempted here.** Shipping any of the above would have traded a visible
+pathology for a worse one on a day with no time to validate. The measurements are
+recorded so the next attempt starts from evidence.
+
+**What DID ship, both measured safe:**
+
+(a) `AUTOMERGE_COS_DEFAULT` 0.88 -> 0.75 (`pipeline/face_clustering.rs`). The old
+0.88 rested on a comment claiming same-person SFace cosine sits at 0.88-0.95, which
+is false for this corpus: at 0.88 consolidate fired **3 times across 3,092 non-mega
+clusters** — inert, which is exactly why the same person stayed split across
+thousands of duplicate-burst clusters. Judging each merge by whether it introduces
+an anti-correlated pair: 0.88 -> 3 merges / 0 unsafe; 0.78 -> 78 / 0; **0.75 -> 140
+/ 0**; 0.70 -> 329 / 1. 0.75 is 47x more same-person recovery than 0.88 with zero
+identity mixing and a real margin before the first unsafe merge. It cannot re-glue
+the mega-clusters (their pairwise centroid cosines are 0.21-0.29). User "different
+people" verdicts and protected named clusters still override it.
+
+macOS was deliberately left alone: it uses a different mechanism
+(`tightPairAutoMerge`, thresholds 0.65 / 0.55 for singletons) that already merges
+more aggressively than 0.75, on a platform that cannot be compiled here. Forcing
+the Windows number onto it would have made macOS *stricter*. Divergence to reconcile
+when someone can measure on a Mac.
+
+(b) A People-grid size floor of 6 faces (`PeopleViewModel.MinFacesPerCluster`).
+2,271 of 3,108 clusters held <=5 faces, so the tab rendered thousands of
+one-moment fragments and buried the few dozen clusters worth naming. Clusters the
+user has NAMED are always shown regardless of size, `face_prints.excluded` rows no
+longer count toward the floor, and the withheld count is disclosed in the UI —
+fragments are hidden from the grid, never deleted, and stay searchable. This does
+not improve clustering; it makes the existing clustering usable, which is the half
+of the complaint that was actually solvable today.
+
 ## 2026-07-29 — Runtime-egress review tripwire refreshed deliberately (14 digests + 2 new reviewed boundary files)
 
 `check_runtime_egress.py --known-blockers` was red with 14 violations, blocking the policy workflow.
