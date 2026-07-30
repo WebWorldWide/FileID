@@ -44,16 +44,24 @@ public sealed partial class SuggestedMergesSheet : UserControl
             // LastMergeSuggestions PropertyChanged subscription — nothing extra
             // to do here.
             HeaderText.Text = "Looking for similar clusters…";
+            SetBusy(true, "Comparing face clusters…");
             try
             {
                 await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
+                // Render() runs off the LastMergeSuggestions subscription and
+                // clears the busy state itself, but clear it here too: if the
+                // reply was value-identical to a previous one, PropertyChanged
+                // may not re-fire and the ring would spin forever.
+                SetBusy(false);
             }
             catch (TimeoutException)
             {
+                SetBusy(false);
                 HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
             }
             catch (Exception ex)
             {
+                SetBusy(false);
                 Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
                 HeaderText.Text = "Couldn't fetch suggestions — see logs.";
             }
@@ -77,12 +85,28 @@ public sealed partial class SuggestedMergesSheet : UserControl
             DispatcherQueue.TryEnqueue(Render);
         });
 
+    /// Show/hide the indeterminate busy state. The ring's IsActive is toggled
+    /// (not just its Visibility) so a hidden ring stops animating instead of
+    /// burning composition work behind the list.
+    private void SetBusy(bool busy, string? message = null)
+    {
+        if (_unloaded) return;
+        BusyRing.IsActive = busy;
+        BusyPanel.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        PairScroller.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
+        if (message is not null) BusyText.Text = message;
+    }
+
     private void Render()
     {
         if (_unloaded) return;
         var sug = EngineClient.Instance.LastMergeSuggestions;
+        // A null result means the reply hasn't landed yet — stay in the busy
+        // state rather than flashing "No likely merges found." over the ring.
+        if (sug is null) return;
+        SetBusy(false);
         _rows.Clear();
-        if (sug is null || sug.Pairs.Count == 0)
+        if (sug.Pairs.Count == 0)
         {
             HeaderText.Text = "No likely merges found. (Try after a fresh scan + re-cluster.)";
             return;

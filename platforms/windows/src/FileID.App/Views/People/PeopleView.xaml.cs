@@ -472,10 +472,10 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // ItemsRepeater + x:Bind does NOT populate the realized element's
     // DataContext (compiled bindings bypass it — same gotcha that broke
     // Library thumbnails). Resolve the cluster from the authoritative
-    // repeater index and set DataContext so the drag / drop / double-tap
+    // repeater index and set DataContext so the drag / drop / tap
     // handlers that read el.DataContext resolve the right PersonCluster.
-    // OnClusterDoubleTapped has no Tag fallback, so without this bridge a
-    // double-tap silently returns and the person-detail sheet never opens.
+    // OnClusterTapped has no Tag fallback, so without this bridge a tap
+    // silently returns and the person-detail sheet never opens.
     // Mirrors LibraryView.OnRepeaterElementPrepared.
     // SafeRun-wrapped: ItemsRepeater raises ElementPrepared from the native
     // realization pass, so a synchronous throw here (an index race when
@@ -604,12 +604,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // unguarded synchronous throw here fast-fails the process — the "click a
     // face to open the person" stowed-crash path. XamlRoot may be null on a
     // detached element; ShowAsync then throws, already caught below.
-    private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnClusterDoubleTapped), async () =>
+    // Single tap (was DoubleTapped): seeing every face in a group is the primary
+    // thing users want from a cluster card, and behind a double-tap it was
+    // effectively undiscoverable. Safe to take the single tap — the card has no
+    // other click action (merging is drag-and-drop, and a drag suppresses Tapped).
+    // `_detailOpen` guards re-entrancy: ContentDialog.ShowAsync throws if a second
+    // dialog opens while one is up, and a habitual double-click would otherwise
+    // fire this twice.
+    private bool _detailOpen;
+
+    private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClusterTapped), async () =>
     {
         if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
-        if (XamlRoot is null) return;
+        if (XamlRoot is null || _detailOpen) return;
+        _detailOpen = true;
+        try { await ShowPersonDetailAsync(pc); }
+        finally { _detailOpen = false; }
+    });
 
+    private async Task ShowPersonDetailAsync(PersonCluster pc)
+    {
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
         var dialog = new ContentDialog
@@ -630,7 +645,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
-    });
+    }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
         => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>
