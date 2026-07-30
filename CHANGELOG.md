@@ -6,7 +6,46 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+### Fixed
+
+#### 2026-07-29 — Fewer junk faces, trustworthy Restructure Apply, Deep Analyze folder exclusions
+
+- **Far fewer useless faces in People, and more real ones.** FileID used to decide whether a detected
+  face was worth keeping based on how much of the *frame* it filled, which is the wrong question: a
+  blurry head in the background of a low-resolution video could fill enough of the frame to be kept,
+  while a perfectly sharp face in a 48-megapixel photo filled too little and got thrown away. It now
+  judges faces by their actual pixel size. On a 135,000-file test library this recovered **~28,000
+  real faces** that were previously discarded, without regressing faces found in videos.
+  **Note:** this applies to files scanned from now on — an existing library needs a re-scan before
+  the People tab reflects it.
+- **Restructure's Apply no longer gives up on the whole batch.** If a single file had been renamed,
+  moved, or deleted since you generated the plan, Apply used to fail completely and move *nothing* —
+  every time you retried. It now skips just that file and applies the rest.
+- **"Undo last run" no longer disappears when you stop it.** Cancelling an in-progress undo (or one
+  that partly failed) used to hide the Undo button even though your files were still moved — on macOS
+  it never came back, even after restarting the app. The button now stays available so you can finish
+  reversing the run.
+- **Restructure's Apply button is now honest about what it will do.** On very large plans FileID only
+  applies the moves it is confident about and holds the rest back for review, but the button, the
+  count next to it, and the confirmation dialog all claimed the full plan would be applied. On macOS
+  it *did* apply everything, including moves you were never shown — that's fixed, and all three
+  platforms now state and apply the same confident-only subset.
+- **Apply is where you can see it.** The Restructure Apply bar now sits at the top of the tab instead
+  of at the bottom, so it's visible as soon as a plan is ready, along with its status and results.
+- **A stopped Restructure can be resumed or reversed reliably.** Fixed cases where a database
+  bookkeeping hiccup left the app permanently offering an Undo that always failed, where an unplugged
+  external drive discarded pending repair records, and where one file landing in an occupied
+  destination could also knock out a second, unrelated file.
+
 ### Added
+
+#### 2026-07-29 — Exclude folders from Deep Analyze
+
+- **You can now exclude specific folders from Deep Analyze.** Deep Analyze runs a large AI model over
+  your library, which is slow and, for some folders, unwanted. Settings now has a **Deep Analyze
+  exclusions** list (separate from scan exclusions): excluded folders stay fully in your library and
+  remain searchable and tagged — only the AI captioning/renaming pass skips them. Choosing specific
+  files to analyze always ignores the list. Available on Windows, macOS, and Linux.
 
 #### 2026-06-13 — Restructure parity + safer moves (stability campaign)
 
@@ -166,4 +205,4 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: ./compare/V15.2.1...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...HEAD

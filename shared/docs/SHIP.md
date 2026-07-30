@@ -59,15 +59,30 @@ For the overall product:
 - Signed, packaged, downloadable from a public GitHub release.
 - README + LICENSE + CONTRIBUTING + PRIVACY + screenshots in the repo.
 
-## Current audit status (2026-07-27)
+## Current audit status (2026-07-29)
 
 Locally runnable source gates are green on Windows and native WSL: locked Rust
-format/clippy/tests for the shared engine, CLI, TUI, and GTK app; Linux release
-build; Windows x64 Release app build plus App/IPC tests and format; 71 shared
-policy regressions; model-license/bootstrap/workflow/current-doc policy; and the
-reviewed runtime-egress known-blocker baseline. A current read-only Adlon
-fingerprint matches the preserved pre-audit result exactly. Final independent
-review found no remaining locally actionable blocker/high/medium code issue.
+format/clippy/tests for the shared engine (693 tests), CLI, TUI, and GTK app (57
+tests); Windows app build plus App (446) / IPC (53) tests and format; shared
+policy regressions; model-license/bootstrap/workflow policy; the current-doc
+contract; and the reviewed runtime-egress known-blocker baseline with its 23-test
+self-test.
+
+Note on the two gates re-greened on 2026-07-29: `check_current_docs.py` and
+`check_runtime_egress.py --known-blockers` were both RED before that date (the
+latter since commit `6aea8ac`). The doc gate was fixed by correcting stale
+migration-version claims; the egress gate by deliberately refreshing 14 reviewed
+source digests after verifying zero added network capability in every drifted
+file, plus reviewing and allowlisting two false-positive boundary files. See
+`DECISIONS.md` (2026-07-29) for exactly what that refresh does and does **not**
+assert — in particular it does not claim the four `6aea8ac`-era files were
+re-read line-by-line for non-network defects.
+
+**macOS is not covered by any local gate.** There is no Swift toolchain in the
+Windows dev env, so the substantial 2026-07-29 macOS changes (Restructure
+apply/undo semantics, `cancelRestructure`, Deep Analyze folder exclusion, the
+face size gate mirror) were verified only by static review. They must pass the
+hosted `macos.yml` workflow before publication.
 
 This does **not** authorize publication. The strict no-flag runtime-egress gate
 still rejects the ten reviewed GitHub/NVIDIA archives and widened downloader host
