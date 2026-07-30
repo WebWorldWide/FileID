@@ -745,6 +745,7 @@ dependencies = [
  "ort-sys",
  "parking_lot",
  "quick-xml",
+ "rayon",
  "reqwest",
  "rusqlite",
  "serde",
