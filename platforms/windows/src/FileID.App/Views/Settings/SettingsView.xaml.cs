@@ -14,6 +14,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 {
     private bool _unloaded;
     private bool _initializingToggles;
+    private readonly System.Collections.Generic.Dictionary<string, long> _excludedPurgeGenerations =
+        new(StringComparer.OrdinalIgnoreCase);
+    private long _nextExcludedPurgeGeneration;
 
     /// <summary> expose the singleton ModelInstallerService so
     /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
@@ -74,6 +77,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // so we do it inline on the dispatcher.
             try { _ = PopulateRecentScansAsync(); } catch { }
             try { PopulateExcludedFolders(); } catch { }
+            try { PopulateDeepAnalyzeExcludedFolders(); } catch { }
         };
     }
 
@@ -110,8 +114,14 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Content = "✕",
                 Tag = path,
                 Padding = new Thickness(6, 2, 6, 2),
+                IsEnabled = !_excludedPurgeGenerations.ContainsKey(path),
             };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Stop excluding " + path);
+            if (!remove.IsEnabled)
+            {
+                ToolTipService.SetToolTip(remove,
+                    "Wait for FileID to finish applying this exclusion.");
+            }
             remove.Click += OnRemoveExcludedFolderClicked;
             Grid.SetColumn(remove, 1);
             grid.Children.Add(label);
@@ -162,6 +172,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             var updated = new System.Collections.Generic.List<string>(vm.Settings.ExcludedFolders) { picked };
             vm.Settings.ExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
             vm.Settings.Save();
+            var purgeGeneration = ++_nextExcludedPurgeGeneration;
+            _excludedPurgeGenerations[picked] = purgeGeneration;
             PopulateExcludedFolders();
 
             // Purge-immediately ruling: the Library reflects the exclusion now,
@@ -171,22 +183,50 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             {
                 var reply = await EngineClient.Instance
                     .PurgeExcludedAndWaitAsync(new[] { picked }).ConfigureAwait(true);
-                ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
-                    ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
-                    : "Excluded. This folder will be skipped from now on.");
+                if (IsCurrentExcludedPurge(picked, purgeGeneration))
+                {
+                    ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
+                        ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
+                        : "Excluded. This folder will be skipped from now on.");
+                }
             }
             catch (Exception ex)
             {
                 DebugLog.Warn($"[SETTINGS] purgeExcluded didn't confirm: {ex.Message}");
-                ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
-                    "Excluded. The library will fully reflect this at the next scan.");
+                if (IsCurrentExcludedPurge(picked, purgeGeneration))
+                {
+                    ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
+                        "Excluded. The library will fully reflect this at the next scan.");
+                }
+            }
+            finally
+            {
+                if (_excludedPurgeGenerations.TryGetValue(picked, out var current)
+                    && current == purgeGeneration)
+                {
+                    _excludedPurgeGenerations.Remove(picked);
+                    if (!_unloaded) PopulateExcludedFolders();
+                }
             }
         });
+
+    private bool IsCurrentExcludedPurge(string path, long generation)
+        => !_unloaded
+            && _excludedPurgeGenerations.TryGetValue(path, out var current)
+            && current == generation
+            && AppViewModel.Instance.Settings.ExcludedFolders.Exists(
+                existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase));
 
     private void OnRemoveExcludedFolderClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRemoveExcludedFolderClicked), () =>
         {
             if (sender is not Button button || button.Tag is not string path) return;
+            if (_excludedPurgeGenerations.ContainsKey(path))
+            {
+                ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
+                    "FileID is still applying this exclusion. Try again when it finishes.");
+                return;
+            }
             var vm = AppViewModel.Instance;
             var updated = new System.Collections.Generic.List<string>();
             foreach (var existing in vm.Settings.ExcludedFolders)
@@ -201,6 +241,106 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             PopulateExcludedFolders();
             ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
                 "No longer excluded. Its files will be added back at the next scan.");
+        });
+
+    // ----- Deep Analyze exclusions card -----
+    //
+    // Deliberately simpler than the scan-exclusion card above: nothing is
+    // removed from the library, so there is no purge-in-flight state to
+    // track and no generation bookkeeping — just persist the list. It only
+    // takes effect on the NEXT whole-library Deep Analyze run (there is no
+    // in-flight VLM pass to retroactively narrow).
+
+    private void PopulateDeepAnalyzeExcludedFolders()
+    {
+        var settings = AppViewModel.Instance.Settings;
+        if (settings.DeepAnalyzeExcludedFolders.Count == 0)
+        {
+            DeepAnalyzeExcludedFoldersEmptyText.Visibility = Visibility.Visible;
+            DeepAnalyzeExcludedFoldersList.ItemsSource = null;
+            return;
+        }
+        DeepAnalyzeExcludedFoldersEmptyText.Visibility = Visibility.Collapsed;
+        var rows = new System.Collections.Generic.List<Grid>();
+        foreach (var path in settings.DeepAnalyzeExcludedFolders)
+        {
+            var grid = new Grid { ColumnSpacing = 8 };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var label = new TextBlock
+            {
+                Text = path,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            ToolTipService.SetToolTip(label, path);
+            var remove = new Button { Content = "✕", Tag = path, Padding = new Thickness(6, 2, 6, 2) };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                remove, "Stop excluding " + path + " from Deep Analyze");
+            remove.Click += OnRemoveDeepAnalyzeExcludedFolderClicked;
+            Grid.SetColumn(remove, 1);
+            grid.Children.Add(label);
+            grid.Children.Add(remove);
+            rows.Add(grid);
+        }
+        DeepAnalyzeExcludedFoldersList.ItemsSource = rows;
+    }
+
+    private void ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity severity, string message)
+    {
+        DeepAnalyzeExcludedFoldersInfoBar.Severity = severity;
+        DeepAnalyzeExcludedFoldersInfoBar.Message = message;
+        DeepAnalyzeExcludedFoldersInfoBar.IsOpen = true;
+    }
+
+    private async void OnAddDeepAnalyzeExcludedFolderClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnAddDeepAnalyzeExcludedFolderClicked), async () =>
+        {
+            var vm = AppViewModel.Instance;
+            var hwnd = App.HostWindow is { } window
+                ? WinRT.Interop.WindowNative.GetWindowHandle(window)
+                : IntPtr.Zero;
+            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            if (result.FailureReason is not null)
+            {
+                ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Error, result.FailureReason);
+                return;
+            }
+            if (result.Path is null) return; // user cancelled
+            var picked = result.Path.TrimEnd('\\', '/');
+            foreach (var existing in vm.Settings.DeepAnalyzeExcludedFolders)
+            {
+                if (string.Equals(existing, picked, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Informational,
+                        "That folder is already excluded from Deep Analyze.");
+                    return;
+                }
+            }
+            var updated = new System.Collections.Generic.List<string>(vm.Settings.DeepAnalyzeExcludedFolders) { picked };
+            vm.Settings.DeepAnalyzeExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
+            vm.Settings.Save();
+            PopulateDeepAnalyzeExcludedFolders();
+            ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Success,
+                "Excluded. Deep Analyze will skip this folder starting with the next whole-library run.");
+        });
+
+    private void OnRemoveDeepAnalyzeExcludedFolderClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnRemoveDeepAnalyzeExcludedFolderClicked), () =>
+        {
+            if (sender is not Button button || button.Tag is not string path) return;
+            var vm = AppViewModel.Instance;
+            var updated = new System.Collections.Generic.List<string>();
+            foreach (var existing in vm.Settings.DeepAnalyzeExcludedFolders)
+            {
+                if (!string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    updated.Add(existing);
+                }
+            }
+            vm.Settings.DeepAnalyzeExcludedFolders = updated;
+            vm.Settings.Save();
+            PopulateDeepAnalyzeExcludedFolders();
         });
 
     // Reads up to the 5 most-recent scan_sessions rows and renders one

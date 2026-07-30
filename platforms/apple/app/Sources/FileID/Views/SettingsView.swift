@@ -52,6 +52,8 @@ struct SettingsTab: View {
                     }
                 }
 
+                DeepAnalyzeExclusionsCard()
+
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
                 CLIPSemanticSearchCard()
@@ -216,6 +218,87 @@ struct SettingsTab: View {
     }
     static var appLogURL: URL {
         AppSupportPath.fileID.appendingPathComponent("logs/app.log")
+    }
+}
+
+// MARK: - Deep Analyze exclusions card
+
+/// Folders to skip during a whole-library Deep Analyze pass — separate from
+/// the (currently unsurfaced) scan-exclusion list: a folder can be fine to
+/// catalog/tag/search but too slow or private to run the VLM over. Nothing
+/// is removed from the library, so unlike the model-install cards above
+/// there's no purge-in-flight state to track — just persist the list; it
+/// takes effect starting with the next whole-library Deep Analyze run.
+struct DeepAnalyzeExclusionsCard: View {
+    @State private var settings = DeepAnalyzeSettings.shared
+    @State private var message: (text: String, isError: Bool)?
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Deep Analyze exclusions").font(.headline)
+                Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().opacity(0.3)
+
+                if let message {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(message.isError ? .red : .green)
+                        Text(message.text)
+                            .font(.caption)
+                            .foregroundStyle(message.isError ? .red : .secondary)
+                        Spacer()
+                    }
+                }
+
+                if settings.excludedFolders.isEmpty {
+                    Text("No folders are excluded from Deep Analyze.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    ForEach(settings.excludedFolders, id: \.self) { folder in
+                        HStack(spacing: 8) {
+                            Text(folder)
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button {
+                                settings.removeExcludedFolder(folder)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help("Stop excluding \(folder) from Deep Analyze")
+                        }
+                    }
+                }
+
+                Button("Add folder…") { pickExcludedFolder() }
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func pickExcludedFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder to exclude from Deep Analyze"
+        panel.prompt = "Exclude"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        switch settings.addExcludedFolder(url.path) {
+        case .added:
+            message = ("Excluded. Deep Analyze will skip this folder starting with the next whole-library run.", false)
+        case .alreadyExcluded:
+            message = ("That folder is already excluded from Deep Analyze.", false)
+        case .invalid:
+            message = ("Couldn't exclude that folder — pick a folder on this Mac.", true)
+        }
     }
 }
 

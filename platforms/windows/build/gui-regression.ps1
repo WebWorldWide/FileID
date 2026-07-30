@@ -86,6 +86,13 @@ if (-not (Test-Path $Corpus)) {
 $corpusFileCount = (Get-ChildItem -Path $Corpus -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
 OK "corpus: $Corpus ($corpusFileCount files)"
 
+$runningFileId = @(Get-Process -Name "FileID" -ErrorAction SilentlyContinue)
+if ($runningFileId.Count -gt 0) {
+    $runningPids = ($runningFileId | ForEach-Object Id) -join ", "
+    Fail "FileID is already running (pid=$runningPids); close it before starting the GUI regression harness"
+    exit 2
+}
+
 # --- 2. Build ---------------------------------------------------------
 $AppExe = Join-Path $AppDir "bin\x64\$Configuration\$AppTfm\win-x64\FileID.exe"
 if (-not $SkipBuild) {
@@ -180,6 +187,26 @@ if (-not $proc.HasExited) {
 if (-not $proc.HasExited) {
     Warn "app did not exit gracefully; killing"
     try { Stop-Process -Id $proc.Id -Force } catch { }
+}
+
+# A fast scan can write its completion marker and exit between poll intervals.
+# Re-read the complete log after process exit so the final assertions use the
+# authoritative marker sequence rather than the last observed tail.
+if (Test-Path $AppLog) {
+    $scanStarted = $false
+    $scanEnded = $false
+    $scanOk = $false
+    foreach ($line in Get-Content -Path $AppLog -ErrorAction SilentlyContinue) {
+        if ($line -match '\[AUTO-SCAN\] starting scan') {
+            $scanStarted = $true
+        } elseif ($line -match '\[AUTO-SCAN\] scan ended ok=(\w+)') {
+            $scanEnded = $true
+            $scanOk = ($Matches[1] -eq 'True')
+        } elseif ($line -match '\[AUTO-SCAN\] failed:') {
+            $scanEnded = $true
+            $scanOk = $false
+        }
+    }
 }
 
 # --- 8. Assertions ---------------------------------------------------

@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nThe platform DTOs are hand-maintained in platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift, platforms/windows/src/engine/src/ipc/mod.rs, and platforms/windows/src/FileID.IpcSchema/. Swift, Rust, and C# conformance suites lock those DTOs to this schema.",
-  "version": "1.1.0",
+  "version": "1.3.0",
 
   "$defs": {
     "IPCCommand": {
@@ -50,6 +50,22 @@
         { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["cancelRestructure"],  "additionalProperties": false, "properties": { "cancelRestructure":  { "type": "object", "additionalProperties": false, "description": "Cooperatively cancel only the active restructure plan, apply, or undo operation. Must not cancel a library scan." } } },
+        {
+          "type": "object",
+          "required": ["healthCheck"],
+          "additionalProperties": false,
+          "properties": {
+            "healthCheck": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["requestID"],
+              "properties": {
+                "requestID": { "type": "string", "minLength": 1, "description": "Client-generated nonce echoed verbatim by healthCheckResult so readiness cannot be satisfied by a stale event from an earlier engine generation." }
+              }
+            }
+          }
+        },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
@@ -100,7 +116,8 @@
                 "skipExisting": { "type": "boolean", "description": "If true, skip files already processed by this model (files.vlm_model matches modelKind)." },
                 "fileIDs":      { "type": "array", "items": { "type": "integer" }, "maxItems": 10000, "uniqueItems": true, "description": "Optional bounded selection. When present, analyze only these file IDs through the same persistent batch runner; absent means the whole library." },
                 "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
-                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
+                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." },
+                "excludedFolders": { "type": "array", "items": { "type": "string" }, "maxItems": 256, "description": "Absolute folder paths to skip when scanning the whole library (fileIDs absent). A file is excluded when its path falls under one of these folders (path-segment-boundary matching, not a raw substring — excluding '/Photos' does not exclude '/PhotosBackup'). Ignored when fileIDs is present: an explicit selection is a deliberate per-file action and is never silently filtered. Optional; absent/empty means no folder exclusions." }
               }
             }
           }
@@ -156,7 +173,14 @@
         { "type": "object", "required": ["undoRestructure"], "additionalProperties": false,
           "properties": { "undoRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": { "libraryRoot": { "type": "string" } } } } },
+            "properties": {
+              "libraryRoot": { "type": "string" },
+              "shortcutUndoToken": {
+                "type": ["string", "null"],
+                "format": "uuid",
+                "description": "When present, undo only the shortcut-mode run identified by this opaque token; never consume the real-move undo journal."
+              }
+            } } } },
 
         { "type": "object", "required": ["applyTags"], "additionalProperties": false,
           "properties": { "applyTags": { "type": "object", "additionalProperties": false,
@@ -292,6 +316,7 @@
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
+        { "type": "object", "required": ["healthCheckResult"],       "additionalProperties": false, "properties": { "healthCheckResult":       { "$ref": "#/$defs/SinglePositional/HealthCheckResult" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
         {
@@ -370,6 +395,23 @@
               "workerCap":        { "type": "integer", "minimum": 1 },
               "physicalMemoryGB": { "type": "number", "minimum": 0 },
               "hardware":         { "type": ["object", "null"], "description": "HardwareInfo snapshot — same shape as the hardwareReprobed event's hardware field. V15.9+ engines additionally populate: pCores, eCores, logicalCpuCores, workerCap, ramTotalMB, ramAvailableMB, memoryTier (low|balanced|high), vramMB, npuPresent, powerSource (ac|battery|unknown), batteryPercent, activeProfile (eco|auto|performance). Older engines omit those fields; consumers must default them." }
+            }
+          }
+        }
+      },
+
+      "HealthCheckResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["_0"],
+        "properties": {
+          "_0": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["requestID", "pid"],
+            "properties": {
+              "requestID": { "type": "string", "minLength": 1, "description": "Exact nonce from the corresponding healthCheck command." },
+              "pid":       { "type": "integer", "minimum": 0, "description": "Process ID of the engine that handled the health check." }
             }
           }
         }
@@ -679,6 +721,21 @@
                 "required": ["category", "count"],
                 "properties": { "category": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } }
               } },
+              "confidenceCounts": {
+                "anyOf": [
+                  { "type": "null" },
+                  { "type": "object", "additionalProperties": false,
+                    "required": ["auto", "review", "ask", "unknown"],
+                    "properties": {
+                      "auto": { "type": "integer", "minimum": 0 },
+                      "review": { "type": "integer", "minimum": 0 },
+                      "ask": { "type": "integer", "minimum": 0 },
+                      "unknown": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                ],
+                "description": "Engine-authoritative confidence totals for the complete plan, including rows omitted from a bounded preview. Apply-time integrity is revalidated immediately before the first move."
+              },
               "folderClassifications": {
                 "anyOf": [
                   { "type": "null" },
@@ -710,7 +767,11 @@
             "properties": {
               "applied":        { "type": "integer", "minimum": 0 },
               "failed":         { "type": "integer", "minimum": 0 },
-              "privilegeError": { "type": ["string", "null"] }
+              "privilegeError": { "type": ["string", "null"] },
+              "cancelled":      { "type": "boolean", "default": false, "description": "True when cooperative cancellation stopped the operation before every planned row was processed." },
+              "planned":        { "type": ["integer", "null"], "minimum": 0, "description": "Authoritative number of rows eligible for this apply or undo operation." },
+              "remaining":      { "type": ["integer", "null"], "minimum": 0, "description": "Eligible rows not processed because cancellation stopped the operation. Present when cancelled is true." },
+              "shortcutUndoToken": { "type": ["string", "null"], "format": "uuid", "description": "Opaque token for undoing only the shortcuts created by this apply. Present only for shortcut-mode runs that created at least one new shortcut." }
             }
           }
         }

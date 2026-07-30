@@ -26,6 +26,8 @@ public struct IPCCommand: Codable, Sendable {
         case pauseScan
         case resumeScan
         case cancelScan
+        case cancelRestructure
+        case healthCheck(requestID: String)
         case requestStatus
         case shutdown
         case runFaceClustering
@@ -42,8 +44,15 @@ public struct IPCCommand: Codable, Sendable {
         /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
         /// `fileIDs` optionally scopes the persistent batch to one bounded
         /// selection; nil retains whole-library behavior.
-        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.)
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?)
+        /// `excludedFolders` skips these absolute folder paths during a
+        /// whole-library run (path-segment-boundary matching, e.g. excluding
+        /// "/Photos" does not exclude "/PhotosBackup"); IGNORED when
+        /// `fileIDs` is present — an explicit selection is a deliberate
+        /// per-file action and is never silently filtered. Optional; nil/empty
+        /// means no folder exclusions.
+        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
+        /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet
@@ -70,7 +79,7 @@ public struct IPCCommand: Codable, Sendable {
         /// relocated back to its original location (the engine replays its on-disk
         /// undo journal). Reply lands on `restructureApplyResult`, where `applied`
         /// is the count of files moved back. (RESTRUCTURE.md §6 reversibility)
-        case undoRestructure(libraryRoot: String)
+        case undoRestructure(libraryRoot: String, shortcutUndoToken: String? = nil)
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
         case purgeExcluded(excludedPaths: [String])
@@ -188,6 +197,7 @@ public struct IPCEvent: Codable, Sendable {
 
     public enum Payload: Codable, Sendable {
         case ready(EngineInfo)
+        case healthCheckResult(HealthCheckResult)
         case progress(ScanProgress)
         case phaseChanged(ScanPhase)
         case discoveryComplete(totalFiles: Int)
@@ -219,6 +229,16 @@ public struct IPCEvent: Codable, Sendable {
 }
 
 // MARK: - DTOs
+
+public struct HealthCheckResult: Codable, Sendable {
+    public let requestID: String
+    public let pid: Int32
+
+    public init(requestID: String, pid: Int32) {
+        self.requestID = requestID
+        self.pid = pid
+    }
+}
 
 public struct EngineInfo: Codable, Sendable {
     public let version: String
@@ -691,10 +711,26 @@ public struct FolderClassificationCounts: Codable, Sendable {
     }
 }
 
+public struct RestructureConfidenceCounts: Codable, Sendable {
+    public let auto: Int
+    public let review: Int
+    public let ask: Int
+    public let unknown: Int
+
+    public init(auto: Int, review: Int, ask: Int, unknown: Int) {
+        self.auto = auto
+        self.review = review
+        self.ask = ask
+        self.unknown = unknown
+    }
+}
+
 public struct RestructurePlan: Codable, Sendable {
     public let libraryRoot: String
     public let moves: [RestructureMove]
     public let categoryCounts: [RestructureCategoryCount]
+    /// Full-plan confidence totals, including rows omitted from a bounded preview.
+    public let confidenceCounts: RestructureConfidenceCounts?
     /// Engine-authoritative folder classification counts. Nil on older engines.
     public let folderClassifications: FolderClassificationCounts?
     /// Opaque engine-owned plan handle when `moves` is a bounded preview.
@@ -706,10 +742,12 @@ public struct RestructurePlan: Codable, Sendable {
                 categoryCounts: [RestructureCategoryCount],
                 folderClassifications: FolderClassificationCounts? = nil,
                 planID: String? = nil, totalMoves: Int? = nil,
-                truncated: Bool = false) {
+                truncated: Bool = false,
+                confidenceCounts: RestructureConfidenceCounts? = nil) {
         self.libraryRoot = libraryRoot
         self.moves = moves
         self.categoryCounts = categoryCounts
+        self.confidenceCounts = confidenceCounts
         self.folderClassifications = folderClassifications
         self.planID = planID
         self.totalMoves = totalMoves
@@ -717,7 +755,7 @@ public struct RestructurePlan: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case libraryRoot, moves, categoryCounts, folderClassifications
+        case libraryRoot, moves, categoryCounts, confidenceCounts, folderClassifications
         case planID, totalMoves, truncated
     }
 
@@ -726,6 +764,8 @@ public struct RestructurePlan: Codable, Sendable {
         libraryRoot = try c.decode(String.self, forKey: .libraryRoot)
         moves = try c.decode([RestructureMove].self, forKey: .moves)
         categoryCounts = try c.decode([RestructureCategoryCount].self, forKey: .categoryCounts)
+        confidenceCounts = try c.decodeIfPresent(
+            RestructureConfidenceCounts.self, forKey: .confidenceCounts)
         folderClassifications = try c.decodeIfPresent(
             FolderClassificationCounts.self, forKey: .folderClassifications)
         planID = try c.decodeIfPresent(String.self, forKey: .planID)
@@ -739,11 +779,36 @@ public struct RestructureApplyResult: Codable, Sendable {
     public let failed: Int
     /// Surfaces a "Developer Mode required for symlinks" message; nil otherwise.
     public let privilegeError: String?
+    public let cancelled: Bool
+    public let planned: Int?
+    public let remaining: Int?
+    public let shortcutUndoToken: String?
 
-    public init(applied: Int, failed: Int, privilegeError: String? = nil) {
+    public init(applied: Int, failed: Int, privilegeError: String? = nil,
+                cancelled: Bool = false, planned: Int? = nil, remaining: Int? = nil,
+                shortcutUndoToken: String? = nil) {
         self.applied = applied
         self.failed = failed
         self.privilegeError = privilegeError
+        self.cancelled = cancelled
+        self.planned = planned
+        self.remaining = remaining
+        self.shortcutUndoToken = shortcutUndoToken
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case applied, failed, privilegeError, cancelled, planned, remaining, shortcutUndoToken
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        applied = try c.decode(Int.self, forKey: .applied)
+        failed = try c.decode(Int.self, forKey: .failed)
+        privilegeError = try c.decodeIfPresent(String.self, forKey: .privilegeError)
+        cancelled = try c.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false
+        planned = try c.decodeIfPresent(Int.self, forKey: .planned)
+        remaining = try c.decodeIfPresent(Int.self, forKey: .remaining)
+        shortcutUndoToken = try c.decodeIfPresent(String.self, forKey: .shortcutUndoToken)
     }
 }
 

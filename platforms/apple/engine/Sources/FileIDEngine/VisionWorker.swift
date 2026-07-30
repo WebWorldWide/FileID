@@ -97,6 +97,7 @@ public final class VisionWorker: @unchecked Sendable {
         public var faceQualities: [Double]     // 0..1, parallel to faceBBoxes; -1 if not measured
         public var faceYaws: [Double?]         // radians, parallel to faceBBoxes; nil if missing
         public var facePitches: [Double?]      // radians, parallel to faceBBoxes; nil if missing
+        public var faceMinDimPx: [Double]      // min(w,h) in absolute source pixels, parallel to faceBBoxes
         public var facePrints: [Data]          // EMPTY here — extracted lazily in Stage D
         /// False iff `handler.perform` exceeded the wall-clock timeout and was
         /// abandoned (empty result). The tagging stage keys its stage-ran gates
@@ -116,6 +117,7 @@ public final class VisionWorker: @unchecked Sendable {
         var pass = PrimaryPass(classifyTags: [], faceCount: 0,
                                faceBBoxes: [], faceQualities: [],
                                faceYaws: [], facePitches: [],
+                               faceMinDimPx: [],
                                facePrints: [], didComplete: false)
 
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
@@ -177,6 +179,16 @@ public final class VisionWorker: @unchecked Sendable {
             pass.faceQualities.reserveCapacity(sortedFaces.count)
             pass.faceYaws.reserveCapacity(sortedFaces.count)
             pass.facePitches.reserveCapacity(sortedFaces.count)
+            pass.faceMinDimPx.reserveCapacity(sortedFaces.count)
+            // Vision's boundingBox is normalized to THIS cgImage, which is
+            // already the decoded image (see loadImageAndEXIF's
+            // FILEID_SCAN_MAX_PIXELS cap, default 1536px long edge — a
+            // different downscale regime than the Windows decoder's, see the
+            // caveat on DBWriter.isExcluded.minBBoxMinDimPx). cgImage.width/
+            // height convert the normalized bbox to that decoded image's
+            // pixels for the absolute-size clustering gate.
+            let imgWidthPx = Double(cgImage.width)
+            let imgHeightPx = Double(cgImage.height)
             for obs in sortedFaces {
                 let r = obs.boundingBox
                 pass.faceBBoxes.append(String(format: "%.4f,%.4f,%.4f,%.4f",
@@ -184,6 +196,7 @@ public final class VisionWorker: @unchecked Sendable {
                 pass.faceQualities.append(closestQuality(for: r, in: qualityByBBox))
                 pass.faceYaws.append(obs.yaw?.doubleValue)
                 pass.facePitches.append(obs.pitch?.doubleValue)
+                pass.faceMinDimPx.append(min(r.width * imgWidthPx, r.height * imgHeightPx))
             }
         }
         return pass

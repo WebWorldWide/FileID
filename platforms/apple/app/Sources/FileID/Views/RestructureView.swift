@@ -54,6 +54,10 @@ struct RestructureView: View {
     @State private var pendingApplyCount = 0
     @State private var storedPlanID: String?
     @State private var storedPlanMoveCount = 0
+    /// Full-plan confidence tallies for the active stored plan — the auto-tier
+    /// count is what actually applies (see `applyStoredPlan`'s Auto-only
+    /// filter); review/ask/unknown stay put. Nil until a truncated plan lands.
+    @State private var storedPlanConfidenceCounts: RestructureConfidenceCounts?
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
     private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
@@ -167,66 +171,32 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    header
-                    if storedPlanMoveCount > 0 {
-                        largePlanCard
-                    } else if libraryRoot == nil
-                        || (!summary.hasContent && proposals.isEmpty) {
-                        emptyState
-                    } else {
-                        if !proposals.isEmpty || summary.hasContent {
-                            RestructureStatHero(summary: summary,
-                                                  hoverBus: hoverBus)
-                            if shouldShowMissingContentModels {
-                                missingContentModelsBanner
-                            } else if shouldShowDeepAnalyzeHint {
-                                deepAnalyzeHintBanner
-                            }
-                            HStack {
-                                viewModeToggle
-                                Spacer()
-                            }
-                        }
-                        if !proposals.isEmpty {
-                            if viewMode == .cards {
-                                unifiedHeroSurface
-                            } else {
-                                treeCard
-                            }
-                        } else if summary.hasContent {
-                            nothingToMoveCard
-                        }
-                        if summary.staysPutFiles > 0 {
-                            staysPutSection
-                        }
-                    }
-                    if let s = status {
-                        statusBanner(s, isError: statusIsError)
-                    }
-                    // Reserve room for the floating apply bar.
-                    Color.clear.frame(height: applyBarVisible ? 96 : 0)
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
-            }
+        // Prominence: the apply bar now lives in normal flow at the TOP of the
+        // tab — a persistent bar above the plan content — instead of floating
+        // over the bottom of the scroll view, so the primary action is visible
+        // the moment a plan lands, with no scrolling required. (owner request)
+        VStack(alignment: .leading, spacing: 0) {
             if applyBarVisible {
                 RestructureApplyBar(
                     selectedCount: storedPlanMoveCount > 0
-                        ? storedPlanMoveCount : selectedIDs.count,
+                        ? (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount)
+                        : selectedIDs.count,
                     totalCount: storedPlanMoveCount > 0
                         ? storedPlanMoveCount : proposals.count,
-                    canApply: storedPlanMoveCount > 0 || !selectedIDs.isEmpty,
+                    canApply: (storedPlanMoveCount > 0
+                        && (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount) > 0)
+                        || !selectedIDs.isEmpty,
                     isApplying: applying,
                     onApply: {
                         guard !applying else { return }
                         if storedPlanMoveCount > 0 {
                             pendingMoves = []
                             pendingPlanID = storedPlanID
-                            pendingApplyCount = storedPlanMoveCount
+                            // Only the Auto tier actually applies from a stored
+                            // plan (applyStoredPlan filters to auto-only) — the
+                            // confirmation must promise exactly that, not the
+                            // full stored count. (audit R1)
+                            pendingApplyCount = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
                         } else {
                             pendingMoves = eligibleMoves() // R6-01: freeze reviewed set
                             pendingPlanID = nil
@@ -234,11 +204,13 @@ struct RestructureView: View {
                         }
                         guard pendingApplyCount > 0 else { return }
                         confirmApply = true
-                    }
+                    },
+                    onCancel: { engine.cancelRestructure() }
                 )
                 .padding(.horizontal, 18)
-                .padding(.bottom, 14)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .padding(.top, 14)
+                .padding(.bottom, 10)
+                .transition(.move(edge: .top).combined(with: .opacity))
                 // F-C3-021-app: the apply action routes through the engine
                 // butler, which performs real on-disk moves (it has no macOS
                 // symlink-preview mode). The apply bar is now a single honest
@@ -257,36 +229,84 @@ struct RestructureView: View {
                     Text("FileID will move the selected files into the new structure on disk and update its library. You can reverse the whole run with “Undo last run” right afterward — but review the structure first.")
                 }
             }
-            // R2: after an apply that moved files, offer a one-click reversal. The
-            // engine replays its on-disk undo journal to put every file back.
-            if engine.canUndoRestructure {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.uturn.backward.circle.fill")
-                        .foregroundStyle(Theme.gold)
-                    Text("Files were moved on disk — you can put them back.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Undo last run") {
-                        guard let root = libraryRoot, !applying else { return }
-                        applying = true
-                        status = "Undoing the last restructure…"
-                        statusIsError = false
-                        // A failed send (engine respawning) would otherwise wedge
-                        // `applying` true forever — no result event ever arrives to
-                        // clear it, leaving the button permanently disabled. (audit R2-app)
-                        if !engine.undoRestructure(libraryRoot: root.path) {
-                            applying = false
-                            status = "Engine is unavailable — try again in a moment."
-                            statusIsError = true
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        header
+                        if storedPlanMoveCount > 0 {
+                            largePlanCard
+                        } else if libraryRoot == nil
+                            || (!summary.hasContent && proposals.isEmpty) {
+                            emptyState
+                        } else {
+                            if !proposals.isEmpty || summary.hasContent {
+                                RestructureStatHero(summary: summary,
+                                                      hoverBus: hoverBus)
+                                if shouldShowMissingContentModels {
+                                    missingContentModelsBanner
+                                } else if shouldShowDeepAnalyzeHint {
+                                    deepAnalyzeHintBanner
+                                }
+                                HStack {
+                                    viewModeToggle
+                                    Spacer()
+                                }
+                            }
+                            if !proposals.isEmpty {
+                                if viewMode == .cards {
+                                    unifiedHeroSurface
+                                } else {
+                                    treeCard
+                                }
+                            } else if summary.hasContent {
+                                nothingToMoveCard
+                            }
+                            if summary.staysPutFiles > 0 {
+                                staysPutSection
+                            }
                         }
+                        if let s = status {
+                            statusBanner(s, isError: statusIsError)
+                        }
+                        // Reserve room for the floating "Undo last run" bar —
+                        // the apply bar itself no longer floats over content.
+                        Color.clear.frame(height: engine.canUndoRestructure ? 72 : 0)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.gold)
-                    .disabled(applying)
+                    .padding(.horizontal, 18)
+                    .padding(.top, 18)
+                    .padding(.bottom, 12)
                 }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 14)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+                // R2: after an apply that moved files, offer a one-click reversal. The
+                // engine replays its on-disk undo journal to put every file back.
+                if engine.canUndoRestructure {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                            .foregroundStyle(Theme.gold)
+                        Text("Files were moved on disk — you can put them back.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Undo last run") {
+                            guard let root = libraryRoot, !applying else { return }
+                            applying = true
+                            status = "Undoing the last restructure…"
+                            statusIsError = false
+                            // A failed send (engine respawning) would otherwise wedge
+                            // `applying` true forever — no result event ever arrives to
+                            // clear it, leaving the button permanently disabled. (audit R2-app)
+                            if !engine.undoRestructure(libraryRoot: root.path) {
+                                applying = false
+                                status = "Engine is unavailable — try again in a moment."
+                                statusIsError = true
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.gold)
+                        .disabled(applying)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 14)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: applyBarVisible)
@@ -346,6 +366,9 @@ struct RestructureView: View {
             if let priv = result.privilegeError, !priv.isEmpty {
                 status = priv
                 statusIsError = true
+            } else if result.cancelled {
+                status = "Stopped — \(result.applied) file\(result.applied == 1 ? "" : "s") already moved, still undoable."
+                statusIsError = false
             } else {
                 status = "\(result.applied) moved · \(result.failed) failed"
                 statusIsError = false
@@ -752,9 +775,21 @@ struct RestructureView: View {
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Large plan ready").font(.headline)
-                    Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams the complete plan without loading every file path into the app.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                    // The engine's stored-plan apply only ever moves the "auto"
+                    // confidence tier — most rows in a plan this size were never
+                    // shown to the user, so Review/Ask/unknown-confidence rows
+                    // stay put for individual review rather than being applied
+                    // sight-unseen. (audit R1)
+                    if let counts = storedPlanConfidenceCounts {
+                        let heldBack = counts.review + counts.ask + counts.unknown
+                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Ready to apply \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) Review, Needs approval, or unknown-confidence move\(heldBack == 1 ? "" : "s") stay put for you to review first.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams only the confident (Auto) moves without loading every file path into the app.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
             }
@@ -1053,6 +1088,7 @@ struct RestructureView: View {
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
         storedPlanID = nil
         storedPlanMoveCount = 0
+        storedPlanConfidenceCounts = nil
         loading = true
         status = nil
         if !engine.planRestructure(libraryRoot: root.path) {
@@ -1081,6 +1117,7 @@ struct RestructureView: View {
             }
             storedPlanID = planID
             storedPlanMoveCount = totalMoves
+            storedPlanConfidenceCounts = plan.confidenceCounts
             proposals = []
             groups = []
             selectedIDs = []
@@ -1094,6 +1131,7 @@ struct RestructureView: View {
         }
         storedPlanID = nil
         storedPlanMoveCount = 0
+        storedPlanConfidenceCounts = nil
 
         let mapped = Self.mapProposals(from: plan)
         proposals = mapped

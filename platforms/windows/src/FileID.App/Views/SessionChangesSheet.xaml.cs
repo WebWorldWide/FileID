@@ -16,31 +16,50 @@ namespace FileID.Views;
 
 public sealed partial class SessionChangesSheet : UserControl
 {
-    private static readonly SolidColorBrush GoldBrush = new(Microsoft.UI.Colors.Gold);
+    private readonly SolidColorBrush _goldBrush;
     private readonly SolidColorBrush _dimBrush;
     private readonly SolidColorBrush _warnBrush;
     private bool _unloaded;
+    private bool _subscribed;
 
     public SessionChangesSheet()
     {
         InitializeComponent();
+        _goldBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         _dimBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray);
         _warnBrush = new SolidColorBrush(Microsoft.UI.Colors.Orange);
-        ChangeLog.Instance.Changed += OnChangeLogChanged;
-        Unloaded += (_, _) =>
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _unloaded = false;
+        if (!_subscribed)
         {
-            _unloaded = true;
-            ChangeLog.Instance.Changed -= OnChangeLogChanged;
-        };
-        Loaded += (_, _) => Rebuild();
+            ChangeLog.Instance.Changed += OnChangeLogChanged;
+            _subscribed = true;
+        }
+        Rebuild();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _unloaded = true;
+        if (!_subscribed) return;
+        ChangeLog.Instance.Changed -= OnChangeLogChanged;
+        _subscribed = false;
     }
 
     private void OnChangeLogChanged(object? sender, EventArgs e)
-        => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_unloaded) return;
+        DispatcherQueue.TryEnqueue(() =>
         {
             if (_unloaded) return;
             Rebuild();
         });
+    }
 
     private void Rebuild()
         => DebugLog.SafeRun(nameof(Rebuild), () =>
@@ -66,6 +85,7 @@ public sealed partial class SessionChangesSheet : UserControl
                 ChangeKind.Rename => "",      // Rename
                 ChangeKind.Trash => "",       // Delete
                 ChangeKind.Restructure => "", // Folder
+                ChangeKind.RestructureShortcuts => "",
                 ChangeKind.PeopleMerge => "", // People
                 ChangeKind.Tags => "",        // Tag
                 _ => "",                      // History
@@ -83,6 +103,7 @@ public sealed partial class SessionChangesSheet : UserControl
         };
         var detailText = entry.Status switch
         {
+            ChangeStatus.Undoing => "Undoing…",
             ChangeStatus.Undone => "Undone",
             ChangeStatus.UndoFailed => "Undo failed" + (entry.StatusDetail is null ? "" : " — " + entry.StatusDetail),
             ChangeStatus.NotUndoable => entry.StatusDetail ?? "This change can no longer be undone.",
@@ -118,8 +139,10 @@ public sealed partial class SessionChangesSheet : UserControl
             var button = new Button
             {
                 Content = isRetry ? "Retry" : "Undo",
+                MinWidth = 68,
                 VerticalAlignment = VerticalAlignment.Center,
-                BorderBrush = GoldBrush,
+                BorderBrush = _goldBrush,
+                IsEnabled = !ChangeLog.Instance.IsUndoInFlight,
             };
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
                 button, (isRetry ? "Retry undo of " : "Undo ") + entry.Label);
@@ -136,6 +159,20 @@ public sealed partial class SessionChangesSheet : UserControl
                 });
             Grid.SetColumn(button, 2);
             grid.Children.Add(button);
+        }
+        else if (entry.Status == ChangeStatus.Undoing)
+        {
+            var progress = new ProgressRing
+            {
+                Width = 20,
+                Height = 20,
+                IsActive = true,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                progress, "Undoing " + entry.Label);
+            Grid.SetColumn(progress, 2);
+            grid.Children.Add(progress);
         }
         else if (entry.Status == ChangeStatus.Undone)
         {

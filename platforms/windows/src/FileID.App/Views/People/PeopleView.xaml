@@ -151,15 +151,17 @@
                               BorderThickness="1"
                               Padding="12"
                               Tag="{x:Bind ClusterId}"
+                              IsTabStop="True"
                               AutomationProperties.Name="{x:Bind Caption}"
-                              AutomationProperties.HelpText="Double-tap to edit name and faces; drag onto another person to merge."
+                              AutomationProperties.HelpText="Click, or press Enter, to see every face in this group and edit its name. Drag onto another group to merge."
                               CanDrag="True"
                               AllowDrop="True"
                               DragStarting="OnClusterDragStarting"
                               DragOver="OnClusterDragOver"
                               DragLeave="OnClusterDragLeave"
                               Drop="OnClusterDrop"
-                              DoubleTapped="OnClusterDoubleTapped">
+                              KeyDown="OnClusterKeyDown"
+                              Tapped="OnClusterTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem Text="Edit name + faces"
@@ -289,6 +291,15 @@
                     <TextBlock x:Name="HiddenUnknownsButtonText" Text="Show" />
                 </Button>
             </Grid>
+            <!-- Small-fragment disclosure. Face clustering over-splits into many
+                 tiny duplicate-burst clusters; the grid holds those back so the
+                 real people are findable. Say so plainly rather than dropping
+                 them silently — they stay searchable either way. -->
+            <TextBlock x:Name="HiddenSmallClustersText"
+                       Visibility="Collapsed"
+                       TextWrapping="Wrap"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
             <StackPanel Orientation="Horizontal"
                         Spacing="12"
                         Visibility="{x:Bind FooterVisibility, Mode=OneWay}">

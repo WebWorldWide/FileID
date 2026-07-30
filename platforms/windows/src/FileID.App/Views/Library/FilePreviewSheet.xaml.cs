@@ -1217,6 +1217,8 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = false;
+            var priorUserTags = await Services.TagChangeJournal
+                .CapturePriorUserTagsAsync(new[] { fileId });
             // Await the engine's BulkActionResult instead of fire-and-forget:
             // declaring success on the IPC send alone told the user the tags
             // applied even when the engine reported failure (the silent-failure
@@ -1225,6 +1227,15 @@ public sealed partial class FilePreviewSheet : UserControl
                 "applyTags",
                 () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { fileId }, tags, mode: "add"),
                 TimeSpan.FromSeconds(30));
+            var confirmedFileIds = Services.BulkActionResultTruth
+                .ConfirmedSuccessfulFileIds(result, new[] { fileId });
+            if (confirmedFileIds.Count > 0)
+            {
+                Services.TagChangeJournal.PushUndo(
+                    Services.TagChangeJournal.FormatLabel("add", confirmedFileIds.Count),
+                    confirmedFileIds,
+                    priorUserTags);
+            }
             // Navigated away while tagging was in flight — the tags still applied
             // to the captured file, but its status/input mutations would land on
             // the wrong (now-displayed) file. Skip the UI update.

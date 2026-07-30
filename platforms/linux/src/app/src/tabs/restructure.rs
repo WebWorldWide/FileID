@@ -28,8 +28,8 @@ use gtk::glib::clone;
 
 use crate::engine_client::{EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    ApplyRestructurePayload, CommandPayload, PlanRestructurePayload, RestructureMove,
-    RestructurePlan, UndoRestructurePayload,
+    ApplyRestructurePayload, CommandPayload, Empty, PlanRestructurePayload,
+    RestructureConfidenceCounts, RestructureMove, RestructurePlan, UndoRestructurePayload,
 };
 
 // Okabe-Ito CVD-safe palette (RESTRUCTURE.md §7) as RGB triples in 0..1.
@@ -137,6 +137,12 @@ struct State {
     can_undo: bool,
     undo_in_flight: bool,
     last_apply_symlinks: bool,
+    cancel_requested: bool,
+    /// Set from `RestructureApplyResult.shortcut_undo_token` after a
+    /// shortcut-mode apply; the only way to undo shortcuts (they leave no
+    /// move journal). Cleared once the shortcut undo fully completes or the
+    /// destination root/plan changes.
+    shortcut_undo_token: Option<String>,
 }
 
 struct Ui {
@@ -155,10 +161,13 @@ struct Ui {
     bottom_spacer: gtk::Box,
     apply_bar: gtk::Box,
     undo_bar: gtk::Box,
+    undo_label: gtk::Label,
     selected_count_label: gtk::Label,
     apply_btn: gtk::Button,
+    cancel_btn: gtk::Button,
     symlink_switch: gtk::Switch,
     apply_hint: gtk::Label,
+    confidence_label: gtk::Label,
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -325,34 +334,11 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     status_row.set_visible(false);
 
     let bottom_spacer = gtk::Box::builder()
-        .height_request(120)
+        .height_request(80)
         .visible(false)
         .build();
 
-    // ── Scroll body ───────────────────────────────────────────────────────────
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(16)
-        .margin_top(16)
-        .margin_bottom(16)
-        .margin_start(16)
-        .margin_end(16)
-        .css_classes(["fileid-tab"])
-        .build();
-    body.append(&header);
-    body.append(&stack);
-    body.append(&status_row);
-    body.append(&bottom_spacer);
-
-    let scroller = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&body)
-        .css_classes(["fileid-tab"])
-        .build();
-
-    // ── Bottom bars (undo + apply), floating over the scroll body ─────────────
+    // ── Undo bar, floating over the scroll body ────────────────────────────────
     let (undo_bar, undo_inner) = padded_card();
     undo_inner.set_orientation(gtk::Orientation::Horizontal);
     undo_inner.set_spacing(10);
@@ -373,6 +359,9 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     undo_inner.append(&undo_btn);
     undo_bar.set_visible(false);
 
+    // ── Apply bar — pinned near the top of the tab (right under the header),
+    // not floating at the bottom, so it's visible the instant a plan is ready
+    // without scrolling past the Sankey + recommendations to find it. ────────
     let (apply_bar, apply_inner) = padded_card();
     apply_inner.set_spacing(6);
     let apply_row = gtk::Box::builder()
@@ -398,9 +387,16 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .sensitive(false)
         .css_classes(["gold-button"])
         .build();
+    let cancel_btn = gtk::Button::builder()
+        .label("Cancel")
+        .sensitive(false)
+        .visible(false)
+        .tooltip_text("Stop the restructure that is running. Files already moved stay moved and remain undoable.")
+        .build();
     apply_row.append(&selected_count_label);
     apply_row.append(&symlink_label);
     apply_row.append(&symlink_switch);
+    apply_row.append(&cancel_btn);
     apply_row.append(&apply_btn);
     let apply_hint = gtk::Label::builder()
         .label("")
@@ -408,10 +404,49 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .wrap(true)
         .css_classes(["dim-label", "caption"])
         .build();
+    let confidence_label = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .css_classes(["dim-label", "caption"])
+        .build();
     apply_inner.append(&apply_row);
+    apply_inner.append(&confidence_label);
     apply_inner.append(&apply_hint);
     apply_bar.set_visible(false);
 
+    // ── Scroll body ───────────────────────────────────────────────────────────
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(16)
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .css_classes(["fileid-tab"])
+        .build();
+    body.append(&header);
+    body.append(&apply_bar);
+    // Status sits directly under the apply bar, ABOVE the plan list: the bar
+    // moved to the top, and `stack` can be thousands of rows tall, so leaving
+    // status below it pushed every apply/cancel/undo result (including
+    // "Stopped — N already moved, still undoable") off-screen.
+    body.append(&status_row);
+    body.append(&stack);
+    body.append(&bottom_spacer);
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&body)
+        .css_classes(["fileid-tab"])
+        .build();
+
+    // The undo bar is the only bar still floated over the scroll body — it
+    // reports the outcome of a run that already happened, so it doesn't need
+    // top-of-tab prominence the way the pending apply bar does.
     let bottom_bars = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
@@ -422,7 +457,6 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .margin_bottom(16)
         .build();
     bottom_bars.append(&undo_bar);
-    bottom_bars.append(&apply_bar);
 
     let root = gtk::Overlay::builder().css_classes(["fileid-tab"]).build();
     root.set_child(Some(&scroller));
@@ -444,10 +478,13 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         bottom_spacer,
         apply_bar,
         undo_bar,
+        undo_label,
         selected_count_label,
         apply_btn: apply_btn.clone(),
+        cancel_btn: cancel_btn.clone(),
         symlink_switch: symlink_switch.clone(),
         apply_hint,
+        confidence_label,
     });
 
     update_apply_hint(&ui, false);
@@ -624,12 +661,21 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     let Some(plan_id) = plan.plan_id.clone() else {
                         return;
                     };
+                    // The confirmation dialog must authorize the number that
+                    // will ACTUALLY move: applying a stored plan executes only
+                    // the Auto tier (engine `auto_tier_only`), so quoting the
+                    // full plan total asked the user to consent to far more
+                    // files than the engine touches — and contradicted the
+                    // apply bar directly above it. Windows and macOS both
+                    // quote the Auto count here.
+                    let Some(counts) = complete_confidence_counts(plan) else {
+                        return;
+                    };
                     ApplyRequest {
                         root,
                         moves: Vec::new(),
                         plan_id: Some(plan_id),
-                        total: usize::try_from(plan.total_moves.unwrap_or(plan.moves.len() as u64))
-                            .unwrap_or(usize::MAX),
+                        total: usize::try_from(counts.auto).unwrap_or(usize::MAX),
                     }
                 } else {
                     let moves: Vec<RestructureMove> = plan
@@ -654,6 +700,37 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
+    cancel_btn.connect_clicked(clone!(
+        #[strong]
+        engine,
+        #[strong]
+        state,
+        #[strong]
+        ui,
+        move |_| {
+            {
+                let mut s = state.borrow_mut();
+                if !s.applying || s.cancel_requested {
+                    return;
+                }
+                s.cancel_requested = true;
+            }
+            ui.cancel_btn.set_sensitive(false);
+            // Scoped to the restructure only: a library scan sharing this engine
+            // must survive it, which is why this is not cancelScan.
+            let sent = engine
+                .borrow_mut()
+                .send(CommandPayload::CancelRestructure(Empty {}));
+            if sent.is_err() {
+                state.borrow_mut().cancel_requested = false;
+                ui.cancel_btn.set_sensitive(true);
+                set_status(&ui, "Engine is unavailable — try again in a moment.", true);
+            } else {
+                set_status(&ui, "Stopping the restructure…", false);
+            }
+        }
+    ));
+
     undo_btn.connect_clicked(clone!(
         #[strong]
         engine,
@@ -668,10 +745,15 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             let Some(root) = state.borrow().root.clone() else {
                 return;
             };
+            // A shortcut-mode apply has no move journal — the token captured
+            // from its RestructureApplyResult is the ONLY way the engine can
+            // undo it (routes to `undo_shortcuts` instead of `undo_last`).
+            let shortcut_undo_token = state.borrow().shortcut_undo_token.clone();
             {
                 let mut s = state.borrow_mut();
                 s.applying = true;
                 s.undo_in_flight = true;
+                s.cancel_requested = false;
             }
             set_status(&ui, "Undoing the last restructure…", false);
             let sent =
@@ -679,6 +761,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     .borrow_mut()
                     .send(CommandPayload::UndoRestructure(UndoRestructurePayload {
                         library_root: root,
+                        shortcut_undo_token,
                     }));
             if sent.is_err() {
                 {
@@ -689,6 +772,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 set_status(&ui, "Engine is unavailable — try again in a moment.", true);
             }
             update_apply_controls(&state, &ui);
+            update_bars(&state, &ui);
         }
     ));
 
@@ -782,8 +866,11 @@ fn set_root_and_plan(
         // Undo is journal-keyed by the root that was applied. Switching to a
         // different destination invalidates the "Undo last run" affordance —
         // leaving it armed would send the NEW root to UndoRestructure and
-        // silently no-op (or error) against the wrong journal. Clear it.
+        // silently no-op (or error) against the wrong journal. Clear it, and
+        // drop any shortcut undo token with it — it's scoped to the old root
+        // and must never be replayed against the new one.
         s.can_undo = false;
+        s.shortcut_undo_token = None;
     }
     ui.dest_label.set_text(&format!("Destination: {root}"));
     ui.dest_label.set_visible(true);
@@ -844,6 +931,9 @@ fn on_plan(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, plan: RestructurePlan) {
 
     let truncated = plan.truncated;
     let total_moves = plan.total_moves.unwrap_or(plan.moves.len() as u64);
+    // Captured before `plan` moves into state below — the truncated-plan
+    // empty-state copy needs it to describe what Apply will actually do.
+    let confidence_counts = complete_confidence_counts(&plan).cloned();
     let proposals = map_proposals(&plan);
     let summary = make_summary(&plan, &proposals);
     let sankey = build_sankey(&proposals);
@@ -881,13 +971,33 @@ fn on_plan(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, plan: RestructurePlan) {
             "Your library is already organized — every folder is a recognized anchor.",
         );
     } else if truncated {
-        show_empty(
-            ui,
-            "Large plan ready",
-            &format!(
-                "The engine stored all {total_moves} moves as one bounded, undoable plan. Apply runs the complete plan without loading every path into the app."
+        // Applying a stored plan only ever runs the Auto tier (engine's
+        // `apply.apply_iter(auto_tier_only(stored_moves), ...)`) — Review /
+        // Ask / unclassified moves are held back. Say so; "Apply runs the
+        // complete plan" was a straight-up lie about what clicking Apply does.
+        let body = match confidence_counts.as_ref() {
+            Some(counts) if counts.auto > 0 => {
+                let held_back = total_moves.saturating_sub(counts.auto);
+                format!(
+                    "The engine stored all {total_moves} moves as one bounded plan. Apply runs only \
+                     the {} Auto-confidence move{} now — {held_back} Review, needs-a-decision, or \
+                     unclassified move{} stay put until you plan a smaller folder to inspect them.",
+                    counts.auto,
+                    plural(counts.auto as usize),
+                    plural(held_back as usize),
+                )
+            }
+            Some(_) => format!(
+                "The engine stored all {total_moves} moves as one bounded plan, but none are \
+                 Auto-confidence — Apply would do nothing. Plan a smaller folder to review them \
+                 individually."
             ),
-        );
+            None => format!(
+                "The engine stored all {total_moves} moves as one bounded plan, but didn't return \
+                 complete confidence totals for it — recompute the plan before applying."
+            ),
+        };
+        show_empty(ui, "Large plan ready", &body);
     } else {
         ui.sankey_stat
             .set_text(&sankey_header_stat(&state.borrow().proposals));
@@ -898,6 +1008,16 @@ fn on_plan(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, plan: RestructurePlan) {
     }
     update_bars(state, ui);
     update_apply_controls(state, ui);
+    update_confidence_summary(state, ui);
+}
+
+/// Mirrors the engine's own journal/manifest retention rule
+/// (`restructure_apply.rs` `undo_last` / `undo_shortcuts`): the record is
+/// cleared ONLY when the undo fully completes without cancellation and
+/// without failures. A cancelled or partially-failed undo must stay undoable
+/// so the user can retry it and put the remaining files back.
+fn undo_fully_completed(result: &fileid_engine::ipc::RestructureApplyResult) -> bool {
+    !result.cancelled && result.failed == 0
 }
 
 fn on_apply_result(
@@ -906,20 +1026,51 @@ fn on_apply_result(
     ui: &Rc<Ui>,
     result: fileid_engine::ipc::RestructureApplyResult,
 ) {
-    let was_undo = {
+    let (was_undo, was_cancelled, now_undoable, shortcut_missing_token) = {
         let mut s = state.borrow_mut();
         let u = s.undo_in_flight;
+        let c = s.cancel_requested;
         s.undo_in_flight = false;
         s.applying = false;
-        s.can_undo = if u {
-            false
+        s.cancel_requested = false;
+        let mut shortcut_missing_token = false;
+        if u {
+            let fully_completed = undo_fully_completed(&result);
+            s.can_undo = !fully_completed;
+            if fully_completed {
+                s.shortcut_undo_token = None;
+            }
+        } else if s.last_apply_symlinks {
+            // Shortcut applies have no move journal — the token the engine
+            // just handed back is the ONLY way to undo them.
+            s.shortcut_undo_token = result.shortcut_undo_token.clone();
+            s.can_undo = s.shortcut_undo_token.is_some() && result.applied > 0;
+            shortcut_missing_token = result.applied > 0 && s.shortcut_undo_token.is_none();
         } else {
-            !s.last_apply_symlinks && result.applied > 0
-        };
-        u
+            s.shortcut_undo_token = None;
+            s.can_undo = result.applied > 0;
+        }
+        (u, c, s.can_undo, shortcut_missing_token)
     };
     match result.privilege_error.as_ref().filter(|p| !p.is_empty()) {
         Some(p) => set_status(ui, p, true),
+        None if shortcut_missing_token => set_status(
+            ui,
+            "Shortcuts were created, but the engine did not return a shortcut undo token — \
+             remove the links manually.",
+            true,
+        ),
+        None if was_cancelled => set_status(
+            ui,
+            &format!(
+                "Stopped — {} file{} already {}{}",
+                result.applied,
+                plural(result.applied as usize),
+                if was_undo { "put back" } else { "moved" },
+                if now_undoable { ", still undoable" } else { "" }
+            ),
+            false,
+        ),
         None if was_undo => set_status(
             ui,
             &format!(
@@ -946,13 +1097,21 @@ fn on_error(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, msg: &str) {
         (s.loading, s.applying)
     };
     if was_applying {
-        state.borrow_mut().applying = false;
+        {
+            let mut s = state.borrow_mut();
+            s.applying = false;
+            s.cancel_requested = false;
+        }
         set_status(
             ui,
             "The engine reported an error — recheck your library and try again.",
             true,
         );
         update_apply_controls(state, ui);
+        // Cancel's visibility is owned by update_bars (gated on s.applying),
+        // so without this the button stays on screen and clickable after the
+        // apply already failed — a control that silently does nothing.
+        update_bars(state, ui);
     }
     if was_loading {
         state.borrow_mut().loading = false;
@@ -972,6 +1131,7 @@ fn on_exited(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
             let mut s = state.borrow_mut();
             s.applying = false;
             s.undo_in_flight = false;
+            s.cancel_requested = false;
         }
         set_status(
             ui,
@@ -1055,6 +1215,7 @@ fn do_apply(
             return;
         }
         s.applying = true;
+        s.cancel_requested = false;
         s.last_apply_symlinks = use_symlinks;
     }
     let sent =
@@ -1073,6 +1234,7 @@ fn do_apply(
         set_status(ui, "Applying moves…", false);
     }
     update_apply_controls(state, ui);
+    update_bars(state, ui);
 }
 
 // ─── Stat hero ───────────────────────────────────────────────────────────────
@@ -1486,14 +1648,67 @@ fn open_drilldown(state: &Rc<RefCell<State>>, ui: &Rc<Ui>, scope: DrillScope) {
 
 // ─── Shared UI updates ───────────────────────────────────────────────────────
 
+fn total_moves(plan: &RestructurePlan) -> u64 {
+    plan.total_moves.unwrap_or(plan.moves.len() as u64)
+}
+
+/// Engine-side confidence accounting for the WHOLE plan, accepted only when it
+/// reconciles with the move total. A truncated plan shows a sample, so the
+/// tallies are the only trustworthy description of the part the user cannot
+/// see; a mismatch means stale or partial accounting and must not be trusted.
+/// Mirrors `RestructurePlanPresentation.TryGetCompleteConfidenceCounts`.
+fn complete_confidence_counts(plan: &RestructurePlan) -> Option<&RestructureConfidenceCounts> {
+    let counts = plan.confidence_counts.as_ref()?;
+    let sum = counts
+        .auto
+        .checked_add(counts.review)?
+        .checked_add(counts.ask)?
+        .checked_add(counts.unknown)?;
+    (sum == total_moves(plan)).then_some(counts)
+}
+
+/// A truncated plan is applied by `plan_id` from the engine's stored copy, so
+/// the user is authorising moves the list never showed. Require complete
+/// confidence accounting with at least one auto-confidence move before that is
+/// allowed. Mirrors `RestructurePlanPresentation.CanApplyStoredPlan`.
+fn can_apply_stored_plan(plan: &RestructurePlan) -> bool {
+    plan.truncated
+        && plan
+            .plan_id
+            .as_ref()
+            .is_some_and(|id| !id.trim().is_empty())
+        && complete_confidence_counts(plan).is_some_and(|counts| counts.auto > 0)
+}
+
+/// The apply-bar label for a truncated (stored-plan) apply. It must describe
+/// what Apply will actually do — only the Auto tier — not the full plan size;
+/// "all {total} moves selected" was a lie for any plan with Review/Ask/
+/// unclassified moves. Falls back to a safe placeholder when the engine's
+/// confidence tallies don't reconcile with the move total, rather than
+/// falling through to a raw, unchecked read.
+fn stored_plan_apply_label(plan: &RestructurePlan) -> String {
+    let total = total_moves(plan);
+    match complete_confidence_counts(plan) {
+        Some(counts) if counts.auto > 0 => {
+            let held_back = total.saturating_sub(counts.auto);
+            format!(
+                "{} Auto move{} will apply · {held_back} held back",
+                counts.auto,
+                plural(counts.auto as usize)
+            )
+        }
+        Some(_) => format!("no Auto moves — all {total} held back for review"),
+        None => "— recompute the plan before applying".to_string(),
+    }
+}
+
 fn update_apply_controls(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     let s = state.borrow();
     if let Some(plan) = s.plan.as_ref().filter(|plan| plan.truncated) {
-        let total = plan.total_moves.unwrap_or(plan.moves.len() as u64);
         ui.selected_count_label
-            .set_text(&format!("all {total} moves selected"));
+            .set_text(&stored_plan_apply_label(plan));
         ui.apply_btn
-            .set_sensitive(total > 0 && plan.plan_id.is_some() && !s.applying);
+            .set_sensitive(can_apply_stored_plan(plan) && !s.applying);
         return;
     }
     let total = s.proposals.len();
@@ -1501,6 +1716,45 @@ fn update_apply_controls(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     ui.selected_count_label
         .set_text(&format!("{sel} of {total} selected"));
     ui.apply_btn.set_sensitive(sel > 0 && !s.applying);
+}
+
+fn update_confidence_summary(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
+    let s = state.borrow();
+    let Some(plan) = s.plan.as_ref() else {
+        ui.confidence_label.set_visible(false);
+        return;
+    };
+    let Some(counts) = complete_confidence_counts(plan) else {
+        if plan.truncated {
+            ui.confidence_label.set_text(
+                "This plan is too large to list in full and the engine did not return complete \
+                 confidence totals — recompute the plan before applying.",
+            );
+            ui.confidence_label.set_visible(true);
+        } else {
+            ui.confidence_label.set_visible(false);
+        }
+        return;
+    };
+    let mut parts = Vec::new();
+    if counts.auto > 0 {
+        parts.push(format!("{} confident", counts.auto));
+    }
+    if counts.review > 0 {
+        parts.push(format!("{} to review", counts.review));
+    }
+    if counts.ask > 0 {
+        parts.push(format!("{} need a decision", counts.ask));
+    }
+    if counts.unknown > 0 {
+        parts.push(format!("{} unclassified", counts.unknown));
+    }
+    if parts.is_empty() {
+        ui.confidence_label.set_visible(false);
+        return;
+    }
+    ui.confidence_label.set_text(&parts.join(" · "));
+    ui.confidence_label.set_visible(true);
 }
 
 fn update_apply_hint(ui: &Rc<Ui>, use_symlinks: bool) {
@@ -1516,7 +1770,20 @@ fn update_bars(state: &Rc<RefCell<State>>, ui: &Rc<Ui>) {
     let show_apply = !s.proposals.is_empty() && !s.loading;
     ui.apply_bar.set_visible(show_apply);
     ui.undo_bar.set_visible(s.can_undo);
-    ui.bottom_spacer.set_visible(show_apply || s.can_undo);
+    ui.undo_label.set_text(if s.last_apply_symlinks {
+        "Shortcut links were created — you can remove them."
+    } else {
+        "Files were moved on disk — you can put them back."
+    });
+    // Only the undo bar still floats over the scroll body; the apply bar
+    // lives inline near the top now, so it no longer needs reserved space.
+    ui.bottom_spacer.set_visible(s.can_undo);
+    // Cancel only exists while an apply/undo is actually in flight; there is
+    // nothing to cancel otherwise and an always-visible dead button reads as
+    // broken.
+    ui.cancel_btn.set_visible(s.applying);
+    ui.cancel_btn
+        .set_sensitive(s.applying && !s.cancel_requested);
 }
 
 fn set_status(ui: &Rc<Ui>, msg: &str, is_error: bool) {
@@ -2340,4 +2607,182 @@ fn recent_root_async() -> async_channel::Receiver<Option<String>> {
         let _ = tx.send_blocking(recent_root());
     });
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fileid_engine::ipc::RestructureApplyResult;
+
+    fn plan(
+        truncated: bool,
+        plan_id: Option<&str>,
+        total_moves: Option<u64>,
+        confidence: Option<(u64, u64, u64, u64)>,
+    ) -> RestructurePlan {
+        RestructurePlan {
+            library_root: "/library".into(),
+            plan_id: plan_id.map(str::to_owned),
+            total_moves,
+            truncated,
+            moves: Vec::new(),
+            category_counts: Vec::new(),
+            confidence_counts: confidence.map(|(auto, review, ask, unknown)| {
+                RestructureConfidenceCounts {
+                    auto,
+                    review,
+                    ask,
+                    unknown,
+                }
+            }),
+            folder_classifications: None,
+        }
+    }
+
+    #[test]
+    fn confidence_counts_must_reconcile_with_the_move_total() {
+        let good = plan(true, Some("p1"), Some(100), Some((60, 20, 15, 5)));
+        assert!(complete_confidence_counts(&good).is_some());
+
+        let short = plan(true, Some("p1"), Some(100), Some((60, 20, 15, 4)));
+        assert!(
+            complete_confidence_counts(&short).is_none(),
+            "tallies that do not sum to the move total are stale or partial"
+        );
+
+        let absent = plan(true, Some("p1"), Some(100), None);
+        assert!(complete_confidence_counts(&absent).is_none());
+    }
+
+    #[test]
+    fn confidence_totals_cannot_be_overflowed_into_agreement() {
+        let overflow = plan(true, Some("p1"), Some(0), Some((u64::MAX, 1, 0, 0)));
+        assert!(
+            complete_confidence_counts(&overflow).is_none(),
+            "a wrapping sum must not be read as reconciling"
+        );
+    }
+
+    #[test]
+    fn a_truncated_plan_is_only_applicable_with_complete_accounting() {
+        assert!(can_apply_stored_plan(&plan(
+            true,
+            Some("p1"),
+            Some(100),
+            Some((60, 20, 15, 5))
+        )));
+
+        assert!(
+            !can_apply_stored_plan(&plan(true, Some("p1"), Some(100), Some((0, 80, 15, 5)))),
+            "no auto-confidence move means nothing is safe to apply unseen"
+        );
+        assert!(
+            !can_apply_stored_plan(&plan(true, None, Some(100), Some((60, 20, 15, 5)))),
+            "a stored plan cannot be applied without its id"
+        );
+        assert!(
+            !can_apply_stored_plan(&plan(true, Some("   "), Some(100), Some((60, 20, 15, 5)))),
+            "a blank plan id is not an id"
+        );
+        assert!(
+            !can_apply_stored_plan(&plan(true, Some("p1"), Some(100), None)),
+            "a truncated plan with no confidence accounting must stay unapplicable"
+        );
+    }
+
+    #[test]
+    fn an_untruncated_plan_does_not_use_the_stored_plan_path() {
+        assert!(!can_apply_stored_plan(&plan(
+            false,
+            Some("p1"),
+            Some(100),
+            Some((60, 20, 15, 5))
+        )));
+    }
+
+    #[test]
+    fn total_moves_falls_back_to_the_listed_moves() {
+        let mut p = plan(false, None, None, None);
+        assert_eq!(total_moves(&p), 0);
+        p.moves.push(RestructureMove {
+            file_id: 1,
+            source: "/a".into(),
+            destination: "/b".into(),
+            category: "Photos".into(),
+            tier: None,
+            confidence: "auto".into(),
+            reason: None,
+        });
+        assert_eq!(total_moves(&p), 1);
+    }
+
+    #[test]
+    fn stored_plan_apply_label_reports_the_auto_tier_not_the_full_plan() {
+        // The stored-plan apply path only ever runs Auto-confidence moves
+        // (engine's `auto_tier_only`) — the label must say so, not claim all
+        // 100 moves will apply.
+        let label =
+            stored_plan_apply_label(&plan(true, Some("p1"), Some(100), Some((60, 20, 15, 5))));
+        assert!(
+            label.contains("60") && label.contains("40"),
+            "expected the Auto count (60) and the held-back remainder (40), got: {label}"
+        );
+        assert!(
+            !label.contains("100"),
+            "must not claim the full plan total applies, got: {label}"
+        );
+    }
+
+    #[test]
+    fn stored_plan_apply_label_falls_back_safely_without_raw_totals() {
+        let no_auto =
+            stored_plan_apply_label(&plan(true, Some("p1"), Some(100), Some((0, 80, 15, 5))));
+        assert!(no_auto.contains("no Auto moves"), "got: {no_auto}");
+
+        // Tallies that don't reconcile with the move total are stale or
+        // partial — the label must not fall through to an unchecked read of
+        // either number.
+        let unreconciled =
+            stored_plan_apply_label(&plan(true, Some("p1"), Some(100), Some((60, 20, 15, 4))));
+        assert_eq!(unreconciled, "— recompute the plan before applying");
+
+        let absent = stored_plan_apply_label(&plan(true, Some("p1"), Some(100), None));
+        assert_eq!(absent, "— recompute the plan before applying");
+    }
+
+    fn apply_result(applied: u32, failed: u32, cancelled: bool) -> RestructureApplyResult {
+        RestructureApplyResult {
+            applied,
+            failed,
+            privilege_error: None,
+            cancelled,
+            planned: None,
+            remaining: None,
+            shortcut_undo_token: None,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_or_partially_failed_undo_keeps_the_journal_live() {
+        // Mirrors restructure_apply.rs: `if !result.cancelled && result.failed
+        // == 0` is the ONLY condition that retires the journal. Anything else
+        // must leave it retryable, or the "still undoable" status text (and
+        // the Undo button it describes) would contradict each other.
+        assert!(
+            !undo_fully_completed(&apply_result(3, 0, true)),
+            "a cancelled undo must stay retryable"
+        );
+        assert!(
+            !undo_fully_completed(&apply_result(3, 1, false)),
+            "a partially-failed undo must stay retryable"
+        );
+        assert!(
+            !undo_fully_completed(&apply_result(0, 0, true)),
+            "cancelled with nothing yet applied is still not a completion"
+        );
+        assert!(
+            undo_fully_completed(&apply_result(5, 0, false)),
+            "only a clean, non-cancelled undo may retire the journal"
+        );
+    }
 }

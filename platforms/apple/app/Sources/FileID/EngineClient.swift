@@ -692,7 +692,17 @@ public final class EngineClient {
             // makes the run undoable; the undo's own reply clears it. (R2)
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
-                canUndoRestructure = false
+                // A cancelled or partially-failed undo must KEEP the
+                // affordance: Restructure.undoLast only clears the on-disk
+                // journal when the undo both completed and had zero failures
+                // (Pipeline/Restructure.swift), so the remaining files are
+                // still relocated and still reversible. Clearing this
+                // unconditionally stranded a half-reverted library with no UI
+                // path back — permanently, since this flag is only ever set
+                // true by a forward apply and is never re-seeded from disk.
+                // Mirrors Windows NextCanUndoRestructure and Linux
+                // undo_fully_completed.
+                canUndoRestructure = result.cancelled || result.failed > 0
             } else {
                 canUndoRestructure = result.applied > 0
             }
@@ -700,7 +710,8 @@ public final class EngineClient {
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
-        case .bulkActionResult,
+        case .healthCheckResult,
+             .bulkActionResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -1057,7 +1068,13 @@ public final class EngineClient {
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
         guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
-        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true, fileIDs: nil)) else { return }
+        // Every current call site is a whole-library run (no fileIDs), so the
+        // persisted Deep Analyze exclusion list is threaded through here —
+        // the one choke point every deepAnalyzeAll send passes through —
+        // rather than at each call site. Sent as nil (omitted on the wire)
+        // when empty; ignored engine-side whenever fileIDs is present.
+        let excluded = DeepAnalyzeSettings.shared.excludedFolders
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true, fileIDs: nil, excludedFolders: excluded.isEmpty ? nil : excluded)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
@@ -1081,8 +1098,11 @@ public final class EngineClient {
     }
 
     /// Apply the selected `moves` through the engine butler. macOS performs
-    /// real on-disk moves; `useSymlinks` is sent for wire parity and ignored
-    /// engine-side. The reply lands on `restructureApplyResult` and bumps
+    /// real on-disk moves only — there is no symlink-preview apply mode, so
+    /// the engine now rejects `useSymlinks: true` with an error instead of
+    /// silently performing a real move (audit R3; see DECISIONS.md). Callers
+    /// should not pass `true`; the parameter exists for wire parity with the
+    /// Windows engine. The reply lands on `restructureApplyResult` and bumps
     /// `restructureApplyResultSignal`.
     @discardableResult
     public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
@@ -1106,6 +1126,16 @@ public final class EngineClient {
         let sent = send(.undoRestructure(libraryRoot: libraryRoot))
         if sent { undoRestructureInFlight = true }
         return sent
+    }
+
+    /// Cooperatively cancel the active restructure plan/apply/undo — never a
+    /// library scan (that's `cancel()` → `.cancelScan`; the schema requires
+    /// `.cancelRestructure` stay isolated from it). The engine finishes the
+    /// move currently in flight (each is already durable before the next
+    /// cancel-poll) and replies with a terminal `restructureApplyResult`
+    /// whose `cancelled` is true.
+    public func cancelRestructure() {
+        send(.cancelRestructure)
     }
 
     /// Pre-fetch a VLM's weights without running inference. Used by the

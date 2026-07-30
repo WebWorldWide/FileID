@@ -42,6 +42,38 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private long _refreshGen;
     private int _activeLoads;
 
+    /// <summary>Minimum faces a cluster needs before it appears in the People
+    /// grid (named clusters are always shown regardless — see the HAVING clause).
+    ///
+    /// Face clustering over-splits: on a real 135k-file library it produced 3,108
+    /// clusters, of which 2,271 held 5 or fewer faces — overwhelmingly
+    /// duplicate-burst fragments of one shot rather than distinct people. Showing
+    /// all of them made the tab unusable ("thousands of leftover faces") and
+    /// buried the few dozen clusters actually worth naming. 6 is the measured
+    /// knee: clusters of >=6 faces have mean pairwise cosine 0.71-0.86 (coherent
+    /// identities), and dropping to >=6 cut the surfaced count by roughly 3/4
+    /// while keeping every large cluster.
+    ///
+    /// Fragments are NOT deleted and remain fully searchable — they are only
+    /// held back from the grid, and any of them can still be reached by naming or
+    /// through merge suggestions.</summary>
+    public const int MinFacesPerCluster = 6;
+
+    /// <summary>Count of clusters withheld by <see cref="MinFacesPerCluster"/> on
+    /// the last refresh, so the view can disclose them instead of silently
+    /// dropping them.</summary>
+    public int HiddenSmallClusterCount
+    {
+        get => _hiddenSmallClusterCount;
+        private set
+        {
+            if (_hiddenSmallClusterCount == value) return;
+            _hiddenSmallClusterCount = value;
+            OnPropertyChanged();
+        }
+    }
+    private int _hiddenSmallClusterCount;
+
     public PeopleViewModel(string dbPath, DispatcherQueue ui, Func<bool>? hideUnknown = null)
     {
         _dbPath = dbPath;
@@ -196,11 +228,18 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 )                                                       AS anchor_face_id
             FROM persons p
             JOIN face_prints fp ON fp.person_id = p.id
+                 AND COALESCE(fp.excluded, 0) = 0
             WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
             GROUP BY p.id
+            HAVING COUNT(fp.id) >= $min_faces
+               -- A cluster the user has already named is always shown, however
+               -- small: hiding someone's own labelled person would be wrong.
+               OR (p.name IS NOT NULL AND TRIM(p.name) <> '')
+               OR (p.first_name IS NOT NULL AND TRIM(p.first_name) <> '')
             ORDER BY member_count DESC
             """;
         cmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
+        cmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -214,8 +253,35 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 AnchorFaceId = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
             });
         }
+        reader.Close();
+
+        // Count what the size floor withheld, so the view can disclose it rather
+        // than silently hiding clusters. Same predicate as above, inverted.
+        using var hiddenCmd = conn.CreateCommand();
+        hiddenCmd.CommandText = """
+            SELECT COUNT(*) FROM (
+                SELECT p.id
+                FROM persons p
+                JOIN face_prints fp ON fp.person_id = p.id
+                     AND COALESCE(fp.excluded, 0) = 0
+                WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
+                GROUP BY p.id
+                HAVING COUNT(fp.id) < $min_faces
+                   AND (p.name IS NULL OR TRIM(p.name) = '')
+                   AND (p.first_name IS NULL OR TRIM(p.first_name) = '')
+            )
+            """;
+        hiddenCmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
+        hiddenCmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
+        var hidden = hiddenCmd.ExecuteScalar();
+        _pendingHiddenCount = hidden is long l ? (int)l : Convert.ToInt32(hidden ?? 0);
+
         return rows;
     }
+
+    /// Carried from the DB worker to the UI thread by ApplyOnUi, so
+    /// HiddenSmallClusterCount is only published alongside its own row set.
+    private int _pendingHiddenCount;
 
     private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
@@ -226,6 +292,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             Replace(rows);
+            HiddenSmallClusterCount = _pendingHiddenCount;
         });
         if (_ui.HasThreadAccess)
         {

@@ -121,6 +121,14 @@ internal sealed class AppSettings
     /// case-insensitively, and caps the list.</summary>
     public List<string> ExcludedFolders { get; set; } = new();
 
+    /// <summary>Folders excluded from the whole-library Deep Analyze pass
+    /// (deepAnalyzeAll with no fileIDs). Separate from ExcludedFolders —
+    /// deliberately: a folder can be fine to catalog/tag/search but too
+    /// slow or private to run the VLM over. Sent fresh with every
+    /// deepAnalyzeAll; an explicit selection (Analyze Selected) is never
+    /// filtered by this list. Same sanitization as ExcludedFolders.</summary>
+    public List<string> DeepAnalyzeExcludedFolders { get; set; } = new();
+
     /// <summary>Show the "Review changes before closing?" prompt when the
     /// session change log still has undoable entries at window close.
     /// Cleared by the dialog's "Don't ask me again" checkbox.</summary>
@@ -183,11 +191,14 @@ internal sealed class AppSettings
     /// auto-tagger. v5: non-commercial qwen2_5_vl_3b removed (Qwen Research
     /// License) — RAM++ is the auto-tagger and Qwen2.5-VL-7B (Apache) is the
     /// default Deep Analyze model; any leftover 3B value migrates to 7B.
-    /// v6: ExcludedFolders + ConfirmCloseOnPendingChanges added.</summary>
-    private const int CurrentSchemaVersion = 6;
+    /// v6: ExcludedFolders + ConfirmCloseOnPendingChanges added.
+    /// v7: DeepAnalyzeExcludedFolders added.</summary>
+    private const int CurrentSchemaVersion = 7;
 
-    /// <summary>Tamper bound for ExcludedFolders — a hand-edited settings.json
-    /// can't make every scan drag a giant exclusion list through IPC.</summary>
+    /// <summary>Tamper bound for ExcludedFolders / DeepAnalyzeExcludedFolders
+    /// — a hand-edited settings.json can't make every scan or Deep Analyze
+    /// run drag a giant exclusion list through IPC. Matches the schema's
+    /// deepAnalyzeAll.excludedFolders maxItems.</summary>
     private const int MaxExcludedFolders = 256;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
@@ -251,6 +262,7 @@ internal sealed class AppSettings
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
         s.ExcludedFolders = SanitizeExcludedFolders(s.ExcludedFolders);
+        s.DeepAnalyzeExcludedFolders = SanitizeExcludedFolders(s.DeepAnalyzeExcludedFolders);
     }
 
     /// <summary>Drop null/whitespace/relative/invalid entries, trim trailing
@@ -350,6 +362,7 @@ internal sealed class AppSettings
         // the snapshot being serialized.
         var clone = (AppSettings)MemberwiseClone();
         clone.ExcludedFolders = new List<string>(ExcludedFolders);
+        clone.DeepAnalyzeExcludedFolders = new List<string>(DeepAnalyzeExcludedFolders);
         return clone;
     }
 

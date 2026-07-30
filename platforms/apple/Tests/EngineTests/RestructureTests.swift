@@ -658,6 +658,14 @@ struct RestructureApplyTests {
         #expect(plan.truncated)
         #expect(plan.totalMoves == total)
         #expect(plan.moves.count == Restructure.storedPlanPreviewCap)
+        let confidence = try #require(plan.confidenceCounts)
+        #expect(confidence.auto == 0)
+        #expect(confidence.review == 0)
+        #expect(confidence.ask == total)
+        #expect(confidence.unknown == 0)
+        #expect(
+            confidence.auto + confidence.review + confidence.ask + confidence.unknown
+                == total)
         let planID = try #require(plan.planID)
         #expect(FileManager.default.fileExists(
             atPath: planDir.appendingPathComponent("\(planID).ndjson").path))
@@ -685,5 +693,93 @@ struct RestructureApplyTests {
         let file = tmp.appendingPathComponent("\(stored.planID).ndjson")
         let data = try Data(contentsOf: file)
         #expect(data.split(separator: 0x0A).count == total + 1)
+    }
+
+    /// Audit R1 (data-safety fix): a stored/truncated plan's rows past the
+    /// preview cap were NEVER shown to the user, so `applyStoredPlan` must
+    /// apply only the "auto" tier — exactly like the Rust engine's
+    /// `auto_tier_only` gate — and hold Review/Ask/unknown-confidence rows
+    /// back rather than moving them sight-unseen.
+    @Test("applyStoredPlan applies only the Auto tier; Review/Ask/unknown stay put")
+    func applyStoredPlanFiltersToAutoTier() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDStoredPlanTierFilter-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let incoming = root.appendingPathComponent("incoming")
+        try FileManager.default.createDirectory(at: incoming, withIntermediateDirectories: true)
+
+        let autoSrc = incoming.appendingPathComponent("auto.jpg")
+        let reviewSrc = incoming.appendingPathComponent("review.jpg")
+        let askSrc = incoming.appendingPathComponent("ask.jpg")
+        let unknownSrc = incoming.appendingPathComponent("unknown.jpg")
+        for src in [autoSrc, reviewSrc, askSrc, unknownSrc] {
+            try Data(src.lastPathComponent.utf8).write(to: src)
+        }
+
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: autoSrc.path)
+        try await insertRow(db, id: 2, path: reviewSrc.path)
+        try await insertRow(db, id: 3, path: askSrc.path)
+        try await insertRow(db, id: 4, path: unknownSrc.path)
+
+        let autoDest = root.appendingPathComponent("Photos/auto.jpg")
+        let reviewDest = root.appendingPathComponent("Photos/review.jpg")
+        let askDest = root.appendingPathComponent("Photos/ask.jpg")
+        let unknownDest = root.appendingPathComponent("Photos/unknown.jpg")
+
+        let moves = [
+            RestructureMove(fileID: 1, source: autoSrc.path, destination: autoDest.path,
+                            category: "photo", confidence: "auto"),
+            RestructureMove(fileID: 2, source: reviewSrc.path, destination: reviewDest.path,
+                            category: "photo", confidence: "review"),
+            RestructureMove(fileID: 3, source: askSrc.path, destination: askDest.path,
+                            category: "photo", confidence: "ask"),
+            RestructureMove(fileID: 4, source: unknownSrc.path, destination: unknownDest.path,
+                            category: "photo", confidence: ""),
+        ]
+        let planDir = tmp.appendingPathComponent("plans")
+        let stored = try Restructure.storePlan(
+            libraryRoot: root.path, moves: moves, directory: planDir)
+
+        let result = try await Restructure.applyStoredPlan(
+            planID: stored.planID, expectedRoot: root.path,
+            database: db, libraryRoot: root, directory: planDir)
+
+        #expect(result.moved == 1)
+        #expect(result.failed == 0)
+        #expect(result.cancelled == false)
+        #expect(result.heldReview == 1)
+        #expect(result.heldAsk == 1)
+        #expect(result.heldUnknown == 1)
+
+        #expect(FileManager.default.fileExists(atPath: autoDest.path), "auto move applied")
+        #expect(!FileManager.default.fileExists(atPath: autoSrc.path))
+
+        // Review/Ask/unknown must stay exactly where they were — the whole
+        // point of this fix: those rows were never shown to the user.
+        #expect(FileManager.default.fileExists(atPath: reviewSrc.path))
+        #expect(!FileManager.default.fileExists(atPath: reviewDest.path))
+        #expect(FileManager.default.fileExists(atPath: askSrc.path))
+        #expect(!FileManager.default.fileExists(atPath: askDest.path))
+        #expect(FileManager.default.fileExists(atPath: unknownSrc.path))
+        #expect(!FileManager.default.fileExists(atPath: unknownDest.path))
+
+        let pathAuto: String? = try await db.pool.read { d in
+            try String.fetchOne(d, sql: "SELECT path_text FROM files WHERE id = 1")
+        }
+        #expect(pathAuto == autoDest.path)
+        let pathReview: String? = try await db.pool.read { d in
+            try String.fetchOne(d, sql: "SELECT path_text FROM files WHERE id = 2")
+        }
+        #expect(pathReview == reviewSrc.path)
+        let pathAsk: String? = try await db.pool.read { d in
+            try String.fetchOne(d, sql: "SELECT path_text FROM files WHERE id = 3")
+        }
+        #expect(pathAsk == askSrc.path)
+        let pathUnknown: String? = try await db.pool.read { d in
+            try String.fetchOne(d, sql: "SELECT path_text FROM files WHERE id = 4")
+        }
+        #expect(pathUnknown == unknownSrc.path)
     }
 }

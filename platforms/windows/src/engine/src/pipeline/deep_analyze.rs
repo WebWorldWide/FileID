@@ -87,6 +87,24 @@ pub enum AnalyzeMode {
     CaptionAndTags,
 }
 
+impl AnalyzeMode {
+    fn requests_caption(self) -> bool {
+        matches!(self, Self::CaptionOnly | Self::Both | Self::CaptionAndTags)
+    }
+
+    fn requests_tags(self) -> bool {
+        matches!(self, Self::TagsOnly | Self::Both | Self::CaptionAndTags)
+    }
+
+    fn requests_rename(self) -> bool {
+        matches!(self, Self::RenameOnly | Self::Both)
+    }
+
+    fn establishes_completion(self) -> bool {
+        self == Self::Both
+    }
+}
+
 /// Run Deep Analyze on a single file: pull image bytes (image, video
 /// keyframe, or PDF page-1 via shell helpers) → call the VLM via the
 /// subprocess wrapper → write results back to the DB. Cancellation
@@ -216,6 +234,7 @@ pub async fn analyze_file(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -491,6 +510,7 @@ async fn analyze_metadata_named_file(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -700,9 +720,30 @@ async fn transcode_image_to_jpeg(
 ) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-        validate_vlm_image_dimensions(&p)?;
-        let img = image::open(&p)
-            .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
+        let image_rs_decode = || -> anyhow::Result<image::DynamicImage> {
+            validate_vlm_image_dimensions(&p)?;
+            image::open(&p).map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))
+        };
+        let img = match image_rs_decode() {
+            Ok(img) => img,
+            Err(primary_error) => {
+                let ext = p
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or_default();
+                if !ext.eq_ignore_ascii_case("heic") && !ext.eq_ignore_ascii_case("heif") {
+                    return Err(primary_error);
+                }
+                let (rgb, width, height) = crate::shell::heic::decode(&p).map_err(|heic_error| {
+                    anyhow::anyhow!("{primary_error}; HEIC fallback failed: {heic_error}")
+                })?;
+                validate_vlm_pixel_count(width, height)?;
+                let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
+                    anyhow::anyhow!("HEIC decoder returned an invalid RGB buffer")
+                })?;
+                image::DynamicImage::ImageRgb8(image)
+            }
+        };
         let img = if img.width().max(img.height()) > MAX_VLM_INPUT_EDGE {
             img.resize(
                 MAX_VLM_INPUT_EDGE,
@@ -755,6 +796,7 @@ fn persist_vlm_results(
     conn: &rusqlite::Connection,
     file_id: i64,
     model_kind: &str,
+    mode: AnalyzeMode,
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
@@ -763,28 +805,49 @@ fn persist_vlm_results(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    // Single transaction so the caption/name UPDATE and the vlm-tag
-    // DELETE+INSERT-replace commit atomically — a crash between the DELETE and
-    // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
-    // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                          vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                          vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
-        rusqlite::params![description, proposed_name, model_kind, now, file_id],
+    let existing_full_model = tx.query_row(
+        "SELECT vlm_full_model FROM files WHERE id=?1",
+        [file_id],
+        |row| row.get::<_, Option<String>>(0),
     )?;
-    if !tags.is_empty() {
+
+    if mode.requests_caption() {
+        tx.execute(
+            "UPDATE files SET vlm_description=?1 WHERE id=?2",
+            rusqlite::params![description, file_id],
+        )?;
+    }
+    if mode.requests_rename() {
+        tx.execute(
+            "UPDATE files SET vlm_proposed_name=?1 WHERE id=?2",
+            rusqlite::params![proposed_name, file_id],
+        )?;
+    }
+    if mode.requests_tags() {
         tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
-            rusqlite::params![file_id],
+            [file_id],
         )?;
-        let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
-        )?;
-        for t in tags {
-            stmt.execute(rusqlite::params![file_id, t])?;
+        if !tags.is_empty() {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?1, ?2, 'vlm', NULL)",
+            )?;
+            for tag in tags {
+                stmt.execute(rusqlite::params![file_id, tag])?;
+            }
         }
+    }
+    if mode.establishes_completion() {
+        tx.execute(
+            "UPDATE files SET vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?2 WHERE id=?3",
+            rusqlite::params![model_kind, now, file_id],
+        )?;
+    } else if existing_full_model.as_deref() != Some(model_kind) {
+        tx.execute(
+            "UPDATE files SET vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL WHERE id=?1",
+            [file_id],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -804,6 +867,7 @@ pub(crate) async fn vlm_server_payload_ok(
         "fileid-vlm-selftest-{}.jpg",
         uuid::Uuid::new_v4()
     ));
+    let _temp_guard = TempFileGuard(Some(test_img.clone()));
     // 32×32 mid-gray JPEG — smallest input that still exercises the mmproj +
     // chat-completions payload path.
     image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
@@ -813,9 +877,10 @@ pub(crate) async fn vlm_server_payload_ok(
     ))
     .save_with_format(&test_img, image::ImageFormat::Jpeg)
     .map_err(|e| anyhow::anyhow!("write VLM self-test image: {e}"))?;
-    let result = server.complete(&test_img, "Reply with: ok", 1).await;
-    let _ = std::fs::remove_file(&test_img);
-    result.map(|_| ())
+    server
+        .complete(&test_img, "Reply with: ok", 1)
+        .await
+        .map(|_| ())
 }
 
 /// Poll the cancel flag until it's set. Raced against an in-flight VLM request
@@ -829,6 +894,19 @@ async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
 /// Run one `server.complete` but bail the moment the cancel flag flips, instead
 /// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
 /// future cancels the underlying reqwest request. (audit E4)
+#[derive(Debug)]
+struct VlmServerRequestFailed;
+
+impl std::fmt::Display for VlmServerRequestFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VLM server request failed")
+    }
+}
+
+pub(crate) fn is_vlm_server_request_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<VlmServerRequestFailed>().is_some()
+}
+
 async fn complete_cancellable(
     server: &crate::models::vlm_server::VlmServer,
     image: &std::path::Path,
@@ -839,7 +917,9 @@ async fn complete_cancellable(
     tokio::select! {
         biased;
         _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
-        r = server.complete(image, prompt, max_tokens) => r,
+        r = server.complete(image, prompt, max_tokens) => {
+            r.map_err(|error| error.context(VlmServerRequestFailed))
+        },
     }
 }
 
@@ -936,6 +1016,7 @@ pub(crate) async fn analyze_file_via_server(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -1170,6 +1251,317 @@ pub(crate) fn parse_vlm_tags(raw: &str) -> Vec<String> {
 mod tests {
     use super::sanitize_proposed_name;
     use super::*;
+
+    #[test]
+    fn only_server_request_errors_are_classified_for_liveness_probes() {
+        let server_error =
+            anyhow::anyhow!("connection reset").context(VlmServerRequestFailed);
+        assert!(is_vlm_server_request_error(&server_error));
+        assert!(!is_vlm_server_request_error(&anyhow::anyhow!(
+            "decode corrupt.jpg failed"
+        )));
+    }
+
+    fn persistence_db() -> (rusqlite::Connection, i64) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).expect("migrations apply");
+        conn.execute(
+            "INSERT INTO files \
+             (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, \
+              vlm_description, vlm_proposed_name) \
+             VALUES ('C:\\lib\\photo.jpg', 0, 1, 0.0, 'image', 'jpg', 0, \
+                     'old caption', 'old-name')",
+            [],
+        )
+        .unwrap();
+        let file_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'favorite', 'user', NULL)",
+            [file_id],
+        )
+        .unwrap();
+        (conn, file_id)
+    }
+
+    fn persisted_state(
+        conn: &rusqlite::Connection,
+        file_id: i64,
+    ) -> (Option<String>, Option<String>, Option<String>, Option<f64>) {
+        conn.query_row(
+            "SELECT vlm_description, vlm_proposed_name, vlm_model, vlm_analyzed_at \
+             FROM files WHERE id=?1",
+            [file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    fn persisted_full_model(conn: &rusqlite::Connection, file_id: i64) -> Option<String> {
+        conn.query_row(
+            "SELECT vlm_full_model FROM files WHERE id=?1",
+            [file_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn persisted_tags(conn: &rusqlite::Connection, file_id: i64) -> Vec<(String, String)> {
+        conn.prepare("SELECT tag, source FROM tags WHERE file_id=?1 ORDER BY source, tag")
+            .unwrap()
+            .query_map([file_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn partial_modes_replace_only_requested_components_without_marking_complete() {
+        let (conn, file_id) = persistence_db();
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'stale', 'vlm', NULL)",
+            [file_id],
+        )
+        .unwrap();
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::CaptionAndTags,
+            Some("partial caption"),
+            Some("ignored-name"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_state(&conn, file_id),
+            (
+                Some("partial caption".into()),
+                Some("old-name".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(persisted_full_model(&conn, file_id), None);
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![("favorite".into(), "user".into())]
+        );
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::TagsOnly,
+            Some("ignored caption"),
+            Some("ignored-name"),
+            &["fresh-tag".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_state(&conn, file_id),
+            (
+                Some("partial caption".into()),
+                Some("old-name".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(persisted_full_model(&conn, file_id), None);
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![
+                ("favorite".into(), "user".into()),
+                ("fresh-tag".into(), "vlm".into())
+            ]
+        );
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::CaptionOnly,
+            None,
+            Some("ignored-name"),
+            &["ignored-tag".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_state(&conn, file_id),
+            (None, Some("old-name".into()), None, None)
+        );
+        assert_eq!(persisted_full_model(&conn, file_id), None);
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![
+                ("favorite".into(), "user".into()),
+                ("fresh-tag".into(), "vlm".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn full_empty_result_clears_requested_stale_values_and_marks_complete() {
+        let (conn, file_id) = persistence_db();
+        conn.execute(
+            "INSERT INTO tags (file_id, tag, source, score) VALUES (?1, 'stale', 'vlm', NULL)",
+            [file_id],
+        )
+        .unwrap();
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::Both,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        let state = persisted_state(&conn, file_id);
+        assert_eq!(state.0, None);
+        assert_eq!(state.1, None);
+        assert_eq!(state.2.as_deref(), Some("model-a"));
+        assert!(state.3.is_some());
+        assert_eq!(
+            persisted_full_model(&conn, file_id).as_deref(),
+            Some("model-a")
+        );
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![("favorite".into(), "user".into())]
+        );
+    }
+
+    #[test]
+    fn legacy_raw_model_marker_is_invalidated_by_partial_work() {
+        let (conn, file_id) = persistence_db();
+        conn.execute(
+            "UPDATE files SET vlm_model='model-a', vlm_analyzed_at=1234 WHERE id=?1",
+            [file_id],
+        )
+        .unwrap();
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::CaptionOnly,
+            Some("refreshed caption"),
+            None,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            persisted_state(&conn, file_id),
+            (
+                Some("refreshed caption".into()),
+                Some("old-name".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(persisted_full_model(&conn, file_id), None);
+    }
+
+    #[test]
+    fn same_model_partial_preserves_full_marker_and_model_switch_invalidates_it() {
+        let (conn, file_id) = persistence_db();
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::Both,
+            Some("full caption"),
+            Some("full-name"),
+            &["full-tag".into()],
+        )
+        .unwrap();
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-a",
+            AnalyzeMode::CaptionOnly,
+            Some("refreshed caption"),
+            Some("ignored-name"),
+            &["ignored-tag".into()],
+        )
+        .unwrap();
+        let same_model = persisted_state(&conn, file_id);
+        assert_eq!(same_model.0.as_deref(), Some("refreshed caption"));
+        assert_eq!(same_model.1.as_deref(), Some("full-name"));
+        assert_eq!(same_model.2.as_deref(), Some("model-a"));
+        assert!(same_model.3.is_some());
+        assert_eq!(
+            persisted_full_model(&conn, file_id).as_deref(),
+            Some("model-a")
+        );
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![
+                ("favorite".into(), "user".into()),
+                ("full-tag".into(), "vlm".into())
+            ]
+        );
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-b",
+            AnalyzeMode::RenameOnly,
+            Some("ignored caption"),
+            Some("model-b-name"),
+            &["ignored-tag".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            persisted_state(&conn, file_id),
+            (
+                Some("refreshed caption".into()),
+                Some("model-b-name".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(persisted_full_model(&conn, file_id), None);
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![
+                ("favorite".into(), "user".into()),
+                ("full-tag".into(), "vlm".into())
+            ]
+        );
+
+        persist_vlm_results(
+            &conn,
+            file_id,
+            "model-b",
+            AnalyzeMode::Both,
+            Some("model-b caption"),
+            Some("model-b-full-name"),
+            &["model-b-tag".into()],
+        )
+        .unwrap();
+        let full_model_b = persisted_state(&conn, file_id);
+        assert_eq!(full_model_b.0.as_deref(), Some("model-b caption"));
+        assert_eq!(full_model_b.1.as_deref(), Some("model-b-full-name"));
+        assert_eq!(full_model_b.2.as_deref(), Some("model-b"));
+        assert!(full_model_b.3.is_some());
+        assert_eq!(
+            persisted_full_model(&conn, file_id).as_deref(),
+            Some("model-b")
+        );
+        assert_eq!(
+            persisted_tags(&conn, file_id),
+            vec![
+                ("favorite".into(), "user".into()),
+                ("model-b-tag".into(), "vlm".into())
+            ]
+        );
+    }
 
     #[test]
     fn vlm_pixel_cap_accepts_boundary_and_rejects_oversize() {

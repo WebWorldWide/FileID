@@ -945,7 +945,9 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false,
+                proposeRenames: ProposeRenamesCheck.IsChecked == true,
+                excludedFolders: AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders);
         }
         catch (Exception ex)
         {
@@ -981,15 +983,34 @@ public sealed partial class DeepAnalyzeView : UserControl
         SetApplyBusy(true, "Applying…");
         int tagged = 0, peopled = 0, applyFailed = 0;
         bool openRenameSheet = false;
+        IReadOnlyDictionary<long, List<string>>? priorUserTags = null;
+        var confirmedTagFileIds = new HashSet<long>();
         try
         {
             using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var ct = System.Threading.CancellationToken.None;
+            IReadOnlyDictionary<string, List<long>>? keywordMap = null;
+            IReadOnlyDictionary<string, List<long>>? peopleMap = null;
             if (keywords)
             {
-                var map = await store.KeywordTagFileIdsAsync(ct);
-                foreach (var kv in map)
+                keywordMap = await store.KeywordTagFileIdsAsync(ct);
+            }
+            if (people)
+            {
+                peopleMap = await store.NamedPersonFileIdsAsync(ct);
+            }
+            var requestedTagFileIds = (keywordMap?.Values ?? [])
+                .Concat(peopleMap?.Values ?? [])
+                .SelectMany(ids => ids)
+                .Distinct()
+                .ToArray();
+            priorUserTags = await Services.TagChangeJournal
+                .CapturePriorUserTagsAsync(requestedTagFileIds);
+
+            if (keywordMap is not null)
+            {
+                foreach (var kv in keywordMap)
                 {
                     if (kv.Value.Count == 0) continue;
                     var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
@@ -998,12 +1019,16 @@ public sealed partial class DeepAnalyzeView : UserControl
                         TimeSpan.FromSeconds(30));
                     tagged += (int)result.Succeeded;
                     applyFailed += (int)result.Failed;
+                    foreach (var fileId in Services.BulkActionResultTruth
+                                 .ConfirmedSuccessfulFileIds(result, kv.Value))
+                    {
+                        confirmedTagFileIds.Add(fileId);
+                    }
                 }
             }
-            if (people)
+            if (peopleMap is not null)
             {
-                var map = await store.NamedPersonFileIdsAsync(ct);
-                foreach (var kv in map)
+                foreach (var kv in peopleMap)
                 {
                     if (kv.Value.Count == 0) continue;
                     var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
@@ -1012,6 +1037,11 @@ public sealed partial class DeepAnalyzeView : UserControl
                         TimeSpan.FromSeconds(30));
                     peopled += (int)result.Succeeded;
                     applyFailed += (int)result.Failed;
+                    foreach (var fileId in Services.BulkActionResultTruth
+                                 .ConfirmedSuccessfulFileIds(result, kv.Value))
+                    {
+                        confirmedTagFileIds.Add(fileId);
+                    }
                 }
             }
             if (names)
@@ -1031,6 +1061,14 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
         finally
         {
+            if (priorUserTags is not null && confirmedTagFileIds.Count > 0)
+            {
+                var confirmed = confirmedTagFileIds.OrderBy(id => id).ToArray();
+                Services.TagChangeJournal.PushUndo(
+                    Services.TagChangeJournal.FormatLabel("add", confirmed.Length),
+                    confirmed,
+                    priorUserTags);
+            }
             System.Threading.Interlocked.Exchange(ref _applyInFlight, 0);
         }
 

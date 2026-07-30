@@ -20,7 +20,6 @@ pub(crate) async fn handle_wipe_library(
     face_cluster_active: Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: Arc<std::sync::atomic::AtomicBool>,
-    restructure_cancel: Arc<std::sync::atomic::AtomicBool>,
     restructure_active: Arc<std::sync::atomic::AtomicBool>,
     mutation_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
@@ -29,7 +28,6 @@ pub(crate) async fn handle_wipe_library(
         coord.request_cancel();
     }
     deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    restructure_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let _exclusive = match tokio::time::timeout(
         std::time::Duration::from_secs(10),

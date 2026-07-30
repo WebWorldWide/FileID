@@ -235,9 +235,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun("PeopleView.OnContinueToDeepAnalyzeClicked", () =>
         {
             string model = "qwen2_5_vl_7b";
-            try { model = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
-            catch { /* fall back to default model */ }
-            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+            System.Collections.Generic.IReadOnlyList<string>? excludedFolders = null;
+            try
+            {
+                model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
+                excludedFolders = AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders;
+            }
+            catch { /* fall back to default model, no exclusions */ }
+            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true, excludedFolders: excludedFolders);
             AppViewModel.Instance.ActiveTab = SidebarTab.DeepAnalyze;
         });
 
@@ -269,7 +274,23 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             if (_unloaded) return;
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(FooterVisibility));
+            SyncHiddenSmallClusters();
         });
+
+    private void SyncHiddenSmallClusters()
+    {
+        int hidden = ViewModel.HiddenSmallClusterCount;
+        if (hidden <= 0)
+        {
+            HiddenSmallClustersText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        HiddenSmallClustersText.Text =
+            $"{hidden:N0} more small face groups (fewer than {PeopleViewModel.MinFacesPerCluster} " +
+            "photos each) are hidden — these are usually several shots of the same moment rather " +
+            "than distinct people. They're still searchable, and naming one brings it back here.";
+        HiddenSmallClustersText.Visibility = Visibility.Visible;
+    }
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnClustersCollectionChanged", () =>
@@ -451,10 +472,10 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // ItemsRepeater + x:Bind does NOT populate the realized element's
     // DataContext (compiled bindings bypass it — same gotcha that broke
     // Library thumbnails). Resolve the cluster from the authoritative
-    // repeater index and set DataContext so the drag / drop / double-tap
+    // repeater index and set DataContext so the drag / drop / tap
     // handlers that read el.DataContext resolve the right PersonCluster.
-    // OnClusterDoubleTapped has no Tag fallback, so without this bridge a
-    // double-tap silently returns and the person-detail sheet never opens.
+    // OnClusterTapped has no Tag fallback, so without this bridge a tap
+    // silently returns and the person-detail sheet never opens.
     // Mirrors LibraryView.OnRepeaterElementPrepared.
     // SafeRun-wrapped: ItemsRepeater raises ElementPrepared from the native
     // realization pass, so a synchronous throw here (an index race when
@@ -560,6 +581,22 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     });
 
+    private async void OnClusterKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClusterKeyDown), async () =>
+    {
+        if (sender is not FrameworkElement { DataContext: PersonCluster cluster }) return;
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            e.Handled = true;
+            await OpenDetailSheetAsync(cluster);
+        }
+        else if (e.Key == Windows.System.VirtualKey.Space && ViewModel.IsSelectMode)
+        {
+            cluster.IsSelected = !cluster.IsSelected;
+            e.Handled = true;
+        }
+    });
+
     // SafeRunAsync-wrapped: the whole handler, INCLUDING the synchronous
     // prologue (new PersonDetailSheet() runs XamlReader.Load of the sheet
     // template, which can throw synchronously on a resource-resolution failure).
@@ -567,12 +604,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // unguarded synchronous throw here fast-fails the process — the "click a
     // face to open the person" stowed-crash path. XamlRoot may be null on a
     // detached element; ShowAsync then throws, already caught below.
-    private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnClusterDoubleTapped), async () =>
+    // Single tap (was DoubleTapped): seeing every face in a group is the primary
+    // thing users want from a cluster card, and behind a double-tap it was
+    // effectively undiscoverable. Safe to take the single tap — the card has no
+    // other click action (merging is drag-and-drop, and a drag suppresses Tapped).
+    // `_detailOpen` guards re-entrancy: ContentDialog.ShowAsync throws if a second
+    // dialog opens while one is up, and a habitual double-click would otherwise
+    // fire this twice.
+    private bool _detailOpen;
+
+    private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnClusterTapped), async () =>
     {
         if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
-        if (XamlRoot is null) return;
+        if (XamlRoot is null || _detailOpen) return;
+        _detailOpen = true;
+        try { await ShowPersonDetailAsync(pc); }
+        finally { _detailOpen = false; }
+    });
 
+    private async Task ShowPersonDetailAsync(PersonCluster pc)
+    {
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
         var dialog = new ContentDialog
@@ -593,7 +645,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         };
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
-    });
+    }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
         => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>
@@ -613,60 +665,68 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
         if (sourceId == destId) return; // no-op self-drop
 
-        var confirm = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Merge clusters?",
-            Content = $"Move all faces from #{sourceId} into #{destId}? You can undo this from Recent changes.",
-            PrimaryButtonText = "Merge",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-        };
-        // ShowAsync throws when another ContentDialog is already open; this is
-        // an async-void drop handler, so treat a failed confirm as Cancel.
-        ContentDialogResult choice;
-        try { choice = await confirm.ShowAsync(); }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Merge confirm dialog failed (another dialog open?): " + ex.Message);
-            return;
-        }
-        if (choice != ContentDialogResult.Primary) return;
-
+        if (System.Threading.Interlocked.CompareExchange(ref _bulkOpInFlight, 1, 0) != 0) return;
         try
         {
-            // revertMerge needs the exact face ids that moved and the merge
-            // reply doesn't carry them — snapshot BEFORE the merge.
-            var movedFaceIds = await ReadFaceIdsForPersonAsync(sourceId);
-            // Await the engine's bulkActionResult instead of fire-and-forget:
-            // a swallowed merge made the user think the merge happened, then
-            // the refresh re-showed the old state. Surface any failure.
-            var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
-                "mergeClusters",
-                () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
-                TimeSpan.FromSeconds(30));
-            if (r.Failed > 0 || r.Succeeded == 0)
+            var confirm = new ContentDialog
             {
-                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
-                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
-                             ?? "The engine did not confirm the merge.";
-                await ShowAlertAsync("Merge failed",
-                    $"Couldn't merge #{sourceId} into #{destId} — {detail}");
-            }
-            else
+                XamlRoot = XamlRoot,
+                Title = "Merge clusters?",
+                Content = $"Move all faces from #{sourceId} into #{destId}? You can undo this from Recent changes.",
+                PrimaryButtonText = "Merge",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+            // ShowAsync throws when another ContentDialog is already open; this is
+            // an async-void drop handler, so treat a failed confirm as Cancel.
+            ContentDialogResult choice;
+            try { choice = await confirm.ShowAsync(); }
+            catch (Exception ex)
             {
-                PushMergeUndo(sourceId, destId, movedFaceIds,
-                    $"merge people #{sourceId} into #{destId}");
+                DebugLog.Warn("Merge confirm dialog failed (another dialog open?): " + ex.Message);
+                return;
             }
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
-            await ShowAlertAsync("Merge failed",
-                $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
-        }
+            if (choice != ContentDialogResult.Primary) return;
 
-        await ViewModel.RefreshAsync(CancellationToken.None);
+            try
+            {
+                // revertMerge needs the exact face ids that moved and the merge
+                // reply doesn't carry them — snapshot BEFORE the merge.
+                var movedFaceIds = await ReadFaceIdsForPersonAsync(sourceId);
+                // Await the engine's bulkActionResult instead of fire-and-forget:
+                // a swallowed merge made the user think the merge happened, then
+                // the refresh re-showed the old state. Surface any failure.
+                var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "mergeClusters",
+                    () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
+                    TimeSpan.FromSeconds(30));
+                if (r.Failed > 0 || r.Succeeded == 0)
+                {
+                    var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                                 ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                                 ?? "The engine did not confirm the merge.";
+                    await ShowAlertAsync("Merge failed",
+                        $"Couldn't merge #{sourceId} into #{destId} — {detail}");
+                }
+                else
+                {
+                    PushMergeUndo(sourceId, destId, movedFaceIds,
+                        $"merge people #{sourceId} into #{destId}");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
+                await ShowAlertAsync("Merge failed",
+                    $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
+            }
+
+            await ViewModel.RefreshAsync(CancellationToken.None);
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _bulkOpInFlight, 0);
+        }
     });
 
     // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
@@ -972,19 +1032,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (movedFaceIds.Count == 0) return; // no snapshot → not undoable
         UndoStack.Instance.Push(label, ChangeKind.PeopleMerge, async () =>
         {
-            try
-            {
-                var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                    "revertMerge",
-                    () => EngineClient.Instance.RevertMergeAsync(sourceId, destId, movedFaceIds),
-                    TimeSpan.FromSeconds(30));
-                return r.Failed == 0 && r.Succeeded > 0;
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("Revert merge failed: " + ex.Message);
-                return false;
-            }
+            var engine = EngineClient.Instance;
+            await engine.WaitForReadyAsync(TimeSpan.FromSeconds(15));
+            var r = await engine.WaitForBulkActionResultAsync(
+                "revertMerge",
+                () => engine.RevertMergeAsync(sourceId, destId, movedFaceIds),
+                Timeout.InfiniteTimeSpan);
+            return r.Failed == 0 && r.Succeeded > 0;
         });
     }
 }

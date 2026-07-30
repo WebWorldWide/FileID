@@ -8,6 +8,135 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-07-29 — Face over-detection, Restructure apply trust, and Deep Analyze folder exclusion: audit + fix session
+
+A full audit (adversarial-verified, source + real-catalog measurement against the 2026-07-29 Adlon
+scan: 135,740 files, 183,230 detected faces, 3,108 person clusters) drove a same-day fix pass across
+the shared Rust engine, all three GUIs, and macOS. The owner's four complaints — too many/invisible
+leftover faces, unclear apply affordances, no way to exclude folders from Deep Analyze, and
+Restructure/Deep Analyze correctness — are addressed as follows. See `DECISIONS.md` for the *why*
+behind each; `RESTRUCTURE.md` §8 for the now-documented IPC 1.2 apply/undo contract.
+
+**Faces.** The only face-size gate was relative-to-image-area (scale-invariant, so uncorrelated with
+actual visibility) — it kept unrecognizable crowd blobs from low-res video while discarding
+well-resolved 100px+ faces on high-megapixel photos. Added an absolute `FACE_MIN_BBOX_MIN_DIM_PX =
+40.0` floor. The first pass picked 64px off a POOLED sweep; the follow-up audit caught that as a
+regression and a per-source-kind re-measurement corrected it — decode resolution is not uniform
+(video keyframes cap at 1280px, stills decode to [2048,4096), so video-face min-dim p50 is 52px vs
+159px for images), and 64px would have silently destroyed clustering in 30% of face-bearing videos
+while looking like a +18,018 win on aggregate. 40px is +28,051 image faces, +134 video faces, and
+wipes only 29 persons entirely (each holding <=8 faces, i.e. noise). Mirrored to
+macOS (new `faceMinDimPx` threaded from `VisionWorker` through `DBWriter`), with the cross-platform
+decode-resolution caveat documented (Windows decodes near-original resolution; macOS's
+`FILEID_SCAN_MAX_PIXELS` default caps at 1536px, so 64.0 is a stricter relative gate there — flagged
+for the owner to re-tune on real Mac hardware, not silently "fixed"). Deleted the dead
+`FACE_QUALITY_FLOOR` check on Windows (a macOS-Vision-scale constant applied to SCRFD's product
+score, analytically provable to never fire — 0 of 183,230 real rows tripped it); kept intact on
+macOS where it's real. Also wired `face_prints.excluded` into Restructure's `face_count` query
+(previously read by exactly one query in the whole engine, silently under-filing 19.2% of files
+that had an assigned face). **Not fixed, deliberately deferred:** the separate mega-cluster problem
+(16 clusters absorbing 83,381 faces via kNN connected-components chaining) needs labelled ground
+truth to calibrate against, not a blind threshold change; the People-tab UI still has no
+minimum-cluster-size filter to make 3,108 raw clusters reviewable — both are in `NEXT.md`.
+
+**Restructure apply trust.** Fixed real correctness bugs, not just cosmetics, alongside moving each
+platform's apply bar to the top of the tab (prominence, the owner's explicit ask):
+- Engine (shared Rust): a stale row (file deleted/renamed since planning, or a destination that
+  collided in the meantime) used to abort the ENTIRE apply via `?` — zero files moved, reproducible
+  forever since the spool wasn't cleared. Split preflight into structural-fatal vs per-row-advisory
+  outcomes; `apply_iter_with`'s existing graceful skip already handled the identical conditions.
+  Also fixed a DB-reconciliation-failure double-count (`applied += 1; failed += 1` for one row,
+  diverging from macOS's documented single-count convention) that left `undo_last`'s
+  journal-removal gate permanently unsatisfiable — "you can put them back" offered forever, always
+  re-failing. The paired fix (stop counting it `failed` *and* make `reconcile_pending_path_updates`
+  retry instead of discarding its recovery record after one pass) closes both halves; a genuinely
+  unfixable UNIQUE conflict between two live rows is still a known, correctly-recorded gap.
+- Windows: cancelled-undo now correctly keeps the Undo button live (was gated on `Failed > 0` only,
+  ignoring `Cancelled`).
+- Linux (agent-verified via WSL: clippy/test/fmt clean): same cancelled-undo fix; shortcut-mode
+  apply now has a real undo path (token was hardcoded `None`); the "all N moves selected" label no
+  longer lies about a truncated plan applying only its Auto tier.
+- macOS (agent-implemented, unverified — no Xcode here): `applyStoredPlan` was applying EVERY
+  confidence tier for a truncated plan (the most severe of the three platforms' bugs — real
+  Review/Ask moves left on disk with no review), fixed to Auto-only with a stored-plan-version bump
+  for clean migration; added the previously-entirely-missing `cancelRestructure` button (engine
+  plumbing existed, UI didn't); `useSymlinks`/`shortcutUndoToken` now fail closed instead of
+  silently performing/undoing real moves (macOS has no symlink-apply mode).
+
+**Deep Analyze folder exclusion.** Didn't exist in the IPC contract at all. Added
+`deepAnalyzeAll.excludedFolders` (schema 1.2.0 -> 1.3.0) as a list separate from scan exclusions
+(different question: "catalog/search this but skip the VLM pass" vs "never touch this folder"),
+applied only to whole-library runs (an explicit file selection is never filtered), matched with the
+same separator-terminated prefix-range technique as scan exclusions (not a bare `LIKE prefix%`, so
+excluding `/Photos` doesn't also exclude `/PhotosBackup` — proven by a dedicated boundary test).
+Windows and Linux fully implemented with Settings UI (add/remove folder, live persistence) and
+verified; macOS delegated to a background agent (protocol field, GRDB-side filter, Settings UI,
+call sites) — check its report before relying on it, unverified pending a real build.
+
+**Second audit round (same day).** A full top-to-bottom adversarial audit of the entire uncommitted
+change set ran after the work above and produced 27 confirmed findings, all triaged. Fixed: the face
+floor per-kind regression (above); macOS's cancelled/partially-failed undo permanently hiding "Undo
+last run" (`app/.../EngineClient.swift` — the same bug Windows/Linux fixed earlier, made REACHABLE on
+macOS for the first time by the new Cancel button, and unrecoverable there because the flag is never
+re-seeded from disk); a leaked `DestinationClaims` reservation letting one raced destination fail a
+second legitimate row (`restructure_apply.rs`); `reconcile_pending_path_updates` deleting every
+pending recovery record when the library volume is simply unmounted; the Linux apply confirmation
+dialog authorizing the FULL plan total when only the Auto tier moves; Linux status feedback rendering
+below a multi-thousand-row list after the apply bar moved up; an inert-but-visible Linux Cancel button
+after an engine error; Linux exclusion dedupe folding case on a case-sensitive filesystem (and the SQL
+side's `COLLATE NOCASE`, now Windows-only); missing engine-side enforcement of the schema's
+`excludedFolders` 256 cap; and several comments that misstated when `reconcile_pending_path_updates`
+runs (engine start, not "next scan") — the stated safety argument for the counter change. Also fixed a
+new macOS IPC test that asserted nil optionals are omitted from the wire: `IPCCommand.Payload` uses
+synthesized Codable with no custom `encode(to:)`, so it very likely writes explicit nulls, and the
+assertion would have failed on the owner's first Mac build for a reason unrelated to the feature.
+Three CI policy gates that were RED are now green: `check_current_docs.py` (ARCHITECTURE.md/SHIP.md
+still said migrations v19, now v20) and `check_runtime_egress.py --known-blockers` plus its 23-test
+self-test (14 digests refreshed deliberately after verifying zero added network capability in every
+drifted file, and two false-positive boundary files reviewed line-by-line and allowlisted — see
+DECISIONS.md, which records what that refresh does and does NOT assert).
+
+**Verification.** Rust engine: `cargo clippy --all-targets -D warnings` clean, `cargo test` 692
+passed / 0 failed / 3 ignored, `cargo fmt --check` clean. Windows: `dotnet build` 0 warnings/errors,
+446 App.Tests + 53 IpcSchema.Tests passed, `dotnet format --verify-no-changes` clean for every
+touched file (103 pre-existing ENDOFLINE errors in 3 untouched files are unrelated repo drift, not
+introduced this session). Linux: `cargo clippy`/`cargo test` (57 passed)/`cargo fmt --check` all
+clean via WSL Ubuntu. macOS: source-reviewed by hand (types/call-sites cross-checked, brace-balance
+verified) but not compiled — genuinely unverified until the owner runs a real Xcode build.
+
+Resume in this order:
+
+1. **Get a real macOS build.** This is the one platform nothing here compiled. Open Xcode, build,
+   run the Restructure and Deep Analyze flows by hand, run `swift test`. Fix whatever the compiler
+   finds — two agents worked carefully but blind, and Swift 6 strict concurrency plus GRDB idioms
+   are easy to get subtly wrong without a compiler in the loop.
+2. **Re-scan and validate the face-size fix on real hardware.** Everything here was measured
+   against the frozen 2026-07-29 Adlon catalog by direct SQL query — no actual re-scan with the new
+   64px gate has run yet. Re-scan (or re-cluster against the existing embeddings if a cheaper path
+   exists) and confirm the predicted +18,018/-6,429/+24,447 numbers hold, and that People-tab
+   clustering quality genuinely improves for the owner, not just on paper.
+3. **The mega-cluster / fragmentation clustering problem is still open.** 16 clusters absorb 83,381
+   faces (kNN connected-components chaining — my own cosine-similarity measurement showed
+   mega-cluster intra-similarity ~0.39, barely above inter-mega-cluster ~0.21-0.29, i.e. these
+   aren't held together by real similarity). This needs labelled ground truth to safely retune
+   `pass1_cosine`/`k_nn`/`AUTOMERGE_COS_DEFAULT` — guessing new numbers without it risks repeating
+   the exact regression `identity_clustering.rs`'s own comments warn about.
+4. **People tab still dumps all 3,108 clusters unfiltered.** No minimum-cluster-size hide, no bulk
+   dismiss for junk. Out of this session's explicit scope (the owner's three directives were the
+   face floor, apply-bar prominence, and Deep Analyze exclusion) but is the other half of "too many
+   leftover faces" and should be next.
+5. **The kNN tie-break nondeterminism flagged by the audit is unfixed.** Both
+   `face_clustering.rs` and `restructure_semantic.rs`'s comparators don't consult index as a
+   tiebreak, so ties can resolve differently across stdlib/arch (the newly-added single-thread HNSW
+   pool, documented in `DECISIONS.md`, only fixes the graph-build nondeterminism, not this).
+6. External release gates (signing, hosted CI native builds, ARM64/AMD/Intel/QNN hardware, clean-VM
+   installer) remain unproven locally, unchanged from prior sessions.
+
+Evidence: `.ralph/adlon-faces-20260729/candidate-current/FileID/fileid.sqlite` (the frozen catalog
+every measurement in this entry was computed against), full `cargo test`/`dotnet test`/WSL
+`cargo test` output captured in-session, and the two macOS agent reports (Restructure apply-bar,
+Deep Analyze exclusion) for exactly what was changed file-by-file.
+
 ## 2026-07-28 — macOS / CLI / TUI audit: EXIF orientation parity restored, five more defects closed
 
 A second pass covered the macOS Swift engine and app, the `fileid` CLI, and `fileid-tui`, combining source audit with adversarial verification and hands-on runtime exercise. Six real defects landed.

@@ -44,6 +44,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         Crashed,
     }
 
+    internal const string StoppedReason = "Engine stopped";
+
     private readonly DispatcherQueue _ui;
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
@@ -83,6 +85,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private Task? _stdoutLoop;
     private Task? _stderrLoop;
     private StreamWriter? _stdin;
+    private readonly GenerationHealthWaiters _healthWaiters = new();
+    private readonly object _transportFailureLock = new();
+    private Task _transportFailureTask = Task.CompletedTask;
+    private int _transportFailureGeneration = -1;
+    private static readonly TimeSpan HealthProbeTimeout = TimeSpan.FromSeconds(5);
 
     private DateTime _lastSpawnAttempt = DateTime.MinValue;
     private int _consecutiveFailures;
@@ -107,6 +114,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // BUG-3: respawn debouncing — prevents two-spawn races during the
     // 1s/4s/16s backoff window when the engine flaps quickly.
     private int _isStarting; // 0 = idle, 1 = StartAsync in flight
+    private readonly EngineLifecycleCoordinator _lifecycle = new();
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
 
     // BUG-6: distinguish user-initiated shutdown from a crash. Set by
     // ShutdownAsync; OnProcessExited consumes it. Uses int + Interlocked
@@ -121,7 +130,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // much later gets mis-read as user-initiated and never respawns. Only honor
     // the flag if the exit follows the request within ExpectingExitWindow.
     private long _expectingExitAtTicks;
+    private readonly object _expectedExitRestartGate = new();
     private int _restartAfterExpectedExit;
+    private long _restartAfterExpectedExitRevision = -1;
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     // Re-entrancy gate for any auto-triggered Deep Analyze pass. Released
@@ -308,6 +319,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private RestructurePlan? _lastRestructurePlan;
+    private long _restructureMutationRevision;
+    private long _pendingRestructurePlanRevision = -1;
+    private long _restructurePlanDiscardedSignal;
     public RestructurePlan? LastRestructurePlan
     {
         get => _lastRestructurePlan;
@@ -321,6 +335,50 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// from (CRITICAL audit finding). Nulling it fires PropertyChanged →
     /// RestructureView clears the on-screen plan.</summary>
     public void InvalidateRestructurePlan() => LastRestructurePlan = null;
+
+    public long RestructurePlanDiscardedSignal
+    {
+        get => _restructurePlanDiscardedSignal;
+        private set => Set(ref _restructurePlanDiscardedSignal, value);
+    }
+
+    internal long CaptureRestructurePlanRevision()
+    {
+        var revision = Volatile.Read(ref _restructureMutationRevision);
+        Volatile.Write(ref _pendingRestructurePlanRevision, revision);
+        return revision;
+    }
+
+    internal void AbandonRestructurePlanRevision(long revision)
+        => Interlocked.CompareExchange(
+            ref _pendingRestructurePlanRevision,
+            -1,
+            revision);
+
+    internal static bool ShouldAcceptRestructurePlan(
+        long requestedRevision,
+        long currentRevision)
+        => requestedRevision >= 0 && requestedRevision == currentRevision;
+
+    internal static bool MutationInvalidatesRestructurePlan(EventPayload? payload)
+        => payload switch
+        {
+            PhaseChangedEvent phase when phase.Phase is
+                ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan => true,
+            ScanCompleteEvent => true,
+            FaceClusteringCompleteEvent => true,
+            DeepAnalyzeStartingEvent => true,
+            DeepAnalyzeCompleteEvent => true,
+            BulkActionResultEvent bulk => bulk.Result.Succeeded > 0,
+            LibraryWipedEvent wiped => wiped.Result.Ok,
+            _ => false,
+        };
+
+    internal static bool RestructureResultInvalidatesPlan(
+        bool wasUndo,
+        bool forwardRunWasUndoable,
+        RestructureApplyResult result)
+        => result.Applied > 0 && (wasUndo || forwardRunWasUndoable);
 
     private RestructureApplyResult? _lastRestructureApplyResult;
     public RestructureApplyResult? LastRestructureApplyResult
@@ -336,6 +394,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// later dispatcher turn (or an OnLoaded replay) still tells the two apart and
     /// can say "undone" instead of "applied".</summary>
     public bool LastRestructureApplyResultWasUndo { get; private set; }
+    public bool LastRestructureApplyResultWasShortcutUndo { get; private set; }
 
     private bool _canUndoRestructure;
     /// <summary>True once an applyRestructure may have moved files and they haven't
@@ -348,20 +407,31 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private string? _pendingRestructureApplyRoot;
     private bool _pendingRestructureApplyUndoable;
     internal string? UndoRestructureRoot { get; private set; }
+    internal string? UndoRestructureShortcutToken { get; private set; }
     /// Set by UndoRestructureAsync so the next RestructureApplyResult is read as
     /// the undo's reply rather than a fresh apply.
     internal bool UndoRestructureInFlight { get; set; }
+    internal bool UndoRestructureInFlightWasShortcut { get; set; }
 
     internal static bool? NextCanUndoRestructure(
         bool wasUndo,
         RestructureApplyResult result,
-        bool forwardRunWasUndoable = true)
+        bool forwardRunWasUndoable = true,
+        bool wasShortcutUndo = false)
     {
+        if (wasShortcutUndo) return null;
         if (wasUndo)
         {
-            return result.Failed > 0 || !string.IsNullOrWhiteSpace(result.PrivilegeError);
+            // A cancelled undo deliberately keeps its journal so the user can
+            // retry it (restructure_apply.rs: "a cancelled undo must leave
+            // the original intact"). Not consulting Cancelled here hid the
+            // Undo button while the journal — and the still-relocated files —
+            // remained, with no way back except relaunching the app.
+            return result.Cancelled
+                || result.Failed > 0
+                || !string.IsNullOrWhiteSpace(result.PrivilegeError);
         }
-        if (!forwardRunWasUndoable) return false;
+        if (!forwardRunWasUndoable) return null;
         return result.Applied > 0 ? true : null;
     }
 
@@ -484,42 +554,536 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
               ?? throw new InvalidOperationException(
                   "EngineClient must be constructed on the UI thread. "
                   + "First-touch the singleton from App.OnLaunched, not from a Task.Run continuation.");
-        UndoRestructureRoot = ReadPersistedRestructureUndoRoot(
+        RefreshPersistedRestructureUndo();
+    }
+
+    private const int MaxPersistedUndoLineBytes = 64 * 1024;
+    private const int MaxPersistedUndoManifests = 1024;
+    private const int MaxPersistedUndoStagingEntries = 1024;
+
+    internal readonly record struct PersistedRealUndo(
+        string LibraryRoot,
+        DateTime UpdatedUtc);
+
+    internal readonly record struct PersistedShortcutUndo(
+        string LibraryRoot,
+        string Token,
+        DateTime UpdatedUtc);
+
+    private void RefreshPersistedRestructureUndo(string? completedShortcutToken = null)
+    {
+        var realUndo = ReadPersistedRestructureUndo(
             Path.Combine(AppPaths.Root, "restructure_undo.ndjson"));
+        var shortcutUndo = ReadPersistedShortcutUndo(
+            Path.Combine(AppPaths.Root, "restructure_shortcut_undo"),
+            completedShortcutToken);
+
+        if (shortcutUndo is { } tiedShortcut
+            && realUndo is { } tiedReal
+            && tiedShortcut.UpdatedUtc == tiedReal.UpdatedUtc)
+        {
+            UndoRestructureRoot = null;
+            UndoRestructureShortcutToken = null;
+            CanUndoRestructure = false;
+            return;
+        }
+        if (shortcutUndo is { } persistedShortcut
+            && (realUndo is null || persistedShortcut.UpdatedUtc > realUndo.Value.UpdatedUtc))
+        {
+            UndoRestructureRoot = persistedShortcut.LibraryRoot;
+            UndoRestructureShortcutToken = persistedShortcut.Token;
+        }
+        else
+        {
+            UndoRestructureRoot = realUndo?.LibraryRoot;
+            UndoRestructureShortcutToken = null;
+        }
         CanUndoRestructure = UndoRestructureRoot is not null;
     }
 
-    internal static string? ReadPersistedRestructureUndoRoot(string journalPath)
+    internal static PersistedShortcutUndo? ReadPersistedShortcutUndo(
+        string manifestDirectory,
+        string? excludedToken = null)
     {
         try
         {
-            if (!File.Exists(journalPath)) return null;
-            using var stream = new FileStream(
-                journalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
-            var firstLine = reader.ReadLine();
-            if (string.IsNullOrWhiteSpace(firstLine)) return null;
-            using var document = System.Text.Json.JsonDocument.Parse(firstLine);
-            var root = document.RootElement;
-            if (!root.TryGetProperty("version", out var version)
-                || version.GetInt32() != 2
-                || !root.TryGetProperty("library_root", out var libraryRoot))
+            if (!Directory.Exists(manifestDirectory)) return null;
+            PersistedShortcutUndo? newest = null;
+            var newestIsAmbiguous = false;
+            var inspected = 0;
+            foreach (var path in Directory.EnumerateFiles(
+                manifestDirectory,
+                "*.ndjson",
+                SearchOption.TopDirectoryOnly))
+            {
+                if (++inspected > MaxPersistedUndoManifests) return null;
+                try
+                {
+                    if (!TryGetRegularFileAttributes(path, out _)) continue;
+                    var token = Path.GetFileNameWithoutExtension(path);
+                    if (!Guid.TryParseExact(token, "D", out var parsed)
+                        || !string.Equals(parsed.ToString("D"), token, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    using var stream = new FileStream(
+                        path,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite | FileShare.Delete);
+                    if (!TryReadBoundedUtf8Line(stream, out var headerLine)
+                        || string.IsNullOrWhiteSpace(headerLine)
+                        || !TryParseShortcutHeader(
+                            headerLine,
+                            token,
+                            out var versionNumber,
+                            out var libraryRoot,
+                            out var stagingDirectory))
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetLastWriteTimeUtc(path, out var updatedUtc))
+                    {
+                        continue;
+                    }
+
+                    var hasCommittedEntries = false;
+                    var invalidCommittedEntry = false;
+                    while (true)
+                    {
+                        if (!TryReadBoundedUtf8Line(stream, out var entryLine))
+                        {
+                            invalidCommittedEntry = true;
+                            break;
+                        }
+                        if (entryLine is null) break;
+                        if (!TryValidateShortcutEntry(
+                            entryLine,
+                            versionNumber,
+                            libraryRoot,
+                            stagingDirectory))
+                        {
+                            invalidCommittedEntry = true;
+                            break;
+                        }
+                        hasCommittedEntries = true;
+                    }
+                    if (invalidCommittedEntry) continue;
+
+                    if (!hasCommittedEntries
+                        && (versionNumber != 3
+                            || stagingDirectory is null
+                            || !TryReadPendingShortcutIntents(
+                                libraryRoot,
+                                token,
+                                stagingDirectory,
+                                ref updatedUtc)))
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(token, excludedToken, StringComparison.Ordinal)) continue;
+                    var candidate = new PersistedShortcutUndo(
+                        libraryRoot,
+                        token,
+                        updatedUtc);
+                    if (newest is null || candidate.UpdatedUtc > newest.Value.UpdatedUtc)
+                    {
+                        newest = candidate;
+                        newestIsAmbiguous = false;
+                    }
+                    else if (candidate.UpdatedUtc == newest.Value.UpdatedUtc)
+                    {
+                        newestIsAmbiguous = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn(
+                        "Skipping unreadable Restructure shortcut undo manifest: " + ex.Message);
+                }
+            }
+            return newestIsAmbiguous ? null : newest;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Could not read persisted Restructure shortcut undo metadata: " + ex.Message);
+            return null;
+        }
+    }
+
+    private static bool TryParseShortcutHeader(
+        string headerLine,
+        string token,
+        out int versionNumber,
+        out string libraryRoot,
+        out string? stagingDirectory)
+    {
+        versionNumber = 0;
+        libraryRoot = "";
+        stagingDirectory = null;
+        using var document = System.Text.Json.JsonDocument.Parse(headerLine);
+        var header = document.RootElement;
+        if (header.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !header.TryGetProperty("version", out var version)
+            || !version.TryGetInt32(out versionNumber)
+            || versionNumber is not (2 or 3)
+            || !header.TryGetProperty("library_root", out var rootProperty)
+            || rootProperty.ValueKind != System.Text.Json.JsonValueKind.String
+            || !header.TryGetProperty("token", out var tokenProperty)
+            || tokenProperty.ValueKind != System.Text.Json.JsonValueKind.String
+            || !string.Equals(tokenProperty.GetString(), token, StringComparison.Ordinal)
+            || !TryNormalizeAbsolutePath(rootProperty.GetString(), out libraryRoot))
+        {
+            return false;
+        }
+
+        if (versionNumber == 2) return true;
+        if (!header.TryGetProperty("staging_dir", out var stagingProperty)
+            || stagingProperty.ValueKind != System.Text.Json.JsonValueKind.String
+            || !TryNormalizeAbsolutePath(stagingProperty.GetString(), out stagingDirectory)
+            || !header.TryGetProperty("staging_dir_identity", out var stagingIdentity)
+            || !IsFileIdentity(stagingIdentity))
+        {
+            return false;
+        }
+
+        var expectedStagingDirectory = Path.GetFullPath(Path.Combine(
+            libraryRoot,
+            ".fileid-restructure-shortcut-staging",
+            token));
+        return string.Equals(
+            stagingDirectory,
+            expectedStagingDirectory,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryValidateShortcutEntry(
+        string entryLine,
+        int versionNumber,
+        string libraryRoot,
+        string? stagingDirectory)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(entryLine);
+        var entry = document.RootElement;
+        if (entry.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !entry.TryGetProperty("file_id", out var fileId)
+            || !fileId.TryGetInt64(out _)
+            || !TryGetPathProperty(entry, "source", out var source)
+            || !TryGetPathProperty(entry, "link", out var link)
+            || !IsPathWithinRoot(source, libraryRoot)
+            || !IsPathWithinRoot(link, libraryRoot)
+            || !entry.TryGetProperty("source_identity", out var sourceIdentity)
+            || !IsFileIdentity(sourceIdentity)
+            || !entry.TryGetProperty("link_identity", out var linkIdentity)
+            || !IsFileIdentity(linkIdentity))
+        {
+            return false;
+        }
+
+        if (!entry.TryGetProperty("staging_link", out var stagingLink)
+            || stagingLink.ValueKind == System.Text.Json.JsonValueKind.Null)
+        {
+            return true;
+        }
+        if (versionNumber != 3
+            || stagingDirectory is null
+            || stagingLink.ValueKind != System.Text.Json.JsonValueKind.String
+            || !TryNormalizeAbsolutePath(stagingLink.GetString(), out var stagedPath)
+            || !string.Equals(
+                Path.GetDirectoryName(stagedPath),
+                stagingDirectory,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        var stagedName = Path.GetFileName(stagedPath);
+        return stagedName.EndsWith(".link", StringComparison.Ordinal)
+            && IsCanonicalGuid(stagedName[..^".link".Length]);
+    }
+
+    private static bool TryReadPendingShortcutIntents(
+        string libraryRoot,
+        string token,
+        string stagingDirectory,
+        ref DateTime updatedUtc)
+    {
+        if (!TryGetDirectoryAttributes(stagingDirectory, out _)) return false;
+        var intentIds = new HashSet<string>(StringComparer.Ordinal);
+        var stagedLinkIds = new HashSet<string>(StringComparer.Ordinal);
+        var inspected = 0;
+        foreach (var path in Directory.EnumerateFileSystemEntries(
+            stagingDirectory,
+            "*",
+            SearchOption.TopDirectoryOnly))
+        {
+            if (++inspected > MaxPersistedUndoStagingEntries) return false;
+            var name = Path.GetFileName(path);
+            if (name.EndsWith(".intent.json", StringComparison.Ordinal))
+            {
+                if (!TryGetRegularFileAttributes(path, out _)) return false;
+                var operationId = name[..^".intent.json".Length];
+                if (!IsCanonicalGuid(operationId)
+                    || !TryValidateShortcutIntent(
+                        path,
+                        operationId,
+                        libraryRoot,
+                        token,
+                        stagingDirectory))
+                {
+                    return false;
+                }
+                if (!TryGetLastWriteTimeUtc(path, out var intentUpdatedUtc)) return false;
+                if (intentUpdatedUtc > updatedUtc) updatedUtc = intentUpdatedUtc;
+                intentIds.Add(operationId);
+                continue;
+            }
+
+            if (name.EndsWith(".link", StringComparison.Ordinal))
+            {
+                var operationId = name[..^".link".Length];
+                if (!IsCanonicalGuid(operationId)
+                    || !TryGetReparseFileAttributes(path, out _))
+                {
+                    return false;
+                }
+                stagedLinkIds.Add(operationId);
+                continue;
+            }
+            return false;
+        }
+
+        return intentIds.Count > 0 && stagedLinkIds.All(intentIds.Contains);
+    }
+
+    private static bool TryValidateShortcutIntent(
+        string intentPath,
+        string operationId,
+        string libraryRoot,
+        string token,
+        string stagingDirectory)
+    {
+        using var stream = new FileStream(
+            intentPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (!TryReadBoundedUtf8Line(stream, out var line)
+            || string.IsNullOrWhiteSpace(line)
+            || !TryReadBoundedUtf8Line(stream, out var trailing)
+            || trailing is not null)
+        {
+            return false;
+        }
+
+        using var document = System.Text.Json.JsonDocument.Parse(line);
+        var intent = document.RootElement;
+        if (intent.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !intent.TryGetProperty("version", out var version)
+            || !version.TryGetInt32(out var versionNumber)
+            || versionNumber != 1
+            || !intent.TryGetProperty("token", out var intentToken)
+            || intentToken.ValueKind != System.Text.Json.JsonValueKind.String
+            || !string.Equals(intentToken.GetString(), token, StringComparison.Ordinal)
+            || !intent.TryGetProperty("operation_id", out var intentOperationId)
+            || intentOperationId.ValueKind != System.Text.Json.JsonValueKind.String
+            || !string.Equals(
+                intentOperationId.GetString(),
+                operationId,
+                StringComparison.Ordinal)
+            || !intent.TryGetProperty("file_id", out var fileId)
+            || !fileId.TryGetInt64(out _)
+            || !TryGetPathProperty(intent, "source", out var source)
+            || !TryGetPathProperty(intent, "link", out var link)
+            || !TryGetPathProperty(intent, "staging_link", out var stagingLink)
+            || !IsPathWithinRoot(source, libraryRoot)
+            || !IsPathWithinRoot(link, libraryRoot)
+            || !string.Equals(
+                stagingLink,
+                Path.GetFullPath(Path.Combine(stagingDirectory, operationId + ".link")),
+                StringComparison.OrdinalIgnoreCase)
+            || !intent.TryGetProperty("source_identity", out var sourceIdentity)
+            || !IsFileIdentity(sourceIdentity))
+        {
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryGetPathProperty(
+        System.Text.Json.JsonElement element,
+        string name,
+        out string path)
+    {
+        path = "";
+        return element.TryGetProperty(name, out var property)
+            && property.ValueKind == System.Text.Json.JsonValueKind.String
+            && TryNormalizeAbsolutePath(property.GetString(), out path);
+    }
+
+    private static bool TryNormalizeAbsolutePath(string? value, out string path)
+    {
+        path = "";
+        if (string.IsNullOrWhiteSpace(value) || !Path.IsPathFullyQualified(value)) return false;
+        path = Path.GetFullPath(value);
+        return true;
+    }
+
+    private static bool IsPathWithinRoot(string path, string root)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        return !Path.IsPathRooted(relative)
+            && !string.Equals(relative, ".", StringComparison.Ordinal)
+            && !string.Equals(relative, "..", StringComparison.Ordinal)
+            && !relative.StartsWith(
+                ".." + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal)
+            && !relative.StartsWith(
+                ".." + Path.AltDirectorySeparatorChar,
+                StringComparison.Ordinal);
+    }
+
+    private static bool IsFileIdentity(System.Text.Json.JsonElement element)
+        => element.ValueKind == System.Text.Json.JsonValueKind.Object
+            && element.TryGetProperty("volume", out var volume)
+            && volume.TryGetUInt64(out _)
+            && element.TryGetProperty("file", out var file)
+            && file.TryGetUInt64(out _);
+
+    private static bool IsCanonicalGuid(string value)
+        => Guid.TryParseExact(value, "D", out var parsed)
+            && string.Equals(parsed.ToString("D"), value, StringComparison.Ordinal);
+
+    private static bool TryGetRegularFileAttributes(
+        string path,
+        out FileAttributes attributes)
+    {
+        attributes = File.GetAttributes(path);
+        return IsRegularPersistedUndoFileAttributes(attributes);
+    }
+
+    internal static bool IsRegularPersistedUndoFileAttributes(FileAttributes attributes)
+        => (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
+
+    private static bool TryGetReparseFileAttributes(
+        string path,
+        out FileAttributes attributes)
+    {
+        attributes = File.GetAttributes(path);
+        return (attributes & FileAttributes.Directory) == 0
+            && (attributes & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private static bool TryGetDirectoryAttributes(
+        string path,
+        out FileAttributes attributes)
+    {
+        attributes = File.GetAttributes(path);
+        return (attributes & FileAttributes.Directory) != 0
+            && (attributes & FileAttributes.ReparsePoint) == 0;
+    }
+
+    private static bool TryGetLastWriteTimeUtc(string path, out DateTime updatedUtc)
+    {
+        try
+        {
+            updatedUtc = File.GetLastWriteTimeUtc(path);
+            return true;
+        }
+        catch
+        {
+            updatedUtc = DateTime.MinValue;
+            return false;
+        }
+    }
+
+    private static bool TryReadBoundedUtf8Line(Stream stream, out string? line)
+    {
+        line = null;
+        using var buffer = new MemoryStream(capacity: 256);
+        while (true)
+        {
+            var next = stream.ReadByte();
+            if (next < 0) return buffer.Length == 0;
+            if (next == '\n')
+            {
+                try
+                {
+                    line = new UTF8Encoding(
+                        encoderShouldEmitUTF8Identifier: false,
+                        throwOnInvalidBytes: true)
+                        .GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
+                    return true;
+                }
+                catch (DecoderFallbackException)
+                {
+                    return false;
+                }
+            }
+            if (buffer.Length >= MaxPersistedUndoLineBytes) return false;
+            buffer.WriteByte((byte)next);
+        }
+    }
+
+    internal static string? ReadPersistedRestructureUndoRoot(string journalPath)
+        => ReadPersistedRestructureUndo(journalPath)?.LibraryRoot;
+
+    internal static PersistedRealUndo? ReadPersistedRestructureUndo(string journalPath)
+    {
+        try
+        {
+            var currentExists = File.Exists(journalPath);
+            var currentValid = TryReadPersistedRestructureUndoJournal(
+                journalPath,
+                out var currentRoot,
+                out var currentHasWork);
+            if (currentValid && currentHasWork)
+            {
+                return TryGetLastWriteTimeUtc(journalPath, out var currentUpdatedUtc)
+                    ? new PersistedRealUndo(currentRoot!, currentUpdatedUtc)
+                    : null;
+            }
+            if (currentExists && !currentValid) return null;
+
+            var directory = Path.GetDirectoryName(journalPath);
+            var fileName = Path.GetFileName(journalPath);
+            if (string.IsNullOrWhiteSpace(directory)
+                || string.IsNullOrWhiteSpace(fileName)
+                || !Directory.Exists(directory))
             {
                 return null;
             }
-            var value = libraryRoot.GetString();
-            if (string.IsNullOrWhiteSpace(value)) return null;
-            var firstEntry = reader.ReadLine();
-            if (string.IsNullOrWhiteSpace(firstEntry)) return null;
-            using var entryDocument = System.Text.Json.JsonDocument.Parse(firstEntry);
-            var entry = entryDocument.RootElement;
-            if (!entry.TryGetProperty("file_id", out _)
-                || !entry.TryGetProperty("from", out _)
-                || !entry.TryGetProperty("to", out _))
+
+            var prefix = $".{fileName}.prior-";
+            var candidates = Directory
+                .EnumerateFiles(directory, prefix + "*", SearchOption.TopDirectoryOnly)
+                .Where(path =>
+                {
+                    var name = Path.GetFileName(path);
+                    var suffix = name.Length > prefix.Length ? name[prefix.Length..] : "";
+                    return Guid.TryParseExact(suffix, "D", out var parsed)
+                        && string.Equals(parsed.ToString("D"), suffix, StringComparison.Ordinal);
+                })
+                .Take(2)
+                .ToArray();
+            if (candidates.Length != 1
+                || !TryReadPersistedRestructureUndoJournal(
+                    candidates[0],
+                    out var priorRoot,
+                    out var priorHasWork)
+                || !priorHasWork)
             {
                 return null;
             }
-            return value;
+            if (currentValid
+                && !string.Equals(currentRoot, priorRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            return TryGetLastWriteTimeUtc(candidates[0], out var priorUpdatedUtc)
+                ? new PersistedRealUndo(priorRoot!, priorUpdatedUtc)
+                : null;
         }
         catch (Exception ex)
         {
@@ -528,7 +1092,138 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private static bool TryReadPersistedRestructureUndoJournal(
+        string journalPath,
+        out string? libraryRoot,
+        out bool hasWork)
+    {
+        libraryRoot = null;
+        hasWork = false;
+        if (!File.Exists(journalPath)
+            || (File.GetAttributes(journalPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            return false;
+        }
+        using var stream = new FileStream(
+            journalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (!TryReadBoundedUtf8Line(stream, out var firstLine)
+            || string.IsNullOrWhiteSpace(firstLine))
+        {
+            return false;
+        }
+        using var document = System.Text.Json.JsonDocument.Parse(firstLine);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("version", out var version)
+            || !version.TryGetInt32(out var versionNumber)
+            || versionNumber is not (2 or 3)
+            || !root.TryGetProperty("library_root", out var rootProperty)
+            || rootProperty.ValueKind != System.Text.Json.JsonValueKind.String
+            || !TryNormalizeAbsolutePath(rootProperty.GetString(), out var normalizedRoot))
+        {
+            return false;
+        }
+        libraryRoot = normalizedRoot;
+        if (!TryReadBoundedUtf8Line(stream, out var firstEntry)) return false;
+        if (firstEntry is null) return true;
+        using var entryDocument = System.Text.Json.JsonDocument.Parse(firstEntry);
+        var entry = entryDocument.RootElement;
+        hasWork = entry.TryGetProperty("file_id", out _)
+            && entry.TryGetProperty("from", out _)
+            && entry.TryGetProperty("to", out _)
+            && (versionNumber == 2
+                || (entry.TryGetProperty("source_identity", out var sourceIdentity)
+                    && IsFileIdentity(sourceIdentity)));
+        return hasWork;
+    }
+
     // ─── Lifecycle ─────────────────────────────────────────────────────
+
+    internal bool CanFinalizeApplicationClose(long terminalRevision)
+    {
+        var process = _process;
+        var processAlive = process is not null;
+        if (process is not null)
+        {
+            try
+            {
+                processAlive = !process.HasExited;
+            }
+            catch
+            {
+                processAlive = true;
+            }
+        }
+        return IsSafeToFinalizeApplicationClose(
+            _lifecycle.IsTerminalStopCurrent(terminalRevision),
+            Volatile.Read(ref _isStarting) != 0,
+            processAlive);
+    }
+
+    internal static bool IsSafeToFinalizeApplicationClose(
+        bool terminalStopActive,
+        bool startInFlight,
+        bool processAlive)
+        => terminalStopActive && !startInFlight && !processAlive;
+
+    private async Task RunLifecycleIntentAsync(
+        EngineLifecycleIntent intent,
+        Func<Task> action)
+    {
+        await _lifecycleGate.WaitAsync(intent.Token).ConfigureAwait(false);
+        try
+        {
+            ThrowIfLifecycleIntentSuperseded(intent);
+            await action().ConfigureAwait(false);
+            ThrowIfLifecycleIntentSuperseded(intent);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task<T> RunLifecycleIntentAsync<T>(
+        EngineLifecycleIntent intent,
+        Func<Task<T>> action)
+    {
+        await _lifecycleGate.WaitAsync(intent.Token).ConfigureAwait(false);
+        try
+        {
+            ThrowIfLifecycleIntentSuperseded(intent);
+            var result = await action().ConfigureAwait(false);
+            ThrowIfLifecycleIntentSuperseded(intent);
+            return result;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private static void ThrowIfLifecycleIntentSuperseded(
+        EngineLifecycleIntent intent)
+    {
+        intent.Token.ThrowIfCancellationRequested();
+        if (!intent.IsCurrent)
+        {
+            throw new OperationCanceledException(
+                "A newer engine lifecycle action superseded this action.",
+                intent.Token);
+        }
+    }
+
+    private void ThrowIfStartSuperseded(
+        long lifecycleRevision,
+        CancellationToken lifecycleToken)
+    {
+        lifecycleToken.ThrowIfCancellationRequested();
+        if (!_lifecycle.IsCurrent(lifecycleRevision, shouldRun: true))
+        {
+            throw new OperationCanceledException(
+                "A newer engine lifecycle action superseded this start.",
+                lifecycleToken);
+        }
+    }
 
     /// <summary>
     /// Spawn the engine. Idempotent — calling this while already running
@@ -537,6 +1232,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task StartAsync()
     {
+        using var intent = _lifecycle.Begin(shouldRun: true);
+        await RunLifecycleIntentAsync(
+            intent,
+            () => StartCoreAsync(intent.Revision, intent.Token))
+            .ConfigureAwait(false);
+    }
+
+    private async Task StartCoreAsync(
+        long lifecycleRevision,
+        CancellationToken lifecycleToken)
+    {
+        ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
         if (!_ui.HasThreadAccess)
         {
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -544,7 +1251,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             {
                 try
                 {
-                    await StartAsync();
+                    await StartCoreAsync(lifecycleRevision, lifecycleToken);
                     completion.TrySetResult();
                 }
                 catch (Exception ex)
@@ -559,6 +1266,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
         if (_process is { HasExited: false })
         {
             // Engine is already running. Don't touch _isStarting — another
@@ -583,8 +1291,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // release `_isStarting`, otherwise the gate latches at 1 forever
         // and OnProcessExited's respawn can't claim it. Wrap the whole
         // body in try/finally so the release is unconditional.
+        Process? startedProcess = null;
         try
         {
+            ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
             if (_process is { HasExited: true })
             {
                 Cleanup();
@@ -687,7 +1397,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     break;
             }
 
-            Process? p = null;
             try
             {
                 var psi = new ProcessStartInfo
@@ -719,41 +1428,56 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     psi.Environment["FILEID_RESTRUCTURE_GRANULARITY"] = granularity;
                 }
 
-                p = Process.Start(psi)
+                ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
+                startedProcess = Process.Start(psi)
                     ?? throw new InvalidOperationException("Process.Start returned null");
-                _process = p;
-                _stdin = p.StandardInput;
+                _process = startedProcess;
+                _stdin = startedProcess.StandardInput;
 
                 _readCts = new CancellationTokenSource();
                 var ct = _readCts.Token;
                 var generation = SpawnGeneration;
-                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, generation, ct), ct);
-                _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
+                _stdoutLoop = Task.Run(
+                    () => StdoutLoopAsync(
+                        startedProcess,
+                        startedProcess.StandardOutput,
+                        generation,
+                        ct),
+                    ct);
+                _stderrLoop = Task.Run(
+                    () => StderrLoopAsync(startedProcess.StandardError, ct),
+                    ct);
 
                 // Subscribe before enabling events so an immediate exit is observed.
-                p.Exited += OnProcessExited;
-                p.EnableRaisingEvents = true;
+                startedProcess.Exited += OnProcessExited;
+                startedProcess.EnableRaisingEvents = true;
+            }
+            catch (OperationCanceledException)
+                when (lifecycleToken.IsCancellationRequested
+                    || !_lifecycle.IsCurrent(lifecycleRevision, shouldRun: true))
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                if (p is not null)
+                if (startedProcess is not null)
                 {
                     try
                     {
-                        if (!p.HasExited)
+                        if (!startedProcess.HasExited)
                         {
-                            p.Kill(entireProcessTree: true);
-                            p.WaitForExit(5_000);
+                            startedProcess.Kill(entireProcessTree: true);
+                            startedProcess.WaitForExit(5_000);
                         }
                     }
                     catch { }
-                    if (ReferenceEquals(_process, p))
+                    if (ReferenceEquals(_process, startedProcess))
                     {
                         Cleanup();
                     }
                     else
                     {
-                        try { p.Dispose(); } catch { }
+                        try { startedProcess.Dispose(); } catch { }
                     }
                 }
                 DebugLog.Error("EngineClient.StartAsync failed: " + ex.Message);
@@ -762,16 +1486,27 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
 
+            ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
             // Send a status request — when the engine returns ready, we'll
             // populate Info and flip State to Ready.
             try
             {
-                await SendCommandAsync(new RequestStatusCommand());
+                await SendCommandAsync(
+                    new RequestStatusCommand(),
+                    CancellationToken.None);
             }
             catch (Exception ex)
             {
                 DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
             }
+            ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
+        }
+        catch (OperationCanceledException)
+            when (lifecycleToken.IsCancellationRequested
+                || !_lifecycle.IsCurrent(lifecycleRevision, shouldRun: true))
+        {
+            TerminateSupersededStart(startedProcess);
+            throw;
         }
         finally
         {
@@ -780,6 +1515,40 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // converge here so OnProcessExited's respawn can always CAS
             // the gate back from 0 → 1.
             Interlocked.Exchange(ref _isStarting, 0);
+        }
+    }
+
+    private void TerminateSupersededStart(Process? process)
+    {
+        if (process is not null && ReferenceEquals(_process, process))
+        {
+            var exited = false;
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                exited = process.WaitForExit(5_000);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn(
+                    "EngineClient: superseded start termination failed: "
+                    + ex.Message);
+            }
+
+            if (exited && ReferenceEquals(_process, process))
+            {
+                Cleanup();
+            }
+        }
+
+        if (!_lifecycle.ShouldRun
+            && (_process is null || _process.HasExited))
+        {
+            CrashReason = StoppedReason;
+            State = LifecycleState.Crashed;
         }
     }
 
@@ -876,7 +1645,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task StdoutLoopAsync(StreamReader reader, int generation, CancellationToken ct)
+    private async Task StdoutLoopAsync(
+        Process process,
+        StreamReader reader,
+        int generation,
+        CancellationToken ct)
     {
         // Per-loop framing state — a respawn starts a fresh loop with its own
         // buffer, so stale bytes can never carry over or race (#22).
@@ -906,6 +1679,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             catch (Exception ex)
             {
                 DebugLog.Warn("Engine stdout read error: " + ex.Message);
+                await HandleTransportFailureAsync(
+                    "stdout read",
+                    ex,
+                    process,
+                    generation).ConfigureAwait(false);
                 return;
             }
             if (framing.OversizeDropped)
@@ -924,8 +1702,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
             if (line is null)
             {
-                // EOF — engine closed stdout (likely exiting). Process.Exited
-                // will pick up the cleanup.
+                if (!ct.IsCancellationRequested && IsTrackedLiveProcess(process, generation))
+                {
+                    await HandleTransportFailureAsync(
+                        "stdout EOF",
+                        new EndOfStreamException(
+                            "The engine closed stdout while its process was still running."),
+                        process,
+                        generation).ConfigureAwait(false);
+                }
                 return;
             }
             if (string.IsNullOrWhiteSpace(line))
@@ -941,6 +1726,21 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             catch (Exception ex)
             {
                 DebugLog.Warn($"Engine emitted unparseable line ({ex.GetType().Name}): {ex.Message}");
+                continue;
+            }
+
+            if (ev.Payload is HealthCheckResultEvent health)
+            {
+                if (!_healthWaiters.TryResolve(
+                        health.Result.RequestId,
+                        health.Result.Pid,
+                        generation))
+                {
+                    DebugLog.Warn(
+                        $"[IPC IN] ignored unmatched healthCheckResult " +
+                        $"request={health.Result.RequestId}, pid={health.Result.Pid}, " +
+                        $"generation={generation}.");
+                }
                 continue;
             }
 
@@ -990,6 +1790,296 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private static readonly System.Text.RegularExpressions.Regex s_pathInLine =
         new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private bool IsTrackedLiveProcess(Process process, int generation)
+    {
+        if (generation != SpawnGeneration || !ReferenceEquals(process, _process))
+        {
+            return false;
+        }
+        try
+        {
+            return !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsTransportFailureActive(int generation)
+    {
+        lock (_transportFailureLock)
+        {
+            return _transportFailureGeneration == generation
+                && !_transportFailureTask.IsCompleted;
+        }
+    }
+
+    private Task HandleTransportFailureAsync(
+        string source,
+        Exception error,
+        Process process,
+        int generation)
+    {
+        lock (_transportFailureLock)
+        {
+            if (generation != SpawnGeneration || !ReferenceEquals(process, _process))
+            {
+                return Task.CompletedTask;
+            }
+            if (_transportFailureGeneration == generation
+                && !_transportFailureTask.IsCompleted)
+            {
+                return _transportFailureTask;
+            }
+
+            _transportFailureGeneration = generation;
+            _transportFailureTask = ReplaceBrokenTransportAsync(
+                source,
+                error,
+                process,
+                generation);
+            return _transportFailureTask;
+        }
+    }
+
+    private async Task ReplaceBrokenTransportAsync(
+        string source,
+        Exception error,
+        Process process,
+        int generation)
+    {
+        int? pid = null;
+        bool? hasExited = null;
+        try
+        {
+            pid = process.Id;
+            hasExited = process.HasExited;
+        }
+        catch { }
+
+        DebugLog.Error(
+            $"[ENGINE-TRANSPORT] {source} failed: {error.Message}; " +
+            $"state={State}, generation={generation}, pid={pid?.ToString() ?? "?"}, " +
+            $"hasExited={hasExited?.ToString() ?? "?"}, stdin={(_stdin is null ? "null" : "set")}, " +
+            $"stdoutLoop={_stdoutLoop?.Status.ToString() ?? "null"}, " +
+            $"processTracked={ReferenceEquals(process, _process)}.");
+
+        _healthWaiters.FailGeneration(
+            generation,
+            new IOException("The engine command channel failed.", error));
+        await TransitionFromReadyForTransportFailureAsync(generation).ConfigureAwait(false);
+
+        if (!IsTrackedLiveProcess(process, generation))
+        {
+            return;
+        }
+
+        var lifecycleRevision = _lifecycle.CurrentRevision;
+        if (_lifecycle.IsCurrent(lifecycleRevision, shouldRun: true))
+        {
+            ArmExpectedExitRestart(lifecycleRevision);
+        }
+        else
+        {
+            ClearExpectedExitRestart();
+        }
+        Interlocked.Exchange(ref _expectedExitProcess, process);
+        Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
+        Interlocked.Exchange(ref _expectingExit, 1);
+
+        StreamWriter? brokenStdin = null;
+        lock (_writeLock)
+        {
+            if (generation == SpawnGeneration
+                && ReferenceEquals(process, _process))
+            {
+                brokenStdin = _stdin;
+                _stdin = null;
+            }
+        }
+        try { brokenStdin?.Dispose(); }
+        catch (Exception closeError)
+        {
+            DebugLog.Warn(
+                "[ENGINE-TRANSPORT] closing broken stdin failed: " +
+                closeError.Message);
+        }
+
+        if (await WaitForExactProcessExitAsync(
+                process,
+                TimeSpan.FromMilliseconds(750)).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (Exception killError)
+        {
+            DebugLog.Error(
+                "[ENGINE-TRANSPORT] could not terminate the broken engine process: " +
+                killError.Message);
+        }
+
+        if (!await WaitForExactProcessExitAsync(
+                process,
+                TimeSpan.FromSeconds(10)).ConfigureAwait(false))
+        {
+            ClearExpectedExitRestart(lifecycleRevision);
+            await TransitionToTerminalTransportCrashAsync(generation)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<bool> WaitForExactProcessExitAsync(
+        Process process,
+        TimeSpan timeout)
+    {
+        try
+        {
+            if (process.HasExited) return true;
+            await process.WaitForExitAsync().WaitAsync(timeout).ConfigureAwait(false);
+            return process.HasExited;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
+        catch
+        {
+            try { return process.HasExited; }
+            catch { return false; }
+        }
+    }
+
+    private Task TransitionFromReadyForTransportFailureAsync(int generation)
+    {
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void Transition()
+        {
+            try
+            {
+                if (generation == SpawnGeneration && State == LifecycleState.Ready)
+                {
+                    State = LifecycleState.Starting;
+                    CrashReason = "The engine command channel stopped responding. Restarting it now.";
+                }
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        }
+
+        if (_ui.HasThreadAccess)
+        {
+            Transition();
+        }
+        else if (!_ui.TryEnqueue(Transition))
+        {
+            completion.TrySetException(
+                new InvalidOperationException(
+                    "The UI dispatcher rejected the engine transport-failure transition."));
+        }
+        return completion.Task;
+    }
+
+    private Task TransitionToTerminalTransportCrashAsync(int generation)
+    {
+        var completion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        void Transition()
+        {
+            try
+            {
+                if (generation == SpawnGeneration)
+                {
+                    State = LifecycleState.Crashed;
+                    CrashReason =
+                        "FileID could not stop the engine after its command channel failed. " +
+                        "Close FileID before trying again so the catalog writer is not orphaned.";
+                }
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        }
+
+        if (_ui.HasThreadAccess)
+        {
+            Transition();
+        }
+        else if (!_ui.TryEnqueue(Transition))
+        {
+            completion.TrySetException(
+                new InvalidOperationException(
+                    "The UI dispatcher rejected the terminal engine transport transition."));
+        }
+        return completion.Task;
+    }
+
+    private void ArmExpectedExitRestart(long lifecycleRevision)
+    {
+        lock (_expectedExitRestartGate)
+        {
+            _restartAfterExpectedExitRevision = lifecycleRevision;
+            _restartAfterExpectedExit = 1;
+        }
+    }
+
+    private void ClearExpectedExitRestart(long? lifecycleRevision = null)
+    {
+        lock (_expectedExitRestartGate)
+        {
+            if (lifecycleRevision.HasValue
+                && _restartAfterExpectedExitRevision
+                    != lifecycleRevision.Value)
+            {
+                return;
+            }
+            _restartAfterExpectedExit = 0;
+            _restartAfterExpectedExitRevision = -1;
+        }
+    }
+
+    private long ConsumeExpectedExitRestartRevision()
+    {
+        lock (_expectedExitRestartGate)
+        {
+            if (_restartAfterExpectedExit != 1)
+            {
+                _restartAfterExpectedExitRevision = -1;
+                return -1;
+            }
+            var revision = _restartAfterExpectedExitRevision;
+            _restartAfterExpectedExit = 0;
+            _restartAfterExpectedExitRevision = -1;
+            return revision;
+        }
+    }
+
+    private long ResolveCurrentExpectedExitRestartRevision()
+    {
+        var armedRevision = ConsumeExpectedExitRestartRevision();
+        if (armedRevision >= 0
+            && _lifecycle.IsCurrent(armedRevision, shouldRun: true))
+        {
+            return armedRevision;
+        }
+
+        var currentRevision = _lifecycle.CurrentRevision;
+        return _lifecycle.IsCurrent(currentRevision, shouldRun: true)
+            ? currentRevision
+            : -1;
+    }
 
     private bool ConsumeExpectedExit(Process? exited)
     {
@@ -1061,12 +2151,26 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             if (expectedExit)
             {
+                ResetProcessBoundScanState();
+                CrashReason = StoppedReason;
                 State = LifecycleState.Crashed;
-                CrashReason = string.Empty;
-                if (Interlocked.Exchange(ref _restartAfterExpectedExit, 0) == 1)
+                var restartRevision =
+                    ResolveCurrentExpectedExitRestartRevision();
+                if (restartRevision >= 0)
                 {
-                    _ = StartAfterLateExpectedExitAsync();
+                    _ = StartAfterLateExpectedExitAsync(restartRevision);
                 }
+                return;
+            }
+
+            var respawnRevision = _lifecycle.CurrentRevision;
+            if (!_lifecycle.IsCurrent(
+                    respawnRevision,
+                    shouldRun: true))
+            {
+                ResetProcessBoundScanState();
+                CrashReason = StoppedReason;
+                State = LifecycleState.Crashed;
                 return;
             }
 
@@ -1109,29 +2213,57 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // an outer one was actively harmful: setting _isStarting=1
             // here caused StartAsync's own CAS to see "already starting"
             // and bail, so every auto-respawn was silently dropped.
-            _ = Task.Delay(delay).ContinueWith(_ => _ui.TryEnqueue(async () =>
-            {
-                try
-                {
-                    await StartAsync().ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    DebugLog.Error("EngineClient: respawn StartAsync threw: " + ex.Message);
-                }
-            }));
+            _ = StartAfterCrashDelayAsync(delay, respawnRevision);
         });
     }
 
-    private async Task StartAfterLateExpectedExitAsync()
+    private async Task StartAfterCrashDelayAsync(
+        TimeSpan delay,
+        long lifecycleRevision)
     {
+        await Task.Delay(delay).ConfigureAwait(false);
+        await StartIfCurrentAsync(
+            lifecycleRevision,
+            "EngineClient: respawn StartAsync threw: ")
+            .ConfigureAwait(false);
+    }
+
+    private Task StartAfterLateExpectedExitAsync(long lifecycleRevision)
+        => StartIfCurrentAsync(
+            lifecycleRevision,
+            "EngineClient: late expected-exit restart failed: ");
+
+    private async Task StartIfCurrentAsync(
+        long lifecycleRevision,
+        string failurePrefix)
+    {
+        await _lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            await StartAsync();
+            if (!_lifecycle.IsCurrent(
+                    lifecycleRevision,
+                    shouldRun: true))
+            {
+                return;
+            }
+
+            await StartCoreAsync(
+                lifecycleRevision,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (!_lifecycle.IsCurrent(
+                lifecycleRevision,
+                shouldRun: true))
+        {
         }
         catch (Exception ex)
         {
-            DebugLog.Error("EngineClient: late expected-exit restart failed: " + ex.Message);
+            DebugLog.Error(failurePrefix + ex.Message);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
         }
     }
 
@@ -1152,6 +2284,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private void Cleanup()
     {
         var retiringGeneration = SpawnGeneration;
+        _healthWaiters.FailGeneration(
+            retiringGeneration,
+            new InvalidOperationException(
+                "The engine stopped before confirming command-channel health."));
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
         _readCts = null;
@@ -1220,6 +2356,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // restructureApplyResult that clears this, so the next apply's result would
         // be mis-attributed as the dead undo's. (audit R2-app)
         UndoRestructureInFlight = false;
+        UndoRestructureInFlightWasShortcut = false;
         // Bump the process generation LAST so an observer that reads it after a
         // State PropertyChanged sees the post-teardown value. Views holding a
         // static in-flight guard keyed to a command sent to THIS process
@@ -1249,11 +2386,186 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// or surfaces a clean error — never silently throws "Engine not
     /// running."
     /// </summary>
-    public async Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+    public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
+        => EnsureCommandChannelReadyAsync(timeout, ct);
+
+    public async Task EnsureCommandChannelReadyAsync(
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        TimeSpan Remaining()
+        {
+            var remaining = timeout - stopwatch.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw new TimeoutException(
+                    $"Engine command channel did not become healthy within " +
+                    $"{timeout.TotalSeconds:0}s.");
+            }
+            return remaining;
+        }
+
+        await WaitForLifecycleReadyAsync(Remaining(), ct).ConfigureAwait(false);
+        var firstGeneration = SpawnGeneration;
+        try
+        {
+            await ProbeCommandChannelAsync(
+                MinTimeout(Remaining(), HealthProbeTimeout),
+                ct).ConfigureAwait(false);
+            return;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn(
+                $"[ENGINE-HEALTH] generation {firstGeneration} failed its " +
+                $"correlated probe: {ex.Message}");
+        }
+
+        await WaitForLifecycleReadyAsync(
+            Remaining(),
+            ct,
+            generationAfter: firstGeneration).ConfigureAwait(false);
+        await ProbeCommandChannelAsync(
+            MinTimeout(Remaining(), HealthProbeTimeout),
+            ct).ConfigureAwait(false);
+    }
+
+    private static TimeSpan MinTimeout(TimeSpan left, TimeSpan cap)
+        => left <= cap ? left : cap;
+
+    private async Task ProbeCommandChannelAsync(
+        TimeSpan timeout,
+        CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if (State == LifecycleState.Ready) return;
-        if (State == LifecycleState.Crashed)
+        if (State != LifecycleState.Ready)
+        {
+            throw new InvalidOperationException(
+                $"Engine is not Ready for a health probe (state={State}).");
+        }
+
+        var generation = SpawnGeneration;
+        var process = _process
+            ?? throw new InvalidOperationException(
+                "Engine reported Ready without a tracked process.");
+        int pid;
+        bool hasExited;
+        try
+        {
+            hasExited = process.HasExited;
+            if (hasExited)
+            {
+                throw new InvalidOperationException(
+                    "Engine reported Ready after its process exited.");
+            }
+            pid = process.Id;
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "Could not identify the Ready engine process.",
+                ex);
+        }
+
+        if (!IsHealthTargetCurrent(
+                generation,
+                SpawnGeneration,
+                process,
+                _process,
+                hasExited))
+        {
+            throw new InvalidOperationException(
+                "The engine changed while preparing its health probe.");
+        }
+        var requestId = Guid.NewGuid().ToString("N");
+        var waiter = _healthWaiters.Register(requestId, generation, pid);
+        if (!IsHealthTargetCurrent(
+                generation,
+                SpawnGeneration,
+                process,
+                _process,
+                capturedHasExited: false))
+        {
+            var changed = new InvalidOperationException(
+                "The engine changed before its health probe could be sent.");
+            _healthWaiters.TryFail(requestId, changed);
+            _ = waiter.Task.Exception;
+            throw changed;
+        }
+        try
+        {
+            await SendCommandAsync(new HealthCheckCommand(requestId), ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _healthWaiters.TryFail(requestId, ex);
+            _ = waiter.Task.Exception;
+            throw;
+        }
+
+        try
+        {
+            await waiter.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException ex)
+        {
+            var timeoutError = new TimeoutException(
+                $"Engine generation {generation} (pid {pid}) did not answer " +
+                $"health probe {requestId} within {timeout.TotalSeconds:0.###}s.",
+                ex);
+            _healthWaiters.TryFail(requestId, timeoutError);
+            _ = waiter.Task.Exception;
+            await HandleTransportFailureAsync(
+                "health probe timeout",
+                timeoutError,
+                process,
+                generation).ConfigureAwait(false);
+            throw timeoutError;
+        }
+        catch (OperationCanceledException ex)
+        {
+            _healthWaiters.TryFail(requestId, ex);
+            _ = waiter.Task.Exception;
+            throw;
+        }
+    }
+
+    internal static bool IsHealthTargetCurrent(
+        int capturedGeneration,
+        int currentGeneration,
+        Process capturedProcess,
+        Process? currentProcess,
+        bool capturedHasExited)
+        => !capturedHasExited
+            && capturedGeneration == currentGeneration
+            && ReferenceEquals(capturedProcess, currentProcess);
+
+    private async Task WaitForLifecycleReadyAsync(
+        TimeSpan timeout,
+        CancellationToken ct,
+        int? generationAfter = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        bool IsReady()
+            => State == LifecycleState.Ready
+                && (!generationAfter.HasValue
+                    || SpawnGeneration != generationAfter.Value)
+                && !IsTransportFailureActive(SpawnGeneration);
+
+        if (IsReady()) return;
+        if (State == LifecycleState.Crashed
+            && !generationAfter.HasValue
+            && !IsTransportFailureActive(SpawnGeneration))
         {
             throw new InvalidOperationException(
                 "Engine has crashed: " + (CrashReason ?? "unknown reason"));
@@ -1262,12 +2574,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         PropertyChangedEventHandler? handler = null;
         handler = (_, e) =>
         {
-            if (e.PropertyName != nameof(State)) return;
-            if (State == LifecycleState.Ready)
+            if (e.PropertyName is not nameof(State)
+                and not nameof(SpawnGeneration))
+            {
+                return;
+            }
+            if (IsReady())
             {
                 tcs.TrySetResult(true);
             }
-            else if (State == LifecycleState.Crashed)
+            else if (State == LifecycleState.Crashed
+                     && !generationAfter.HasValue
+                     && !IsTransportFailureActive(SpawnGeneration))
             {
                 tcs.TrySetException(new InvalidOperationException(
                     "Engine crashed while waiting for ready: " + (CrashReason ?? "unknown reason")));
@@ -1276,13 +2594,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         PropertyChanged += handler;
         // Re-check both terminal states after subscribing so a transition in
         // the precheck/attach window cannot strand the waiter until timeout.
-        var stateAfterSubscribe = State;
-        if (stateAfterSubscribe == LifecycleState.Ready)
+        if (IsReady())
         {
             PropertyChanged -= handler;
             return;
         }
-        if (stateAfterSubscribe == LifecycleState.Crashed)
+        if (State == LifecycleState.Crashed
+            && !generationAfter.HasValue
+            && !IsTransportFailureActive(SpawnGeneration))
         {
             PropertyChanged -= handler;
             throw new InvalidOperationException(
@@ -1297,7 +2616,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"Engine did not become Ready within {timeout.TotalSeconds:0}s (current state: {State}).");
+                $"Engine did not become Ready within {timeout.TotalSeconds:0}s " +
+                $"(current state: {State}, generation: {SpawnGeneration}).");
         }
         finally
         {
@@ -1336,7 +2656,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Scan FileDone events are sampled (every Nth) because a fast scan
             // can emit hundreds per second and subscribers (LibraryView) don't
             // need every one to feel responsive.
-            bool publishToSubject = true;
+            bool publishToSubject = ev.Payload is not HealthCheckResultEvent;
             if (ev.Payload is FileDoneEventWrapper)
             {
                 var n = Interlocked.Increment(ref _scanFileDoneEventCounter);
@@ -1349,10 +2669,33 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             try
             {
+                if (MutationInvalidatesRestructurePlan(ev.Payload))
+                {
+                    var revision = Interlocked.Increment(ref _restructureMutationRevision);
+                    DebugLog.Info(
+                        $"[RESTRUCTURE] inputs changed at revision {revision} after " +
+                        $"{ev.Payload?.GetType().Name}; invalidating cached plan.");
+                    if (LastRestructurePlan is not null)
+                    {
+                        InvalidateRestructurePlan();
+                    }
+                }
+
                 switch (ev.Payload)
                 {
+                    case HealthCheckResultEvent:
+                        break;
                     case ReadyEvent r:
                         Info = r.Info;
+                        lock (_transportFailureLock)
+                        {
+                            if (_transportFailureGeneration != generation
+                                || _transportFailureTask.IsCompleted)
+                            {
+                                _transportFailureGeneration = -1;
+                                _transportFailureTask = Task.CompletedTask;
+                            }
+                        }
                         if (GpuDeviceRemoved && _gpuDeviceRemovedGeneration != generation)
                         {
                             GpuDeviceRemoved = false;
@@ -1538,6 +2881,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         if (e.Error.Kind == "undo_restructure")
                         {
                             UndoRestructureInFlight = false;
+                            UndoRestructureInFlightWasShortcut = false;
+                        }
+                        if (e.Error.Kind.StartsWith("plan_restructure", StringComparison.Ordinal))
+                        {
+                            Interlocked.Exchange(ref _pendingRestructurePlanRevision, -1);
                         }
                         if (IsNonFatalWarningKind(e.Error.Kind))
                         {
@@ -1646,6 +2994,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         QueueState = qs.State;
                         break;
                     case RestructurePlanEvent rp:
+                        var requestedRevision =
+                            Interlocked.Exchange(ref _pendingRestructurePlanRevision, -1);
+                        var currentRevision = Volatile.Read(ref _restructureMutationRevision);
+                        if (!ShouldAcceptRestructurePlan(requestedRevision, currentRevision))
+                        {
+                            DebugLog.Warn(
+                                $"[RESTRUCTURE] discarded stale plan for revision {requestedRevision}; " +
+                                $"current revision is {currentRevision}.");
+                            RestructurePlanDiscardedSignal++;
+                            break;
+                        }
                         LastRestructurePlan = rp.Plan;
                         break;
                     case RestructureApplyResultEvent rar:
@@ -1654,7 +3013,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // the result so it is already correct when the result's
                         // PropertyChanged enqueues the view's SyncApplyResult.
                         bool wasUndo = UndoRestructureInFlight;
+                        bool wasShortcutUndo = wasUndo && UndoRestructureInFlightWasShortcut;
+                        if (!wasShortcutUndo && RestructureResultInvalidatesPlan(
+                            wasUndo,
+                            _pendingRestructureApplyUndoable,
+                            rar.Result))
+                        {
+                            InvalidateRestructurePlan();
+                        }
                         LastRestructureApplyResultWasUndo = wasUndo;
+                        LastRestructureApplyResultWasShortcutUndo = wasShortcutUndo;
                         _lastRestructureApplyResult = rar.Result;
                         PropertyChanged?.Invoke(
                             this,
@@ -1662,24 +3030,34 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         var nextCanUndo = NextCanUndoRestructure(
                             wasUndo,
                             rar.Result,
-                            _pendingRestructureApplyUndoable);
+                            _pendingRestructureApplyUndoable,
+                            wasShortcutUndo);
                         if (wasUndo)
                         {
                             UndoRestructureInFlight = false;
-                            if (nextCanUndo == false)
+                            UndoRestructureInFlightWasShortcut = false;
+                            if (wasShortcutUndo
+                                && IsSuccessfulRestructureUndoResult(rar.Result))
+                            {
+                                RefreshPersistedRestructureUndo(UndoRestructureShortcutToken);
+                            }
+                            else if (nextCanUndo == false)
                             {
                                 UndoRestructureRoot = null;
                             }
                         }
                         else
                         {
-                            if (nextCanUndo == true)
+                            if (!string.IsNullOrWhiteSpace(rar.Result.ShortcutUndoToken))
                             {
+                                UndoRestructureShortcutToken = rar.Result.ShortcutUndoToken;
                                 UndoRestructureRoot = _pendingRestructureApplyRoot;
+                                CanUndoRestructure = UndoRestructureRoot is not null;
                             }
-                            else if (!_pendingRestructureApplyUndoable)
+                            else if (nextCanUndo == true)
                             {
-                                UndoRestructureRoot = null;
+                                UndoRestructureShortcutToken = null;
+                                UndoRestructureRoot = _pendingRestructureApplyRoot;
                             }
                             _pendingRestructureApplyRoot = null;
                             _pendingRestructureApplyUndoable = false;
@@ -1808,5 +3186,103 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+}
+
+internal sealed class GenerationHealthWaiters
+{
+    internal sealed class Waiter
+    {
+        internal Waiter(string requestId, int generation, int pid)
+        {
+            RequestId = requestId;
+            Generation = generation;
+            Pid = pid;
+        }
+
+        internal string RequestId { get; }
+        internal int Generation { get; }
+        internal int Pid { get; }
+        internal TaskCompletionSource Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal Task Task => Completion.Task;
+    }
+
+    private readonly object _gate = new();
+    private readonly Dictionary<string, Waiter> _waiters =
+        new(StringComparer.Ordinal);
+
+    internal int Count
+    {
+        get
+        {
+            lock (_gate) return _waiters.Count;
+        }
+    }
+
+    internal Waiter Register(string requestId, int generation, int pid)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        var waiter = new Waiter(requestId, generation, pid);
+        lock (_gate)
+        {
+            if (!_waiters.TryAdd(requestId, waiter))
+            {
+                throw new InvalidOperationException(
+                    $"A health probe with request ID '{requestId}' is already registered.");
+            }
+        }
+        return waiter;
+    }
+
+    internal bool TryResolve(string requestId, int pid, int generation)
+    {
+        Waiter? waiter;
+        lock (_gate)
+        {
+            if (!_waiters.TryGetValue(requestId, out waiter)
+                || waiter.Pid != pid
+                || waiter.Generation != generation)
+            {
+                return false;
+            }
+            _waiters.Remove(requestId);
+        }
+        waiter.Completion.TrySetResult();
+        return true;
+    }
+
+    internal bool TryFail(string requestId, Exception error)
+    {
+        Waiter? waiter;
+        lock (_gate)
+        {
+            if (!_waiters.Remove(requestId, out waiter))
+            {
+                return false;
+            }
+        }
+        waiter.Completion.TrySetException(error);
+        return true;
+    }
+
+    internal int FailGeneration(int generation, Exception error)
+    {
+        List<Waiter> retired;
+        lock (_gate)
+        {
+            retired = _waiters.Values
+                .Where(waiter => waiter.Generation == generation)
+                .ToList();
+            foreach (var waiter in retired)
+            {
+                _waiters.Remove(waiter.RequestId);
+            }
+        }
+        foreach (var waiter in retired)
+        {
+            waiter.Completion.TrySetException(error);
+        }
+        return retired.Count;
     }
 }

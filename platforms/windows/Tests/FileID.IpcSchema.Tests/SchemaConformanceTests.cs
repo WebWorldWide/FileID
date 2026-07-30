@@ -1,4 +1,4 @@
-// Schema-conformance suite — C# twin of the Rust engine's variant coverage
+﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
 // tests, checked against the canonical contract itself. For every
 // CommandPayload / EventPayload variant we keep an exemplar instance,
 // serialize it through IpcCoder (the exact wire path), and assert against
@@ -46,9 +46,9 @@ public class SchemaConformanceTests
     private static readonly float[] _embedding512 = new float[512];
 
     [Fact]
-    public void SchemaVersion_ReflectsOptionalDeepAnalyzeSelectionAddition()
+    public void SchemaVersion_ReflectsCorrelatedHealthCheckAddition()
     {
-        Assert.Equal("1.1.0", _schema.RootElement.GetProperty("version").GetString());
+        Assert.Equal("1.3.0", _schema.RootElement.GetProperty("version").GetString());
     }
 
     [Fact]
@@ -149,6 +149,8 @@ public class SchemaConformanceTests
         new PauseScanCommand(),
         new ResumeScanCommand(),
         new CancelScanCommand(),
+        new CancelRestructureCommand(),
+        new HealthCheckCommand("health-check-1"),
         new RequestStatusCommand(),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
@@ -197,6 +199,7 @@ public class SchemaConformanceTests
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
+        new HealthCheckResultEvent(new HealthCheckResult("health-check-1", 1234)),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),
         new DiscoveryCompleteEvent(50_000),

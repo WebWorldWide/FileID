@@ -429,11 +429,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
                     SizeBytes = m.Size,
                     ModifiedAt = m.ModifiedAt,
                     GroupKey = groupKey,
-                    // A recommended keeper is still marked (so the per-group trash
-                    // never targets the whole group), but the global "Trash
-                    // non-keepers" bulk action is hidden in Similar mode — these
-                    // are NOT byte-identical, so no one-click mass delete.
-                    IsKeeper = k == 0,
+                    IsSimilar = true,
                 });
             }
             groups.Add(new DuplicateGroup
@@ -594,6 +590,17 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     public Microsoft.UI.Xaml.Visibility SimilarBadgeVisibility =>
         IsSimilar ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
 
+    public Microsoft.UI.Xaml.Visibility ExactActionsVisibility =>
+        IsSimilar ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    public string TrashActionText =>
+        IsSimilar ? "Trash selected copies" : "Trash this group only";
+
+    public string TrashActionHelpText =>
+        IsSimilar
+            ? "Move only the copies explicitly checked for trash to the Recycle Bin."
+            : "Move every non-keeper member to the Recycle Bin.";
+
     // FEAT-CRIT-2: per-group skip flag. Members of a skipped group are
     // excluded from "Trash non-keepers". Mirrors the macOS Cleanup
     // per-group "Skip" action.
@@ -661,6 +668,14 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     /// to the parent group's content hash at construction.</summary>
     public required string GroupKey { get; init; }
 
+    public bool IsSimilar { get; init; }
+
+    public Microsoft.UI.Xaml.Visibility KeeperVisibility =>
+        IsSimilar ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
+    public Microsoft.UI.Xaml.Visibility TrashSelectionVisibility =>
+        IsSimilar ? Microsoft.UI.Xaml.Visibility.Visible : Microsoft.UI.Xaml.Visibility.Collapsed;
+
     public string SizeDisplay
     {
         get
@@ -682,6 +697,18 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
             if (_isKeeper == value) return;
             _isKeeper = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsKeeper)));
+        }
+    }
+
+    private bool _isSelectedForTrash;
+    public bool IsSelectedForTrash
+    {
+        get => _isSelectedForTrash;
+        set
+        {
+            if (_isSelectedForTrash == value) return;
+            _isSelectedForTrash = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectedForTrash)));
         }
     }
 
@@ -721,4 +748,17 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+internal static class CleanupSelectionPolicy
+{
+    internal static DuplicateMember[] SelectedVictims(DuplicateGroup group) =>
+        group.Members
+            .Where(member => group.IsSimilar ? member.IsSelectedForTrash : !member.IsKeeper)
+            .ToArray();
+
+    internal static DuplicateMember? RetainedCopy(DuplicateGroup group) =>
+        group.IsSimilar
+            ? group.Members.FirstOrDefault(member => !member.IsSelectedForTrash)
+            : group.Members.FirstOrDefault(member => member.IsKeeper);
 }

@@ -320,6 +320,7 @@ public enum Tagging {
                         faceQualities: pass.faceQualities,
                         faceYaws: pass.faceYaws,
                         facePitches: pass.facePitches,
+                        faceMinDimPx: pass.faceMinDimPx,
                         ocrText: ocr,
                         cameraModel: exif.cameraModel,
                         locationLat: exif.lat,

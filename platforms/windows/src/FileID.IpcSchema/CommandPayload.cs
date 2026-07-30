@@ -38,6 +38,9 @@ public sealed record PurgeExcludedCommand(
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
+public sealed record CancelRestructureCommand : CommandPayload;
+public sealed record HealthCheckCommand(
+    [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
@@ -62,7 +65,9 @@ public sealed record DeepAnalyzeAllCommand(
     bool TagsOnly = false,
     bool ProposeRenames = true,
     [property: JsonPropertyName("fileIDs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<long>? FileIds = null) : CommandPayload;
+    IReadOnlyList<long>? FileIds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? ExcludedFolders = null) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
@@ -84,7 +89,10 @@ public sealed record ApplyRestructureCommand(
 /// <summary>Reverse the most recent applyRestructure — the engine replays its
 /// on-disk undo journal to move every relocated file back. Reply is a
 /// RestructureApplyResult (Applied = files moved back). (RESTRUCTURE.md §6)</summary>
-public sealed record UndoRestructureCommand(string LibraryRoot) : CommandPayload;
+public sealed record UndoRestructureCommand(
+    string LibraryRoot,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? ShortcutUndoToken = null) : CommandPayload;
 
 public sealed record RestructureMove(
     [property: JsonPropertyName("fileID")] long FileId,
@@ -231,6 +239,8 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
+            "cancelRestructure" => Empty<CancelRestructureCommand>(ref reader),
+            "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
@@ -259,6 +269,8 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
+            case CancelRestructureCommand: WriteEmpty(writer, "cancelRestructure"); break;
+            case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;

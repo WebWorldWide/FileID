@@ -16,6 +16,8 @@ struct IPCProtocolTests {
             .pauseScan,
             .resumeScan,
             .cancelScan,
+            .cancelRestructure,
+            .healthCheck(requestID: "health-check-1"),
             .requestStatus,
             .shutdown
         ]
@@ -32,6 +34,55 @@ struct IPCProtocolTests {
             let decodedPayloadJSON = try IPCCoder.encoder.encode(decoded.payload)
             #expect(originalPayloadJSON == decodedPayloadJSON)
         }
+    }
+
+    @Test("Health check result preserves request correlation and process ID")
+    func healthCheckResultRoundTrip() throws {
+        let event = IPCEvent(payload: .healthCheckResult(HealthCheckResult(
+            requestID: "health-check-1",
+            pid: 4242
+        )))
+        let line = try IPCCoder.encodeLine(event)
+        let decoded = try IPCCoder.decoder.decode(IPCEvent.self, from: Data(line.dropLast()))
+        guard case .healthCheckResult(let result) = decoded.payload else {
+            Issue.record("Decoded payload was not .healthCheckResult")
+            return
+        }
+        #expect(result.requestID == "health-check-1")
+        #expect(result.pid == 4242)
+    }
+
+    @Test("Restructure plan confidence totals survive JSON round-trip")
+    func restructureConfidenceCountsRoundTrip() throws {
+        let plan = RestructurePlan(
+            libraryRoot: "/Users/adam/photos",
+            moves: [],
+            categoryCounts: [],
+            confidenceCounts: RestructureConfidenceCounts(
+                auto: 17, review: 5, ask: 2, unknown: 1))
+        let encoded = try IPCCoder.encoder.encode(plan)
+        let decoded = try IPCCoder.decoder.decode(RestructurePlan.self, from: encoded)
+        let counts = try #require(decoded.confidenceCounts)
+
+        #expect(counts.auto == 17)
+        #expect(counts.review == 5)
+        #expect(counts.ask == 2)
+        #expect(counts.unknown == 1)
+    }
+
+    @Test("Older restructure plans decode without confidence totals")
+    func legacyRestructurePlanWithoutConfidenceCounts() throws {
+        let json = Data(#"""
+            {
+              "libraryRoot": "/Users/adam/photos",
+              "moves": [],
+              "categoryCounts": []
+            }
+            """#.utf8)
+        let plan = try IPCCoder.decoder.decode(RestructurePlan.self, from: json)
+
+        #expect(plan.confidenceCounts == nil)
+        #expect(!plan.truncated)
     }
 
     @Test("Event: progress payload survives round-trip with all fields")
@@ -118,6 +169,57 @@ struct IPCProtocolTests {
             #expect(originalJSON == decodedJSON,
                     "round-trip mismatch for \(payload)")
         }
+    }
+
+    @Test("deepAnalyzeAll.excludedFolders round-trips, present or nil")
+    func deepAnalyzeAllExcludedFoldersRoundTrip() throws {
+        let withExclusions = IPCCommand.Payload.deepAnalyzeAll(
+            modelKind: "qwen2_5_vl_7b", skipExisting: true, tagsOnly: nil,
+            proposeRenames: nil, fileIDs: nil,
+            excludedFolders: ["/Users/adam/Private", "/Users/adam/Scratch"])
+        let cmd = IPCCommand(payload: withExclusions)
+        let line = try IPCCoder.encodeLine(cmd)
+        let decoded = try IPCCoder.decoder.decode(IPCCommand.self, from: Data(line.dropLast()))
+        guard case .deepAnalyzeAll(_, _, _, _, _, let decodedExcluded) = decoded.payload else {
+            Issue.record("Decoded payload was not .deepAnalyzeAll")
+            return
+        }
+        #expect(decodedExcluded == ["/Users/adam/Private", "/Users/adam/Scratch"])
+
+        // Absent excludedFolders — fileIDs also nil (whole-library, no
+        // exclusions), the common case — must decode back to nil.
+        //
+        // Deliberately NOT asserting that the key is omitted from the wire
+        // rather than written as null: `IPCCommand.Payload` uses Swift's
+        // SYNTHESIZED Codable (there is no custom `encode(to:)` in
+        // IPCProtocol.swift), and synthesized enum encoding writes optional
+        // associated values with `encode`, not `encodeIfPresent` — so a nil
+        // very likely serializes as `"excludedFolders": null`. That is a
+        // pre-existing property of this case's three other optionals
+        // (`tagsOnly`, `proposeRenames`, `fileIDs`), not something
+        // excludedFolders introduces, so pinning it here would assert
+        // unverified behavior and could fail for a reason unrelated to this
+        // field. Round-trip fidelity — which holds either way — is the
+        // contract that actually matters app→engine.
+        //
+        // Cross-platform note for whoever picks this up: the Rust
+        // (`skip_serializing_if`) and C# (`JsonIgnore(WhenWritingNull)`)
+        // mirrors both OMIT these keys, and the JSON Schema types them as
+        // `array`/`boolean` (a null would violate strict validation). If
+        // macOS does emit nulls, that divergence predates this field and
+        // should be fixed for the whole Payload enum at once.
+        let withoutExclusions = IPCCommand.Payload.deepAnalyzeAll(
+            modelKind: "qwen2_5_vl_7b", skipExisting: true, tagsOnly: nil,
+            proposeRenames: nil, fileIDs: nil, excludedFolders: nil)
+
+        let cmd2 = IPCCommand(payload: withoutExclusions)
+        let line2 = try IPCCoder.encodeLine(cmd2)
+        let decoded2 = try IPCCoder.decoder.decode(IPCCommand.self, from: Data(line2.dropLast()))
+        guard case .deepAnalyzeAll(_, _, _, _, _, let decodedExcluded2) = decoded2.payload else {
+            Issue.record("Decoded payload was not .deepAnalyzeAll")
+            return
+        }
+        #expect(decodedExcluded2 == nil)
     }
 
     @Test("FileDoneEvent.skippedStages survives round-trip")

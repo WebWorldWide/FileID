@@ -867,6 +867,39 @@
                 </StackPanel>
             </Border>
 
+            <!-- Deep Analyze exclusions. Separate from the scan exclusion
+                 list above: a folder can be fine to catalog/tag/search but
+                 too slow or private to run the VLM over. Files stay in the
+                 library either way — this only skips the whole-library Deep
+                 Analyze pass (People/Restructure's auto-tag trigger and the
+                 Deep Analyze tab's own "Analyze all"); an explicit
+                 file/folder selection is never filtered by this list. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="Deep Analyze exclusions" Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2"/>
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list." />
+                    <InfoBar x:Name="DeepAnalyzeExcludedFoldersInfoBar"
+                             IsOpen="False" IsClosable="True" />
+                    <TextBlock x:Name="DeepAnalyzeExcludedFoldersEmptyText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="No folders are excluded from Deep Analyze."
+                               Visibility="Visible" />
+                    <ItemsControl x:Name="DeepAnalyzeExcludedFoldersList" />
+                    <Button Content="Add folder…"
+                            Click="OnAddDeepAnalyzeExcludedFolderClicked"
+                            AutomationProperties.Name="Add a folder excluded from Deep Analyze" />
+                </StackPanel>
+            </Border>
+
             <!-- Recent scans. Most-recent 5 scan_sessions rows: started_at,
                  file count, duration, root path. Refreshes whenever the
                  Settings tab is opened (cheap query against a small table). -->

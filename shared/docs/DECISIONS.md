@@ -7,6 +7,359 @@
 
 ---
 
+## 2026-07-29 — Face clustering: auto-merge lowered 0.88 -> 0.75, People grid gets a size floor, and mega-cluster splitting is deliberately NOT attempted
+
+Investigating "thousands of leftover faces, tons are the same people" produced four
+measurements on the 2026-07-29 Adlon catalog. Recording all of them, including the
+negative results, because they bound what is worth trying next.
+
+**1. The mega-clusters are provably wrong, and centroid cohesion cannot see it.**
+16 clusters hold 83,381 faces (largest 26,422). Pass 3 splits on mean
+cosine-to-centroid < 0.60 — and these score 0.61-0.74, so 9 of 16 PASS. Centroid
+cohesion is not scale-invariant: in a large diffuse cluster the centroid becomes a
+generic "average face" direction that every member sits ~0.62 from. Measured by
+size band (mean pairwise cosine / pairwise minimum):
+
+    <=150 faces (780 clusters):  pairwise 0.71-0.86, min +0.43..+0.78
+    >=151 faces  (57 clusters):  pairwise 0.23-0.55, min -0.12..-0.25
+
+Every large cluster contains ANTI-CORRELATED face pairs. Two faces at cosine -0.15
+cannot be one identity — a label-free contradiction, not a threshold opinion.
+
+**2. Raising the Pass-3 split depth does nothing.** `pass3_max_splits` is a
+recursion-DEPTH cap (decremented into both children), so 7 caps a cluster at 2^7
+leaves. Faithfully simulating `validate_and_split` at depth 7/12/16/24 on the four
+largest clusters returned byte-identical output: 1 part each. They never split
+because they pass the centroid bar on the first check. Depth was never the
+constraint.
+
+**3. Adding a pairwise-cohesion floor to Pass 3 does not converge.** Tried
+p10>=0.35, p10>=0.45, p2>=0.20, min>=0.00, min>=0.10 with depth 40. Every variant
+still left multi-thousand-face residual parts (largest 2,920-5,734) AND 16-26 parts
+containing anti-correlated pairs, while inflating 6 clusters into 248-837 and
+producing 1-30 new <=2-face fragments. Recursive 2-means cannot recover identity
+boundaries; bisecting a chained manifold does not cut where identities do.
+
+**4. Retuning the Pass-1 link threshold is worse, not better.** The root cause is
+Pass 1: mutual-kNN + connected components has no diameter bound, so A~B~C~D chains
+merge people who are themselves dissimilar. Simulated on a fixed 20,000-face
+subsample:
+
+    pass1   clusters  largest  singletons   faces in anti-correlated clusters
+     0.50      2596    16226    10.3%        81.1%     <- shipped
+     0.60      6032    10140    24.6%        50.7%
+     0.70      9222     6949    38.6%        34.7%
+
+Raising the threshold barely dents the blob while singletons quadruple. Chaining is
+scale-free — in a family library there are always enough intermediate faces to
+bridge. There is no value of this constant that yields clean identities.
+
+**5. A centroid-linkage guard helps materially but does not solve it — and is NOT
+shipped.** The most promising variant tested: keep the same mutual-kNN edge set, but
+process edges strongest-first and REFUSE a union whose two components' running
+centroids are below a link threshold (turning single linkage into centroid linkage,
+which does have a diameter bound). Running centroid sums make the guard O(dim) per
+merge, so it is cheap enough for the real pipeline. On the same 20,000-face
+subsample:
+
+    variant                clusters  largest  singletons  faces in anti-corr clusters
+    today (single-linkage)     2596    16226      10.3%           81.1%
+    guarded @ 0.45            3726    12279      13.8%           61.8%
+    guarded @ 0.50            4079     9931      14.8%           58.3%
+    guarded @ 0.55            5215     9129      20.2%           52.6%
+    guarded @ 0.60            6612     8099      26.7%           44.2%
+
+Genuinely the best result of the five — it nearly halves the worst pathology. It is
+still NOT shipped, deliberately: a ~10,000-face blob survives, and singletons rise
+10.3% -> 14.8% (~45% relative, roughly 6,000 more unclustered faces at full corpus
+scale). More unclustered faces means MORE "the same person is split up", which is
+the complaint this work exists to fix — so on a day with no ability to validate
+against named ground truth, it trades the stated problem for a subtler one. Ship it
+only alongside a labelled check that real identities did not fragment.
+
+**6. Why none of it converges: the embeddings themselves do not separate these
+identities.** Using small (6-150 face) clusters as a same-person proxy, measured
+mean pairwise cosine for same-person pairs, split by face quality:
+
+    both faces quality >= 0.35 : 0.744   (n=71,063)
+    either face quality <  0.30 : 0.438   (n=19,449)
+
+The code's existing note is confirmed: low-quality faces carry little identity
+signal, and this corpus is old/scanned with quality capped ~0.42 (p50 0.357). Since
+the hardest different-person lookalike pairs reach ~0.55, the same-person and
+different-person distributions OVERLAP substantially. No threshold, linkage rule, or
+split heuristic can separate overlapping distributions. Raising the pre-cluster
+quality gate 0.25 -> 0.35 confirms this from the other side: the blob only falls to
+6,645 while 43.1% of faces stop clustering entirely — a bad trade.
+
+**Conclusion: the over-merge half is an EMBEDDER ceiling, not a tuning bug.** The
+real fix is a stronger face embedder (a modern ArcFace/AdaFace-class model with
+better discriminative power on low-quality scans), which is a `MODELS.md` change:
+new weights, license vetting, ONNX/CoreML export, and on-hardware validation. A
+diameter-bounded linkage (item 5) is worth having on top, but is not sufficient
+alone. NOTHING in this area was shipped beyond the two measured-safe items below.
+Shipping any of items 1-5 would have traded a visible pathology for a worse one on
+a day with no time to validate. All measurements are recorded so the next attempt
+starts from evidence rather than repeating these five dead ends.
+
+**What DID ship, both measured safe:**
+
+(a) `AUTOMERGE_COS_DEFAULT` 0.88 -> 0.75 (`pipeline/face_clustering.rs`). The old
+0.88 rested on a comment claiming same-person SFace cosine sits at 0.88-0.95, which
+is false for this corpus: at 0.88 consolidate fired **3 times across 3,092 non-mega
+clusters** — inert, which is exactly why the same person stayed split across
+thousands of duplicate-burst clusters. Judging each merge by whether it introduces
+an anti-correlated pair: 0.88 -> 3 merges / 0 unsafe; 0.78 -> 78 / 0; **0.75 -> 140
+/ 0**; 0.70 -> 329 / 1. 0.75 is 47x more same-person recovery than 0.88 with zero
+identity mixing and a real margin before the first unsafe merge. It cannot re-glue
+the mega-clusters (their pairwise centroid cosines are 0.21-0.29). User "different
+people" verdicts and protected named clusters still override it.
+
+macOS was deliberately left alone: it uses a different mechanism
+(`tightPairAutoMerge`, thresholds 0.65 / 0.55 for singletons) that already merges
+more aggressively than 0.75, on a platform that cannot be compiled here. Forcing
+the Windows number onto it would have made macOS *stricter*. Divergence to reconcile
+when someone can measure on a Mac.
+
+(b) A People-grid size floor of 6 faces (`PeopleViewModel.MinFacesPerCluster`).
+2,271 of 3,108 clusters held <=5 faces, so the tab rendered thousands of
+one-moment fragments and buried the few dozen clusters worth naming. Clusters the
+user has NAMED are always shown regardless of size, `face_prints.excluded` rows no
+longer count toward the floor, and the withheld count is disclosed in the UI —
+fragments are hidden from the grid, never deleted, and stay searchable. This does
+not improve clustering; it makes the existing clustering usable, which is the half
+of the complaint that was actually solvable today.
+
+## 2026-07-29 — Runtime-egress review tripwire refreshed deliberately (14 digests + 2 new reviewed boundary files)
+
+`check_runtime_egress.py --known-blockers` was red with 14 violations, blocking the policy workflow.
+The reviewed-source digests are a REVIEW TRIPWIRE, not a checksum to be regenerated on sight, so
+this records exactly what was verified before refreshing them.
+
+Twelve entries were digest drift: eight files edited today (the Restructure/Deep-Analyze/face work)
+and four that drifted in the prior commit `6aea8ac` (`main.rs`, `commands/trash.rs`,
+`commands/bulk.rs`, `Program.cs`, `MainWindow.xaml.cs`). Before refreshing, every one was checked
+for ADDED network capability — grepping each file's working-tree diff and, for the `6aea8ac`-era
+files, that commit's diff, for `reqwest`/`TcpStream`/`TcpListener`/`UdpSocket`/`HttpClient`/
+`WebClient`/`WebRequest`/`TcpClient`/`URLSession`/`http(s)://`/`Command::new`/`dlopen`/`libloading`/
+`DllImport`/`NativeLibrary`/`ProcessStartInfo`/`getaddrinfo`. Result: zero added lines in all
+fourteen. The gate's separate host-approval checks were already passing (only digest and
+module-boundary errors were reported), so no unapproved egress host appeared either.
+
+Two files were newly added to `RAW_NETWORK_FILES` after inspecting the exact matched line in each —
+both are false positives of deliberately-broad patterns, kept broad on purpose:
+- `platforms/windows/src/engine/src/commands/restructure.rs` — the `.rs` pattern includes
+  `windows::Win32::`, and the only hit is `use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;`
+  (a file-sharing constant for the held-handle move; no network).
+- `platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs` — the `.cs` pattern
+  includes `Process`, and the only hit is `Process? processAtWrite = null;` (the engine child-process
+  handle). Note the caller-allowlist route does not work for C#: `SAFE_NETWORK_SINK_PATTERNS[".cs"]`
+  is `re.compile(r"$^")` and can never match, so a reviewed C# boundary file must go in
+  `RAW_NETWORK_FILES` with a digest.
+
+Both additions were mirrored into `test_check_runtime_egress.py`'s hardcoded inventory, which asserts
+`set(REVIEWED_NETWORK_SOURCE_SHA256) == RAW_NETWORK_FILES`; the 23-test self-test and the gate are
+both green. What this refresh does NOT assert: that the four `6aea8ac`-era files were re-read
+line-by-line for non-network defects. They were verified only for added network capability. Anyone
+tightening this later should re-review those four in full.
+
+## 2026-07-29 — New dependency: `rayon`, to pin HNSW graph builds to one thread for reproducible face clusters
+
+`instant-distance` (the HNSW library face clustering and restructure semantic search use) already
+pulls in `rayon` transitively and builds its graph with it — so thread scheduling, not just the RNG
+seed, decides graph topology and therefore the approximate-kNN neighbour sets face clustering
+derives identities from. Measured on the 129k-face Adlon catalog: repeat runs of the IDENTICAL
+input drifted 1,071-1,082 persons, with the largest cluster swinging 17,226-26,439 faces, purely
+from nondeterministic thread interleaving — re-clustering the same library could reshuffle a
+user's named People between runs.
+
+Declared `rayon` directly (previously only transitive) so `hnsw_index::build` can construct a
+dedicated single-threaded `rayon::ThreadPoolBuilder` and run the graph build inside it via
+`pool.install(...)`. Pinning the WHOLE process to one rayon thread made repeat runs byte-identical
+but cost 4x wall-clock (70s -> 286s on the same corpus); confining just the HNSW build to a
+one-thread pool buys the same reproducibility without serializing the rest of the pipeline
+(tagging, embedding, etc. keep their normal parallelism). Falls back to the ambient (nondeterministic)
+pool with a logged warning if the dedicated pool can't be spawned (an OS thread-spawn failure — an
+approximate index still beats no index). Apache-2.0/MIT, already present transitively, so this adds
+no new license or supply-chain surface, only a direct `Cargo.toml` line.
+
+Known remaining gap, NOT fixed by this: the kNN tie-breaking comparator in both
+`face_clustering.rs` and `restructure_semantic.rs` doesn't consult index as a tiebreaker, so ties
+among equal-similarity neighbours can still resolve differently across stdlib/arch (an unstable
+`select_nth_unstable_by` partition). Left for a follow-up — fixing it is a one-line comparator
+change (`.then(a.idx.cmp(&b.idx))`) but touches two files and wasn't part of this session's
+measured, verified scope.
+
+## 2026-07-29 — Face clustering size gate: absolute 40px floor replaces the relative-area-only gate
+
+The only face-size filter (`FACE_MIN_BBOX_AREA_FRACTION`, Windows `pipeline/tagging.rs`, macOS
+`DBWriter.minBBoxAreaFraction`) was relative to image area, which is scale-invariant and therefore
+uncorrelated with actual visibility: it kept small-but-large-area-fraction faces from low-res video
+frames while discarding well-resolved faces on high-megapixel photos. Measured on the 2026-07-29
+Adlon catalog (135,740 files, 183,230 detected faces): 34,884 faces excluded purely by area
+included 8,696 already >=100px min-dimension, while 5,778 kept faces were <60px.
+
+Added `FACE_MIN_BBOX_MIN_DIM_PX` (an absolute-pixel floor, min(bbox.w, bbox.h)) alongside a
+lowered `FACE_MIN_BBOX_AREA_FRACTION` (0.002 -> 0.0002, now only a degenerate-detection backstop).
+
+**The floor is 40px, chosen on a PER-SOURCE-KIND sweep.** An initial pooled sweep
+(40/48/56/64/72/80/96/112/128px over all 183,230 faces) argued for 64px on aggregate net
+(+18,018). That was wrong, and the audit caught it: the floor is measured in DECODE-space pixels,
+and decode resolution is not uniform. Stills decode native or DCT-scaled to [2048, 4096), while
+video keyframes are capped at a 1280px long edge (`shell/video.rs`), so the same real-world face
+lands ~3x smaller when it came from a video. Measured min-dimension p50 is 159px for the 169,347
+image faces but only 52px for the 13,883 video faces. Re-running the sweep split by kind:
+
+    floor   image faces      video faces     videos losing ALL clusterable faces
+      40      +28,051           +134             136 / 4,311   (3%)
+      48      +27,337         -1,774             503 / 4,311  (12%)
+      64      +22,138         -4,120           1,287 / 4,311  (30%)
+
+64px would have silently destroyed face clustering in 30% of face-bearing videos while looking
+like a win on the pooled number. 40px keeps nearly all the image-side recovery (+28,051 of the
++30,693 available at no floor), does not regress video, and wipes only 29 persons entirely — every
+one holding <=8 faces (noise; real people here hold dozens to thousands). Going below 40 buys ~3k
+more faces but keeps weakening the "drop faces too small to identify" goal with no evidence it
+improves cluster quality, which cannot be measured without labelled ground truth.
+
+A single kind-independent constant is deliberate: a per-kind floor is a second uncalibrated constant
+that would also have to be mirrored exactly in the Swift engine (uncompilable in this dev env). The
+cleaner long-term fix is raising the video decode ceiling for the face pass so every source shares
+one scale — that needs hardware measurement.
+
+This does NOT fix the separate mega-cluster problem (16 clusters absorbing 83,381 faces via kNN
+connected-components chaining, largest 26,422) — that's a clustering-algorithm/threshold issue,
+not a detection-gate issue; the sweep showed the mega-clusters barely shrink at any floor
+(the largest goes 26,422 -> 26,343 at 40px, and only -> 25,908 even at 64px). Left for a future
+session with labelled ground truth to calibrate
+against, per the existing `identity_clustering.rs` comments' own warning against changing
+`pass1_cosine`/`k_nn` without one.
+
+Mirrored to macOS (`DBWriter.swift`), threading a new `faceMinDimPx` field from `VisionWorker`
+through `Tagging.swift` into `DBWriter.TaggedFile`, computed from `cgImage.width/height` at
+detection time. NOT exact cross-platform parity: Windows decodes near-original resolution
+(DCT-scaled only above a 4096px long edge), while macOS's `FILEID_SCAN_MAX_PIXELS` caps decode at
+1536px by default — so the same 40.0 constant is a stricter relative gate on macOS. Kept
+numerically identical rather than guessing a "compensated" value with no macOS ground truth to
+calibrate against (this was written and verified on Windows only — no Mac in this environment).
+Also deleted the dead `FACE_QUALITY_FLOOR` check on Windows (a macOS-Vision-quality-scale copy
+applied to SCRFD's `score * geometry` product, which can only be >= 0.045 — the floor could never
+fire, proven analytically and confirmed against 0 of 183,230 real rows). Kept intact on macOS,
+where Vision's `faceCaptureQuality` genuinely is 0..1.
+
+## 2026-07-29 — Restructure apply preflight: per-row staleness is advisory, not batch-fatal
+
+`ForwardBatchPreflight::validate` used to `?`-propagate ANY failure — including per-row identity
+staleness (source deleted/renamed since planning, DB row missing, destination collision) — which
+aborted the ENTIRE apply with zero files moved for a single stale row, even though
+`apply_iter_with` already has a documented graceful per-move skip (B4: "a stale plan is skipped")
+for the identical conditions. On a live 135k-file corpus with a real plan-to-apply time gap, this
+made "restructure just doesn't work" reproducible forever (the spool isn't cleared on failure).
+
+Split `validate`'s return into `PreflightOutcome::{Applicable, Stale(reason)}`. Kept `?`/`ensure!`
+fatal ONLY for genuinely structural plan corruption (duplicate file ID/source/destination, path
+outside root, unsafe filename) — conditions that indicate the whole plan is untrustworthy, not just
+one row. Made identity staleness AND a post-planning destination collision both advisory: the
+preflight now logs and continues past them, letting `apply_iter_with`'s existing per-move check
+(re-validated at actual apply time, not just at preflight) skip the stale row and apply everything
+else. Extended `stored_plan_late_row_tampering_fails_before_any_move_or_journal` (the collision
+case moved from "fatal" to "applies the other 3, skips 1") and added
+`stale_auto_tier_row_is_skipped_not_batch_fatal` as a direct regression test for the headline bug.
+
+Considered also converting the symlink-source-rejection check to advisory — decided against it:
+that check wasn't flagged by measurement/audit as a live-corpus race (unlike deleted/renamed
+sources), and changing an unreviewed code path adds risk without a proven need.
+
+## 2026-07-29 — Restructure undo: DB-reconciliation failures no longer double-count as move failures, and the recovery record now retries instead of being discarded after one pass
+
+Two related bugs, both from the same root cause. (1) A DB-only `path_text` UNIQUE-conflict
+failure during forward apply counted as BOTH `applied` and `failed` for the same row
+(`applied += 1; failed += 1`), diverging from the documented macOS convention (Restructure.swift,
+F-C3-012: "a DB-update failure does NOT also count it failed — no double-count"). (2) The
+symmetric undo-replay case counted ONLY `failed`, even though the file was already physically
+restored — meaning `undo_last`'s journal-removal gate (`!result.cancelled && result.failed == 0`)
+could never fire, leaving the "you can put them back" affordance offered forever, always re-failing
+on retry, for a run that had actually succeeded from the user's perspective.
+
+Fixed by no longer incrementing `failed` at either `record_path_update_failure` call site — the
+physical move already happened; only DB bookkeeping lags, and it self-heals via
+`reconcile_pending_path_updates` on the next scan. This alone would be an incomplete fix (flagged
+during design): `reconcile_pending_path_updates` unconditionally deleted its recovery record file
+after ONE best-effort pass regardless of whether the same live conflict caused THAT retry to fail
+too — meaning splitting the counters would retire the undo journal correctly but silently discard
+the only evidence needed to ever fix the still-stale DB row. Fixed in tandem: entries whose retry
+also hits the live conflict are now collected into `still_pending` and the file is rewritten with
+just those lines (not deleted) so a later scan keeps retrying; the file is only removed once
+nothing is left to retry. Genuinely resolving the underlying UNIQUE conflict (deciding which of two
+rows should own a contested path) is out of scope — that needs a product decision, not a unilateral
+one, and is left as a known gap: the row stays correctly recorded for reconciliation, but nothing
+here actively repairs it if the conflict is permanent (e.g., two live DB rows genuinely disagree).
+
+Rewrote three tests (`apply_reports_db_path_update_failure_and_keeps_undo`,
+`undo_restores_a_moved_but_db_update_failed_file`,
+`undo_reconciles_a_completed_move_after_db_update_failure_via_reconcile_pass` — the last one
+renamed and restructured, since its old premise of "retry the DB fix via a second `undo_last()`
+call" no longer applies once the journal correctly retires after the first call) to assert the
+corrected single-count behavior. Deliberately did NOT exercise
+`reconcile_pending_path_updates` end-to-end in the new test — it reads a real,
+non-test-isolated `%LOCALAPPDATA%\FileID\restructure_recover.ndjson` shared with every other
+test in the same file that triggers `record_path_update_failure`, so calling it directly risked
+cross-test pollution (a stale entry for the same `file_id` convention this test file uses,
+written by a different test run, healing incorrectly against this test's isolated in-memory DB).
+Verified the same underlying mechanism (`update_path_in_db` succeeding once the injected conflict
+trigger is dropped) directly instead.
+
+## 2026-07-29 — Deep Analyze folder exclusion: separate list from scan exclusions, path-segment-boundary matching, whole-library-only
+
+Added `deepAnalyzeAll.excludedFolders` (IPC schema bumped 1.2.0 -> 1.3.0) as a NEW list, distinct
+from the existing scan-exclusion list (`startScan.excludedPaths`), rather than reusing it. Scan
+exclusions answer "never catalog this folder at all"; Deep Analyze exclusions answer a narrower
+question — "catalog/tag/search this folder normally, but skip the expensive VLM pass over it"
+(e.g. a legal-documents folder the user wants searchable but not auto-captioned, or a folder too
+large to be worth the VLM time). Conflating the two would prevent that use case.
+
+Implemented as a per-command field (sent fresh with every `deepAnalyzeAll`, sourced from an
+app-side Settings list), mirroring the existing `excludedPaths`-on-`startScan` pattern rather than
+inventing new engine-side persisted state. Deliberately ignored when `fileIDs` is present: an
+explicit file/folder selection (e.g. "Analyze Selected") is a deliberate per-file user action and
+must never be silently filtered — only whole-library/background-trigger runs are affected.
+
+Matching (`exclusion_where_clause`, `commands/deep_analyze.rs`) uses the same separator-terminated
+`[lo, hi)` prefix-range technique as `path_safety::resolve_exclusions` (scan exclusions), NOT a
+bare `LIKE prefix%` (which `deepAnalyzeFolder`'s existing `pathPrefix` uses by contract, for a
+different, single-target convenience command) — a bare prefix would incorrectly treat
+"/Photos" as matching "/PhotosBackup". Proven end-to-end with a dedicated test inserting a file
+under the excluded folder, a same-text-prefix sibling, and an unrelated file, asserting only the
+first is dropped.
+
+## 2026-07-29 — macOS engine fails closed on `useSymlinks`/`shortcutUndoToken` instead of silently doing a real move
+
+The macOS `applyRestructure`/`undoRestructure` handlers used to accept
+`useSymlinks: true` and a non-nil `shortcutUndoToken` "for wire parity" and
+then quietly ignore both, always performing a real on-disk move and always
+replaying the real-move undo journal. That was a deliberate call at the time
+(macOS has no symlink-preview apply mode), but it is a silent contract
+violation against the shared schema, which promises `useSymlinks` gives a
+reversible preview and `shortcutUndoToken` undoes only that preview's own
+journal — never the real-move journal. A caller (present or future — cross-
+platform tooling, or a macOS shortcut mode later) relying on either promise
+would get real, permanent moves with no error and no way to tell.
+
+Both now reject with a structured `EngineError` before any restructure
+reservation is taken (`ScanCoordinator.reserveRestructure()` has no timeout,
+so rejecting after reserving would wedge every later restructure command on
+`restructure_busy`). The `undoRestructure` rejection also emits a terminal
+`restructureApplyResult` alongside the error, because `EngineClient`'s
+`undoRestructureInFlight` flag is cleared only by that event (audit R2-app) —
+an error-only reply would leave it latched and misattribute the next apply's
+result to this rejected undo. Fail-closed was chosen over silently honoring
+the request (there is still no macOS symlink-apply implementation to honor it
+with) and over leaving the dead-parameter behavior as-is (an audit-verified
+data-safety gap on the reference platform). The wire format is unchanged —
+`IPCProtocolTests.windowsCommandsRoundTrip` still round-trips
+`useSymlinks: true`; only the macOS *engine's* handling of a true value
+changed.
+
 ## 2026-07-28 — Off-thread accessibility notifications fan out per subscriber; the SafeRun invariant is machine-checked
 
 `ReducedMotion` re-raises `PropertyChanged` directly from the WinRT

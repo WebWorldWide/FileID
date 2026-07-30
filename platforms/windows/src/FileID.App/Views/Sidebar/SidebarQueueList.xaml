@@ -20,7 +20,8 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0"
+            <TextBlock x:Name="HeaderText"
+                       Grid.Column="0"
                        Text="UP NEXT"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        FontWeight="SemiBold"
