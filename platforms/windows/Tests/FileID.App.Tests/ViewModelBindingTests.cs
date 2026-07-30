@@ -962,6 +962,19 @@ public class RestructureUndoAvailabilityTests
         Assert.False(EngineClient.NextCanUndoRestructure(
             wasUndo: true, new RestructureApplyResult(3, 0)));
     }
+
+    [Fact]
+    public void CancelledUndo_RemainsRetryable()
+    {
+        // restructure_apply.rs deliberately keeps the inverse-move journal on
+        // a cancelled undo (even with zero failures) so the user can re-run
+        // it and put the remaining files back. Before this fix, only
+        // result.Failed was consulted, so a cancelled-but-zero-failure undo
+        // hid the Undo button while the journal — and the still-relocated
+        // files — remained.
+        Assert.True(EngineClient.NextCanUndoRestructure(
+            wasUndo: true, new RestructureApplyResult(2, 0, Cancelled: true)));
+    }
 }
 
 /// <summary>

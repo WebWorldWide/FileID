@@ -48,7 +48,7 @@ public class SchemaConformanceTests
     [Fact]
     public void SchemaVersion_ReflectsCorrelatedHealthCheckAddition()
     {
-        Assert.Equal("1.2.0", _schema.RootElement.GetProperty("version").GetString());
+        Assert.Equal("1.3.0", _schema.RootElement.GetProperty("version").GetString());
     }
 
     [Fact]

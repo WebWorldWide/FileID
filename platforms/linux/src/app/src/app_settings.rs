@@ -121,6 +121,60 @@ pub fn remember_welcome_sheet_seen() {
     set_entries(&[("welcomeSheetSeen", Value::Bool(true))]);
 }
 
+/// Absolute folder paths to skip when running Deep Analyze over the whole
+/// library (mirrors Windows `AppSettings.DeepAnalyzeExcludedFolders`).
+/// Separate from the scan exclusion list — a folder can be fine to
+/// catalog/tag/search but too slow or private to run the VLM over. `None`
+/// (key absent, matching every settings.json written before this feature
+/// existed) means no exclusions, same as an empty list. Sent fresh with
+/// every deepAnalyzeAll; an explicit file selection is never filtered.
+pub fn deep_analyze_excluded_folders() -> Option<Vec<String>> {
+    let path = settings_path()?;
+    let list = load_map(&path)
+        .get("deepAnalyzeExcludedFolders")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    // Sanitize on READ too, not just on write: settings.json is shared with the
+    // other platforms and hand-editable, so this is the path that would
+    // otherwise hand an unbounded/relative list straight to the engine.
+    let list = sanitize_deep_analyze_excluded_folders(&list);
+    (!list.is_empty()).then_some(list)
+}
+
+/// Trim trailing separators, drop blanks, dedupe, cap the list (matches the
+/// schema's `deepAnalyzeAll.excludedFolders` maxItems). Mirrors the Windows
+/// `SanitizeExcludedFolders` except for case: Windows folds case because NTFS
+/// does, but Linux filesystems are case-sensitive, so `~/Photos` and
+/// `~/photos` are genuinely different directories. Folding here would silently
+/// drop one of them from a privacy-motivated control — the user would believe a
+/// folder was excluded when it wasn't.
+pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
+    const MAX: usize = 256;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in raw {
+        if out.len() >= MAX {
+            break;
+        }
+        let trimmed = entry.trim().trim_end_matches(['\\', '/']);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed.to_owned()) {
+            out.push(trimmed.to_owned());
+        }
+    }
+    out
+}
+
+pub fn remember_deep_analyze_excluded_folders(folders: &[String]) {
+    let sanitized = sanitize_deep_analyze_excluded_folders(folders);
+    let value = Value::Array(sanitized.into_iter().map(Value::String).collect());
+    set_entries(&[("deepAnalyzeExcludedFolders", value)]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +211,77 @@ mod tests {
             reloaded.get("lastFolderPath"),
             Some(&Value::String("/tmp".into()))
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sanitize_deep_analyze_excluded_folders_trims_dedupes_and_drops_blanks() {
+        let raw = vec![
+            "/home/adam/Photos/ ".to_string(),
+            "/home/adam/photos".to_string(), // NOT a dup: case-sensitive FS
+            "   ".to_string(),               // blank
+            "/home/adam/Photos/".to_string(), // dup by trailing sep
+            "/home/adam/Private".to_string(),
+        ];
+        let result = sanitize_deep_analyze_excluded_folders(&raw);
+        assert_eq!(
+            result,
+            vec![
+                "/home/adam/Photos".to_string(),
+                "/home/adam/photos".to_string(),
+                "/home/adam/Private".to_string(),
+            ],
+            "Linux paths are case-sensitive — /Photos and /photos are different \
+             directories and both must survive; only the trailing-separator \
+             duplicate collapses"
+        );
+    }
+
+    #[test]
+    fn sanitize_deep_analyze_excluded_folders_caps_at_bound() {
+        let many: Vec<String> = (0..400).map(|i| format!("/x/{i}")).collect();
+        let result = sanitize_deep_analyze_excluded_folders(&many);
+        assert_eq!(result.len(), 256);
+    }
+
+    #[test]
+    fn deep_analyze_excluded_folders_round_trips_through_the_settings_file() {
+        // Exercises the same load_map/save_map path deep_analyze_excluded_folders
+        // and remember_deep_analyze_excluded_folders use, on an isolated temp
+        // file — settings_path() itself resolves a real, non-test-isolated
+        // location, so this mirrors settings_round_trip_preserves_unknown_keys
+        // above rather than calling the public getters/setters directly.
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-settings-da-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-settings.json");
+
+        let mut map = load_map(&path);
+        let sanitized = sanitize_deep_analyze_excluded_folders(&[
+            "/home/adam/Private".to_string(),
+            "/home/adam/Private".to_string(), // dup, must collapse
+        ]);
+        map.insert(
+            "deepAnalyzeExcludedFolders".into(),
+            Value::Array(sanitized.into_iter().map(Value::String).collect()),
+        );
+        save_map(&path, &map);
+
+        let reloaded = load_map(&path);
+        let folders: Vec<String> = reloaded
+            .get("deepAnalyzeExcludedFolders")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(folders, vec!["/home/adam/Private".to_string()]);
         std::fs::remove_dir_all(dir).ok();
     }
 

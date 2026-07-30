@@ -46,6 +46,7 @@ public struct TaggedFile: Sendable {
     public var faceQualities: [Double]       // 0..1, parallel to faceBBoxes; -1 = unmeasured
     public var faceYaws: [Double?]           // radians, parallel to faceBBoxes; nil = missing
     public var facePitches: [Double?]        // radians, parallel to faceBBoxes; nil = missing
+    public var faceMinDimPx: [Double]        // min(w,h) absolute source px, parallel to faceBBoxes
     public var ocrText: String?              // empty/nil if no text or skipped
     /// Extracted document/PDF text — the SAME text fed to BGE — persisted into the
     /// `doc_text` table so the v15 AFTER INSERT trigger fills `doc_fts` for full-text
@@ -101,6 +102,7 @@ public struct TaggedFile: Sendable {
         facePrints: [Data] = [], faceBBoxes: [String] = [],
         faceQualities: [Double] = [],
         faceYaws: [Double?] = [], facePitches: [Double?] = [],
+        faceMinDimPx: [Double] = [],
         ocrText: String? = nil, docText: String? = nil, cameraModel: String? = nil,
         locationLat: Double? = nil, locationLon: Double? = nil,
         failed: Bool = false, errorMessage: String? = nil,
@@ -130,6 +132,7 @@ public struct TaggedFile: Sendable {
         self.faceQualities = faceQualities
         self.faceYaws = faceYaws
         self.facePitches = facePitches
+        self.faceMinDimPx = faceMinDimPx
         self.ocrText = ocrText
         self.docText = docText
         self.cameraModel = cameraModel
@@ -761,8 +764,13 @@ public actor DBWriter {
                     let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
                     let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
                     let bboxArea = Self.bboxArea(bboxes[i])
+                    // Missing (pre-migration or non-Vision-source) min-dim data
+                    // fails OPEN on the size gate — quality/area/pose still apply.
+                    let minDimPx: Double = i < file.faceMinDimPx.count
+                        ? file.faceMinDimPx[i] : Double.greatestFiniteMagnitude
                     let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                                   pitch: pitch, bboxArea: bboxArea)
+                                                   pitch: pitch, bboxArea: bboxArea,
+                                                   bboxMinDimPx: minDimPx)
                     try db.cachedStatement(sql: """
                         INSERT INTO face_prints
                           (file_id, print_data, bbox, face_quality, excluded)
@@ -961,12 +969,46 @@ public actor DBWriter {
     /// positive from the detector.
     static let qualityFloor: Double = 0.02
 
-    /// Minimum bbox area (fraction of image) for clustering. Faces
-    /// under 0.2% of the frame produce noisy ArcFace embeddings —
-    /// crowd extras don't carry enough identity signal. ArcFace's
-    /// 8-pixel crop minimum + 112×112 rescale handles small faces
-    /// in high-res group photos.
-    static let minBBoxAreaFraction: Double = 0.002
+    /// Minimum bbox area (fraction of image) for clustering — a backstop
+    /// against degenerate detections only (near-zero-area boxes), not the
+    /// real size gate. A relative-area fraction alone is anti-correlated
+    /// with actual face resolvability: it's scale-invariant, so it can't
+    /// tell a small-but-large-fraction face in a low-res source from a
+    /// well-resolved face in a high-megapixel photo. `minBBoxMinDimPx`
+    /// below is the real gate; this was lowered from 0.002 to 0.0002
+    /// alongside it (Windows FACE_MIN_BBOX_AREA_FRACTION, same change).
+    static let minBBoxAreaFraction: Double = 0.0002
+
+    /// Minimum bbox size in absolute pixels of the DECODED image handed to
+    /// Vision (not the source file's native resolution). Mirrors the Windows
+    /// gate (platforms/windows/.../pipeline/tagging.rs
+    /// FACE_MIN_BBOX_MIN_DIM_PX = 40.0): a relative-area fraction alone keeps
+    /// small-but-large-fraction faces from low-res sources while discarding
+    /// well-resolved faces on a high-megapixel photo, so an absolute floor is
+    /// the only gate that tracks whether a crop carries identity at all.
+    ///
+    /// 40.0 is calibrated on a PER-SOURCE-KIND sweep of the 2026-07-29 Adlon
+    /// catalog, because decode resolution is not uniform: measured
+    /// min-dimension p50 was 159px for image faces but only 52px for video
+    /// faces (keyframes decode at a 1280px cap). A 64px floor looked optimal
+    /// on the pooled distribution but silently dropped EVERY clusterable face
+    /// in 30% of face-bearing videos; 40px keeps nearly all of the image-side
+    /// recovery (+28,051 faces) without regressing video (+134). See
+    /// DECISIONS.md 2026-07-29.
+    ///
+    /// Cross-platform caveat that remains: macOS's own decode ceiling is
+    /// `loadImageAndEXIF`'s `FILEID_SCAN_MAX_PIXELS` (default 1536px long
+    /// edge), which is lower than Windows' [2048, 4096) for stills — so this
+    /// shared constant is a somewhat stricter relative gate on macOS for
+    /// large photos. Kept numerically identical anyway (like the yaw/pitch/
+    /// area constants above, which are nominally shared despite Vision's and
+    /// SCRFD's metrics differing) rather than inventing a second
+    /// uncalibrated constant: there is no macOS ground truth to calibrate
+    /// against, and this file could not be compiled or run in the Windows dev
+    /// env. Re-measure on real Mac hardware before treating 40.0 as final
+    /// here; raising FILEID_SCAN_MAX_PIXELS is the cleaner lever if macOS
+    /// under-detects.
+    static let minBBoxMinDimPx: Double = 40.0
 
     /// |yaw| beyond this is "heavy profile" — same identity at frontal vs
     /// 60° profile lands far apart in embedding space, polluting clusters.
@@ -987,10 +1029,11 @@ public actor DBWriter {
     /// Vision couldn't measure it — usually low-confidence detection,
     /// so we exclude (admitting them lets noise into clusters).
     static func isExcluded(quality: Double?, yaw: Double?, pitch: Double?,
-                           bboxArea: Double) -> Bool {
+                           bboxArea: Double, bboxMinDimPx: Double) -> Bool {
         guard let q = quality else { return true }
         if q < qualityFloor { return true }
         if bboxArea < minBBoxAreaFraction { return true }
+        if bboxMinDimPx < minBBoxMinDimPx { return true }
         if let y = yaw, abs(y) > maxYawRadians { return true }
         if let p = pitch, abs(p) > maxPitchRadians { return true }
         return false

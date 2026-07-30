@@ -422,7 +422,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         if (wasShortcutUndo) return null;
         if (wasUndo)
         {
-            return result.Failed > 0 || !string.IsNullOrWhiteSpace(result.PrivilegeError);
+            // A cancelled undo deliberately keeps its journal so the user can
+            // retry it (restructure_apply.rs: "a cancelled undo must leave
+            // the original intact"). Not consulting Cancelled here hid the
+            // Undo button while the journal — and the still-relocated files —
+            // remained, with no way back except relaunching the app.
+            return result.Cancelled
+                || result.Failed > 0
+                || !string.IsNullOrWhiteSpace(result.PrivilegeError);
         }
         if (!forwardRunWasUndoable) return null;
         return result.Applied > 0 ? true : null;

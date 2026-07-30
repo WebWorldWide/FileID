@@ -632,6 +632,7 @@ dependencies = [
  "pdfium-render",
  "proptest",
  "quick-xml",
+ "rayon",
  "reqwest",
  "rusqlite",
  "serde",

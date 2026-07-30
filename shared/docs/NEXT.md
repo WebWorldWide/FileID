@@ -27,6 +27,51 @@ pre-existing concurrency warnings that the 12-minute alarm budget also has to
 absorb. If it is noisy, keep it as a separate non-required job rather than
 weakening the local gate.
 
+## STATUS 2026-07-29 — Face size-gate, Restructure apply-trust, and Deep Analyze exclusion fixes are locally complete on Windows/Linux/Rust; macOS is unverified
+
+Full detail in `STATE.md` (2026-07-29 entry) and `DECISIONS.md` (six new entries dated 2026-07-29).
+One-line version: an absolute 64px face-size floor replaces a relative-area-only gate that kept
+invisible crowd blobs while discarding well-resolved faces; three real Restructure apply-trust bugs
+are fixed across the shared Rust engine and all three GUIs (a stale row no longer aborts the whole
+apply, a DB-reconciliation failure no longer permanently wedges Undo, cancelled-undo no longer
+hides its own retry button); each platform's apply bar moved to the top of the Restructure tab;
+and `deepAnalyzeAll.excludedFolders` (schema 1.3.0) lets a whole-library Deep Analyze run skip
+folders, boundary-safe and separate from scan exclusions. Rust (`cargo clippy -D warnings` +
+`cargo test`, 692 passed) and Windows (`dotnet build`/`test`, 446+53 passed) and Linux (via WSL:
+clippy/test/fmt, 57 passed) are all green. macOS was implemented by two careful background agents
+with exhaustive grep-and-review discipline but **could not be compiled in this environment** — it
+is unverified until a real Xcode build runs.
+
+Resume in this order:
+
+1. **Build macOS for real.** `bash run.sh` or Xcode, then `swift test`. This is the only platform
+   with zero compiler feedback on today's changes (Restructure apply-bar fixes in
+   `FileIDEngineMain.swift`/`Restructure.swift`/`EngineClient.swift`/`RestructureApplyBar.swift`/
+   `RestructureView.swift`, and a separate Deep Analyze exclusion agent's changes — check that
+   agent's final report, retrievable via SendMessage to agent id in this session's transcript if
+   not already surfaced, before trusting it landed cleanly).
+2. **Re-scan on real hardware and confirm the face-floor numbers hold outside SQL theory.** Every
+   number in today's face-gate fix (+18,018 net clusterable, -6,429 dropped, +24,447 recovered) was
+   computed by querying the frozen 2026-07-29 Adlon catalog directly — no actual re-scan with the
+   new gate has run. Re-scan (or find a cheaper re-cluster-only path if the embeddings can be
+   reused) and confirm real People-tab quality improves, not just the predicted SQL counts.
+3. **The mega-cluster problem is still open and is the bigger of the two face complaints.** 16
+   clusters absorb 83,381 faces via kNN connected-components chaining (measured mega-cluster
+   intra-cosine ~0.39, barely above inter-mega-cluster ~0.21-0.29 — these are chained, not
+   cohesive). Needs labelled ground truth before touching `pass1_cosine`/`k_nn`/
+   `AUTOMERGE_COS_DEFAULT` — `identity_clustering.rs`'s own comments document a prior regression
+   from tuning blind, twice.
+4. **People tab has no minimum-cluster-size filter.** 3,108 raw clusters, unfiltered, is the other
+   half of "too many leftover faces" the face-size fix alone doesn't solve. Deliberately deferred
+   this session (wasn't one of the owner's three explicit asks); needs a small design pass across
+   all three GUIs since none currently has an analogous pattern to port.
+5. **kNN tie-break nondeterminism is unfixed** in `face_clustering.rs` and
+   `restructure_semantic.rs` (comparators don't consult index as a tiebreak — `select_nth_unstable_by`
+   is an unstable partition, so ties can resolve differently across stdlib/arch builds). The
+   uncommitted single-thread HNSW pool fix only addresses graph-build nondeterminism, not this.
+6. Everything below (external release gates, native platform hardware, signing) is unchanged from
+   prior sessions and still unproven locally.
+
 ## STATUS 2026-07-28 — Landed on `main` and CI-green; refreshed v0.1.1 as an unsigned prerelease
 
 The production-readiness pass is committed and pushed to `main` (no other branches, PRs, or open issues remain). Two real defects are closed — the off-thread `ReducedMotion` multicast raise that could kill the process and starve sibling subscribers, and ten `PropertyChanged` handlers that had drifted out of `DebugLog.SafeRun` — with a source-derived contract test preventing regression. A full uncapped `F:\Adlon Drive` run passed every assertion at ~29 files/s with **195 failures exactly matching the preserved baseline**, peak RSS 6,972 MB under the 8,500 cap, and a byte-identical read-only corpus fingerprint. Both GUIs were launched and rendered, not merely compiled. See STATE 2026-07-28.

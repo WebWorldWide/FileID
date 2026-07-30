@@ -102,8 +102,8 @@
     <Grid Padding="32,32,32,24" RowSpacing="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Spacing="6">
@@ -115,7 +115,13 @@
                        Text="FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply."/>
         </StackPanel>
 
-        <ScrollViewer Grid.Row="1"
+        <!-- ApplyBar moved to the top (Grid.Row 1, above the scrollable plan
+             list) so committing a plan is the first thing visible, not a
+             strip the user has to scroll past unread moves to find. It was
+             previously docked at the bottom (Grid.Row 2) — see the port note
+             on the Border below. -->
+
+        <ScrollViewer Grid.Row="2"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="16">
@@ -764,8 +770,10 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift. -->
-        <Border Grid.Row="2"
+        <!-- ApplyBar — port of macOS RestructureApplyBar.swift. Docked at the
+             top (Grid.Row 1) instead of the bottom so committing a plan is
+             the first thing the user sees, per the 2026-07-29 audit. -->
+        <Border Grid.Row="1"
                 CornerRadius="16"
                 BorderBrush="{ThemeResource GoldDimBrush}"
                 BorderThickness="1">

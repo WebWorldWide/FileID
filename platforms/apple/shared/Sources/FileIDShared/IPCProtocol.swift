@@ -44,8 +44,15 @@ public struct IPCCommand: Codable, Sendable {
         /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
         /// `fileIDs` optionally scopes the persistent batch to one bounded
         /// selection; nil retains whole-library behavior.
-        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.)
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?)
+        /// `excludedFolders` skips these absolute folder paths during a
+        /// whole-library run (path-segment-boundary matching, e.g. excluding
+        /// "/Photos" does not exclude "/PhotosBackup"); IGNORED when
+        /// `fileIDs` is present — an explicit selection is a deliberate
+        /// per-file action and is never silently filtered. Optional; nil/empty
+        /// means no folder exclusions.
+        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
+        /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet

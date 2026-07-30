@@ -326,12 +326,27 @@ fn inspect_stored_plan(
         }
         tiers.observe(&move_.confidence);
         if move_.confidence.eq_ignore_ascii_case("auto") {
-            preflight.validate(&move_).with_context(|| {
+            match preflight.validate(&move_).with_context(|| {
                 format!(
                     "eligible stored restructure plan move {} failed preflight",
                     index + 1
                 )
-            })?;
+            })? {
+                crate::pipeline::restructure_apply::PreflightOutcome::Applicable => {}
+                // Stale rows describe the live corpus changing since planning
+                // (deleted/renamed/re-identified source, a destination that
+                // collided in the meantime) — apply_iter_with re-checks and
+                // skips these gracefully per move at apply time (B4), so one
+                // stale row must not abort every other move in the plan.
+                crate::pipeline::restructure_apply::PreflightOutcome::Stale(reason) => {
+                    tracing::warn!(
+                        file_id = move_.file_id,
+                        move_index = index + 1,
+                        reason,
+                        "stored restructure plan move is stale during preflight; will be skipped at apply time"
+                    );
+                }
+            }
         }
         index += 1;
     }
@@ -465,9 +480,22 @@ fn apply_inline_plan(
         if preflight.is_cancelled() {
             return Ok(cancelled_apply_result());
         }
-        preflight
+        match preflight
             .validate(move_)
-            .with_context(|| format!("inline restructure move {} failed preflight", index + 1))?;
+            .with_context(|| format!("inline restructure move {} failed preflight", index + 1))?
+        {
+            crate::pipeline::restructure_apply::PreflightOutcome::Applicable => {}
+            // See the matching comment in inspect_stored_plan: apply_iter_with
+            // re-checks and skips stale rows gracefully at apply time (B4).
+            crate::pipeline::restructure_apply::PreflightOutcome::Stale(reason) => {
+                tracing::warn!(
+                    file_id = move_.file_id,
+                    move_index = index + 1,
+                    reason,
+                    "inline restructure move is stale during preflight; will be skipped at apply time"
+                );
+            }
+        }
     }
     let total = moves.len();
     apply.apply_iter(moves.into_iter().map(Ok), Some(total))
@@ -894,7 +922,7 @@ const PLAN_FILES_SQL: &str = "SELECT
                AND p.name IS NOT NULL AND TRIM(p.name) <> ''
              ORDER BY p.name)) AS names,
    (SELECT COUNT(*) FROM face_prints fp
-     WHERE fp.file_id = f.id) AS face_count,
+     WHERE fp.file_id = f.id AND COALESCE(fp.excluded, 0) = 0) AS face_count,
    (SELECT COUNT(*) FROM face_prints fp
       JOIN persons p ON p.id = fp.person_id
      WHERE fp.file_id = f.id
@@ -920,7 +948,7 @@ const PLAN_FILES_PAGE_SQL: &str = "SELECT
                AND p.name IS NOT NULL AND TRIM(p.name) <> ''
              ORDER BY p.name)) AS names,
    (SELECT COUNT(*) FROM face_prints fp
-     WHERE fp.file_id = f.id) AS face_count,
+     WHERE fp.file_id = f.id AND COALESCE(fp.excluded, 0) = 0) AS face_count,
    (SELECT COUNT(*) FROM face_prints fp
       JOIN persons p ON p.id = fp.person_id
      WHERE fp.file_id = f.id
@@ -1828,7 +1856,7 @@ mod tests {
                  location_lat REAL, location_lon REAL,
                  has_text INTEGER, failed INTEGER DEFAULT 0);
              CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
-             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER, excluded INTEGER DEFAULT 0);
              INSERT INTO files(id,path_text,kind,failed) VALUES
                  (1,'/a.jpg','image',0),(2,'/b.jpg','image',0),(3,'/c.jpg','image',1);
              INSERT INTO persons(id,name) VALUES (1,'Bob'),(2,'Alice');
@@ -1866,7 +1894,7 @@ mod tests {
                  location_lat REAL, location_lon REAL,
                  has_text INTEGER, failed INTEGER DEFAULT 0);
              CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
-             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER, excluded INTEGER DEFAULT 0);
              INSERT INTO files(id,path_text,kind,failed) VALUES
                  (1,'/library/a.jpg','image',0),
                  (2,'/library/nested/b.jpg','image',0),
@@ -1895,7 +1923,7 @@ mod tests {
                  location_lat REAL, location_lon REAL,
                  has_text INTEGER, failed INTEGER DEFAULT 0);
              CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
-             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
+             CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER, excluded INTEGER DEFAULT 0);
              INSERT INTO files(id,path_text,kind,failed) VALUES
                  (1,'c:\\library\\a.jpg','image',0),
                  (2,'c:\\library\\nested\\b.jpg','image',0),
@@ -2475,6 +2503,99 @@ mod tests {
     }
 
     #[test]
+    fn stale_auto_tier_row_is_skipped_not_batch_fatal() {
+        // The headline preflight bug: two Auto-tier moves in the same plan,
+        // one of whose source files was deleted from disk after planning
+        // (a live-corpus race, not plan corruption). Before the preflight
+        // was split into structural-vs-stale outcomes, ANY preflight
+        // failure aborted the whole apply via `?` — zero files moved, even
+        // the untouched sibling row. It must now apply the healthy row and
+        // report exactly the stale one as failed.
+        let root = std::env::temp_dir().join(format!(
+            "fileid-stale-auto-row-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let incoming = root.join("incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+
+        let healthy_source = incoming.join("healthy.jpg");
+        std::fs::write(&healthy_source, b"healthy").unwrap();
+        let vanished_source = incoming.join("vanished.jpg");
+        std::fs::write(&vanished_source, b"vanished").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for (id, path) in [(1, &healthy_source), (2, &vanished_source)] {
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
+                 VALUES (?1,?2,?1,7,1.0,'image','jpg',0,?3)",
+                rusqlite::params![id, path.to_string_lossy(), crate::platform::file_ref(path).unwrap() as i64],
+            )
+            .unwrap();
+        }
+
+        let healthy_dest = root.join("Sorted").join("healthy.jpg");
+        let vanished_dest = root.join("Sorted").join("vanished.jpg");
+        let moves = [
+            IpcMove {
+                file_id: 1,
+                source: healthy_source.to_string_lossy().into_owned(),
+                destination: healthy_dest.to_string_lossy().into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: "auto".into(),
+                reason: None,
+            },
+            IpcMove {
+                file_id: 2,
+                source: vanished_source.to_string_lossy().into_owned(),
+                destination: vanished_dest.to_string_lossy().into_owned(),
+                category: "photo".into(),
+                tier: Some("Mixed".into()),
+                confidence: "auto".into(),
+                reason: None,
+            },
+        ];
+        let root_text = root.to_string_lossy().into_owned();
+        let plan_dir = root.join("plans");
+        let (plan_id, _) =
+            write_stored_plan_in(&plan_dir, &root_text, moves.into_iter().map(Ok), 2).unwrap();
+
+        // The race: delete the second file's source AFTER the plan was
+        // written, exactly as if the user (or another app) removed it
+        // between planning and clicking Apply.
+        std::fs::remove_file(&vanished_source).unwrap();
+
+        let apply = RestructureApply::new(
+            std::sync::Arc::new(parking_lot::Mutex::new(conn)),
+            root.clone(),
+            false,
+        )
+        .with_undo_journal_path(root.join("undo.ndjson"));
+
+        let (result, tiers, total) =
+            apply_stored_plan_in(&plan_dir, &plan_id, &root_text, &apply)
+                .expect("a stale row must not abort the whole apply");
+
+        assert_eq!(total, 2);
+        assert_eq!(tiers.auto, 2);
+        assert_eq!(
+            (result.applied, result.failed),
+            (1, 1),
+            "the healthy row must apply; only the vanished-source row is skipped"
+        );
+        assert!(!healthy_source.exists(), "the healthy source must have moved");
+        assert_eq!(std::fs::read(&healthy_dest).unwrap(), b"healthy");
+        assert!(
+            !vanished_dest.exists(),
+            "no file must appear at the stale row's destination"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn stored_plan_preflight_cancellation_is_truthful_and_retryable() {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
@@ -2872,11 +2993,34 @@ mod tests {
         write_last(&tampered);
         assert_rejected("duplicate destination");
 
+        // A destination collision that appears after planning describes THIS
+        // ROW's relationship to the live corpus changing, not a corrupt
+        // plan — unlike the structural "duplicate destination" case above
+        // (the plan itself targeting one path twice), preflight must not
+        // abort every other move over it. apply_iter_with's existing
+        // strict-destinations skip (failed += 1; continue) handles it.
         tampered = original_last.clone();
         std::fs::create_dir_all(root.join("Sorted")).unwrap();
         std::fs::write(&tampered.destination, b"appeared after planning").unwrap();
         write_last(&tampered);
-        assert_rejected("no longer collision-free");
+        let (result, _, _) = apply_stored_plan_in(&plan_dir, &plan_id, &root_text, &apply)
+            .expect("a stale destination collision must not abort the whole apply");
+        assert_eq!(
+            (result.applied, result.failed),
+            (3, 1),
+            "the 3 untampered moves must apply; only the collided row is skipped"
+        );
+        assert_eq!(
+            std::fs::read(&tampered.destination).unwrap(),
+            b"appeared after planning",
+            "the file that raced into the destination must not be overwritten"
+        );
+        for index in 0..3 {
+            assert!(
+                !incoming.join(format!("{index}.jpg")).exists(),
+                "untampered source {index} must have moved"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }

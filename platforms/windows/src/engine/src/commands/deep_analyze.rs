@@ -471,11 +471,19 @@ pub(crate) async fn handle_deep_analyze_all(
     }
     let ids_result = match payload.file_ids.as_deref() {
         Some(requested) => collect_requested_file_ids(&db, requested),
-        None => collect_file_ids(
-            &db,
-            &format!("WHERE {}", deep_analyze_target_filter()),
-            &[],
-        ),
+        None => {
+            let (exclusion_sql, exclusion_params) =
+                exclusion_where_clause(payload.excluded_folders.as_deref().unwrap_or(&[]));
+            let params: Vec<&dyn rusqlite::ToSql> = exclusion_params
+                .iter()
+                .map(|p| p as &dyn rusqlite::ToSql)
+                .collect();
+            collect_file_ids(
+                &db,
+                &format!("WHERE {}{}", deep_analyze_target_filter(), exclusion_sql),
+                &params,
+            )
+        }
     };
     let ids = match ids_result {
         Ok(v) => v,
@@ -530,6 +538,53 @@ pub(crate) fn deep_analyze_target_filter() -> &'static str {
     {
         "kind IN ('image','video','audio','model') AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')"
     }
+}
+
+/// Build a `" AND NOT (...) AND NOT (...)"` SQL fragment (empty string if
+/// `excluded` is empty) plus its bound params, for `deepAnalyzeAll`'s
+/// whole-library scan. Each excluded folder becomes a `[lo, hi)` range over
+/// `path_text COLLATE NOCASE`, using the same separator-terminated-prefix
+/// technique as `path_safety::resolve_exclusions` (scan exclusions) so
+/// excluding "C:\Photos" does NOT also exclude "C:\PhotosBackup" — a bare
+/// `LIKE prefix%` (as deepAnalyzeFolder's pathPrefix uses, by contract) would
+/// get that wrong. No scan-root containment check: unlike a scan exclusion,
+/// a Deep Analyze exclusion applies library-wide, mirroring `purgeExcluded`'s
+/// `resolve_exclusion_unrooted` (any absolute folder is a valid target).
+///
+/// The range is case-folded (`COLLATE NOCASE`) only where the filesystem is,
+/// i.e. on Windows. On Linux `/Photos` and `/photos` are different directories,
+/// so folding there would exclude a folder the user never asked to exclude —
+/// the wrong direction for a privacy control. Matches the app-side comparison
+/// in each platform's settings sanitizer.
+pub(crate) fn exclusion_where_clause(excluded: &[String]) -> (String, Vec<String>) {
+    let mut sql = String::new();
+    let mut params = Vec::new();
+    let sep = if cfg!(windows) { '\\' } else { '/' };
+    let collate = if cfg!(windows) { " COLLATE NOCASE" } else { "" };
+    for raw in excluded {
+        let Some(resolved) = crate::util::path_safety::resolve_exclusion_unrooted(
+            std::path::Path::new(raw),
+        ) else {
+            continue;
+        };
+        let mut lo = resolved.original;
+        if !lo.ends_with(sep) {
+            lo.push(sep);
+        }
+        let Some(hi) = crate::scan_session::prefix_upper_bound(&lo) else {
+            continue;
+        };
+        let n1 = params.len() + 1;
+        let n2 = params.len() + 2;
+        use std::fmt::Write as _;
+        let _ = write!(
+            sql,
+            " AND NOT (path_text{collate} >= ?{n1} AND path_text{collate} < ?{n2})"
+        );
+        params.push(lo);
+        params.push(hi);
+    }
+    (sql, params)
 }
 
 fn normalize_folder_scope(raw: &str) -> Result<String, &'static str> {
@@ -1306,6 +1361,81 @@ mod tests {
     }
 
     #[test]
+    fn exclusion_where_clause_is_empty_for_no_exclusions() {
+        let (sql, params) = super::exclusion_where_clause(&[]);
+        assert_eq!(sql, "");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn exclusion_where_clause_respects_folder_boundaries_end_to_end() {
+        // The exact false-positive scan exclusions already guard against
+        // (path_safety::resolve_exclusions_containment): excluding a folder
+        // must not also exclude a sibling that merely shares a text prefix.
+        let root = if cfg!(windows) { r"C:\Library" } else { "/library" };
+        let excluded_dir = if cfg!(windows) {
+            r"C:\Library\Photos"
+        } else {
+            "/library/photos"
+        };
+        let sibling_dir = if cfg!(windows) {
+            r"C:\Library\PhotosBackup"
+        } else {
+            "/library/photosbackup"
+        };
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let insert = |id: i64, path: &str| {
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
+                 VALUES (?1,?2,?1,10,1.0,'image','jpg',0)",
+                rusqlite::params![id, path],
+            )
+            .unwrap();
+        };
+        insert(1, &format!("{excluded_dir}{}kept_out.jpg", std::path::MAIN_SEPARATOR));
+        insert(2, &format!("{sibling_dir}{}kept_in.jpg", std::path::MAIN_SEPARATOR));
+        insert(3, &format!("{root}{}also_kept_in.jpg", std::path::MAIN_SEPARATOR));
+
+        let (exclusion_sql, exclusion_params) =
+            super::exclusion_where_clause(&[excluded_dir.to_string()]);
+        assert!(exclusion_sql.contains("AND NOT"));
+        assert_eq!(exclusion_params.len(), 2);
+
+        let params: Vec<&dyn rusqlite::ToSql> = exclusion_params
+            .iter()
+            .map(|p| p as &dyn rusqlite::ToSql)
+            .collect();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT id FROM files WHERE {}{} ORDER BY id",
+                super::deep_analyze_target_filter(),
+                exclusion_sql
+            ))
+            .unwrap();
+        let ids: Vec<i64> = stmt
+            .query_map(rusqlite::params_from_iter(params), |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "the excluded folder's own file must be dropped; a same-prefix \
+             sibling and an unrelated file must survive"
+        );
+    }
+
+    #[test]
+    fn exclusion_where_clause_ignores_relative_paths() {
+        let (sql, params) = super::exclusion_where_clause(&["not/absolute".to_string()]);
+        assert_eq!(sql, "");
+        assert!(params.is_empty());
+    }
+
+    #[test]
     fn batch_eta_seconds_mirrors_scan_eta_semantics() {
         // No rate yet (first file) → None, just like the scan ramp-up.
         assert_eq!(super::batch_eta_seconds(0.0, 0, 100), None);
@@ -1391,6 +1521,7 @@ mod tests {
                 file_ids: None,
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: None,
             },
             cancel,
         )
@@ -1489,6 +1620,7 @@ mod tests {
                 file_ids: Some(Vec::new()),
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -1510,6 +1642,7 @@ mod tests {
                 file_ids: Some(vec![1; super::MAX_SELECTED_FILE_IDS + 1]),
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -1545,6 +1678,7 @@ mod tests {
                 file_ids: Some(vec![unsupported]),
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: None,
             },
             Arc::new(AtomicBool::new(false)),
         )
@@ -1786,6 +1920,7 @@ mod tests {
                 file_ids: Some(vec![file_id]),
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: None,
             },
             Arc::new(AtomicBool::new(false)),
         )

@@ -1205,7 +1205,8 @@ public sealed partial class RestructureView : UserControl
             var model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
             try
             {
-                await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+                await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true,
+                    excludedFolders: AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders);
             }
             catch (Exception ex)
             {
