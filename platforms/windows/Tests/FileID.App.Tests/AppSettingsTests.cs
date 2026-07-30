@@ -51,7 +51,8 @@ public class AppSettingsTests
         Assert.False(s.SelectedVlmModelWasUserChosen);
         Assert.Empty(s.ExcludedFolders);
         Assert.True(s.ConfirmCloseOnPendingChanges);
-        Assert.Equal(6, s.SchemaVersion);
+        Assert.Empty(s.DeepAnalyzeExcludedFolders);
+        Assert.Equal(7, s.SchemaVersion);
     }
 
     [Fact]
@@ -162,11 +163,12 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        // "{}" carries no schemaVersion → property default (current schema, v6).
-        Assert.Equal(6, decoded.SchemaVersion);
-        // v6 fields absent from an old settings.json take their safe defaults.
+        // "{}" carries no schemaVersion → property default (current schema, v7).
+        Assert.Equal(7, decoded.SchemaVersion);
+        // Fields absent from an old settings.json take their safe defaults.
         Assert.Empty(decoded.ExcludedFolders);
         Assert.True(decoded.ConfirmCloseOnPendingChanges);
+        Assert.Empty(decoded.DeepAnalyzeExcludedFolders);
     }
 
     [Fact]
@@ -204,5 +206,42 @@ public class AppSettingsTests
         s.ExcludedFolders.Add(@"C:\Pics\Other");
         Assert.Single(clone.ExcludedFolders);
         Assert.Equal(s_cloneExpectedExcludedFolders, s.ExcludedFolders);
+    }
+
+    [Fact]
+    public void DeepAnalyzeExcludedFolders_IsSeparateFromScanExcludedFolders()
+    {
+        // The two lists are deliberately independent — excluding a folder
+        // from scanning does not exclude it from Deep Analyze, and vice
+        // versa (see the field doc comments).
+        var s = new AppSettings();
+        s.ExcludedFolders.Add(@"C:\Pics\Raw");
+        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
+        Assert.Equal(new List<string> { @"C:\Pics\Raw" }, s.ExcludedFolders);
+        Assert.Equal(new List<string> { @"C:\Pics\Private" }, s.DeepAnalyzeExcludedFolders);
+    }
+
+    [Fact]
+    public void DeepAnalyzeExcludedFolders_RoundTripsThroughJsonAsCamelCase()
+    {
+        var original = new AppSettings();
+        original.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
+        var json = JsonSerializer.Serialize(original, s_options);
+        Assert.Contains("\"deepAnalyzeExcludedFolders\"", json);
+        var decoded = JsonSerializer.Deserialize<AppSettings>(json, s_options);
+        Assert.NotNull(decoded);
+        Assert.Equal(original.DeepAnalyzeExcludedFolders, decoded!.DeepAnalyzeExcludedFolders);
+    }
+
+    [Fact]
+    public void CloneForWrite_SnapshotsDeepAnalyzeExcludedFoldersList()
+    {
+        var s = new AppSettings();
+        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
+        var clone = (AppSettings)typeof(AppSettings)
+            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(s, null)!;
+        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Other");
+        Assert.Single(clone.DeepAnalyzeExcludedFolders);
     }
 }

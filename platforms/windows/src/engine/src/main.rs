@@ -462,15 +462,11 @@ async fn async_main() -> Result<()> {
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_face_cluster_active = face_cluster_active.clone();
-    // Restructure-apply cancel flag (F-C6-013 wiring). CancelScan sets it; the
-    // ApplyRestructure arm resets it to false before each apply so a stale
-    // cancel can't pre-stop a fresh apply; the apply loop polls it per move.
-    let restructure_apply_cancel: Arc<std::sync::atomic::AtomicBool> =
-        Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_restructure_apply_cancel = restructure_apply_cancel.clone();
-    // Single-flight for apply/undo: two overlapping runs would share one cancel
-    // flag and race on-disk moves plus the undo journal. Same compare-exchange +
-    // RAII-guard shape as Deep Analyze. (audit 2026-07-14)
+    let restructure_cancellations = RestructureCancelRegistry::default();
+    let dispatch_restructure_cancellations = restructure_cancellations.clone();
+    // Single-flight for apply/undo: two overlapping runs would race on-disk
+    // moves plus the undo journal. Same compare-exchange + RAII-guard shape as
+    // Deep Analyze. (audit 2026-07-14)
     let restructure_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_restructure_active = restructure_active.clone();
@@ -561,7 +557,7 @@ async fn async_main() -> Result<()> {
                                     &dispatch_deep_cancel,
                                     &dispatch_deep_active,
                                     &dispatch_face_cluster_active,
-                                    &dispatch_restructure_apply_cancel,
+                                    &dispatch_restructure_cancellations,
                                     &dispatch_restructure_active,
                                     &dispatch_mutation_gate,
                                     &dispatch_jobs,
@@ -627,7 +623,7 @@ async fn async_main() -> Result<()> {
         coordinator.request_cancel();
     }
     deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Release);
-    restructure_apply_cancel.store(true, std::sync::atomic::Ordering::Release);
+    restructure_cancellations.request_cancel();
     commands::prewarm::cancel_prewarm(None);
 
     if tokio::time::timeout(Duration::from_secs(2), &mut stdio_loop)
@@ -836,6 +832,52 @@ struct DeepActiveGuard(Arc<std::sync::atomic::AtomicBool>);
 impl Drop for DeepActiveGuard {
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+fn request_scan_cancel(cancel: &std::sync::atomic::AtomicBool) {
+    cancel.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[derive(Clone, Default)]
+struct RestructureCancelRegistry {
+    tokens: Arc<parking_lot::Mutex<Vec<Arc<std::sync::atomic::AtomicBool>>>>,
+}
+
+impl RestructureCancelRegistry {
+    fn register(&self) -> RestructureCancelGuard {
+        let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.tokens.lock().push(token.clone());
+        RestructureCancelGuard {
+            registry: self.clone(),
+            token,
+        }
+    }
+
+    fn request_cancel(&self) {
+        for token in self.tokens.lock().iter() {
+            token.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+struct RestructureCancelGuard {
+    registry: RestructureCancelRegistry,
+    token: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RestructureCancelGuard {
+    fn token(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.token.clone()
+    }
+}
+
+impl Drop for RestructureCancelGuard {
+    fn drop(&mut self) {
+        self.registry
+            .tokens
+            .lock()
+            .retain(|token| !Arc::ptr_eq(token, &self.token));
     }
 }
 
@@ -1127,7 +1169,7 @@ async fn handle_line(
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
-    restructure_apply_cancel: &Arc<std::sync::atomic::AtomicBool>,
+    restructure_cancellations: &RestructureCancelRegistry,
     restructure_active: &Arc<std::sync::atomic::AtomicBool>,
     mutation_gate: &Arc<tokio::sync::Mutex<()>>,
     jobs: &job_queue::JobQueue,
@@ -1230,6 +1272,15 @@ async fn handle_line(
     }
 
     match cmd.payload {
+        CommandPayload::HealthCheck(payload) => {
+            sink.send(IpcEvent::now(EventPayload::HealthCheckResult(Wrap::new(
+                ipc::HealthCheckResult {
+                    request_id: payload.request_id,
+                    pid: std::process::id() as i32,
+                },
+            ))))
+            .await;
+        }
         CommandPayload::RequestStatus(_) => {
             // Re-emit ready so the app can rebuild its EngineInfo snapshot.
             commands::hardware::emit_ready(sink).await;
@@ -1272,6 +1323,8 @@ async fn handle_line(
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
+            let cancel_guard = restructure_cancellations.register();
+            let cancel_c = cancel_guard.token();
             spawn_mutation_with_rejection(
                 mutation_gate,
                 sink,
@@ -1281,7 +1334,14 @@ async fn handle_line(
                     "Could not compute a restructure plan because the library is busy.",
                 ),
                 async move {
-                    commands::restructure::handle_plan_restructure(sink_c, db_c, payload).await;
+                    let _cancel_guard = cancel_guard;
+                    commands::restructure::handle_plan_restructure(
+                        sink_c,
+                        db_c,
+                        payload,
+                        cancel_c,
+                    )
+                    .await;
                 },
             )
             .await;
@@ -1316,11 +1376,11 @@ async fn handle_line(
                 .await;
                 return;
             }
-            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
-            let cancel_c = restructure_apply_cancel.clone();
+            let cancel_guard = restructure_cancellations.register();
+            let cancel_c = cancel_guard.token();
             spawn_mutation_with_rejection(
                 mutation_gate,
                 sink,
@@ -1331,6 +1391,7 @@ async fn handle_line(
                 ),
                 async move {
                     let _guard = guard;
+                    let _cancel_guard = cancel_guard;
                     commands::restructure::handle_apply_restructure(sink_c, db_c, payload, cancel_c)
                         .await;
                 },
@@ -1364,11 +1425,11 @@ async fn handle_line(
                 .await;
                 return;
             }
-            restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = DeepActiveGuard(restructure_active.clone());
             let sink_c = sink.clone();
             let db_c = db.clone();
-            let cancel_c = restructure_apply_cancel.clone();
+            let cancel_guard = restructure_cancellations.register();
+            let cancel_c = cancel_guard.token();
             spawn_mutation_with_rejection(
                 mutation_gate,
                 sink,
@@ -1379,6 +1440,7 @@ async fn handle_line(
                 ),
                 async move {
                     let _guard = guard;
+                    let _cancel_guard = cancel_guard;
                     commands::restructure::handle_undo_restructure(sink_c, db_c, payload, cancel_c)
                         .await;
                 },
@@ -1427,14 +1489,15 @@ async fn handle_line(
             }
         }
         CommandPayload::CancelScan(_) => {
-            scan_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+            request_scan_cancel(scan_cancel_requested);
             if let Some(coord) = scan_state.lock().as_ref() {
                 coord.request_cancel();
                 tracing::info!("scan cancel requested");
             }
-            // CancelScan is the app's single "stop the current long op" signal;
-            // also stop an in-flight restructure apply (cooperative, per-move).
-            restructure_apply_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        CommandPayload::CancelRestructure(_) => {
+            restructure_cancellations.request_cancel();
+            tracing::info!("restructure cancel requested");
         }
         CommandPayload::ApplyTags(payload) => {
             let Some(db) = db else {
@@ -1919,6 +1982,7 @@ async fn handle_line(
             let fca_c = face_cluster_active.clone();
             let da_cancel_c = deep_analyze_cancel.clone();
             let da_active_c = deep_analyze_active.clone();
+            restructure_cancellations.request_cancel();
             commands::wipe::handle_wipe_library(
                 sink_c,
                 db_c,
@@ -1927,7 +1991,6 @@ async fn handle_line(
                 fca_c,
                 da_cancel_c,
                 da_active_c,
-                restructure_apply_cancel.clone(),
                 restructure_active.clone(),
                 mutation_gate.clone(),
             )
@@ -1987,6 +2050,58 @@ async fn emit_db_unavailable(sink: &Sink, command: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_restructure_operation_is_not_poisoned_by_an_old_cancel() {
+        let registry = RestructureCancelRegistry::default();
+        {
+            let cancelled = registry.register();
+            registry.request_cancel();
+            assert!(cancelled
+                .token()
+                .load(std::sync::atomic::Ordering::Acquire));
+        }
+
+        let fresh = registry.register();
+        assert!(!fresh.token().load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn scan_and_restructure_cancel_signals_are_isolated() {
+        let scan = std::sync::atomic::AtomicBool::new(false);
+        let registry = RestructureCancelRegistry::default();
+        let restructure = registry.register();
+
+        request_scan_cancel(&scan);
+        assert!(scan.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!restructure
+            .token()
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        scan.store(false, std::sync::atomic::Ordering::Release);
+        registry.request_cancel();
+        assert!(!scan.load(std::sync::atomic::Ordering::Acquire));
+        assert!(restructure
+            .token()
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn cancel_restructure_reaches_active_and_queued_operations_only() {
+        let registry = RestructureCancelRegistry::default();
+        let active = registry.register();
+        let queued = registry.register();
+
+        registry.request_cancel();
+
+        assert!(active.token().load(std::sync::atomic::Ordering::Acquire));
+        assert!(queued.token().load(std::sync::atomic::Ordering::Acquire));
+        drop(active);
+        drop(queued);
+
+        let later = registry.register();
+        assert!(!later.token().load(std::sync::atomic::Ordering::Acquire));
+    }
 
     // F-C1-010: the oversize-frame rejection text must report the REAL cap
     // (MAX_FRAME_BYTES, now 64 MiB — R3-07B), not the stale hardcoded "1 MB".

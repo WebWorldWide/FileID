@@ -867,8 +867,7 @@ struct DeepAnalyzeButton: View {
     @State private var settings = DeepAnalyzeSettings.shared
 
     var body: some View {
-        let alreadyDone = file.vlmDescription != nil
-            && file.vlmModel == settings.activeKind.rawValue
+        let alreadyDone = file.isFullyAnalyzed(by: settings.activeKind.rawValue)
         let fits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         Button {
             guard fits else { return }

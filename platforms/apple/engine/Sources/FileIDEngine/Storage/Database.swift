@@ -509,6 +509,11 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0")
         }
 
+        // Full-pass completion is distinct from vlm_model's latest-run provenance.
+        m.registerMigration("v20_vlm_full_model") { db in
+            try db.execute(sql: "ALTER TABLE files ADD COLUMN vlm_full_model TEXT;")
+        }
+
         return m
     }
 

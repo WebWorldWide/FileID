@@ -138,7 +138,7 @@ public sealed class SankeyFlowControl : Control
 
     // The Sankey is a custom Canvas-drawn control with no intrinsic UI-Automation
     // surface, so a screen reader would otherwise see an empty box. Expose a live
-    // text summary of the flow (source folders → destination categories) as the
+    // text summary of the flow (source folders → semantic organization buckets) as the
     // control's accessible Name + HelpText, and make it keyboard-focusable so the
     // supplementary "where do my files go" view is reachable without a mouse. The
     // primary flow (stat tiles, file-row checkboxes, drill-down buttons) is
@@ -156,7 +156,7 @@ public sealed class SankeyFlowControl : Control
         var categories = moves.Select(m => m.Category).Distinct().Count();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             this,
-            $"Folder reorganization flow: {moves.Count} files from {sources} source folders into {categories} destination categories.");
+            $"Folder reorganization flow: {moves.Count} files from {sources} source folders into {categories} organization buckets.");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
             this,
             "Diagram of where files move. Use the recommendation list below to review and select individual moves.");

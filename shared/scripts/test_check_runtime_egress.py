@@ -219,6 +219,13 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/tui/src/models.rs",
             "platforms/tui/src/scan.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
+            # Reviewed 2026-07-29: both match the deliberately-broad raw-network
+            # patterns on non-network constructs — restructure.rs imports the
+            # Win32 FILE_SHARE_READ *filesystem* constant, and
+            # EngineClient.Commands.cs declares a local `Process?` handle for the
+            # engine child. Neither performs network I/O.
+            "platforms/windows/src/engine/src/commands/restructure.rs",
+            "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
             "platforms/windows/src/engine/src/models/vlm.rs",
             "platforms/windows/src/engine/src/models/whisper.rs",
             "platforms/windows/src/engine/src/platform.rs",

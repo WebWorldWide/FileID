@@ -60,6 +60,9 @@ public sealed partial class SidebarQueueList : UserControl
             return;
         }
         Root.Visibility = Visibility.Visible;
+        HeaderText.Text = QueueHeading(
+            state.Running is not null,
+            state.Pending.Count > 0);
         TotalEtaText.Text = state.TotalEtaSeconds is { } eta && eta > 0
             ? "≈ " + FormatDuration(eta)
             : string.Empty;
@@ -110,6 +113,11 @@ public sealed partial class SidebarQueueList : UserControl
             _visibleRows.RemoveAt(_visibleRows.Count - 1);
         }
     }
+
+    internal static string QueueHeading(bool hasRunning, bool hasPending)
+        => hasRunning
+            ? hasPending ? "RUNNING + NEXT" : "RUNNING"
+            : "UP NEXT";
 
     public sealed class QueueRow : INotifyPropertyChanged
     {

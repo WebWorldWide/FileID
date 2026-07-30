@@ -219,7 +219,10 @@ public enum Restructure {
         }
 
         let summary = try await planDB.read { db -> (
-            total: Int, categories: [RestructureCategoryCount], folders: FolderClassificationCounts
+            total: Int,
+            categories: [RestructureCategoryCount],
+            confidence: RestructureConfidenceCounts,
+            folders: FolderClassificationCounts
         ) in
             let total = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM raw_moves r
@@ -235,15 +238,46 @@ public enum Restructure {
                     RestructureCategoryCount(
                         category: $0["category"] ?? "", count: $0["n"] ?? 0)
                 }
+            let confidence = try Row.fetchOne(db, sql: """
+                SELECT
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='auto' THEN 1 ELSE 0 END),0)
+                    AS auto_count,
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='review' THEN 1 ELSE 0 END),0)
+                    AS review_count,
+                  COALESCE(SUM(CASE WHEN lower(r.confidence)='ask' THEN 1 ELSE 0 END),0)
+                    AS ask_count,
+                  COALESCE(SUM(CASE
+                    WHEN lower(r.confidence) NOT IN ('auto','review','ask') THEN 1 ELSE 0 END),0)
+                    AS unknown_count
+                FROM raw_moves r
+                JOIN folder_tiers t ON t.folder=r.source_folder
+                WHERE t.tier <> 'Anchor'
+                """).map {
+                    RestructureConfidenceCounts(
+                        auto: $0["auto_count"] ?? 0,
+                        review: $0["review_count"] ?? 0,
+                        ask: $0["ask_count"] ?? 0,
+                        unknown: $0["unknown_count"] ?? 0)
+                } ?? RestructureConfidenceCounts(auto: 0, review: 0, ask: 0, unknown: 0)
+            let confidenceTotal =
+                confidence.auto + confidence.review + confidence.ask + confidence.unknown
+            guard confidenceTotal == total else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
             func tierCount(_ tier: String) throws -> Int {
                 try Int.fetchOne(
                     db, sql: "SELECT COUNT(*) FROM folder_tiers WHERE tier=?",
                     arguments: [tier]) ?? 0
             }
-            return (total, categories, FolderClassificationCounts(
-                anchorFolders: try tierCount("Anchor"),
-                mixedFolders: try tierCount("Mixed"),
-                junkFolders: try tierCount("Junk")))
+            return (
+                total,
+                categories,
+                confidence,
+                FolderClassificationCounts(
+                    anchorFolders: try tierCount("Anchor"),
+                    mixedFolders: try tierCount("Mixed"),
+                    junkFolders: try tierCount("Junk"))
+            )
         }
 
         let stored = try await planDB.read { db in
@@ -256,6 +290,7 @@ public enum Restructure {
             return try storePlanStream(
                 libraryRoot: libraryRoot.path,
                 totalMoves: summary.total,
+                confidenceCounts: summary.confidence,
                 directory: directory,
                 nextMove: {
                     guard let row = try cursor.next() else { return nil }
@@ -281,7 +316,8 @@ public enum Restructure {
             folderClassifications: summary.folders,
             planID: truncated ? stored.planID : nil,
             totalMoves: truncated ? summary.total : nil,
-            truncated: truncated)
+            truncated: truncated,
+            confidenceCounts: summary.confidence)
     }
 
     /// Build proposals for every image in the library. The caller (UI)
@@ -563,6 +599,25 @@ public enum Restructure {
             self.mixedFolders = mixedFolders
             self.junkFolders = junkFolders
         }
+    }
+
+    static func confidenceCounts<S: Sequence>(
+        _ confidences: S
+    ) -> RestructureConfidenceCounts where S.Element == String {
+        var auto = 0
+        var review = 0
+        var ask = 0
+        var unknown = 0
+        for confidence in confidences {
+            switch confidence.lowercased() {
+            case "auto": auto += 1
+            case "review": review += 1
+            case "ask": ask += 1
+            default: unknown += 1
+            }
+        }
+        return RestructureConfidenceCounts(
+            auto: auto, review: review, ask: ask, unknown: unknown)
     }
 
     /// Per-source-folder tier labels + rolled-up Anchor/Mixed/Junk counts from the
@@ -864,6 +919,30 @@ public enum Restructure {
         public let skipped: Int
         public let failed: Int
         public let conflicts: [String]
+        /// True iff cooperative cancellation (`isCancelled()`) stopped the loop
+        /// before every eligible row was processed. Mirrors the wire
+        /// `RestructureApplyResult.cancelled` field (IPCProtocol.swift). (audit R2)
+        public let cancelled: Bool
+        /// Rows a stored/truncated plan held back from this apply because they
+        /// were NOT "auto" confidence — mirrors the Rust engine's
+        /// eligible_auto/held_review/held_ask/held_unknown accounting
+        /// (commands/restructure.rs). Zero outside `applyStoredPlan`. (audit R1)
+        public let heldReview: Int
+        public let heldAsk: Int
+        public let heldUnknown: Int
+
+        init(moved: Int, skipped: Int, failed: Int, conflicts: [String],
+             cancelled: Bool = false, heldReview: Int = 0, heldAsk: Int = 0,
+             heldUnknown: Int = 0) {
+            self.moved = moved
+            self.skipped = skipped
+            self.failed = failed
+            self.conflicts = conflicts
+            self.cancelled = cancelled
+            self.heldReview = heldReview
+            self.heldAsk = heldAsk
+            self.heldUnknown = heldUnknown
+        }
     }
 
     public enum UndoJournalError: LocalizedError, Sendable {
@@ -907,6 +986,10 @@ public enum Restructure {
         let version: Int
         let libraryRoot: String
         let totalMoves: Int
+        /// Full-plan confidence tallies, computed once at plan time and reused by
+        /// `applyStoredPlan` so its auto-tier filter doesn't need a second pass
+        /// over the spool just to know the eligible count. (audit R1)
+        let confidenceCounts: RestructureConfidenceCounts
     }
 
     private final class NDJSONLineReader {
@@ -989,7 +1072,11 @@ public enum Restructure {
     }
 
     static let storedPlanPreviewCap = 5_000
-    private static let storedPlanVersion = 1
+    // Bumped 1 → 2 when `confidenceCounts` was added to the header (audit R1) —
+    // a stale version-1 spool from a prior engine build lacks the field, and the
+    // version guard in `applyStoredPlan` rejects it cleanly instead of failing
+    // a raw JSONDecoder error deep in the auto-tier filter.
+    private static let storedPlanVersion = 2
 
     private static var storedPlansDirectory: URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -1003,6 +1090,7 @@ public enum Restructure {
         return try storePlanStream(
             libraryRoot: libraryRoot,
             totalMoves: moves.count,
+            confidenceCounts: Self.confidenceCounts(moves.map(\.confidence)),
             directory: override,
             nextMove: { iterator.next() })
     }
@@ -1010,6 +1098,7 @@ public enum Restructure {
     private static func storePlanStream(
         libraryRoot: String,
         totalMoves: Int,
+        confidenceCounts: RestructureConfidenceCounts,
         directory override: URL? = nil,
         nextMove: () throws -> RestructureMove?
     ) throws -> (planID: String, preview: [RestructureMove]) {
@@ -1046,7 +1135,8 @@ public enum Restructure {
             try append(StoredPlanHeader(
                 version: storedPlanVersion,
                 libraryRoot: libraryRoot,
-                totalMoves: totalMoves))
+                totalMoves: totalMoves,
+                confidenceCounts: confidenceCounts))
             while let move = try nextMove() {
                 if preview.count < storedPlanPreviewCap { preview.append(move) }
                 try append(move)
@@ -1088,21 +1178,49 @@ public enum Restructure {
               pathsEqual(header.libraryRoot, expectedRoot) else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        return try await applyStream(
-            total: header.totalMoves,
+        // Only the "auto" confidence tier is safe to apply from a stored/
+        // truncated plan: most of its rows were never shown to the user (the UI
+        // only renders the first `storedPlanPreviewCap` moves before falling
+        // back to the "Large plan ready" card with no per-row selection), so
+        // Review/Ask/unknown-confidence rows must stay put for explicit review.
+        // Mirrors the Rust engine's `auto_tier_only` gate — the source of truth
+        // for this invariant (commands/restructure.rs: `apply_iter(auto_tier_only(
+        // stored_moves), Some(tiers.auto))`). (audit R1 — data-safety fix)
+        var heldReview = 0
+        var heldAsk = 0
+        var heldUnknown = 0
+        let result = try await applyStream(
+            total: header.confidenceCounts.auto,
             nextProposal: {
-                guard let line = try reader.nextLine() else { return nil }
-                let move = try decoder.decode(RestructureMove.self, from: line)
-                return RestructureProposal(
-                    fileID: move.fileID, oldPath: move.source,
-                    newPath: move.destination, bucket: move.category,
-                    confidence: move.confidence, reason: move.reason)
+                while true {
+                    guard let line = try reader.nextLine() else { return nil }
+                    let move = try decoder.decode(RestructureMove.self, from: line)
+                    switch move.confidence.lowercased() {
+                    case "auto":
+                        return RestructureProposal(
+                            fileID: move.fileID, oldPath: move.source,
+                            newPath: move.destination, bucket: move.category,
+                            confidence: move.confidence, reason: move.reason)
+                    case "review": heldReview += 1
+                    case "ask": heldAsk += 1
+                    default: heldUnknown += 1
+                    }
+                }
             },
             database: database,
             libraryRoot: libraryRoot,
             isCancelled: isCancelled,
             undoJournal: nil,
             recordUndo: true)
+        JSONLog.shared.info(ev: "restructure_apply_stored_plan_tier_filter",
+                            extra: ["eligibleAuto": AnyCodable(header.confidenceCounts.auto),
+                                    "heldReview": AnyCodable(heldReview),
+                                    "heldAsk": AnyCodable(heldAsk),
+                                    "heldUnknown": AnyCodable(heldUnknown)])
+        return ApplyResult(
+            moved: result.moved, skipped: result.skipped, failed: result.failed,
+            conflicts: result.conflicts, cancelled: result.cancelled,
+            heldReview: heldReview, heldAsk: heldAsk, heldUnknown: heldUnknown)
     }
 
     public static func apply(
@@ -1195,6 +1313,12 @@ public enum Restructure {
         // durable, so stopping BETWEEN moves preserves per-move atomicity) and
         // emit throttled progress to the engine log so the run isn't feedbackless.
         var processed = 0
+        // Set only on the cooperative-cancel early-exit below — distinct from a
+        // `nextProposal()` read failure or plan exhaustion, which also `break`
+        // but aren't a user cancel. Threaded into `ApplyResult.cancelled` so the
+        // IPC event (and the UI's "Stopped — N already moved" copy) can tell the
+        // difference. (audit R2)
+        var wasCancelled = false
 
         while true {
             let p: RestructureProposal
@@ -1207,6 +1331,7 @@ public enum Restructure {
                 break
             }
             if isCancelled() {
+                wasCancelled = true
                 JSONLog.shared.info(ev: "restructure_apply_cancelled",
                                     extra: ["processed": AnyCodable(processed),
                                             "total": AnyCodable(total),
@@ -1429,8 +1554,10 @@ public enum Restructure {
         JSONLog.shared.info(ev: "restructure_applied",
                             extra: ["moved": AnyCodable(moved),
                                     "skipped": AnyCodable(skipped),
-                                    "failed": AnyCodable(failed)])
-        return ApplyResult(moved: moved, skipped: skipped, failed: failed, conflicts: conflicts)
+                                    "failed": AnyCodable(failed),
+                                    "cancelled": AnyCodable(wasCancelled)])
+        return ApplyResult(moved: moved, skipped: skipped, failed: failed,
+                           conflicts: conflicts, cancelled: wasCancelled)
     }
 
     // MARK: - Undo (R2 — reversible "Undo last run")

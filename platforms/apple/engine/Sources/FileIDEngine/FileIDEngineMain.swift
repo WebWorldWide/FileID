@@ -256,6 +256,14 @@ struct FileIDEngineMain {
         case .cancelScan:
             await coordinator.requestCancel()
             JSONLog.shared.info(ev: "cancel_requested")
+        case .cancelRestructure:
+            await coordinator.requestRestructureCancel()
+            JSONLog.shared.info(ev: "restructure_cancel_requested")
+        case .healthCheck(let requestID):
+            await sink.emit(.healthCheckResult(HealthCheckResult(
+                requestID: requestID,
+                pid: ProcessInfo.processInfo.processIdentifier
+            )))
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))
@@ -397,7 +405,7 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames, let fileIDs):
+        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames, let fileIDs, let excludedFolders):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_failed", message: "Database unavailable for Deep Analyze.",
@@ -450,10 +458,14 @@ struct FileIDEngineMain {
                 title: "Deep Analyze entire library (\(kind.displayName))",
                 etaSeconds: nil
             ) {
+                // excludedFolders applies ONLY to the whole-library path — an
+                // explicit fileIDs selection is a deliberate per-file action
+                // and is never silently filtered (schema; mirrors the Rust +
+                // C# engines).
                 let scope: DeepAnalyzeScope = if let fileIDs {
                     .selected(fileIDs: fileIDs, skipExisting: skipExisting)
                 } else {
-                    .wholeLibrary(skipExisting: skipExisting)
+                    .wholeLibrary(skipExisting: skipExisting, excludedFolders: excludedFolders ?? [])
                 }
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
                                              scope: scope,
@@ -584,7 +596,8 @@ struct FileIDEngineMain {
                                 folderClassifications: legacyPlan.folderClassifications,
                                 planID: stored.planID,
                                 totalMoves: legacyPlan.moves.count,
-                                truncated: true)
+                                truncated: true,
+                                confidenceCounts: legacyPlan.confidenceCounts)
                         }
                         plan = legacyPlan
                     }
@@ -605,14 +618,26 @@ struct FileIDEngineMain {
                 await coordinator.finishRestructure(token: restructureToken)
             }
             await coordinator.attachRestructure(planTask, token: restructureToken)
-        case .applyRestructure(let libraryRoot, let moves, _, let planID):
-            // macOS performs real filesystem moves; the Windows engine's
-            // symlink-preview mode has no macOS equivalent, so `useSymlinks`
-            // is accepted for wire parity and ignored.
+        case .applyRestructure(let libraryRoot, let moves, let useSymlinks, let planID):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
                     message: "Database failed to open at engine startup; cannot apply a restructure."
+                )))
+                return
+            }
+            // Fail closed instead of silently converting a symlink-preview
+            // request into permanent real moves: macOS has no symlink-apply
+            // engine path (no shortcut-mode journal to undo it with), so the
+            // prior "accepted for wire parity and ignored" behavior meant a
+            // caller asking for a reversible preview got irreversible moves
+            // with no warning. Checked BEFORE reserveRestructure() so a
+            // rejected request never wedges later applies/undos on
+            // restructure_busy. (audit R3 — see DECISIONS.md)
+            guard !useSymlinks else {
+                await sink.emit(.error(EngineError(
+                    kind: "apply_restructure",
+                    message: "Symlink-preview mode is not supported by the macOS engine; it only performs real on-disk moves. Send useSymlinks: false."
                 )))
                 return
             }
@@ -648,12 +673,14 @@ struct FileIDEngineMain {
                             proposals: proposals, database: database, libraryRoot: applyRoot)
                     }
                     await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                        applied: result.moved, failed: result.failed, privilegeError: nil)))
+                        applied: result.moved, failed: result.failed, privilegeError: nil,
+                        cancelled: result.cancelled)))
                 } catch {
                     if let journalError = error as? Restructure.UndoJournalError {
                         let result = journalError.result
                         await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                            applied: result.moved, failed: result.failed, privilegeError: nil)))
+                            applied: result.moved, failed: result.failed, privilegeError: nil,
+                            cancelled: result.cancelled)))
                         await sink.emit(.error(EngineError(
                             kind: "restructure_undo_journal",
                             message: journalError.localizedDescription)))
@@ -667,10 +694,35 @@ struct FileIDEngineMain {
             }
             await coordinator.attachRestructure(applyTask, token: restructureToken)
 
-        case .undoRestructure(let libraryRoot):
+        case .undoRestructure(let libraryRoot, let shortcutUndoToken):
             // Reverse the last apply by replaying the engine's on-disk undo
             // journal. Same machinery as apply (real moves, cancellable, terminal
             // restructureApplyResult), so register it the same way. (R2)
+            //
+            // A non-nil shortcutUndoToken asks to undo only ONE shortcut-mode
+            // (symlink) apply run, never the real-move journal (schema:
+            // shortcutUndoToken). macOS has no symlink-apply mode at all (see the
+            // useSymlinks rejection above), so there is no shortcut journal to
+            // replay — fail closed rather than silently falling through to
+            // undoLast() and replaying the real-move journal instead, which
+            // would violate that contract. Checked BEFORE reserveRestructure()
+            // so a rejected request can't wedge restructure_busy for every
+            // later apply/undo (ScanCoordinator's reservation has no timeout).
+            // (audit R3 — see DECISIONS.md)
+            guard shortcutUndoToken == nil else {
+                // EngineClient's undoRestructureInFlight flag is cleared ONLY by
+                // a terminal restructureApplyResult (audit R2-app) — an .error
+                // alone would leave it latched and mis-attribute the NEXT apply's
+                // result to this rejected undo. Emit both, mirroring the
+                // UndoJournalError catch arm above.
+                await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                    applied: 0, failed: 0, privilegeError: nil, cancelled: false)))
+                await sink.emit(.error(EngineError(
+                    kind: "undo_restructure",
+                    message: "Shortcut-mode restructure is not supported by the macOS engine; there is no shortcut undo journal to replay."
+                )))
+                return
+            }
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -691,7 +743,8 @@ struct FileIDEngineMain {
                 JSONLog.shared.info(ev: "undo_restructure_requested")
                 let result = await Restructure.undoLast(database: database, libraryRoot: undoRoot)
                 await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                    applied: result.moved, failed: result.failed, privilegeError: nil)))
+                    applied: result.moved, failed: result.failed, privilegeError: nil,
+                    cancelled: result.cancelled)))
                 await coordinator.finishRestructure(token: restructureToken)
             }
             await coordinator.attachRestructure(undoTask, token: restructureToken)
@@ -1595,7 +1648,8 @@ struct FileIDEngineMain {
 
     /// Build the IPC `RestructurePlan` DTO from engine proposals: map each
     /// proposal to a `RestructureMove` and roll up per-bucket category counts
-    /// (descending by count, then category for a stable order). Per-move `tier`
+    /// plus full-plan confidence totals. Categories sort by descending count,
+    /// then category for a stable order. Per-move `tier`
     /// (Anchor/Mixed/Junk) and the rolled-up `folderClassifications` are derived
     /// from `Restructure.classifyFolders` so the app renders the
     /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
@@ -1621,12 +1675,15 @@ struct FileIDEngineMain {
         let categoryCounts = counts
             .map { RestructureCategoryCount(category: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
+        let confidenceCounts = Restructure.confidenceCounts(
+            plan.proposals.lazy.map(\.confidence))
         return RestructurePlan(
             libraryRoot: libraryRoot, moves: moves,
             categoryCounts: categoryCounts,
             folderClassifications: FolderClassificationCounts(
                 anchorFolders: plan.anchorFolders, mixedFolders: plan.mixedFolders,
-                junkFolders: plan.junkFolders))
+                junkFolders: plan.junkFolders),
+            confidenceCounts: confidenceCounts)
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.

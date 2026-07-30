@@ -15,6 +15,8 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using WinRT;
 
@@ -66,7 +68,11 @@ internal static class Program
 
         // Single-instance gate. Hold the mutex for the lifetime of the
         // process — `using` ensures it releases on any exit path.
-        using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
+        var instanceMutexName = ResolveInstanceMutexName(
+            System.Environment.GetEnvironmentVariable("FILEID_TEST_INSTANCE_KEY"),
+            System.Environment.GetEnvironmentVariable("FILEID_DB"),
+            System.Environment.GetEnvironmentVariable("LOCALAPPDATA"));
+        using var instanceMutex = new Mutex(initiallyOwned: true, name: instanceMutexName, out bool createdNew);
         if (!createdNew)
         {
             TryActivateExistingInstance();
@@ -93,8 +99,8 @@ internal static class Program
         // file so when the app "opens then closes" we can diagnose without
         // a debugger attached. Cleared at the start of each launch.
         var traceLogPath = System.IO.Path.Combine(
-            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "FileID", "logs", "startup-trace.txt");
+            Services.AppPaths.LogsDir,
+            "startup-trace.txt");
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(traceLogPath)!);
@@ -154,6 +160,28 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    internal static string ResolveInstanceMutexName(
+        string? testInstanceKey,
+        string? databaseOverride,
+        string? localAppDataOverride)
+    {
+#if DEBUG
+        if (!string.IsNullOrWhiteSpace(testInstanceKey))
+        {
+            if (string.IsNullOrWhiteSpace(databaseOverride) ||
+                string.IsNullOrWhiteSpace(localAppDataOverride))
+            {
+                throw new InvalidOperationException(
+                    "FILEID_TEST_INSTANCE_KEY requires isolated FILEID_DB and LOCALAPPDATA values.");
+            }
+
+            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(testInstanceKey.Trim()));
+            return $"Local\\FileID-Test-{Convert.ToHexString(digest.AsSpan(0, 16))}";
+        }
+#endif
+        return SingleInstanceMutexName;
     }
 
     /// <summary>

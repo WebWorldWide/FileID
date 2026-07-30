@@ -140,6 +140,9 @@ pub fn hf_cache_dir() -> Result<PathBuf> { Ok(models_dir()?.join("HuggingFace"))
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
 pub fn restructure_plans_dir() -> Result<PathBuf> { Ok(root()?.join("restructure_plans")) }
+pub fn restructure_shortcut_undo_dir() -> Result<PathBuf> {
+    Ok(root()?.join("restructure_shortcut_undo"))
+}
 /// The C# app's settings file (separate from the engine's probe-cache
 /// `settings.json`). Read-only from the engine; the app owns writes.
 pub fn app_settings_path() -> Result<PathBuf> { Ok(root()?.join("app-settings.json")) }
@@ -156,6 +159,7 @@ pub fn ensure_state_dirs() -> Result<PathBuf> {
         &thumbs_dir()?,
         &faces_dir()?,
         &restructure_plans_dir()?,
+        &restructure_shortcut_undo_dir()?,
     ] {
         std::fs::create_dir_all(sub)
             .with_context(|| format!("creating {}", sub.display()))?;

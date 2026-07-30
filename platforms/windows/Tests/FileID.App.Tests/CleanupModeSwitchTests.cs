@@ -14,6 +14,9 @@ namespace FileID.App.Tests;
 public class CleanupModeSwitchTests
 {
     private static DuplicateGroup Group(string hash, params long[] memberIds)
+        => Group(hash, false, memberIds);
+
+    private static DuplicateGroup Group(string hash, bool isSimilar, params long[] memberIds)
     {
         var members = new List<DuplicateMember>();
         foreach (var id in memberIds)
@@ -25,9 +28,10 @@ public class CleanupModeSwitchTests
                 FileName = $"{id}.jpg",
                 SizeBytes = 4,
                 GroupKey = hash,
+                IsSimilar = isSimilar,
             });
         }
-        return new DuplicateGroup { ContentHash = hash, Members = members };
+        return new DuplicateGroup { ContentHash = hash, Members = members, IsSimilar = isSimilar };
     }
 
     [Fact]
@@ -112,5 +116,77 @@ public class CleanupModeSwitchTests
 
         Assert.Single(groups);
         Assert.Equal("sim-7", groups[0].ContentHash);
+    }
+
+    [Fact]
+    public void SimilarSelectionStartsWithNoTrashVictims()
+    {
+        var group = Group("sim-7", true, 7, 8, 9);
+
+        Assert.Empty(CleanupSelectionPolicy.SelectedVictims(group));
+        Assert.Same(group.Members[0], CleanupSelectionPolicy.RetainedCopy(group));
+    }
+
+    [Fact]
+    public void SimilarSelectionIncludesOnlyExplicitlyCheckedCopies()
+    {
+        var group = Group("sim-7", true, 7, 8, 9);
+        group.Members[1].IsSelectedForTrash = true;
+
+        var victims = CleanupSelectionPolicy.SelectedVictims(group);
+
+        Assert.Single(victims);
+        Assert.Equal(8, victims[0].Id);
+        Assert.Same(group.Members[0], CleanupSelectionPolicy.RetainedCopy(group));
+    }
+
+    [Fact]
+    public void SimilarSelectionRejectsTrashingEveryVisibleCopy()
+    {
+        var group = Group("sim-7", true, 7, 8, 9);
+        foreach (var member in group.Members) member.IsSelectedForTrash = true;
+
+        Assert.Equal(3, CleanupSelectionPolicy.SelectedVictims(group).Length);
+        Assert.Null(CleanupSelectionPolicy.RetainedCopy(group));
+    }
+
+    [Fact]
+    public void ExactSelectionStillUsesEveryNonKeeper()
+    {
+        var group = Group("dup-AA:4", 1, 2, 3);
+        group.Members[1].IsKeeper = true;
+
+        var victims = CleanupSelectionPolicy.SelectedVictims(group);
+
+        Assert.Equal(new long[] { 1, 3 }, victims.Select(member => member.Id));
+        Assert.Same(group.Members[1], CleanupSelectionPolicy.RetainedCopy(group));
+    }
+
+    [Fact]
+    public void ContextFlyoutUsesItsCurrentPlacementTarget()
+    {
+        var root = FindRepoRoot();
+        var source = File.ReadAllText(Path.Combine(
+            root, "platforms", "windows", "src", "FileID.App", "Views", "Cleanup", "CleanupView.xaml.cs"));
+        var xaml = File.ReadAllText(Path.Combine(
+            root, "platforms", "windows", "src", "FileID.App", "Views", "Cleanup", "CleanupView.xaml"));
+
+        Assert.Contains("flyout.Target as FrameworkElement", source);
+        Assert.Contains("Opening=\"OnGroupFlyoutOpening\"", xaml);
+        Assert.DoesNotContain("_lastRightTappedHash", source);
+        Assert.DoesNotContain("RightTapped=\"OnGroupRightTapped\"", xaml);
+    }
+
+    private static string FindRepoRoot()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+                && Directory.Exists(Path.Combine(directory.FullName, "platforms", "windows")))
+            {
+                return directory.FullName;
+            }
+        }
+        throw new DirectoryNotFoundException("Could not find the FileID repository root from the test output directory.");
     }
 }

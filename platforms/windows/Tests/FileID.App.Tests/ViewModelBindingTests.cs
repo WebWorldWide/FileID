@@ -1,4 +1,4 @@
-// ViewModel binding + event-routing tests.
+﻿// ViewModel binding + event-routing tests.
 //
 // These exercise the C# logic that backs Settings/Performance, Welcome,
 // People, and Library bindings WITHOUT a running UI thread. The
@@ -117,9 +117,9 @@ public class WelcomeSheetModelSizeTests
     [InlineData("mistral_small_3_2", 15178)] // 14300+878 MB
     [InlineData("ram_plus", 926)]            // RAM++ ONNX fp16 ~882 MB + sidecars
     [InlineData("qwen2_5_vl_7b", 6100)]    // 4700+1400 MB
-    [InlineData("gemma_3_4b",    3351)]    // 2500+851 MB
+    [InlineData("gemma_3_4b", 3351)]    // 2500+851 MB
     [InlineData("mobileclip_s2", 352)]    // CLIP ViT-B/32 vision (~335 MB)
-    [InlineData("clip_text",     256)]     // 254+1+1 MB
+    [InlineData("clip_text", 256)]     // 254+1+1 MB
     [InlineData("cudnn_runtime_x64", 430)]
     public void GetDisplaySizeMB_MatchesEngineRegistrySum(string modelKind, int expectedMB)
     {
@@ -240,6 +240,67 @@ public class ScanProgressPhaseTests
             FilesPerSecond: 10.0, EtaSeconds: 2.0,
             ResidentMb: 250, AvailableMb: 6000);
         Assert.True(evt.Processed <= evt.Total);
+    }
+
+    [Fact]
+    public void PipelineStageMarksPeopleCompleteAfterFaceClusteringFinishes()
+    {
+        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
+            ScanPhase.Completed,
+            peopleDone: true,
+            captionsRunning: false,
+            captionsDone: false,
+            dbDerivedIndex: -1);
+
+        Assert.Equal(-1, state.ActiveIndex);
+        Assert.Equal(2, state.CompletedThrough);
+    }
+
+    [Fact]
+    public void PipelineStageKeepsPeopleActiveUntilFaceClusteringFinishes()
+    {
+        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
+            ScanPhase.Completed,
+            peopleDone: false,
+            captionsRunning: false,
+            captionsDone: false,
+            dbDerivedIndex: -1);
+
+        Assert.Equal(2, state.ActiveIndex);
+        Assert.Equal(1, state.CompletedThrough);
+    }
+
+    [Fact]
+    public void PipelineStageMarksDoneCompleteAfterDeepAnalyzeTerminates()
+    {
+        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
+            ScanPhase.Completed,
+            peopleDone: true,
+            captionsRunning: false,
+            captionsDone: true,
+            dbDerivedIndex: -1);
+
+        Assert.Equal(-1, state.ActiveIndex);
+        Assert.Equal(4, state.CompletedThrough);
+    }
+}
+
+public class SidebarQueuePresentationTests
+{
+    [Theory]
+    [InlineData(true, false, "RUNNING")]
+    [InlineData(true, true, "RUNNING + NEXT")]
+    [InlineData(false, true, "UP NEXT")]
+    public void QueueHeadingReflectsRunningAndPendingWork(
+        bool hasRunning,
+        bool hasPending,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            FileID.Views.Sidebar.SidebarQueueList.QueueHeading(
+                hasRunning,
+                hasPending));
     }
 }
 
@@ -717,6 +778,7 @@ public class EngineWarningClassificationTests
             new FileID.IpcSchema.RequestStatusCommand(),
             new FileID.IpcSchema.ShutdownCommand(),
             new FileID.IpcSchema.CancelScanCommand(),
+            new FileID.IpcSchema.CancelRestructureCommand(),
             new FileID.IpcSchema.DeepAnalyzeCancelCommand(),
             new FileID.IpcSchema.WipeLibraryCommand(),
             new FileID.IpcSchema.EmbedImageQueryCommand(1, "q2"),
@@ -788,6 +850,67 @@ public class PeopleSelectionReprojectTests
 public class RestructureUndoAvailabilityTests
 {
     [Fact]
+    public void ContentMutations_InvalidateCachedRestructurePlan()
+    {
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new PhaseChangedEvent(ScanPhase.Discovering)));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new PhaseChangedEvent(ScanPhase.Tagging)));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new PhaseChangedEvent(ScanPhase.PostScan)));
+        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
+            new PhaseChangedEvent(ScanPhase.Completed)));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new ScanCompleteEvent(new ScanComplete("scan", 3, 3, 0, 1))));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new FaceClusteringCompleteEvent(new FaceClusteringResult(1, 3, 0, 1))));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new DeepAnalyzeStartingEvent(
+                new DeepAnalyzeStarting("qwen", DeepAnalyzeStartingPhase.Queued, "Queued"))));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new DeepAnalyzeCompleteEvent(new DeepAnalyzeComplete(3, 0, 1, "qwen", false))));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new BulkActionResultEvent(new BulkActionResult("applyTags", 1, 0, []))));
+        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
+            new BulkActionResultEvent(new BulkActionResult("applyTags", 0, 1, []))));
+        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
+            new LibraryWipedEvent(new LibraryWiped(true))));
+        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
+            new LibraryWipedEvent(new LibraryWiped(false))));
+        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(null));
+    }
+
+    [Fact]
+    public void SourceChangingRestructureResult_InvalidatesButShortcutPreviewDoesNot()
+    {
+        var moved = new RestructureApplyResult(3, 0);
+        var empty = new RestructureApplyResult(0, 0);
+
+        Assert.True(EngineClient.RestructureResultInvalidatesPlan(
+            wasUndo: false, forwardRunWasUndoable: true, moved));
+        Assert.True(EngineClient.RestructureResultInvalidatesPlan(
+            wasUndo: true, forwardRunWasUndoable: false, moved));
+        Assert.False(EngineClient.RestructureResultInvalidatesPlan(
+            wasUndo: false, forwardRunWasUndoable: false, moved));
+        Assert.False(EngineClient.RestructureResultInvalidatesPlan(
+            wasUndo: false, forwardRunWasUndoable: true, empty));
+    }
+
+    [Fact]
+    public void RestructurePlanReply_IsAcceptedOnlyAtCapturedMutationRevision()
+    {
+        Assert.True(EngineClient.ShouldAcceptRestructurePlan(
+            requestedRevision: 8,
+            currentRevision: 8));
+        Assert.False(EngineClient.ShouldAcceptRestructurePlan(
+            requestedRevision: 8,
+            currentRevision: 9));
+        Assert.False(EngineClient.ShouldAcceptRestructurePlan(
+            requestedRevision: -1,
+            currentRevision: 0));
+    }
+
+    [Fact]
     public void FreshApplyWithNoWork_PreservesExistingUndoState()
     {
         Assert.Null(EngineClient.NextCanUndoRestructure(
@@ -809,12 +932,21 @@ public class RestructureUndoAvailabilityTests
     }
 
     [Fact]
-    public void SymlinkApplyNeverOffersMoveJournalUndo()
+    public void SymlinkApplyPreservesPriorMoveJournalUndo()
     {
-        Assert.False(EngineClient.NextCanUndoRestructure(
+        Assert.Null(EngineClient.NextCanUndoRestructure(
             wasUndo: false,
             new RestructureApplyResult(10, 0),
             forwardRunWasUndoable: false));
+    }
+
+    [Fact]
+    public void ShortcutUndoPreservesPriorMoveJournalUndo()
+    {
+        Assert.Null(EngineClient.NextCanUndoRestructure(
+            wasUndo: true,
+            new RestructureApplyResult(10, 0),
+            wasShortcutUndo: true));
     }
 
     [Fact]
@@ -829,6 +961,19 @@ public class RestructureUndoAvailabilityTests
     {
         Assert.False(EngineClient.NextCanUndoRestructure(
             wasUndo: true, new RestructureApplyResult(3, 0)));
+    }
+
+    [Fact]
+    public void CancelledUndo_RemainsRetryable()
+    {
+        // restructure_apply.rs deliberately keeps the inverse-move journal on
+        // a cancelled undo (even with zero failures) so the user can re-run
+        // it and put the remaining files back. Before this fix, only
+        // result.Failed was consulted, so a cancelled-but-zero-failure undo
+        // hid the Undo button while the journal — and the still-relocated
+        // files — remained.
+        Assert.True(EngineClient.NextCanUndoRestructure(
+            wasUndo: true, new RestructureApplyResult(2, 0, Cancelled: true)));
     }
 }
 

@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "fileid-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -566,6 +566,7 @@ dependencies = [
  "parking_lot",
  "pdfium-render",
  "quick-xml",
+ "rayon",
  "reqwest",
  "rusqlite",
  "serde",
@@ -588,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "fileid-linux"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-channel",
