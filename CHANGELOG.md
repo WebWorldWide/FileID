@@ -6,6 +6,8 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-30
+
 ### Fixed
 
 #### 2026-07-29 — Fewer junk faces, trustworthy Restructure Apply, Deep Analyze folder exclusions
@@ -36,6 +38,22 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
   bookkeeping hiccup left the app permanently offering an Undo that always failed, where an unplugged
   external drive discarded pending repair records, and where one file landing in an occupied
   destination could also knock out a second, unrelated file.
+- **The same person is no longer split across dozens of groups (People).** The rule that merges
+  near-identical face groups was set so strictly that on a real 135,000-file library it fired only
+  **3 times across 3,092 groups** — effectively doing nothing, which is why one person stayed
+  scattered. Recalibrated against that library: it now finds **140 safe merges**, with none that mix
+  two different people together.
+- **People no longer opens onto thousands of tiny groups.** Roughly three-quarters of face groups
+  held 5 or fewer photos — usually several shots of one moment rather than a distinct person. The
+  grid now shows groups of 6+ photos, always keeps any group you have named regardless of size, and
+  tells you how many small ones are hidden. Nothing is deleted and they stay searchable.
+- **"Suggested merges" no longer looks frozen (Windows).** The search compares every face group and
+  can take several seconds, but the dialog showed only a static line of text. It now shows a progress
+  indicator while it works.
+- **Click a face group to see all its faces (Windows).** The face preview existed but only opened on
+  a double-click or via the right-click menu, so most people never found it. A single click now opens
+  it, and it states when a very large group is showing only its clearest faces rather than silently
+  truncating.
 
 ### Added
 
@@ -205,4 +223,5 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...v0.1.2
