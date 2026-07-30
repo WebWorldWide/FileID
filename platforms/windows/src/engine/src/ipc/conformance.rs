@@ -328,6 +328,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
             file_ids: Some(vec![42, 99]),
             tags_only: true,
             propose_renames: true,
+            excluded_folders: Some(vec![r"C:\Users\adam\Private".into()]),
         }),
         CommandPayload::DeepAnalyzeCancel(Empty {}),
         CommandPayload::PrewarmModel(PrewarmModelPayload { model_kind: "arcface".into() }),

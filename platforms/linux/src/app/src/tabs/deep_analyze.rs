@@ -467,6 +467,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
                 file_ids: None,
                 tags_only: false,
                 propose_renames: true,
+                excluded_folders: crate::app_settings::deep_analyze_excluded_folders(),
             });
             if send_cmd(&ui, payload) {
                 begin_run(&ui);

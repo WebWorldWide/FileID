@@ -201,6 +201,11 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&build_storage_card(&engine));
     root.append(&build_recent_scans_card(&engine));
     root.append(&build_logs_card());
+
+    // ── Deep Analyze exclusions ──────────────────────────────────────────────
+    root.append(&section_label("Deep Analyze"));
+    root.append(&build_deep_analyze_exclusions_card());
+
     root.append(&build_privacy_card());
 
     // Constrain to a centered column (macOS/Windows settings are NOT full-width).
@@ -1106,6 +1111,135 @@ fn build_logs_card() -> gtk::Widget {
     });
     buttons.append(&open);
     card.append(&buttons);
+
+    card.upcast()
+}
+
+// ── Deep Analyze exclusions card ─────────────────────────────────────────────
+//
+// Deliberately simpler than a scan-exclusion card would be: nothing is
+// removed from the library, so there is no purge-in-flight state to track —
+// just persist the list. It only takes effect on the NEXT whole-library Deep
+// Analyze run; an explicit file/folder selection always ignores it (see
+// tabs/deep_analyze.rs and the deepAnalyzeAll.excludedFolders schema doc).
+
+fn build_deep_analyze_exclusions_card() -> gtk::Widget {
+    let card = glass_card();
+    card.append(
+        &gtk::Label::builder()
+            .label("Deep Analyze exclusions")
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build(),
+    );
+    card.append(
+        &gtk::Label::builder()
+            .label("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build(),
+    );
+
+    let empty_label = gtk::Label::builder()
+        .label("No folders are excluded from Deep Analyze.")
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    card.append(&empty_label);
+
+    let listbox = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    card.append(&listbox);
+
+    // Tie-the-knot: the remove-button handler built inside `populate` needs
+    // to re-invoke `populate` itself, so the Rc slot is created empty first
+    // and filled in once the closure exists.
+    let populate_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let populate: Rc<dyn Fn()> = {
+        let listbox = listbox.clone();
+        let empty_label = empty_label.clone();
+        let populate_slot = populate_slot.clone();
+        Rc::new(move || {
+            while let Some(child) = listbox.first_child() {
+                listbox.remove(&child);
+            }
+            let folders = crate::app_settings::deep_analyze_excluded_folders().unwrap_or_default();
+            empty_label.set_visible(folders.is_empty());
+            listbox.set_visible(!folders.is_empty());
+            for path in folders {
+                let row = adw::ActionRow::builder().title(path.clone()).build();
+                let remove = gtk::Button::builder()
+                    .icon_name("list-remove-symbolic")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .tooltip_text(format!("Stop excluding {path} from Deep Analyze"))
+                    .build();
+                row.add_suffix(&remove);
+                remove.connect_clicked(clone!(
+                    #[strong]
+                    path,
+                    #[strong]
+                    populate_slot,
+                    move |_| {
+                        let mut folders = crate::app_settings::deep_analyze_excluded_folders()
+                            .unwrap_or_default();
+                        // Exact compare: Linux paths are case-sensitive, so
+                        // removing "/Photos" must not also remove "/photos".
+                        folders.retain(|existing| existing != &path);
+                        crate::app_settings::remember_deep_analyze_excluded_folders(&folders);
+                        if let Some(f) = populate_slot.borrow().as_ref() {
+                            f();
+                        }
+                    }
+                ));
+                listbox.append(&row);
+            }
+        })
+    };
+    *populate_slot.borrow_mut() = Some(populate.clone());
+    populate();
+
+    let add_btn = gtk::Button::with_label("Add folder…");
+    add_btn.connect_clicked(clone!(
+        #[strong]
+        populate,
+        move |btn| {
+            let Some(window) = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok()) else {
+                return;
+            };
+            let dialog = gtk::FileDialog::builder()
+                .title("Exclude a folder from Deep Analyze")
+                .modal(true)
+                .build();
+            dialog.select_folder(
+                Some(&window),
+                gtk::gio::Cancellable::NONE,
+                clone!(
+                    #[strong]
+                    populate,
+                    move |result| {
+                        let Ok(file) = result else { return };
+                        let Some(path) = file.path() else { return };
+                        let picked = path.to_string_lossy().into_owned();
+                        let mut folders = crate::app_settings::deep_analyze_excluded_folders()
+                            .unwrap_or_default();
+                        // Exact compare (case-sensitive FS) — see
+                        // sanitize_deep_analyze_excluded_folders.
+                        if folders.iter().any(|existing| existing == &picked) {
+                            return;
+                        }
+                        folders.push(picked);
+                        crate::app_settings::remember_deep_analyze_excluded_folders(&folders);
+                        populate();
+                    }
+                ),
+            );
+        }
+    ));
+    card.append(&add_btn);
 
     card.upcast()
 }

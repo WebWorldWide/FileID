@@ -83,6 +83,67 @@ struct DispatchHandlersTests {
                 "applyRestructure must emit a restructureApplyResult event")
     }
 
+    // Audit R3: the schema promises shortcutUndoToken "undo[es] only the
+    // shortcut-mode run identified by this opaque token; never consume the
+    // real-move undo journal" — but macOS has no shortcut/symlink-apply mode
+    // at all, so there is no shortcut journal to replay. The engine must fail
+    // closed (reject) instead of silently falling through to undoLast() and
+    // replaying the real-move journal, which would violate that contract.
+    @Test("undoRestructure with a shortcutUndoToken fails closed and doesn't wedge the reservation")
+    func undoRestructureShortcutTokenFailsClosed() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoShortcutToken-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let coordinator = ScanCoordinator()
+
+        let cap = WireCapture()
+        let sink = cap.sink
+
+        await FileIDEngineMain.dispatch(
+            IPCCommand(payload: .undoRestructure(
+                libraryRoot: tmp.path, shortcutUndoToken: UUID().uuidString)),
+            coordinator: coordinator, sink: sink, database: db)
+
+        let errNeedle = Data("\"undo_restructure\"".utf8)
+        let resultNeedle = Data("\"restructureApplyResult\"".utf8)
+        let out = await waitFor([errNeedle, resultNeedle], in: cap)
+
+        #expect(out.range(of: errNeedle) != nil,
+                "a non-nil shortcutUndoToken must be rejected with an undo_restructure error")
+        #expect(out.range(of: resultNeedle) != nil,
+                "the rejection must still emit a terminal restructureApplyResult so " +
+                "EngineClient's undoRestructureInFlight flag clears (audit R2-app) instead " +
+                "of latching forever")
+
+        // Exactly ONE terminal result must appear — if the rejection had fallen
+        // through to undoLast() instead of returning early, THAT call would emit
+        // a SECOND restructureApplyResult, which this catches.
+        let text = String(decoding: out, as: UTF8.self)
+        let resultCount = text.components(separatedBy: "\"restructureApplyResult\"").count - 1
+        #expect(resultCount == 1,
+                "undoLast() must not also have run and emitted its own result")
+
+        // The reservation must not be wedged: a normal restructure command right
+        // after must be accepted, not bounced with restructure_busy. Reusing the
+        // SAME coordinator is the point — a leaked reservation from the rejected
+        // undo would still be held here.
+        await FileIDEngineMain.dispatch(
+            IPCCommand(payload: .planRestructure(
+                libraryRoot: tmp.path, supportsPagedPlans: false)),
+            coordinator: coordinator, sink: sink, database: db)
+        let planNeedle = Data("\"restructurePlan\"".utf8)
+        let busyNeedle = Data("\"restructure_busy\"".utf8)
+        let out2 = await waitFor([planNeedle], in: cap)
+        await cap.finish()
+
+        #expect(out2.range(of: planNeedle) != nil,
+                "a normal plan request right after the rejection must go through")
+        #expect(out2.range(of: busyNeedle) == nil,
+                "the rejected undo must not have left a stale restructure reservation")
+    }
+
     @Test("restructurePlan DTO maps proposals and rolls up category counts")
     func restructurePlanDTOMapping() throws {
         let proposals = [

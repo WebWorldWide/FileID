@@ -276,26 +276,74 @@ pub struct DetectedFace {
     pub crop_rgb_112: Option<Vec<u8>>,
 }
 
-// Face-quality clustering filter — same constants as macOS
-// (DBWriter.swift qualityFloor / minBBoxAreaFraction / maxYawRadians /
-// maxPitchRadians) so the same library clusters the same faces on both
-// platforms. Pose is radians on both sides. The quality scales differ
-// (Vision faceCaptureQuality vs SCRFD score×geometry) but both floors
-// are "catastrophic-only", and this detector already hard-rejects
-// below its accept threshold — the floor rarely fires here; kept for
-// rule parity.
-const FACE_QUALITY_FLOOR: f32 = 0.02;
-const FACE_MIN_BBOX_AREA_FRACTION: f32 = 0.002;
+// Face-quality clustering filter. Pose/area constants mirror macOS
+// (DBWriter.swift minBBoxAreaFraction / maxYawRadians / maxPitchRadians);
+// pose is radians on both sides.
+//
+// FACE_QUALITY_FLOOR was a copy of macOS's DBWriter.qualityFloor, which
+// gates Apple Vision's genuinely-0..1 faceCaptureQuality. On Windows the
+// value reaching face_is_excluded is validate_face_geometry's
+// `det.score * geom_conf` (scrfd.rs), whose analytic minimum is
+// SCORE_THRESHOLD(0.6) * geom_conf_min(0.075) = 0.045 — strictly above
+// 0.02, so the floor can never fire. Measured on 183,230 real faces
+// (2026-07-29 Adlon catalog): min 0.115, mean 0.332, max 0.506. Deleted
+// rather than rescaled: face_quality already drives the per-file top-K
+// cap, cluster anchor selection, and the calibrated solo_quality_floor
+// (face_clustering.rs), so remapping its scale would silently reorder
+// all three.
+//
+// FACE_MIN_BBOX_AREA_FRACTION alone is anti-correlated with visibility:
+// it's relative to image size, so it keeps small-but-large-area-fraction
+// faces from a low-res video frame while dropping well-resolved faces on
+// a high-megapixel photo. Lowered to a degenerate-detection backstop only;
+// FACE_MIN_BBOX_MIN_DIM_PX is the real size gate now.
+//
+// The floor is measured in DECODE-space pixels, and decode resolution is
+// NOT uniform across sources: stills decode native or DCT-scaled to
+// [2048, 4096) (JPEG_SCALED_DECODE_FLOOR_EDGE below), while video keyframes
+// are capped at a 1280px long edge (shell/video.rs). So the same real-world
+// face lands ~3x smaller here when it came from a video. Measured on the
+// 2026-07-29 Adlon catalog (183,230 faces: 169,347 image / 13,883 video),
+// min-dimension p50 is 159px for image faces but only 52px for video faces.
+//
+// 40px is therefore the calibrated floor, chosen on a PER-KIND sweep rather
+// than the pooled one (the pooled sweep hid the split and initially argued
+// for 64px, which regressed video badly):
+//     floor   image faces      video faces     videos losing ALL faces
+//       40      +28,051           +134             136 / 4,311  (3%)
+//       48      +27,337         -1,774             503 / 4,311 (12%)
+//       64      +22,138         -4,120           1,287 / 4,311 (30%)
+// 40px keeps nearly all of the image-side recovery (+28,051 of the +30,693
+// theoretical max at no floor) while not regressing video at all, and wipes
+// only 29 persons entirely — every one holding <=8 faces, i.e. noise rather
+// than a real family member (real people here hold dozens to thousands).
+// Going below 40 buys ~3k more faces but keeps weakening the "drop faces
+// too small to identify" goal with no evidence it improves cluster quality,
+// which cannot be measured without labelled ground truth.
+//
+// A single kind-independent constant is deliberate: a per-kind floor would
+// be a second uncalibrated constant and would have to be mirrored exactly
+// in the Swift engine (which cannot be compiled in the Windows dev env).
+// The cleaner long-term fix is to raise the video decode ceiling for the
+// face pass so all sources share one scale; that needs hardware measurement.
+const FACE_MIN_BBOX_AREA_FRACTION: f32 = 0.0002;
+const FACE_MIN_BBOX_MIN_DIM_PX: f32 = 40.0;
 const FACE_MAX_YAW_RADIANS: f32 = 50.0 * std::f32::consts::PI / 180.0;
 const FACE_MAX_PITCH_RADIANS: f32 = 30.0 * std::f32::consts::PI / 180.0;
 
-/// True if the face should be excluded from clustering. Mirrors macOS
-/// DBWriter.isExcluded: low capture quality, tiny bbox (noisy
-/// embeddings), or heavy profile/pitch (the same identity at frontal
-/// vs 60° lands far apart in embedding space, polluting clusters).
-pub fn face_is_excluded(quality: f32, yaw: f32, pitch: f32, bbox_area_fraction: f32) -> bool {
-    quality < FACE_QUALITY_FLOOR
-        || bbox_area_fraction < FACE_MIN_BBOX_AREA_FRACTION
+/// True if the face should be excluded from clustering: tiny in absolute
+/// pixels (noisy embeddings — see FACE_MIN_BBOX_MIN_DIM_PX above), tiny
+/// relative to the image (degenerate detection), or heavy profile/pitch
+/// (the same identity at frontal vs 60° lands far apart in embedding
+/// space, polluting clusters).
+pub fn face_is_excluded(
+    yaw: f32,
+    pitch: f32,
+    bbox_area_fraction: f32,
+    bbox_min_dim_px: f32,
+) -> bool {
+    bbox_area_fraction < FACE_MIN_BBOX_AREA_FRACTION
+        || bbox_min_dim_px < FACE_MIN_BBOX_MIN_DIM_PX
         || yaw.abs() > FACE_MAX_YAW_RADIANS
         || pitch.abs() > FACE_MAX_PITCH_RADIANS
 }
@@ -2109,6 +2157,7 @@ async fn process_file_predecoded(
                                                 } else {
                                                     0.0
                                                 };
+                                                let min_dim_px = bbox_xywh[2].min(bbox_xywh[3]);
                                                 tagged.faces.push(DetectedFace {
                                                     bbox: bbox_xywh,
                                                     landmarks: detection.landmarks,
@@ -2118,10 +2167,10 @@ async fn process_file_predecoded(
                                                     pitch: pose.pitch,
                                                     quality,
                                                     excluded: face_is_excluded(
-                                                        quality,
                                                         pose.yaw,
                                                         pose.pitch,
                                                         area_fraction,
+                                                        min_dim_px,
                                                     ),
                                                     crop_rgb_112: Some(crop),
                                                 });
@@ -2873,6 +2922,47 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
+
+    #[test]
+    fn face_is_excluded_gates_on_absolute_size_not_just_area_fraction() {
+        // A 30x36px face in a 1280x720 frame: its area fraction (~0.00117)
+        // clears BOTH the old 0.002-era intent and today's 0.0002 backstop,
+        // so only the absolute-pixel floor can reject it. This is the
+        // "too small to carry identity" case the relative-area gate alone
+        // could never catch.
+        let area_fraction = (30.0_f32 * 36.0) / (1280.0 * 720.0);
+        assert!(
+            area_fraction > FACE_MIN_BBOX_AREA_FRACTION,
+            "sanity: the area backstop must not be what rejects this"
+        );
+        assert!(face_is_excluded(0.0, 0.0, area_fraction, 30.0_f32.min(36.0)));
+    }
+
+    #[test]
+    fn face_is_excluded_keeps_typical_video_keyframe_faces() {
+        // Video keyframes decode at a 1280px long-edge cap, so a normal
+        // face from a video lands near 52px min-dimension (the measured p50
+        // on the Adlon catalog) — well above the still-image floor only
+        // because the floor was calibrated per-kind. Guards the regression
+        // where a 64px floor silently dropped every face in 30% of
+        // face-bearing videos.
+        let area_fraction = (52.0_f32 * 64.0) / (1280.0 * 720.0);
+        assert!(!face_is_excluded(0.0, 0.0, area_fraction, 52.0));
+    }
+
+    #[test]
+    fn face_is_excluded_keeps_well_resolved_faces() {
+        // A 400x400px face on a large photo has a tiny area fraction but
+        // is exactly the well-resolved face the old gate discarded.
+        let area_fraction = (400.0_f32 * 400.0) / (8000.0 * 6000.0);
+        assert!(!face_is_excluded(0.0, 0.0, area_fraction, 400.0));
+    }
+
+    #[test]
+    fn face_is_excluded_still_gates_on_pose() {
+        assert!(face_is_excluded(60.0_f32.to_radians(), 0.0, 1.0, 200.0));
+        assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
+    }
 
     #[tokio::test]
     async fn tagger_passes_discovered_through_to_tagged() {

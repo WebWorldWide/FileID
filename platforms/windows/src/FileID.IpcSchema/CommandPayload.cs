@@ -65,7 +65,9 @@ public sealed record DeepAnalyzeAllCommand(
     bool TagsOnly = false,
     bool ProposeRenames = true,
     [property: JsonPropertyName("fileIDs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<long>? FileIds = null) : CommandPayload;
+    IReadOnlyList<long>? FileIds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    IReadOnlyList<string>? ExcludedFolders = null) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 

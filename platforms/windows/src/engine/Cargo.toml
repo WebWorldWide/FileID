@@ -110,6 +110,14 @@ crossbeam-channel = "0.5"
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
 instant-distance = "0.6"
 
+# Already linked in transitively by instant-distance; declared directly only so
+# the HNSW build can be pinned to a single-threaded pool. instant-distance
+# builds its graph with rayon, so thread scheduling — not just the RNG seed —
+# decides the graph topology and therefore the approximate-kNN neighbour sets
+# face clustering derives identities from. See shared/docs/DECISIONS.md
+# (2026-07-29). Apache-2.0/MIT.
+rayon = "1"
+
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,
 # AND Phase 4 OOXML document text extraction (.docx/.pptx/.xlsx are zip+xml).
 # `default-features = false` skips bzip2/zstd which we don't need.

@@ -1,6 +1,8 @@
 import SwiftUI
 
-/// Floating frosted bar pinned to the bottom of the Restructure tab.
+/// Frosted action bar for the Restructure tab. `RestructureView` pins it near
+/// the TOP of the tab (persistent, above the plan content) whenever a plan is
+/// active or pending, so the primary action stays visible without scrolling.
 ///
 /// One real-move action: the engine butler performs direct on-disk moves (there
 /// is no macOS symlink-preview mode), so the prior two-step "apply as shortcuts →
@@ -17,13 +19,21 @@ struct RestructureApplyBar: View {
     /// irreversible path can't be double-fired.
     var isApplying: Bool = false
     var onApply: () -> Void
+    /// Cooperatively stops the in-flight apply/undo. Files already moved stay
+    /// moved (each is durable before the engine polls for cancel) and remain
+    /// undoable — nil hides the Cancel affordance entirely.
+    var onCancel: (() -> Void)? = nil
 
     @State private var primaryHovered = false
+    @State private var cancelRequested = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 18) {
             selectionSummary
             Spacer(minLength: 16)
+            if isApplying, onCancel != nil {
+                cancelButton
+            }
             primaryButton
         }
         .padding(.horizontal, 18).padding(.vertical, 14)
@@ -39,6 +49,12 @@ struct RestructureApplyBar: View {
                           radius: 14, y: 0)
         )
         .animation(.easeInOut(duration: 0.25), value: canApply)
+        // Reset for the NEXT apply — otherwise a view-identity-preserving
+        // re-render across two separate applies would show a stuck
+        // "Stopping…" label from the previous run.
+        .onChange(of: isApplying) { _, applying in
+            if !applying { cancelRequested = false }
+        }
     }
 
     @ViewBuilder
@@ -62,6 +78,31 @@ struct RestructureApplyBar: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
+    }
+
+    @ViewBuilder
+    private var cancelButton: some View {
+        Button {
+            guard !cancelRequested else { return }
+            cancelRequested = true
+            onCancel?()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "xmark.circle.fill").font(.callout.bold())
+                Text(cancelRequested ? "Stopping…" : "Cancel")
+                    .font(.callout.weight(.semibold))
+            }
+            .padding(.horizontal, 14).padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.red.opacity(0.55), lineWidth: 1)
+            )
+            .foregroundStyle(.red)
+            .opacity(cancelRequested ? 0.55 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .disabled(cancelRequested)
+        .help("Stops after the file currently being moved finishes. Files already moved stay moved and remain undoable.")
     }
 
     @ViewBuilder

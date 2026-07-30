@@ -104,6 +104,44 @@ threshold tuning pending (owner UAT).** See `STATE.md` / `NEXT.md`.
 - **P4 — visualization. ◑ Partial.** Sankey gained the Okabe-Ito CVD-safe palette + an "Other" long-tail node (no silent drop); barycentre ordering + hover highlight + drill-down already existed. Win2D upgrade, before/after tree, and weight sliders remain.
 - **macOS — ✅ Built + verified.** `RestructureSemantic.swift` mirrors the Rust engine byte-faithfully (`swift build` + `swift test` green on Xcode 26.5); `proposeAll` + IPC carry confidence/reason. The R1 non-image pass landed in lockstep with the Rust engine.
 
+## 8. Apply/undo contract (IPC 1.2)
+
+Introduced in schema 1.2.0 (`shared/ipc-schema/ipc.schema.json`), hardened 2026-07-29.
+Documented here because it wasn't previously (the invariant lived only in a Rust code comment,
+which is exactly why the macOS engine diverged from it before the 2026-07-29 fix — see
+`DECISIONS.md`).
+
+- **Paged / stored plans.** `planRestructure.supportsPagedPlans` opts in to a bounded, engine-owned
+  plan spool instead of the legacy full in-memory plan. A plan whose total move count exceeds the
+  5,000-move preview cap (`RESTRUCTURE_PREVIEW_CAP`) is `truncated`: the client sees only a preview
+  slice plus `planID`/`totalMoves`/`confidenceCounts`, and applies it by `planID` via
+  `applyRestructure.planID` (with `moves` empty).
+- **Stored/truncated plans apply the Auto tier ONLY.** Because most of a truncated plan's rows were
+  never rendered for the user to review or deselect, `applyRestructure` against a `planID` executes
+  ONLY rows whose `confidence == "auto"` — Review, Ask, and unknown-confidence rows are held back,
+  not just Ask. This is the single most important invariant in this section: an engine or client
+  that applies every tier from a stored plan silently moves files the user never saw (the exact bug
+  fixed on macOS 2026-07-29). `confidenceCounts` (`{auto, review, ask, unknown}`) must reconcile
+  with `totalMoves` before a truncated plan is applicable; a client should show the Auto count as
+  what will actually move, not the total.
+- **`cancelRestructure`** cooperatively cancels the active restructure plan, apply, or undo —
+  and MUST NOT cancel a library scan (`.cancelScan` is a separate command; the coordinator/registry
+  on every engine enforces this isolation, with a regression test on Windows). Completed moves are
+  durable and journaled before each cancel-poll, so a cancelled apply/undo leaves every
+  already-processed row moved and undoable — the terminal `restructureApplyResult` reports
+  `cancelled: true` with `applied`/`failed` reflecting only the work actually done.
+- **A cancelled undo keeps its journal.** `undoRestructure` deliberately does NOT clear the
+  inverse-move journal when `cancelled` is true (or when any row failed) — the user can re-run
+  Undo to put the remaining files back. A client that derives "can undo" purely from `failed == 0`
+  without also checking `cancelled` will incorrectly hide the Undo affordance while files are still
+  relocated (fixed on Windows/Linux 2026-07-29 — see `DECISIONS.md`).
+- **`shortcutUndoToken`** undoes only ONE shortcut-mode (symlink-preview) apply run, identified by
+  the opaque token returned in that run's `restructureApplyResult.shortcutUndoToken` — it must
+  NEVER consume or replay the real-move undo journal. A client/engine that receives a non-nil token
+  and doesn't have a shortcut-mode implementation should fail closed (reject) rather than silently
+  falling through to a real-move undo — macOS has no shortcut/symlink-apply mode at all and does
+  this (2026-07-29).
+
 ## Sources
 
 Taxonomy/clustering: TnT-LLM (arXiv 2403.12173), UMAP docs, BERTopic tuning, Gower distance (PMC11654179), Temporal Event Clustering (ACM 1083317), Iterative Topic Taxonomy (arXiv 2510.15125). Learn-style: Dropbox Smart Move (dropbox.tech) + patent (USPTO 12072839), Prototypical Networks (arXiv 1703.05175), Chain-of-Layer (arXiv 2402.07386), LlamaFS, ai-file-sorter, the "tree LLM" trick. Confidence/trust: Apple Photos clustering (machinelearning.apple.com), Hazel rule preview, Google Files/Photos, Gmail sorting, command-pattern undo, trust-calibration (aiuxdesign.guide), agentic-AI autonomy (uxmatters). VLM naming: TopicGPT (arXiv 2311.01449), cluster-labeling study (arXiv 2511.02601), constrained outputs (Helicone), Qwen2.5-VL (qwen.ai). Viz: Sankey vs sunburst (CleverTap), barycentre crossing reduction (arXiv 1912.05339), optimal Sankey (Monash), d3-sankey + d3-sankey-diagram, Okabe-Ito palette, large bipartite aggregation (ResearchGate 328993345).

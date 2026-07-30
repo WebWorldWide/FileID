@@ -1187,7 +1187,8 @@ internal sealed partial class EngineClient
     }
 
     public async Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false,
-        bool proposeRenames = true, IReadOnlyList<long>? fileIds = null)
+        bool proposeRenames = true, IReadOnlyList<long>? fileIds = null,
+        IReadOnlyList<string>? excludedFolders = null)
     {
         if (!TryReserveDeepAnalyzeCommand(modelKind, awaitCompletion: false, out var owner))
         {
@@ -1196,7 +1197,8 @@ internal sealed partial class EngineClient
         try
         {
             await SendCommandAsync(
-                new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames, fileIds),
+                new DeepAnalyzeAllCommand(
+                    modelKind, skipExisting, tagsOnly, proposeRenames, fileIds, excludedFolders),
                 () => Volatile.Write(ref owner.Payload.SendBegan, 1));
         }
         catch (Exception ex)

@@ -171,6 +171,57 @@ struct IPCProtocolTests {
         }
     }
 
+    @Test("deepAnalyzeAll.excludedFolders round-trips, present or nil")
+    func deepAnalyzeAllExcludedFoldersRoundTrip() throws {
+        let withExclusions = IPCCommand.Payload.deepAnalyzeAll(
+            modelKind: "qwen2_5_vl_7b", skipExisting: true, tagsOnly: nil,
+            proposeRenames: nil, fileIDs: nil,
+            excludedFolders: ["/Users/adam/Private", "/Users/adam/Scratch"])
+        let cmd = IPCCommand(payload: withExclusions)
+        let line = try IPCCoder.encodeLine(cmd)
+        let decoded = try IPCCoder.decoder.decode(IPCCommand.self, from: Data(line.dropLast()))
+        guard case .deepAnalyzeAll(_, _, _, _, _, let decodedExcluded) = decoded.payload else {
+            Issue.record("Decoded payload was not .deepAnalyzeAll")
+            return
+        }
+        #expect(decodedExcluded == ["/Users/adam/Private", "/Users/adam/Scratch"])
+
+        // Absent excludedFolders — fileIDs also nil (whole-library, no
+        // exclusions), the common case — must decode back to nil.
+        //
+        // Deliberately NOT asserting that the key is omitted from the wire
+        // rather than written as null: `IPCCommand.Payload` uses Swift's
+        // SYNTHESIZED Codable (there is no custom `encode(to:)` in
+        // IPCProtocol.swift), and synthesized enum encoding writes optional
+        // associated values with `encode`, not `encodeIfPresent` — so a nil
+        // very likely serializes as `"excludedFolders": null`. That is a
+        // pre-existing property of this case's three other optionals
+        // (`tagsOnly`, `proposeRenames`, `fileIDs`), not something
+        // excludedFolders introduces, so pinning it here would assert
+        // unverified behavior and could fail for a reason unrelated to this
+        // field. Round-trip fidelity — which holds either way — is the
+        // contract that actually matters app→engine.
+        //
+        // Cross-platform note for whoever picks this up: the Rust
+        // (`skip_serializing_if`) and C# (`JsonIgnore(WhenWritingNull)`)
+        // mirrors both OMIT these keys, and the JSON Schema types them as
+        // `array`/`boolean` (a null would violate strict validation). If
+        // macOS does emit nulls, that divergence predates this field and
+        // should be fixed for the whole Payload enum at once.
+        let withoutExclusions = IPCCommand.Payload.deepAnalyzeAll(
+            modelKind: "qwen2_5_vl_7b", skipExisting: true, tagsOnly: nil,
+            proposeRenames: nil, fileIDs: nil, excludedFolders: nil)
+
+        let cmd2 = IPCCommand(payload: withoutExclusions)
+        let line2 = try IPCCoder.encodeLine(cmd2)
+        let decoded2 = try IPCCoder.decoder.decode(IPCCommand.self, from: Data(line2.dropLast()))
+        guard case .deepAnalyzeAll(_, _, _, _, _, let decodedExcluded2) = decoded2.payload else {
+            Issue.record("Decoded payload was not .deepAnalyzeAll")
+            return
+        }
+        #expect(decodedExcluded2 == nil)
+    }
+
     @Test("FileDoneEvent.skippedStages survives round-trip")
     func skippedStagesRoundTrip() throws {
         let evt = FileDoneEvent(path: "/foo/bar.jpg", kind: "image",

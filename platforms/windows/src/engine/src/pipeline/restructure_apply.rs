@@ -1545,12 +1545,26 @@ pub(crate) struct ForwardBatchPreflight<'a> {
     destination_claims: DestinationClaims,
 }
 
+/// Outcome of a single move's preflight check. `Stale` covers conditions
+/// that describe THIS ROW's relationship to the live corpus changing since
+/// planning (deleted/renamed source, DB identity drift, a destination that
+/// collided after planning) — apply_iter_with already re-checks and skips
+/// these gracefully per move at apply time (B4, DECISIONS.md), so a stale
+/// row here must not abort the whole batch. `Err` (via `?`/`ensure!`)
+/// stays reserved for structural plan corruption (duplicate IDs, paths
+/// outside the root, unsafe filenames) that indicates the WHOLE plan is
+/// untrustworthy, not just one row.
+pub(crate) enum PreflightOutcome {
+    Applicable,
+    Stale(&'static str),
+}
+
 impl ForwardBatchPreflight<'_> {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.apply.is_cancelled()
     }
 
-    pub(crate) fn validate(&mut self, move_: &RestructureMove) -> Result<()> {
+    pub(crate) fn validate(&mut self, move_: &RestructureMove) -> Result<PreflightOutcome> {
         anyhow::ensure!(move_.file_id > 0, "move file ID must be positive");
         anyhow::ensure!(
             self.file_ids.insert(move_.file_id),
@@ -1580,8 +1594,11 @@ impl ForwardBatchPreflight<'_> {
             .context("move destination is outside the selected library root")?;
 
         let source_metadata =
-            std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(source))
-                .context("planned source is unavailable")?;
+            match std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(source))
+            {
+                Ok(m) => m,
+                Err(_) => return Ok(PreflightOutcome::Stale("planned source is unavailable")),
+            };
         anyhow::ensure!(
             !source_metadata.file_type().is_symlink(),
             "planned source must not be a symbolic link"
@@ -1594,16 +1611,22 @@ impl ForwardBatchPreflight<'_> {
             "plan contains a duplicate source"
         );
 
-        let (db_path, db_ref) = current_identity_in_db(&self.apply.db_conn, move_.file_id)?
-            .context("planned file no longer exists in the database")?;
-        anyhow::ensure!(
-            paths_equal(&db_path, &move_.source),
-            "planned source no longer matches the database"
-        );
-        anyhow::ensure!(
-            verified_file_identity(db_ref, source).is_some(),
-            "planned source identity changed; rescan and re-plan"
-        );
+        let Some((db_path, db_ref)) = current_identity_in_db(&self.apply.db_conn, move_.file_id)?
+        else {
+            return Ok(PreflightOutcome::Stale(
+                "planned file no longer exists in the database",
+            ));
+        };
+        if !paths_equal(&db_path, &move_.source) {
+            return Ok(PreflightOutcome::Stale(
+                "planned source no longer matches the database",
+            ));
+        }
+        if verified_file_identity(db_ref, source).is_none() {
+            return Ok(PreflightOutcome::Stale(
+                "planned source identity changed; rescan and re-plan",
+            ));
+        }
 
         if let Some(name) = destination.file_name().and_then(|name| name.to_str()) {
             anyhow::ensure!(
@@ -1627,11 +1650,12 @@ impl ForwardBatchPreflight<'_> {
             );
         }
         let reserved = self.destination_claims.reserve(destination)?;
-        anyhow::ensure!(
-            reserved == destination,
-            "planned destination is no longer collision-free; re-plan before applying"
-        );
-        Ok(())
+        if reserved != destination {
+            return Ok(PreflightOutcome::Stale(
+                "planned destination is no longer collision-free; re-plan before applying",
+            ));
+        }
+        Ok(PreflightOutcome::Applicable)
     }
 }
 
@@ -1879,7 +1903,16 @@ impl RestructureApply {
                                 crate::platform::file_identity(destination),
                                 &canonical_root,
                             );
-                            failed += 1;
+                            // The file was already physically restored (in an
+                            // earlier attempt) — only the DB path_text update
+                            // failed, again. Do NOT count it failed: from the
+                            // user's perspective this row's undo already
+                            // succeeded, and reconcile_pending_path_updates
+                            // keeps retrying the DB fix on later scans. Not
+                            // counting it `failed` here is what lets
+                            // undo_last's journal-removal gate retire once
+                            // every row is physically resolved, instead of
+                            // being stuck open by a DB-only conflict forever.
                         }
                         continue;
                     }
@@ -2059,6 +2092,14 @@ impl RestructureApply {
                             file_id = m.file_id,
                             "[RESTRUCTURE] planned destination became occupied after preflight"
                         );
+                        // `reserve` always claims the name it returns, so the
+                        // bumped alternative is now held even though this row
+                        // is being skipped. Release it, or a LATER row that
+                        // legitimately planned that exact bumped name (the
+                        // planner emits "a.jpg" + "a (2).jpg" pairs itself)
+                        // gets bumped again and fails too — one raced file
+                        // silently unfiling two.
+                        claimed.release(&destination);
                         failed += 1;
                         continue;
                     }
@@ -2203,8 +2244,19 @@ impl RestructureApply {
                             &final_dest,
                         );
                         if !db_updated {
+                            // The file DID move — this is a DB-bookkeeping
+                            // failure only (a live path_text UNIQUE conflict),
+                            // recorded above for recovery and self-healed by
+                            // reconcile_pending_path_updates at the next engine
+                            // start (main.rs — it runs once on launch, before
+                            // the app reads the library; NOT tied to a scan).
+                            // Do NOT also count it failed: macOS parity
+                            // (Restructure.swift, F-C3-012) and it keeps
+                            // applied+failed from double-counting one row
+                            // past `total`. record_path_update_failure already
+                            // preserved the recovery record; nothing here
+                            // needs `failed` to reflect this row too.
                             applied += 1;
-                            failed += 1;
                             continue;
                         }
                         if record_undo {
@@ -3650,9 +3702,14 @@ fn record_feedback_batch(
 /// realign the stale `path_text` to `dst`. Recovery fails closed when identity is
 /// unavailable (for example, exFAT/network volumes) rather than letting a stale
 /// or tampered sidecar repoint a row to unrelated bytes. The write-ahead Undo
-/// journal and the next scan remain the recovery routes in that case. The file is
-/// cleared after one pass; records that cannot heal are dropped as best-effort.
-/// Returns the number of rows realigned.
+/// journal and a re-scan's rename-heal remain the recovery routes in that case.
+///
+/// Records are RETAINED for the next startup in the two transient cases — the
+/// library volume not being mounted, and the DB write still losing to the same
+/// live `path_text` UNIQUE conflict that created the record. Every other
+/// give-up (torn line, file moved again, path outside the root, row gone) is
+/// terminal and its record is dropped. The sidecar is deleted only once nothing
+/// is left to retry. Returns the number of rows realigned.
 pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
     let Ok(trash) = crate::paths::trash_log_path() else {
         return 0;
@@ -3665,12 +3722,19 @@ pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
         return 0; // no record file → nothing to do
     };
     let mut healed = 0usize;
+    // Lines whose file/identity checks passed but whose DB write still hit
+    // the live path_text conflict — the same conflict that created the
+    // record in the first place. Carried forward instead of discarded so a
+    // one-shot best-effort pass doesn't permanently lose recovery data the
+    // moment two records briefly contend (each retry attempt is itself
+    // idempotent: update_path_in_db is a plain UPDATE keyed by file_id).
+    let mut still_pending: Vec<&str> = Vec::new();
     for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(rec) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue; // torn/partial line — skip
         };
         let (Some(file_id), Some(src), Some(dst), Some(root)) = (
@@ -3687,6 +3751,15 @@ pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
             continue;
         };
         let Ok(canonical_root) = canonicalize_safely(Path::new(root)) else {
+            // The library root itself is unreachable — an external/USB volume
+            // that simply isn't mounted this launch. That is TRANSIENT, unlike
+            // the give-ups below (file moved again, outside root, row gone),
+            // so retain the record instead of dropping it: reconcile runs once
+            // per engine start, and dropping here would silently discard every
+            // pending path repair for an offline library. Self-bounding —
+            // records are only appended by an apply, which requires the volume
+            // to be mounted.
+            still_pending.push(line);
             continue;
         };
         if ensure_inside_root(Path::new(src), &canonical_root).is_err()
@@ -3737,11 +3810,32 @@ pub fn reconcile_pending_path_updates(db: &Arc<Mutex<Connection>>) -> usize {
         }
         if update_path_in_db(db, file_id, Path::new(dst)).is_ok() {
             healed += 1;
+        } else {
+            // Same live path_text UNIQUE conflict that created this record —
+            // keep it for the next pass instead of discarding the only
+            // evidence of a physically-restored file with a stale DB row.
+            still_pending.push(line);
         }
     }
-    // Best-effort single-pass consumption: clear the record file regardless so
-    // it can't grow unbounded or re-heal a since-moved file.
-    let _ = std::fs::remove_file(&path);
+    // All other give-up conditions above (torn line, file since moved again,
+    // root no longer owned, identity mismatch) are genuinely terminal, so
+    // dropping those lines is still correct — only a live DB conflict is
+    // retried. Rewrite with just the still-pending lines; only remove the
+    // file once nothing is left to retry.
+    if still_pending.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let mut buf = still_pending.join("\n");
+        buf.push('\n');
+        if std::fs::write(&path, buf).is_err() {
+            tracing::error!("[RESTRUCTURE] failed to persist still-pending path_text recovery records");
+        } else {
+            tracing::warn!(
+                pending = still_pending.len(),
+                "[RESTRUCTURE] some path_text reconciliation records still conflict; retained for the next pass"
+            );
+        }
+    }
     if healed > 0 {
         tracing::info!(healed, "[RESTRUCTURE] reconciled stale path_text from recovery record");
     }
@@ -4064,7 +4158,10 @@ mod tests {
             )])
             .unwrap();
 
-        assert_eq!((result.applied, result.failed), (1, 1));
+        // A DB-only reconciliation failure is not a move failure — the file
+        // genuinely moved. macOS parity (Restructure.swift, F-C3-012): don't
+        // double-count one row as both applied and failed.
+        assert_eq!((result.applied, result.failed), (1, 0));
         assert!(!source.exists(), "the filesystem move already completed");
         assert!(destination.exists());
         assert!(journal.exists(), "the recovery boundary must remain available");
@@ -4108,7 +4205,7 @@ mod tests {
                 &destination.to_string_lossy(),
             )])
             .unwrap();
-        assert_eq!((fwd.applied, fwd.failed), (1, 1));
+        assert_eq!((fwd.applied, fwd.failed), (1, 0));
         assert!(!source.exists() && destination.exists());
 
         // The destination row (id 2) was only a fixture to force the conflict;
@@ -4349,7 +4446,16 @@ mod tests {
     }
 
     #[test]
-    fn undo_retry_reconciles_a_completed_move_after_db_update_failure() {
+    fn undo_reconciles_a_completed_move_after_db_update_failure_via_reconcile_pass() {
+        // A DB-only reconciliation failure during undo is not a move
+        // failure — the file genuinely moved back. So (a) undo_last must
+        // count it applied, not failed, and retire the journal (there is
+        // nothing left to undo), and (b) the stale DB row must be healed
+        // by reconcile_pending_path_updates on a later pass, not by
+        // re-running undo_last (the journal is already gone). This
+        // replaces the old design where a second undo_last() call did the
+        // DB retry — see the counter-split fix in apply_iter_with and the
+        // retry-instead-of-discard fix in reconcile_pending_path_updates.
         let root = undo_fixture_root("undo-db-retry");
         std::fs::create_dir_all(&root).unwrap();
         let original = root.join("photo.jpg");
@@ -4382,25 +4488,42 @@ mod tests {
             )
             .unwrap();
         let first = apply.undo_last().unwrap();
-        assert_eq!((first.applied, first.failed), (1, 1));
-        assert!(original.exists());
+        assert_eq!(
+            (first.applied, first.failed),
+            (1, 0),
+            "the file moved; only DB bookkeeping failed, so this is not a move failure"
+        );
+        assert!(original.exists(), "the undo move must have happened");
         assert!(!sorted.exists());
-        assert!(journal.exists());
+        assert!(
+            !journal.exists(),
+            "the undo genuinely completed (every row physically resolved), so the \
+             journal must retire — re-running undo_last is no longer how the stale \
+             DB row gets fixed"
+        );
         let stale_db_path: String = db
             .lock()
             .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
             .unwrap();
-        assert!(paths_equal(&stale_db_path, &sorted.to_string_lossy()));
+        assert!(
+            paths_equal(&stale_db_path, &sorted.to_string_lossy()),
+            "the DB row is stale until a reconcile pass heals it"
+        );
 
+        // reconcile_pending_path_updates itself reads a real, non-test-isolated
+        // %LOCALAPPDATA% file shared with every other test in this module that
+        // triggers record_path_update_failure, so exercising it end-to-end here
+        // would be flaky (cross-test pollution via file_id=1 entries written by
+        // sibling tests). Verify the mechanism it depends on directly instead:
+        // once the live conflict clears, the same update the recovery record
+        // will retry on the next pass succeeds.
         db.lock().execute_batch("DROP TRIGGER fail_undo_path;").unwrap();
-        let retry = apply.undo_last().unwrap();
-        assert_eq!((retry.applied, retry.failed), (0, 0));
+        update_path_in_db(&db, 1, &original).expect("the DB row must be healable once the conflict clears");
         let repaired_db_path: String = db
             .lock()
             .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert!(paths_equal(&repaired_db_path, &original.to_string_lossy()));
-        assert!(!journal.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

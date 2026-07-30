@@ -16,7 +16,7 @@ tens of thousands of files locally. The primary v1.0 targets are:
 
 Linux ships all six tabs over the shared engine. The two binaries on each desktop
 platform talk newline-delimited JSON over stdio; the engine owns a SQLite WAL DB
-(migrations v1–v19, byte-faithful across the macOS GRDB and Windows/Linux
+(migrations v1–v20, byte-faithful across the macOS GRDB and Windows/Linux
 rusqlite stores).
 
 ## Non-negotiables

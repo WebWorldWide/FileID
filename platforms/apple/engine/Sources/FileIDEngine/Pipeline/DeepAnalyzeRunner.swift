@@ -12,7 +12,11 @@ import FileIDShared
 public enum DeepAnalyzeScope: Sendable {
     case singleFile(Int64)
     case folder(prefix: String)
-    case wholeLibrary(skipExisting: Bool)
+    /// `excludedFolders` — absolute folder paths to skip (path-segment-boundary
+    /// matching via `DeepAnalyzeRunner.exclusionWhereClause`; empty means none).
+    /// Never applied to `.selected` — an explicit selection is deliberate and
+    /// is never silently filtered (schema `deepAnalyzeAll.excludedFolders`).
+    case wholeLibrary(skipExisting: Bool, excludedFolders: [String])
     case selected(fileIDs: [Int64], skipExisting: Bool)
 }
 
@@ -79,24 +83,25 @@ public enum DeepAnalyzeRunner {
                 }
                 let byID = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0) })
                 return ids.compactMap { byID[$0] }
-            case .wholeLibrary(let skipExisting):
+            case .wholeLibrary(let skipExisting, let excludedFolders):
+                let (exclusionSQL, exclusionParams) = Self.exclusionWhereClause(excludedFolders)
                 let sql: String
                 let args: StatementArguments
                 if skipExisting {
                     sql = """
                         SELECT id, path_text FROM files
                         WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
-                          AND (vlm_full_model IS NULL OR vlm_full_model != ?)
+                          AND (vlm_full_model IS NULL OR vlm_full_model != ?)\(exclusionSQL)
                         ORDER BY scanned_at ASC
                         """
-                    args = [modelKey]
+                    args = StatementArguments([modelKey] + exclusionParams)
                 } else {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0\(exclusionSQL)
                         ORDER BY scanned_at ASC
                         """
-                    args = []
+                    args = StatementArguments(exclusionParams)
                 }
                 let r = try GRDB.Row.fetchAll(db, sql: sql, arguments: args)
                 return r.compactMap { row -> Target? in
@@ -116,6 +121,35 @@ public enum DeepAnalyzeRunner {
         out = out.replacingOccurrences(of: "%", with: "\\%")
         out = out.replacingOccurrences(of: "_", with: "\\_")
         return out
+    }
+
+    /// Build a `" AND NOT (path_text LIKE ? ESCAPE '\')"` SQL fragment (empty
+    /// string when `excludedFolders` is empty) plus its bound params, for
+    /// `deepAnalyzeAll`'s whole-library scope. Reuses the same escaped-LIKE-
+    /// prefix technique as the `.folder(prefix:)` scope above (`escapeLike` +
+    /// a trailing `/` before the wildcard) so excluding "/Users/x/Photos"
+    /// does NOT also exclude "/Users/x/PhotosBackup" — a bare `LIKE prefix%`
+    /// would get that wrong. Mirrors the Rust engine's `exclusion_where_clause`
+    /// range-scan (same boundary guarantee, GRDB-idiomatic technique). No
+    /// scan-root containment check: unlike a scan exclusion, a Deep Analyze
+    /// exclusion applies library-wide (any absolute folder is a valid
+    /// target). Relative paths are silently ignored — the schema requires
+    /// absolute folder paths.
+    static func exclusionWhereClause(_ excludedFolders: [String]) -> (sql: String, params: [String]) {
+        var sql = ""
+        var params: [String] = []
+        for raw in excludedFolders {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("/") else { continue }
+            var folder = trimmed
+            while folder.count > 1, folder.hasSuffix("/") {
+                folder.removeLast()
+            }
+            guard !folder.isEmpty else { continue }
+            sql += " AND NOT (path_text LIKE ? ESCAPE '\\')"
+            params.append(Self.escapeLike(folder + "/") + "%")
+        }
+        return (sql, params)
     }
 
     /// Run the batch. Streams progress via `sink`. Holds a SleepGuard

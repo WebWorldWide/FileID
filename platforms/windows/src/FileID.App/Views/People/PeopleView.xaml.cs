@@ -235,9 +235,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         => DebugLog.SafeRun("PeopleView.OnContinueToDeepAnalyzeClicked", () =>
         {
             string model = "qwen2_5_vl_7b";
-            try { model = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
-            catch { /* fall back to default model */ }
-            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
+            System.Collections.Generic.IReadOnlyList<string>? excludedFolders = null;
+            try
+            {
+                model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
+                excludedFolders = AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders;
+            }
+            catch { /* fall back to default model, no exclusions */ }
+            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true, excludedFolders: excludedFolders);
             AppViewModel.Instance.ActiveTab = SidebarTab.DeepAnalyze;
         });
 

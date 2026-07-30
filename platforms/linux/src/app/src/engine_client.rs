@@ -31,7 +31,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fileid_engine::ipc::{
-    CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanPhase, ScanProgress, StartScanPayload,
+    CommandPayload, EventPayload, HealthCheckPayload, IpcCommand, IpcEvent, ScanPhase,
+    ScanProgress, StartScanPayload,
 };
 
 // ─── Public event surface ────────────────────────────────────────────────────
@@ -41,7 +42,15 @@ use fileid_engine::ipc::{
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     Spawning,
+    /// The engine announced itself. NOT sufficient for readiness on its own —
+    /// see `EngineClient::is_ready`.
     Ready,
+    /// Answer to a `healthCheck`, carrying back the nonce we sent and the pid
+    /// that handled it.
+    HealthCheckResult {
+        request_id: String,
+        pid: i32,
+    },
     Progress(ScanProgress),
     PhaseChanged(ScanPhase),
     /// A batch landed — carries the running processed-file total. The Library
@@ -185,6 +194,12 @@ pub struct EngineClient {
     respawns: u32,
     models_busy: bool,
     ready: bool,
+    /// Bumped on every spawn. A health probe is only accepted while the
+    /// generation it was issued for is still the live one.
+    generation: u64,
+    /// Nonce of the health probe currently in flight, with the generation that
+    /// issued it. `ready` flips only when a `healthCheckResult` matches both.
+    pending_health: Option<(String, u64)>,
     /// Set on drop so the reader thread's EOF doesn't trigger a respawn.
     shutting_down: Arc<AtomicBool>,
 }
@@ -208,6 +223,8 @@ impl EngineClient {
             respawns: 0,
             models_busy: false,
             ready: false,
+            generation: 0,
+            pending_health: None,
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -216,8 +233,62 @@ impl EngineClient {
         self.models_busy
     }
 
+    /// True only once a health probe minted for the CURRENT spawn generation
+    /// has been answered with its own nonce. A bare `ready` event is not
+    /// enough — see `begin_health_probe`.
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    /// Mint a nonce for the live generation. Returns `None` when a probe for
+    /// this generation is already outstanding, so a duplicate `ready` cannot
+    /// invalidate the one in flight.
+    fn begin_health_probe(&mut self) -> Option<(String, u64)> {
+        if self
+            .pending_health
+            .as_ref()
+            .is_some_and(|(_, generation)| *generation == self.generation)
+        {
+            return None;
+        }
+        self.next_id = self.next_id.wrapping_add(1);
+        let request_id = format!("health-{}-{}", self.generation, self.next_id);
+        self.pending_health = Some((request_id.clone(), self.generation));
+        Some((request_id, self.generation))
+    }
+
+    /// Accept a probe answer only when it is the nonce we are waiting for AND
+    /// the generation that issued it is still live. An answer from a retired
+    /// engine is dropped, which is the whole point of the nonce.
+    fn settle_health_probe(&mut self, request_id: &str, pid: i32) {
+        let matches = self
+            .pending_health
+            .as_ref()
+            .is_some_and(|(id, generation)| id == request_id && *generation == self.generation);
+        if matches {
+            self.pending_health = None;
+            self.ready = true;
+            tracing::debug!(
+                target: "engine",
+                "engine generation {} ready (pid {pid}, probe {request_id})",
+                self.generation
+            );
+        } else {
+            tracing::debug!(
+                target: "engine",
+                "discarded health answer {request_id} from pid {pid}: not the live probe"
+            );
+        }
+    }
+
+    fn abandon_health_probe(&mut self, request_id: &str, generation: u64) {
+        if self
+            .pending_health
+            .as_ref()
+            .is_some_and(|(id, gen)| id == request_id && *gen == generation)
+        {
+            self.pending_health = None;
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -226,6 +297,7 @@ impl EngineClient {
         }
         self.models_busy = false;
         self.ready = false;
+        self.pending_health = None;
         self.subscribers.clear();
         self.thumb_tx.take();
         self.query_worker.stop();
@@ -287,12 +359,36 @@ impl EngineClient {
                 };
                 match &ev {
                     EngineEvent::Ready => {
-                        let mut client = client.borrow_mut();
-                        client.ready = true;
-                        client.respawns = 0;
+                        // `ready` alone cannot prove the engine we are now
+                        // talking to is the one that sent it: a respawn races
+                        // an in-flight event from the previous generation.
+                        // Only a nonce we minted, answered under the current
+                        // generation, settles it.
+                        let probe = {
+                            let mut client = client.borrow_mut();
+                            client.respawns = 0;
+                            client.begin_health_probe()
+                        };
+                        if let Some((request_id, generation)) = probe {
+                            let mut client = client.borrow_mut();
+                            if client
+                                .send(CommandPayload::HealthCheck(HealthCheckPayload {
+                                    request_id: request_id.clone(),
+                                }))
+                                .is_err()
+                            {
+                                client.abandon_health_probe(&request_id, generation);
+                            }
+                        }
+                    }
+                    EngineEvent::HealthCheckResult { request_id, pid } => {
+                        client.borrow_mut().settle_health_probe(request_id, *pid);
                     }
                     EngineEvent::Spawning => {
-                        client.borrow_mut().ready = false;
+                        let mut client = client.borrow_mut();
+                        client.ready = false;
+                        client.pending_health = None;
+                        client.generation = client.generation.wrapping_add(1);
                     }
                     EngineEvent::Progress(_)
                     | EngineEvent::BatchLanded(_)
@@ -310,6 +406,7 @@ impl EngineClient {
                         let mut client = client.borrow_mut();
                         client.models_busy = false;
                         client.ready = false;
+                        client.pending_health = None;
                     }
                     _ => {}
                 }
@@ -661,6 +758,10 @@ fn drain_stdout(stdout: std::process::ChildStdout, tx: Sender<EngineEvent>) {
 fn map_engine_payload(payload: EventPayload) -> Option<EngineEvent> {
     match payload {
         EventPayload::Ready(_) => Some(EngineEvent::Ready),
+        EventPayload::HealthCheckResult(w) => Some(EngineEvent::HealthCheckResult {
+            request_id: w.inner.request_id,
+            pid: w.inner.pid,
+        }),
         EventPayload::Progress(w) => Some(EngineEvent::Progress(w.inner)),
         EventPayload::PhaseChanged(w) => Some(EngineEvent::PhaseChanged(w.inner)),
         EventPayload::BatchSummary(w) => Some(EngineEvent::BatchLanded(w.inner.processed_total)),
@@ -998,6 +1099,76 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn ready_alone_does_not_make_the_client_ready() {
+        let mut client = EngineClient::new();
+        assert!(!client.is_ready());
+        let (request_id, generation) = client.begin_health_probe().unwrap();
+        assert_eq!(generation, client.generation);
+        assert!(
+            !client.is_ready(),
+            "readiness must wait for the probe answer, not the ready event"
+        );
+        client.settle_health_probe(&request_id, 4242);
+        assert!(client.is_ready());
+    }
+
+    #[test]
+    fn health_probe_from_a_retired_generation_is_ignored() {
+        let mut client = EngineClient::new();
+        let (stale_id, stale_generation) = client.begin_health_probe().unwrap();
+
+        // The engine died and respawned before the answer arrived.
+        client.generation = client.generation.wrapping_add(1);
+        client.pending_health = None;
+        let (fresh_id, fresh_generation) = client.begin_health_probe().unwrap();
+        assert_ne!(stale_generation, fresh_generation);
+        assert_ne!(stale_id, fresh_id);
+
+        client.settle_health_probe(&stale_id, 4242);
+        assert!(
+            !client.is_ready(),
+            "an answer from the previous engine generation must not satisfy readiness"
+        );
+
+        client.settle_health_probe(&fresh_id, 4343);
+        assert!(client.is_ready());
+    }
+
+    #[test]
+    fn a_foreign_nonce_never_satisfies_readiness() {
+        let mut client = EngineClient::new();
+        let _ = client.begin_health_probe().unwrap();
+        client.settle_health_probe("health-999-999", 4242);
+        assert!(!client.is_ready());
+    }
+
+    #[test]
+    fn duplicate_ready_does_not_invalidate_the_probe_in_flight() {
+        let mut client = EngineClient::new();
+        let (first, _) = client.begin_health_probe().unwrap();
+        assert!(
+            client.begin_health_probe().is_none(),
+            "a second ready for the same generation must not mint a competing nonce"
+        );
+        client.settle_health_probe(&first, 4242);
+        assert!(client.is_ready());
+    }
+
+    #[test]
+    fn abandoning_a_failed_send_clears_only_its_own_probe() {
+        let mut client = EngineClient::new();
+        let (first, generation) = client.begin_health_probe().unwrap();
+        client.abandon_health_probe("health-0-999", generation);
+        assert!(
+            client.pending_health.is_some(),
+            "abandoning a foreign nonce must leave the live probe alone"
+        );
+        client.abandon_health_probe(&first, generation);
+        assert!(client.pending_health.is_none());
+        assert!(!client.is_ready());
+    }
 
     #[test]
     fn shutdown_allows_engine_to_exit_after_stdin_eof() {

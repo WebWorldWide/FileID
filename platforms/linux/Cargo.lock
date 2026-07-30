@@ -566,6 +566,7 @@ dependencies = [
  "parking_lot",
  "pdfium-render",
  "quick-xml",
+ "rayon",
  "reqwest",
  "rusqlite",
  "serde",

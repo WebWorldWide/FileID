@@ -232,6 +232,19 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
             check_len("purgeExcluded.excludedPaths", payload.excluded_paths.len(), MAX_EXCLUDED_PATHS)?;
             dedupe_strings(&mut payload.excluded_paths);
         }
+        CommandPayload::DeepAnalyzeAll(payload) => {
+            // The schema caps excludedFolders at 256; enforce it here too so the
+            // bound doesn't depend solely on each app's own sanitizer (a
+            // hand-edited settings.json or a third-party client bypasses those).
+            if let Some(folders) = &mut payload.excluded_folders {
+                check_len(
+                    "deepAnalyzeAll.excludedFolders",
+                    folders.len(),
+                    MAX_EXCLUDED_PATHS,
+                )?;
+                dedupe_strings(folders);
+            }
+        }
         CommandPayload::ApplyRestructure(payload) => {
             check_len("applyRestructure.moves", payload.moves.len(), MAX_RESTRUCTURE_MOVES)?;
             let mut seen = std::collections::HashSet::with_capacity(payload.moves.len());
@@ -399,6 +412,13 @@ pub struct DeepAnalyzeAllPayload {
     /// caption + tags without the rename VLM call. Ignored when tags_only.
     #[serde(default = "default_true")]
     pub propose_renames: bool,
+    /// Absolute folder paths to skip when scanning the whole library
+    /// (ignored when `file_ids` is present — an explicit selection is never
+    /// silently filtered). Path-segment-boundary matching: excluding
+    /// "/Photos" does not exclude "/PhotosBackup". See
+    /// `commands::deep_analyze::exclusion_where_clause`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_folders: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -1551,6 +1571,7 @@ mod tests {
                 file_ids: Some(vec![42, 99]),
                 tags_only: true,
                 propose_renames: true,
+                excluded_folders: Some(vec![r"C:\Users\adam\Private".into()]),
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {

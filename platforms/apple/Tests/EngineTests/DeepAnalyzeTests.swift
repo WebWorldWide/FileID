@@ -296,9 +296,50 @@ struct DeepAnalyzeRunnerTests {
 
         let wholeLibrary = try await DeepAnalyzeRunner.resolveTargets(
             database: db,
-            scope: .wholeLibrary(skipExisting: true),
+            scope: .wholeLibrary(skipExisting: true, excludedFolders: []),
             modelKey: "model-a")
         #expect(Set(wholeLibrary.map { $0.id }) == Set([legacy, otherModel]))
+    }
+
+    // Mirrors the Rust engine's `exclusion_where_clause_respects_folder_boundaries_end_to_end`:
+    // excluding a folder must not also exclude a sibling that merely shares
+    // a text prefix, and must not touch an unrelated file.
+    @Test("resolveTargets wholeLibrary scope: folder exclusion respects sibling-prefix boundaries")
+    func wholeLibraryExclusionRespectsFolderBoundaries() async throws {
+        let (db, tmp) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let excludedDir = "/library/photos"
+        let siblingDir  = "/library/photosbackup"
+        let root        = "/library"
+
+        let keptOut    = try await insertFile(db, path: "\(excludedDir)/kept_out.jpg")
+        let keptIn     = try await insertFile(db, path: "\(siblingDir)/kept_in.jpg")
+        let alsoKeptIn = try await insertFile(db, path: "\(root)/also_kept_in.jpg")
+
+        let targets = try await DeepAnalyzeRunner.resolveTargets(
+            database: db,
+            scope: .wholeLibrary(skipExisting: false, excludedFolders: [excludedDir]),
+            modelKey: "m")
+        let ids = Set(targets.map { $0.id })
+
+        #expect(!ids.contains(keptOut),
+                "the excluded folder's own file must be dropped")
+        #expect(ids.contains(keptIn),
+                "a same-prefix sibling folder must survive")
+        #expect(ids.contains(alsoKeptIn),
+                "an unrelated file must survive")
+    }
+
+    @Test("exclusionWhereClause: empty for no exclusions, ignores relative paths")
+    func exclusionWhereClauseEdgeCases() {
+        let empty = DeepAnalyzeRunner.exclusionWhereClause([])
+        #expect(empty.sql.isEmpty)
+        #expect(empty.params.isEmpty)
+
+        let relative = DeepAnalyzeRunner.exclusionWhereClause(["not/absolute"])
+        #expect(relative.sql.isEmpty)
+        #expect(relative.params.isEmpty)
     }
 
     @Test("persist full pass clears requested empty outputs and stale tags")
@@ -459,7 +500,7 @@ struct DeepAnalyzeRunnerTests {
 
         await DeepAnalyzeRunner.run(
             database: db, sink: sink,
-            scope: .wholeLibrary(skipExisting: false),
+            scope: .wholeLibrary(skipExisting: false, excludedFolders: []),
             modelKind: .qwen3VL4B)
         await cap.finish()
 
