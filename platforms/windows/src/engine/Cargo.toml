@@ -132,7 +132,7 @@ quick-xml = "0.41"
 # audio files in the library get real content-style tag chips. MPL-2.0 (file-
 # level copyleft; fine for separate use). YAMNet sound-event tagging + Whisper
 # transcription are documented follow-ups (need offline ONNX conversion).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
 
 # ONNX Runtime bindings + ndarray for tensor wrangling. Both pinned to
 # EXACT versions (no caret) because the 2.0 RC line had ABI churn between
