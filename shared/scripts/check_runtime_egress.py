@@ -140,7 +140,7 @@ RAW_NETWORK_FILES = {
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "42e7b56992f5beef2516e006aec47b2469e327d40f2b4cc37829f253e1237f10",
-    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "06026bc89caf4293c328182807ccce81ed8004dda0e1e07e11ee42beac33079b",
+    "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "73a55046f6fa9b9dd3efb3b7fd5a5098abff6506c99ece8dcecd8e51ab1af4e3",
     "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "b6c180c884d90833ad0188eb61a1f4ea7907c6ff10f081c61e89752ceb0bf786",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "649ae891f303751261aef7834a4a5353b0c96810018470580f6681cefef26822",
@@ -152,7 +152,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/windows/src/engine/src/downloader.rs": "a3533060920f874dbc328e745edcacf58208ee9c56756834627aea56c98a08c9",
     "platforms/windows/src/engine/src/main.rs": "14ccea80445a3e5dfd21d13846af136f53882f901bcdca2b6630575e44beed1b",
     "platforms/windows/src/engine/src/models/vlm_server.rs": "7dbd53c1c05e7e76832a16ffb5d0b202119a49c4ae9577de2ec4172f19a0f182",
-    "platforms/apple/app/Sources/FileID/EngineClient.swift": "af177eb2b0d457d25b6bfa6280bbf44c9ed8b3229dcdaa046cb6e35c372d3ff4",
+    "platforms/apple/app/Sources/FileID/EngineClient.swift": "2df21bce4b776f9a7286f0eb4088907cca60eaf84c684fde0f99ea8973424b56",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f68d473a8a29a33b11d9f37120482f70ade3b2ba427c6a39a5b39e5f37c1c231",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "02e754fcfe0311ab3e1a891c7006c12b6855761e2237be5a799852cb28c9bb00",
     "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
@@ -161,7 +161,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
     "platforms/linux/src/app/src/tabs/settings.rs": "a8b8be35ff2c5a496a1bd3f795ae12fb4b0b674256bcc5e6d7c75e6bafe7675f",
     "platforms/tui/src/models.rs": "9b3b8b7eaa7fa95eebea74c9e414836d464cfaa5debb6094adab79447922d402",
     "platforms/tui/src/scan.rs": "4cc3540a5a81f1cf1f1e6e74b422d8dc26a72fb9b7fa8b5c059dc660a9bd34d7",
-    "platforms/windows/src/engine/src/commands/trash.rs": "ef035ba1ec4114abe5a6d27addbc8e788d4df855c6737fe8aed6e727f983e03f",
+    "platforms/windows/src/engine/src/commands/trash.rs": "09f112e530d890b554ad6c1498f3a3b002bc79379a3cffa206a1f0fce6041693",
     "platforms/windows/src/engine/src/commands/bulk.rs": "e721af948571ded88b49d81ed3f00183deae323965e64bbd9363e90940f48902",
     "platforms/windows/src/engine/src/models/vlm.rs": "6b6b63daea13d0d7cf7ae79dbe3c9a176b8f0a58bd41d1f9d563d0d8c8a9cc1b",
     "platforms/windows/src/engine/src/models/whisper.rs": "8728f3e24bfd3b1b3e4b2cfb2be86746d30e58392d564a7951fd31407081a743",
