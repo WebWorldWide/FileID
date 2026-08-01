@@ -30,7 +30,7 @@ parking_lot = "0.12"
 # Serialization — IPC protocol, settings, structured logs.
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-base64     = "0.22"
+base64     = "0.23"
 uuid       = { version = "1", features = ["v4", "serde"] }
 # 0.4.20+ for RUSTSEC-2020-0071 / RUSTSEC-2020-0159 (panic-on-invalid-timestamp + localtime_r soundness).
 chrono     = { version = "0.4.20", features = ["serde"] }
