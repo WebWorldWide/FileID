@@ -15,6 +15,8 @@ struct PeopleView: View {
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
+    @State private var hiddenSmallClusterCount: Int = 0
+    @State private var showAllSmallClusters: Bool = false
     @State private var lastVersionSeen: Int = -1
     /// Throttle state for the `store.version` reload coalescer (see
     /// `throttledReload`): leading-edge timestamp + trailing debounce.
@@ -558,8 +560,35 @@ struct PeopleView: View {
                     ? .easeOut(duration: 0.15)
                     : .spring(response: 0.35, dampingFraction: 0.78),
                             value: persons.count)
+                hiddenSmallClustersFooter
                 hiddenUnknownsFooter
             }
+        }
+    }
+
+    /// Disclosure footer showing count of small (<6 faces) un-named face groups.
+    @ViewBuilder
+    private var hiddenSmallClustersFooter: some View {
+        if hiddenSmallClusterCount > 0 || showAllSmallClusters {
+            HStack(spacing: 8) {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .foregroundStyle(.tertiary)
+                Text(showAllSmallClusters
+                     ? "Showing all small face groups"
+                     : "\(hiddenSmallClusterCount) small face groups (fewer than 6 photos) hidden")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(showAllSmallClusters ? "Hide small groups" : "Show all (\(hiddenSmallClusterCount) hidden)") {
+                    showAllSmallClusters.toggle()
+                    reload()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .help("Small face groups (5 photos or fewer) are hidden by default to keep the main grid clean. Named groups are always shown regardless of size.")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
     }
 
@@ -655,10 +684,12 @@ struct PeopleView: View {
         // Drop emptied clusters: moving every face out of a person leaves a
         // 0-face row whose stale representative_face_id now points at the
         // target's face — a ghost card showing the wrong person. Hide it.
-        let rows = store.persons(includeUnknown: showHiddenUnknowns)
+        let minFaces = showAllSmallClusters ? 0 : 6
+        let rows = store.persons(includeUnknown: showHiddenUnknowns, minFaces: minFaces)
             .filter { $0.faceCount > 0 }
         persons = rows
         hiddenUnknownCount = store.hiddenUnknownCount()
+        hiddenSmallClusterCount = store.hiddenSmallClusterCount(minFaces: 6, includeUnknown: showHiddenUnknowns)
         // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
         personByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
     }

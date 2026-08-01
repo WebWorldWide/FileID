@@ -353,9 +353,24 @@ public enum IdentityClustering {
         for s in sims { let d = s - mean; variance += d * d }
         variance /= Float(cluster.count)
 
+        // Check strict anti-correlation: a cluster cannot contain any two faces
+        // with negative pairwise cosine similarity (< 0.0).
+        var hasAntiCorrelatedPair = false
+        if cluster.count >= 2 {
+            for idx1 in 0..<(cluster.count - 1) {
+                for idx2 in (idx1 + 1)..<cluster.count {
+                    if dot(embeddings[cluster[idx1]], embeddings[cluster[idx2]]) < 0.0 {
+                        hasAntiCorrelatedPair = true
+                        break
+                    }
+                }
+                if hasAntiCorrelatedPair { break }
+            }
+        }
+
         let meanOK = mean >= params.pass3MinMeanCosine
         let varOK = variance <= params.pass3VarianceThreshold
-        if meanOK && varOK { return [cluster] }
+        if meanOK && varOK && !hasAntiCorrelatedPair { return [cluster] }
         if splitsRemaining <= 0 { return [cluster] }
 
         // 2-means seeds: face farthest from centroid (lowest cosine), and

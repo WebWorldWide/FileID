@@ -102,7 +102,10 @@ let package = Package(
         ),
         .testTarget(
             name: "FileIDAppTests",
-            dependencies: ["FileID"],
+            dependencies: [
+                "FileID",
+                .product(name: "GRDB", package: "GRDB.swift")
+            ],
             path: "Tests/FileIDAppTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         )

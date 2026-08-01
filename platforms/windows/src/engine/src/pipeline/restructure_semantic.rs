@@ -894,7 +894,10 @@ fn cluster(fused: &[Vec<f32>], params: Hyperparameters) -> Vec<usize> {
             // Bounded top-k: O(n) partition instead of an O(n log n) full sort of
             // all n-1 neighbors when only k are used; sort just the k kept.
             let cmp = |a: &Neighbor, b: &Neighbor| {
-                b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+                b.similarity
+                    .partial_cmp(&a.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.idx.cmp(&b.idx))
             };
             if hits.len() > k {
                 hits.select_nth_unstable_by(k, cmp);

@@ -149,6 +149,7 @@ struct Sidebar: View {
                         .stroke(active ? Theme.gold.opacity(0.55) : Color.clear,
                                   lineWidth: 1)
                 )
+                .animation(.spring(response: 0.35, dampingFraction: 0.78), value: active)
                 .accessibilityLabel("\(tab.rawValue) tab")
                 .accessibilityAddTraits(active ? [.isSelected, .isButton] : [.isButton])
                 .accessibilityHint(active ? "Currently selected" : "Switches to \(tab.rawValue)")

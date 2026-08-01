@@ -13,6 +13,7 @@ struct SettingsTab: View {
     @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
+    @State private var confirmFactoryReset = false
 
     var body: some View {
         ScrollView {
@@ -146,6 +147,34 @@ struct SettingsTab: View {
                                         NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
                                     }
                                     .buttonStyle(.bordered)
+                                }
+                            }
+
+                            Divider().opacity(0.3)
+
+                            // Danger Zone
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Danger Zone").font(.subheadline.bold()).foregroundStyle(.red)
+                                Text("Permanently erase FileID's library, local models, settings, and caches.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button(role: .destructive) {
+                                    confirmFactoryReset = true
+                                } label: {
+                                    Text("Factory Reset & Quit")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .confirmationDialog(
+                                    "Are you sure you want to completely erase FileID?",
+                                    isPresented: $confirmFactoryReset,
+                                    titleVisibility: .visible
+                                ) {
+                                    Button("Erase Everything and Quit", role: .destructive) {
+                                        engine.factoryResetAndQuit()
+                                    }
+                                    Button("Cancel", role: .cancel) { }
+                                } message: {
+                                    Text("This will permanently delete the database, all tags, faces, settings, FileID-managed models, and caches. Shared Deep Analyze model downloads are kept. This action cannot be undone.")
                                 }
                             }
                         }

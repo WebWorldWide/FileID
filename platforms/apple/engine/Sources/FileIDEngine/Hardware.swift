@@ -64,6 +64,12 @@ public enum Hardware {
     /// the sweet spot for this hardware tier — keeps ANE fed without
     /// overwhelming the file source. Faster local SSDs may benefit from
     /// more workers; revisit per-storage tier if needed.
+    /// Default ONNX/CoreML model inference concurrency dynamically scaled
+    /// to Apple Neural Engine (ANE) / GPU performance core count (4..12).
+    public static let defaultInferenceConcurrency: Int = {
+        max(4, min(12, performanceCoreCount))
+    }()
+
     public static let workerCap: Int = computeWorkerCap(
         performanceCores: performanceCoreCount,
         efficiencyCores: efficiencyCoreCount,

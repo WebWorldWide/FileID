@@ -429,9 +429,24 @@ fn validate_and_split(
     }
     variance /= cluster.len() as f32;
 
+    let mut has_anti_correlated_pair = false;
+    if cluster.len() >= 2 {
+        for idx1 in 0..(cluster.len() - 1) {
+            for idx2 in (idx1 + 1)..cluster.len() {
+                if dot(&embeddings[cluster[idx1]], &embeddings[cluster[idx2]]) < 0.0 {
+                    has_anti_correlated_pair = true;
+                    break;
+                }
+            }
+            if has_anti_correlated_pair {
+                break;
+            }
+        }
+    }
+
     let mean_ok = mean >= params.pass3_min_mean_cosine;
     let var_ok = variance <= params.pass3_variance_threshold;
-    if mean_ok && var_ok {
+    if mean_ok && var_ok && !has_anti_correlated_pair {
         return vec![cluster];
     }
     if splits_remaining == 0 {
