@@ -39,7 +39,7 @@ fileid-engine = { path = "../windows/src/engine", default-features = false }
 # packages. These are the only genuinely new dependencies this crate
 # introduces; justified in shared/docs/DECISIONS.md.
 ratatui   = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # Already an engine dependency; declaring it here at the same version means
 # Cargo unifies it (no new crate in the lock graph). Used for the read SQL the
