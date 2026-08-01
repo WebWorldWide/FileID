@@ -8,6 +8,31 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-01 — macOS presentation correctness and cross-platform verification
+
+- **Tag chips now rank correctly.** Generic labels are excluded before the per-file top-two window rank, preserving useful tags such as `sunset`; the preview applies the same source priority, trimming, and suppression policy. SQL orders its ranked result explicitly, so tag chip order is deterministic.
+- **Named small people are never hidden.** The six-face display floor recognizes every structured name field, including title, middle name, last name, and suffix. A cluster named only `Doe` now remains visible and is excluded from the hidden-cluster count.
+- **Factory Reset promises its real scope.** It clears FileID's Application Support data and FileID-managed models, while intentionally retaining shared Deep Analyze Hugging Face downloads rather than deleting a shared user cache.
+- **Regression coverage.** Added `ReadStorePresentationTests` for both tag-ranking and structured-name scenarios. With Xcode 26.6 installed, `swift test --no-parallel -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors` passes all 336 tests in 68 suites. The Windows Rust engine remains clean: Clippy passes and `cargo test` passes 660 tests (two intentional benchmarks ignored).
+- **Native launch.** `bash run.sh --no-wipe` built the production `FileID.app`, compiled and cached the 96 MB MLX Metal library, and launched both the app and child engine successfully. The welcome sheet was inspected through macOS accessibility plus a screenshot; no model download or preference mutation was performed.
+
+## 2026-07-30 (Part 2) — Global Cancel Fix & Native Uninstaller (Factory Reset)
+
+- **Native Uninstaller / Factory Reset**: Instead of providing a script for complete removal, a native "Factory Reset & Quit" button was added to the `Settings → Advanced` Danger Zone (`SettingsView.swift`). It executes `engine.factoryResetAndQuit()` (`EngineClient.swift`) to kill the backend, erase the entire `~/Library/Application Support/FileID` directory (destroying SQLite data, caches, logs, and FileID-managed ONNX weights), purge `com.adamnolle.FileID` UserDefaults, and gracefully terminate the process via `NSApplication`. Shared Deep Analyze Hugging Face downloads are deliberately retained.
+- **Global Cancel Dispatch Fix**: The main UI `Cancel` button (in `Sidebar.swift`) was updated. The previous implementation exclusively emitted `.cancelScan` — wedging the app if a user attempted cancellation mid-Restructure, Deep Analyze, or clustering phase. The fixed `EngineClient.cancel()` now universally broadcasts `.cancelScan`, `.cancelRestructure`, `.deepAnalyzeCancel`, and local `cancelAutoPilot()` together. The FileID backend naturally ignores events invalid for the current state.
+
+## 2026-07-30 (Part 1) — macOS Tag Parity, Anti-Correlation Face Partitioning, Hardware-Adaptive ANE Scaling, & Zero-Warning Production Build
+
+- **macOS Parity & Tag Chips**: Added `tags: [String]?` to `FileRow` in `DBTypes.swift`. Updated `ReadStore.swift` (`toFileRow`, `tags(forFileID:)`, `topVisionTagsBulk`) to query and prioritize user (`source='user'`), VLM (`source='vlm'`), and auto (`source='auto'`) tags, filtering generic suppressed noise tags and displaying tag chips across Library grid tiles and preview detail views.
+- **macOS People Grid Noise Floor**: Implemented `minFaces = 6` filtering query in `ReadStore.swift` and `PeopleView.swift`, filtering out small 1-5 photo burst fragments while retaining user-named people and disclosing hidden count with a toggle.
+- **Strict Anti-Correlation Face Partitioning**: Enforced negative pairwise cosine splitting ($\text{cosine} < 0.0$) in both Swift (`IdentityClustering.swift`) and Rust (`identity_clustering.rs`) to eliminate over-merged mega-clusters while preserving 1:1 identity precision.
+- **Engine Quickselect Determinism**: Fixed `select_nth_unstable_by` comparators in `face_clustering.rs` and `restructure_semantic.rs` to include a secondary index tie-breaker (`.then_with(|| a.idx.cmp(&b.idx))`), guaranteeing cross-platform clustering determinism.
+- **Hardware-Adaptive ANE Concurrency**: Added `Hardware.defaultInferenceConcurrency` (`Hardware.swift`), dynamically scaling model inference concurrency (4 to 12 parallel slots) based on Apple Silicon performance cores across `MobileCLIPService`, `RamPlusService`, `ArcFaceService`, and `BGETextService`.
+- **UI Layout & Motion Polish**: Stabilized grid tile heights in `LibraryView.swift` (`.frame(height: 18)`) and added signature spring motion (`response: 0.35, dampingFraction: 0.78`) to sidebar navigation tabs in `Sidebar.swift`.
+- **Zero Compiler Warnings**: Resolved all unused variable and struct field warnings across `FaceClustering.swift` and `trash.rs`.
+- **CI Strict Concurrency**: Updated `.github/workflows/macos.yml` to include `-Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`.
+- **v0.1.2 Release & macOS DMG**: Built and verified clean `FileID.dmg` locally (32 MB), verified `cargo test` (660 passed / 0 failed, 100% green), and updated the `v0.1.2` GitHub Release asset.
+
 ## 2026-07-29 — Face over-detection, Restructure apply trust, and Deep Analyze folder exclusion: audit + fix session
 
 A full audit (adversarial-verified, source + real-catalog measurement against the 2026-07-29 Adlon

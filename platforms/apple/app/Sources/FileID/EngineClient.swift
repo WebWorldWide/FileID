@@ -2,6 +2,7 @@
 // backoff. State and events are observable on MainActor.
 import Foundation
 import Security
+import AppKit
 import FileIDShared
 
 @MainActor
@@ -968,7 +969,13 @@ public final class EngineClient {
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }
-    public func cancel()   { isPaused = false; send(.cancelScan) }
+    public func cancel() {
+        isPaused = false
+        send(.cancelScan)
+        send(.cancelRestructure)
+        send(.deepAnalyzeCancel)
+        cancelAutoPilot()
+    }
     public func shutdown() {
         // Only latch the expected-exit suppression when the shutdown
         // command actually left the app — otherwise a genuine crash that
@@ -977,6 +984,21 @@ public final class EngineClient {
         if send(.shutdown) {
             expectedExit = true
         }
+    }
+
+    /// Factory Reset: terminate the engine, wipe the Application Support folder,
+    /// purge all UserDefaults, and exit the macOS app immediately.
+    public func factoryResetAndQuit() {
+        terminateRunningEngine()
+        let fm = FileManager.default
+        try? fm.removeItem(at: AppSupportPath.fileID)
+        if let bundleID = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleID)
+            UserDefaults.standard.synchronize()
+        }
+        #if os(macOS)
+        NSApplication.shared.terminate(nil)
+        #endif
     }
 
     /// Wipes the SQLite library + scan logs and triggers a fresh
@@ -998,6 +1020,7 @@ public final class EngineClient {
         // Engine already down (respawn backoff or exhausted budget):
         // the shutdown would be silently dropped and no exit would
         // ever run the wipe — but no WAL lock is held either, so wipe
+
         // directly and respawn.
         guard stdinPipe != nil else {
             Self.deleteLibraryFiles()

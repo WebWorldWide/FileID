@@ -148,6 +148,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
                 b.similarity
                     .partial_cmp(&a.similarity)
                     .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.idx.cmp(&b.idx))
             };
             if hits.len() > k {
                 hits.select_nth_unstable_by(k, cmp);
@@ -226,11 +227,13 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
 /// LABEL-FREE safety criterion: a merge is unsafe if the merged cluster gains an
 /// anti-correlated face pair (cosine < 0), which a single identity cannot contain.
 ///
-///     automerge   merges   unsafe merges
-///       0.88          3        0          (shipped before — inert)
-///       0.78         78        0
-///       0.75        140        0          <- chosen
-///       0.70        329        1          <- safety margin ends here
+/// ```text
+/// automerge   merges   unsafe merges
+///   0.88          3        0          (shipped before — inert)
+///   0.78         78        0
+///   0.75        140        0          <- chosen
+///   0.70        329        1          <- safety margin ends here
+/// ```
 ///
 /// 0.75 gives 47x more same-person recovery than 0.88 with zero identity mixing,
 /// and keeps a real margin above 0.70 where the first unsafe merge appears. It
