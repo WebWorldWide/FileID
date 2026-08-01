@@ -165,7 +165,7 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
 # Authenticode, GlobalMemoryStatusEx.
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
