@@ -16,6 +16,7 @@
 
 param(
     [string]$Corpus = "",
+    [string[]]$ExcludedPaths = @(),
     [int]$ThroughputTarget = 25,     # files/sec REGRESSION FLOOR, not a spec.
                                      # MEASURED on the RTX 5080 / DirectML EP:
                                      # ~29 f/s on a 1K-image subset, ~40 f/s on the
@@ -174,8 +175,11 @@ $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
 $psi.Environment["LOCALAPPDATA"] = $EngineLocalAppData
 if (-not $psi.Environment.ContainsKey("FILEID_MODELS_DIR")) {
+    $isolatedModels = Join-Path $AppDataRoot "Models"
     $liveModels = Join-Path $LiveLocalAppData "FileID\Models"
-    if (Test-Path -LiteralPath $liveModels -PathType Container) {
+    if (Test-Path -LiteralPath $isolatedModels -PathType Container) {
+        $psi.Environment["FILEID_MODELS_DIR"] = $isolatedModels
+    } elseif (Test-Path -LiteralPath $liveModels -PathType Container) {
         $psi.Environment["FILEID_MODELS_DIR"] = $liveModels
     }
 }
@@ -267,7 +271,11 @@ function Read-NewEventLines {
     } finally { $stream.Dispose() }
 }
 
-Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
+$scanPayload = @{ rootPath = $Corpus; rootDisplay = $null }
+if ($ExcludedPaths.Count -gt 0) {
+    $scanPayload.excludedPaths = @($ExcludedPaths)
+}
+Send-Cmd @{ id = "scan-1"; payload = @{ startScan = $scanPayload } }
 
 $scanStart = Get-Date
 # Wait up to 15 minutes for scanComplete. V14.9-W: bumped 5→15 because a
@@ -275,6 +283,7 @@ $scanStart = Get-Date
 # current pipeline. iterate harness should reflect the realistic scan
 # floor rather than time out on healthy long runs.
 $scanComplete = $false
+$scanFailure = $null
 $peakResidentMB = 0
 $totalProcessed = 0
 $deadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
@@ -289,11 +298,28 @@ while (-not $scanComplete -and (Get-Date) -lt $deadline) {
             $p = [int]$Matches[1]
             if ($p -gt $totalProcessed) { $totalProcessed = $p }
         }
+        if ($line -match '"error"') {
+            try {
+                $errorPayload = ($line | ConvertFrom-Json).payload.error._0
+                if ($errorPayload) {
+                    $scanFailure = "$($errorPayload.kind): $($errorPayload.message)"
+                    break
+                }
+            } catch {}
+        }
         if ($line -match '"scanComplete"') { $scanComplete = $true; break }
     }
+    if ($scanFailure) { break }
 }
 $scanElapsed = (Get-Date) - $scanStart
 
+if ($scanFailure) {
+    Fail "scan failed before completion: $scanFailure"
+    Send-Cmd @{ id = "shutdown-after-scan-failure"; payload = @{ shutdown = @{} } }
+    $engineProc.WaitForExit(10000) | Out-Null
+    if (-not $engineProc.HasExited) { $engineProc.Kill() }
+    exit 1
+}
 if (-not $scanComplete) {
     Fail "scan did not complete within $ScanTimeoutMinutes minutes"
     $engineProc.Kill()

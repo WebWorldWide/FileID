@@ -52,6 +52,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
     private bool _selectMaintenancePending;
     private bool _continueBannerRefreshPending;
+    private bool _showSmallClusters;
 
     private bool _unloaded;
     public PeopleView()
@@ -59,7 +60,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         ViewModel = new PeopleViewModel(
             AppPaths.DbPath,
             Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
-            () => AppViewModel.Instance.Settings.PeopleHideUnknown);
+            () => AppViewModel.Instance.Settings.PeopleHideUnknown,
+            () => _showSmallClusters);
         InitializeComponent();
         // Named handlers (not inline lambdas) so OnUnloaded can detach
         // them. Inline lambdas leak the view + VM graph (~hundreds of KB)
@@ -190,11 +192,15 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                         }.ToString());
                     conn.Open();
                     using var cmd = conn.CreateCommand();
-                    // A cluster is "named" when either `name` (legacy) or
-                    // `first_name` (v5) is set, excluding ones the user
-                    // explicitly marked unknown.
-                    cmd.CommandText =
-                        "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL OR first_name IS NOT NULL) AND IFNULL(is_unknown, 0) = 0";
+                    // A cluster is named when any legacy or structured name
+                    // component is non-blank, excluding marked unknowns.
+                    cmd.CommandText = """
+                        SELECT COUNT(*) FROM persons
+                        WHERE IFNULL(is_unknown, 0) = 0
+                          AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                                   COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                                   COALESCE(last_name, '') || COALESCE(suffix, '')) <> '';
+                        """;
                     var v = cmd.ExecuteScalar();
                     return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
                 }
@@ -282,15 +288,27 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         int hidden = ViewModel.HiddenSmallClusterCount;
         if (hidden <= 0)
         {
-            HiddenSmallClustersText.Visibility = Visibility.Collapsed;
+            HiddenSmallClustersFooter.Visibility = Visibility.Collapsed;
             return;
         }
         HiddenSmallClustersText.Text =
-            $"{hidden:N0} more small face groups (fewer than {PeopleViewModel.MinFacesPerCluster} " +
-            "photos each) are hidden — these are usually several shots of the same moment rather " +
-            "than distinct people. They're still searchable, and naming one brings it back here.";
-        HiddenSmallClustersText.Visibility = Visibility.Visible;
+            _showSmallClusters
+                ? $"Showing {hidden:N0} small face groups with fewer than " +
+                  $"{PeopleViewModel.MinFacesPerCluster} photos each."
+                : $"{hidden:N0} small face groups (fewer than " +
+                  $"{PeopleViewModel.MinFacesPerCluster} photos each) are hidden from the primary grid.";
+        HiddenSmallClustersButtonText.Text = _showSmallClusters ? "Hide" : "Show";
+        HiddenSmallClustersFooter.Visibility = Visibility.Visible;
     }
+
+    private async void OnToggleSmallClusters(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnToggleSmallClusters), async () =>
+        {
+            _showSmallClusters = !_showSmallClusters;
+            try { await ViewModel.RefreshAsync(CancellationToken.None); }
+            catch (Exception ex) { DebugLog.Warn("Toggle small clusters refresh threw: " + ex.Message); }
+            SyncHiddenSmallClusters();
+        });
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnClustersCollectionChanged", () =>

@@ -180,10 +180,14 @@ public sealed partial class DeepAnalyzeView : UserControl
                         }.ToString());
                     conn.Open();
                     using var cmd = conn.CreateCommand();
-                    // A cluster is "unnamed" when both `name` (legacy) and
-                    // `first_name` (v5) are NULL — the display falls back
-                    // to "Person N" in PeopleViewModel.
-                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL;";
+                    // A cluster is unnamed only when every legacy and
+                    // structured name component is blank.
+                    cmd.CommandText = """
+                        SELECT COUNT(*) FROM persons
+                        WHERE TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                                   COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                                   COALESCE(last_name, '') || COALESCE(suffix, '')) = '';
+                        """;
                     var result = cmd.ExecuteScalar();
                     return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
                 }

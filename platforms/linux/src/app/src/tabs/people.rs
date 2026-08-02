@@ -39,6 +39,7 @@ const CARD_THUMB_PX: i32 = 256;
 const PHOTO_THUMB_PX: i32 = 240;
 const PERSON_FILE_LIMIT: i64 = 500;
 const PERSON_THUMB_CACHE_CAP: usize = 256;
+const MIN_FACES_PER_CLUSTER: i64 = 13;
 
 // Cosine-similarity band the clusterer treats as "borderline" (might be the
 // same person; might not) — identical to macOS `ClusterSuggestions`.
@@ -364,7 +365,9 @@ struct Ui {
     person_actions: PersonActionGate,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
+    hidden_small: Cell<i64>,
     show_hidden: Cell<bool>,
+    show_small: Cell<bool>,
     mode: Cell<Mode>,
     merge_checked: RefCell<HashSet<i64>>,
     unknown_checked: RefCell<HashSet<i64>>,
@@ -390,6 +393,9 @@ struct Ui {
     footer: gtk::Box,
     footer_label: gtk::Label,
     footer_button: gtk::Button,
+    small_footer: gtk::Box,
+    small_footer_label: gtk::Label,
+    small_footer_button: gtk::Button,
     anchor: gtk::Box,
 }
 
@@ -523,6 +529,26 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     footer.append(&footer_spacer);
     footer.append(&footer_button);
 
+    let small_footer_label = gtk::Label::builder()
+        .label("")
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    let small_footer_spacer = gtk::Box::builder().hexpand(true).build();
+    let small_footer_button = gtk::Button::builder()
+        .label("Show")
+        .css_classes(["flat"])
+        .tooltip_text("Show or hide small unnamed face groups")
+        .build();
+    let small_footer = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .visible(false)
+        .build();
+    small_footer.append(&small_footer_label);
+    small_footer.append(&small_footer_spacer);
+    small_footer.append(&small_footer_button);
+
     // ── Root ─────────────────────────────────────────────────────────────────
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -538,6 +564,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&empty_page);
     root.append(&no_clusters_page);
     root.append(&footer);
+    root.append(&small_footer);
 
     let engine_ready = engine.borrow().is_ready();
     let ui = Rc::new(Ui {
@@ -550,7 +577,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         person_actions: PersonActionGate::default(),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
+        hidden_small: Cell::new(0),
         show_hidden: Cell::new(false),
+        show_small: Cell::new(false),
         mode: Cell::new(Mode::Normal),
         merge_checked: RefCell::new(HashSet::new()),
         unknown_checked: RefCell::new(HashSet::new()),
@@ -572,6 +601,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         footer: footer.clone(),
         footer_label: footer_label.clone(),
         footer_button: footer_button.clone(),
+        small_footer: small_footer.clone(),
+        small_footer_label: small_footer_label.clone(),
+        small_footer_button: small_footer_button.clone(),
         anchor: root.clone(),
     });
 
@@ -587,6 +619,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let ui = ui.clone();
         footer_button.connect_clicked(move |_| {
             ui.show_hidden.set(!ui.show_hidden.get());
+            reload(&ui);
+        });
+    }
+    {
+        let ui = ui.clone();
+        small_footer_button.connect_clicked(move |_| {
+            ui.show_small.set(!ui.show_small.get());
             reload(&ui);
         });
     }
@@ -758,6 +797,25 @@ fn refresh_view(ui: &Rc<Ui>) {
         } else {
             ui.footer_label.set_text(&format!("{n} hidden as unknown"));
             ui.footer_button.set_label("Show them");
+        }
+    }
+
+    let show_small_footer = ui.hidden_small.get() > 0;
+    ui.small_footer.set_visible(show_small_footer);
+    if show_small_footer {
+        let n = ui.hidden_small.get();
+        if ui.show_small.get() {
+            ui.small_footer_label.set_text(&format!(
+                "Showing {n} small face group{} with fewer than {MIN_FACES_PER_CLUSTER} faces each",
+                plural(n)
+            ));
+            ui.small_footer_button.set_label("Hide");
+        } else {
+            ui.small_footer_label.set_text(&format!(
+                "{n} small face group{} hidden from the primary grid (fewer than {MIN_FACES_PER_CLUSTER} faces each)",
+                plural(n)
+            ));
+            ui.small_footer_button.set_label("Show");
         }
     }
 
@@ -1136,10 +1194,24 @@ fn reload(ui: &Rc<Ui>) {
         ui.hidden_unknown.set(hidden);
 
         let show_hidden = ui.show_hidden.get();
-        let visible: Vec<PersonRow> = with_faces
+        let eligible: Vec<PersonRow> = with_faces
             .iter()
             .filter(|p| !p.is_unknown || show_hidden)
             .cloned()
+            .collect();
+        let hidden_small = eligible
+            .iter()
+            .filter(|p| !p.is_unknown && p.face_count < MIN_FACES_PER_CLUSTER && !p.has_any_name())
+            .count() as i64;
+        ui.hidden_small.set(hidden_small);
+        let visible: Vec<PersonRow> = eligible
+            .into_iter()
+            .filter(|p| {
+                p.is_unknown
+                    || ui.show_small.get()
+                    || p.face_count >= MIN_FACES_PER_CLUSTER
+                    || p.has_any_name()
+            })
             .collect();
         let mut map = HashMap::with_capacity(visible.len());
         for p in &visible {

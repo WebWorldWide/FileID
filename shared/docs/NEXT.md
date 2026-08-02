@@ -1,5 +1,39 @@
 # NEXT — resume here
 
+## STATUS 2026-08-01 — Automatic collision control is green; the embedder ceiling remains
+
+Same-physical-file cannot-links now survive every automatic clustering phase, deterministic
+strongest-edge processing propagates them transitively, and a `0.15` centroid-outlier floor applies
+only to unprotected clusters. Named, manual-merge, and verdict-backed identities remain protected.
+The primary People grid also bounds unnamed fragments consistently across Windows, macOS, and
+Linux. The pinned Rust 1.90 audit is GREEN with zero failed checks and two identical partitions.
+
+The preserved Adlon catalog improved from 3,108 to 1,540 raw persons, 2,271 to 561 hidden small
+candidates, 26,422 to 15,856 faces in the largest cluster, and 5,960 to zero automatic same-file
+collision groups while retaining 93.24% of eligible face assignments. This is a major safety and
+usability improvement, not final identity quality: representative sheets still contain mixed child
+mega-clusters. The weakly supervised metric-learning prototype was invalidated by duplicate-pair
+leakage and must not be revived without identity-disjoint labels.
+
+Resume in this order:
+
+1. **Run a fresh read-only Adlon scan when `F:\Adlon Drive` is mounted.** The GREEN audit reused
+   its preserved catalog and used `F:\Music` only as the read-only harness corpus. Use
+   `iterate.ps1` plus independent People-size/distribution, unmatched-ratio, same-file collision,
+   cohesion, database-integrity, fingerprint, and authoritative-completion assertions.
+2. **Evaluate a commercially clean modern face embedder with identity-disjoint labels.** Compare
+   SFace with vetted ArcFace/AdaFace-class candidates across pose, age, lighting, blur, and scanned
+   photos. Include same-person and hard-negative pairs, cluster purity/fragmentation, throughput,
+   model license, package size, and CPU/DirectML behavior. Do not tune global thresholds against
+   duplicate captures or visual anecdotes.
+3. **Close native platform gates.** Port or verify the clustering behavior in the macOS Swift
+   implementation and build/run it with Xcode. Validate the native Linux GTK app/package; Linux
+   already consumes the canonical shared Rust engine, but its GUI/package gate remains open.
+4. **Close release gates.** Verify the packaged provider on supported hardware, then complete
+   clean-VM installer/upgrade/uninstall, signing, and hosted-CI checks.
+5. **Review and land deliberately.** Inspect this uncommitted change set, commit only with owner
+   approval, push through the normal branch/CI workflow, and require all active checks green.
+
 ## ACTION FOR THE OWNER — add strict concurrency to macOS CI (needs `workflow` token scope)
 
 `shared/scripts/run_local_audit_gate.sh` runs the macOS suite as

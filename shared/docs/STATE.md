@@ -8,6 +8,47 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-01 — Face-cluster cannot-links, protected outlier suppression, and pinned real-data audit
+
+The People overload fix is now mirrored across Windows, macOS, and Linux. Unnamed clusters with
+fewer than six active faces are omitted from the primary grid while named clusters remain visible;
+each UI discloses the withheld count and retains those groups for search and re-clustering. Name
+detection checks the trimmed legacy `name` and every structured component. Windows publishes the
+rows and hidden count as one refresh result, and Deep Analyze uses the same naming rule.
+
+Automatic clustering now treats separate detections from the same physical file as cannot-link
+evidence through Pass 1, Pass 2, consolidation, and fragment recovery. The constraint uses
+`file_id`, so copies of one image remain mergeable. Strongest edges are processed deterministically
+and constraints propagate transitively. Unprotected automatic clusters also enforce a `0.15`
+centroid-similarity outlier floor; named, manually merged, and verdict-backed identities bypass
+that suppression so automation cannot silently undo user evidence. Nearest-neighbor selection in
+semantic Restructure uses the same deterministic similarity-then-index tie break.
+
+The pinned Rust 1.90 engine at `.ralph/target-rust190-final/release/FileIDEngine.exe` has SHA-256
+`5a435c7bf3126c1d0dc20723bd37754c2fe38ee2cb1f7193c52c2ab01624a5bc`. The authoritative isolated
+report `.ralph/adlon-faces-20260801-pinned-final-audit1/summary.json` is GREEN with zero failed
+checks. Two deterministic clustering passes completed in 295.98s and 298.55s; the seed catalog and
+read-only `F:\Music` fingerprint were unchanged, and SQLite integrity checks passed. This reused
+the preserved Adlon catalog because `F:\Adlon Drive` was not mounted; it was not a fresh scan.
+
+Against that catalog, raw persons fell from 3,108 to 1,540, display candidates changed from 743 to
+885, hidden small candidates fell from 2,271 to 561, and 113,238 of 121,448 eligible assignments
+were retained (93.24%). The largest cluster fell from 26,422 to 15,856 and from 21.76% to 14.00% of
+assigned faces. Automatic same-file collision groups fell from 5,960 to zero, and cross-cluster
+centroid pairs at or above 0.80 fell from 76 to 57. Final candidate cohesion was p01 0.2156, p05
+0.3595, and median-p05 0.4448. Another 532 same-file collisions remain inside 94 preserved
+`unknown` buckets; these intentionally aggregate non-identity evidence and are diagnostic only.
+
+Rust 1.90 clippy, formatting, release build, and the full test suites passed with the expected
+ignored hardware/destructive cases. The Windows app built with zero warnings/errors, .NET format
+was clean, App tests passed 452/452, IPC tests passed 53/53, and the Python validator compiled.
+Weakly supervised metric learning was rejected: its apparent perfect validation used exact
+duplicate content/bounding-box pairs and measured leakage rather than cross-pose identity quality.
+Representative contact sheets still show mixed child mega-clusters, so the commercially clean
+SFace replacement and labelled evaluation remain required. Native macOS clustering parity,
+native Linux GUI/package validation, packaged provider selection, installer/signing, and hosted CI
+also remain open. No commit or push was performed.
+
 ## 2026-07-29 — Face over-detection, Restructure apply trust, and Deep Analyze folder exclusion: audit + fix session
 
 A full audit (adversarial-verified, source + real-catalog measurement against the 2026-07-29 Adlon
