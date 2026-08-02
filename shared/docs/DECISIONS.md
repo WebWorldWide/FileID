@@ -7,6 +7,45 @@
 
 ---
 
+## 2026-08-02 — Reserve repeated smart names with source evidence
+
+Deep Analyze reserves every proposed name within a batch case-insensitively. The first proposal is
+retained; a duplicate is suffixed with the sanitized source stem and, only when that still collides,
+a stable ordinal. Windows/Linux and macOS use the same 80-character budget. Silently returning the
+same generic filename for repeated forms was rejected because a later rename would collide or force
+the user to distinguish files manually. Blind numeric suffixes were also rejected because the
+original filename often carries a date or reference that makes the result understandable.
+
+## 2026-08-02 — Bind only installed ONNX Runtime providers
+
+Session construction now filters the vendor priority chain through the packs actually present on
+disk before registering execution providers. Provider priority is unchanged; NVIDIA without its
+CUDA/TensorRT pack goes directly to DirectML, while installed accelerator packs retain their existing
+order. Attempting absent providers was rejected because every model session repeated native loader
+failures before reaching the same fallback. ONNX Runtime session logs use error level so optimizer
+diagnostics do not flood local logs; FileID's own provider and performance diagnostics remain intact.
+
+## 2026-08-02 — Show every face group; reduce only with identity-safe evidence
+
+The People grid no longer uses a minimum-size presentation floor on any platform. Hiding small
+groups made the interface look calmer without reducing fragmentation, and it contradicted the
+requirement that every active face remain reviewable. This supersedes the 2026-08-01 13-face
+presentation decision; explicit Unknown filtering and excluded-face semantics are unchanged.
+
+The production fragment-recovery threshold remains `0.75`. Controlled full-catalog runs at `0.75`,
+`0.70`, and `0.60` produced the identical 2,215-person partition and membership digest, while exact
+capture-key and exact-embedding comparisons found no cluster that could be removed without inferring
+identity. Lowering the threshold further or merging only because two centroids are close was rejected:
+it would spend identity precision without evidence that it reduces the real partition.
+
+Reduction therefore happens through explicit per-pair review. Suggested pairs fail closed when either
+membership set is unavailable, never include people who occur in the same file, ignore excluded faces,
+and invalidate every stale suggestion involving either merged endpoint. Linux uses the shared bounded
+engine result; macOS keeps one persisted centroid per person and matches the shared `0.55..<0.97`
+review band and 50-pair bound. Bulk accept actions were removed because similarity alone is not enough
+authority to combine identities; every UI presents similarity as a neutral numeric score instead of
+calling a pair “very likely same.”
+
 ## 2026-08-01 — Real-data oracles reject anti-correlation splitting; presentation uses a 13-face floor
 
 The final Adlon A/B rejected Pass-3 anti-correlation splitting in both Rust and Swift. With eight

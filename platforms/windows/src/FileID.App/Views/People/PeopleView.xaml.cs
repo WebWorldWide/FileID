@@ -52,7 +52,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
     private bool _selectMaintenancePending;
     private bool _continueBannerRefreshPending;
-    private bool _showSmallClusters;
 
     private bool _unloaded;
     public PeopleView()
@@ -60,8 +59,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         ViewModel = new PeopleViewModel(
             AppPaths.DbPath,
             Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
-            () => AppViewModel.Instance.Settings.PeopleHideUnknown,
-            () => _showSmallClusters);
+            () => AppViewModel.Instance.Settings.PeopleHideUnknown);
         InitializeComponent();
         // Named handlers (not inline lambdas) so OnUnloaded can detach
         // them. Inline lambdas leak the view + VM graph (~hundreds of KB)
@@ -280,34 +278,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             if (_unloaded) return;
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(FooterVisibility));
-            SyncHiddenSmallClusters();
-        });
-
-    private void SyncHiddenSmallClusters()
-    {
-        int hidden = ViewModel.HiddenSmallClusterCount;
-        if (hidden <= 0)
-        {
-            HiddenSmallClustersFooter.Visibility = Visibility.Collapsed;
-            return;
-        }
-        HiddenSmallClustersText.Text =
-            _showSmallClusters
-                ? $"Showing {hidden:N0} small face groups with fewer than " +
-                  $"{PeopleViewModel.MinFacesPerCluster} photos each."
-                : $"{hidden:N0} small face groups (fewer than " +
-                  $"{PeopleViewModel.MinFacesPerCluster} photos each) are hidden from the primary grid.";
-        HiddenSmallClustersButtonText.Text = _showSmallClusters ? "Hide" : "Show";
-        HiddenSmallClustersFooter.Visibility = Visibility.Visible;
-    }
-
-    private async void OnToggleSmallClusters(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnToggleSmallClusters), async () =>
-        {
-            _showSmallClusters = !_showSmallClusters;
-            try { await ViewModel.RefreshAsync(CancellationToken.None); }
-            catch (Exception ex) { DebugLog.Warn("Toggle small clusters refresh threw: " + ex.Message); }
-            SyncHiddenSmallClusters();
         });
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)

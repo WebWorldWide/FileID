@@ -1613,7 +1613,7 @@ internal sealed partial class EngineClient
         LastError = null;
         // Do NOT reset LastMergeSuggestions to null here. That fires
         // PropertyChanged → SuggestedMergesSheet.Render() with a null result,
-        // flashing "No likely merges found." over the "Looking…" placeholder before
+        // flashing "No merge-review candidates found." over the "Looking…" placeholder before
         // the real reply lands. Unlike LastLibraryWiped/LastBulkAction (value-type
         // records that CAN be value-equal across replies, so they need the reset),
         // each MergeSuggestions reply carries a fresh Pairs list ⇒ never value-equal

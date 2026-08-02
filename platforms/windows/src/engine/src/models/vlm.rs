@@ -19,7 +19,7 @@ pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual s
 
 /// Default rename prompt — produces a short, kebab-cased filename
 /// suitable for `sanitize_proposed_name`.
-pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension.";
+pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension. For a form, receipt, or repeated document type, include a visible date, name, or reference that distinguishes this file from similar copies.";
 
 /// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)

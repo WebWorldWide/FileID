@@ -64,17 +64,6 @@ public final class ReadStore: @unchecked Sendable {
         "object", "item", "background", "foreground", "indoor", "outdoor"
     ]
 
-    private static let personHasNameSQL = """
-        (
-            (p.name IS NOT NULL AND TRIM(p.name) <> '')
-            OR (p.title IS NOT NULL AND TRIM(p.title) <> '')
-            OR (p.first_name IS NOT NULL AND TRIM(p.first_name) <> '')
-            OR (p.middle_name IS NOT NULL AND TRIM(p.middle_name) <> '')
-            OR (p.last_name IS NOT NULL AND TRIM(p.last_name) <> '')
-            OR (p.suffix IS NOT NULL AND TRIM(p.suffix) <> '')
-        )
-        """
-
     /// Idempotent. Safe to call after engine creates / migrates the DB.
     public func openIfPossible() {
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
@@ -893,12 +882,9 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    public func persons(includeUnknown: Bool = false, minFaces: Int = 0) -> [PersonRow] {
+    public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
         let where_ = includeUnknown ? "" : "WHERE IFNULL(p.is_unknown, 0) = 0"
-        let having_ = minFaces > 0
-            ? "HAVING COUNT(fp.id) >= \(minFaces) OR IFNULL(p.is_unknown, 0) = 1 OR \(Self.personHasNameSQL)"
-            : ""
         do {
             return try q.read { db in
                 let rows = try Row.fetchAll(db, sql: """
@@ -915,7 +901,6 @@ public final class ReadStore: @unchecked Sendable {
                     LEFT JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
                     \(where_)
                     GROUP BY p.id
-                    \(having_)
                     ORDER BY p.is_unknown ASC, p.file_count DESC, p.id ASC
                     """)
                 return rows.map { r in
@@ -941,25 +926,6 @@ public final class ReadStore: @unchecked Sendable {
             reportError("People query failed: \(error)")
             return []
         }
-    }
-
-    /// Count of persons with fewer than minFaces faces that are not named —
-    /// for the size floor disclosure banner.
-    public func hiddenSmallClusterCount(minFaces: Int = 13) -> Int {
-        guard let q = queue else { return 0 }
-        return (try? q.read { db in
-            try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM (
-                    SELECT p.id
-                    FROM persons p
-                    JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
-                    WHERE IFNULL(p.is_unknown, 0) = 0
-                    GROUP BY p.id
-                    HAVING COUNT(fp.id) < \(minFaces)
-                       AND NOT \(Self.personHasNameSQL)
-                )
-                """) ?? 0
-        }) ?? 0
     }
 
     /// Count of persons currently marked as unknown — for the

@@ -1151,7 +1151,7 @@ pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String
 /// Clean up a VLM-proposed filename: lowercase, hyphen-separated, strip
 /// quotes / extension / extra punctuation. The model usually obeys the
 /// prompt but defensive normalization saves a round-trip.
-fn sanitize_proposed_name(raw: &str) -> String {
+pub(crate) fn sanitize_proposed_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
     let lowered = trimmed.to_lowercase();
     let cleaned: String = lowered
