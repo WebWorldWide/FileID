@@ -8,6 +8,85 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-01 — Final face containment, Adlon acceptance, and native release polish
+
+The People overload fix is now mirrored across Windows, macOS, and Linux. Unnamed clusters with
+fewer than 13 active faces are omitted from the primary grid while named and explicit Unknown
+groups remain visible at every size. Each UI discloses the withheld count and keeps those groups
+available through its Show/Hide control without deleting clustering evidence. Name detection uses
+the trimmed legacy name plus every structured name component.
+
+Automatic clustering treats separate detections from the same physical file as cannot-link
+evidence through both identity passes, consolidation, and fragment recovery. Strongest edges are
+processed deterministically, constraints propagate transitively, and unprotected automatic
+clusters enforce a conservative `0.15` centroid-similarity outlier floor. Named, manually merged,
+and verdict-backed identities bypass that suppression so automation cannot silently reverse user
+evidence. Deterministic similarity/index tie breaks remain in face and semantic-neighbor selection.
+
+A proposed anti-correlation split was rejected by a controlled full-catalog A/B. With that split,
+the unchanged validator went RED: raw groups rose to 2,426, visible People cards to 1,220, the
+largest cluster to 19,411, and top-cluster minimum median cohesion fell to 0.5595. Removing only that
+split restored every oracle. The final pipeline therefore keeps its calibrated mean/variance
+validation rather than adding label-free pair probes that fragment real identities.
+
+The exact final Rust 1.90 engine at
+`.ralph/target-rust190-consolidated-final/release/FileIDEngine.exe` has SHA-256
+`8a4c96991fb476cc30b10fdd2744569bcd9e8e4ae3b96fd722bb344a34a55540`. The authoritative isolated
+face report `.ralph/adlon-face-validation-20260801-consolidated-final-audit3/summary.json` is GREEN
+with zero failed checks and has SHA-256
+`8db30aaaed19c55fc15bbde4d6776d2aeae44fe739f94c3169a9b26d1f15d969`. Two clustering passes
+completed in 441.29s and 432.89s with identical partition digest
+`63cbf668d47ef35186f96924b97d22d14fc821666a7f51fcee29a5c1e1c1e4fa`.
+
+The 164,518-file Adlon catalog contains 193,133 eligible face prints. The final partition has 2,215
+raw groups, 1,074 visible People cards, 166,266 assigned faces, 26,867 unmatched faces, and a
+14,645-face largest cluster (8.81% of assignments). High-similarity fragment risk is 433, below its
+438 baseline. DirectML ran on the RTX 5080 with ONNX Runtime 1.22.0; provider selection, runtime
+hashes, face-crop membership, the seed catalog, the read-only `F:\Music` fingerprint, and SQLite
+integrity all passed their post-run checks.
+
+The separate Restructure report
+`.ralph/adlon-restructure-validation-20260801-consolidated-final-audit2/summary.json` is GREEN with
+zero failed checks and SHA-256
+`5f645ed1fbf0c6454cb0de6dc35a8973a1ed61369127c98986e3c4054221a116`. Cancellation emits the
+typed `plan_restructure_cancelled` terminal, then two normal runs produce the same safe nine-move
+inline plan (`planID = null`) with canonical digest
+`6e9001d40fe1267822a62b988ff7f2fe5a5abeae1244308020ec2ba932166127`. No moves were applied.
+
+Final Windows Rust gates pass 709 tests with only the expected ignored destructive/performance
+cases; the explicit million-row reconciliation gate also passes. The Windows app builds with zero
+warnings/errors, format is clean, App tests pass 453/453, and IPC tests pass 53/53. Native WSL Rust
+1.90 gates pass for the engine (687/689), GTK app (57/57), CLI (61 total, two intentional ignores),
+and TUI (104/105); every shipped Linux binary is privacy-clean. Repository policy, runtime egress,
+model licensing, Cargo deny/audit, Flatpak offline-source generation, package-tool tests, all 11 TLS
+roots, Python/JSON/YAML parsing, and PowerShell 5.1/7.6 parsing are green. The full hosted macOS,
+Flatpak, Windows matrix, installers, release assets, signing, and notarization remain remote or
+external gates and must not be inferred from these local checks.
+## 2026-08-01 — macOS presentation correctness and cross-platform verification
+
+- **Tag chips now rank correctly.** Generic labels are excluded before the per-file top-two window rank, preserving useful tags such as `sunset`; the preview applies the same source priority, trimming, and suppression policy. SQL orders its ranked result explicitly, so tag chip order is deterministic.
+- **Named small people are never hidden.** The six-face display floor recognizes every structured name field, including title, middle name, last name, and suffix. A cluster named only `Doe` now remains visible and is excluded from the hidden-cluster count.
+- **Factory Reset promises its real scope.** It clears FileID's Application Support data and FileID-managed models, while intentionally retaining shared Deep Analyze Hugging Face downloads rather than deleting a shared user cache.
+- **Regression coverage.** Added `ReadStorePresentationTests` for both tag-ranking and structured-name scenarios. With Xcode 26.6 installed, `swift test --no-parallel -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors` passes all 336 tests in 68 suites. The Windows Rust engine remains clean: Clippy passes and `cargo test` passes 660 tests (two intentional benchmarks ignored).
+- **Native launch.** `bash run.sh --no-wipe` built the production `FileID.app`, compiled and cached the 96 MB MLX Metal library, and launched both the app and child engine successfully. The welcome sheet was inspected through macOS accessibility plus a screenshot; no model download or preference mutation was performed.
+
+## 2026-07-30 (Part 2) — Global Cancel Fix & Native Uninstaller (Factory Reset)
+
+- **Native Uninstaller / Factory Reset**: Instead of providing a script for complete removal, a native "Factory Reset & Quit" button was added to the `Settings → Advanced` Danger Zone (`SettingsView.swift`). It executes `engine.factoryResetAndQuit()` (`EngineClient.swift`) to kill the backend, erase the entire `~/Library/Application Support/FileID` directory (destroying SQLite data, caches, logs, and FileID-managed ONNX weights), purge `com.adamnolle.FileID` UserDefaults, and gracefully terminate the process via `NSApplication`. Shared Deep Analyze Hugging Face downloads are deliberately retained.
+- **Global Cancel Dispatch Fix**: The main UI `Cancel` button (in `Sidebar.swift`) was updated. The previous implementation exclusively emitted `.cancelScan` — wedging the app if a user attempted cancellation mid-Restructure, Deep Analyze, or clustering phase. The fixed `EngineClient.cancel()` now universally broadcasts `.cancelScan`, `.cancelRestructure`, `.deepAnalyzeCancel`, and local `cancelAutoPilot()` together. The FileID backend naturally ignores events invalid for the current state.
+
+## 2026-07-30 (Part 1) — macOS Tag Parity, Anti-Correlation Face Partitioning, Hardware-Adaptive ANE Scaling, & Zero-Warning Production Build
+
+- **macOS Parity & Tag Chips**: Added `tags: [String]?` to `FileRow` in `DBTypes.swift`. Updated `ReadStore.swift` (`toFileRow`, `tags(forFileID:)`, `topVisionTagsBulk`) to query and prioritize user (`source='user'`), VLM (`source='vlm'`), and auto (`source='auto'`) tags, filtering generic suppressed noise tags and displaying tag chips across Library grid tiles and preview detail views.
+- **macOS People Grid Noise Floor**: Implemented `minFaces = 6` filtering query in `ReadStore.swift` and `PeopleView.swift`, filtering out small 1-5 photo burst fragments while retaining user-named people and disclosing hidden count with a toggle.
+- **Strict Anti-Correlation Face Partitioning**: Enforced negative pairwise cosine splitting ($\text{cosine} < 0.0$) in both Swift (`IdentityClustering.swift`) and Rust (`identity_clustering.rs`) to eliminate over-merged mega-clusters while preserving 1:1 identity precision.
+- **Engine Quickselect Determinism**: Fixed `select_nth_unstable_by` comparators in `face_clustering.rs` and `restructure_semantic.rs` to include a secondary index tie-breaker (`.then_with(|| a.idx.cmp(&b.idx))`), guaranteeing cross-platform clustering determinism.
+- **Hardware-Adaptive ANE Concurrency**: Added `Hardware.defaultInferenceConcurrency` (`Hardware.swift`), dynamically scaling model inference concurrency (4 to 12 parallel slots) based on Apple Silicon performance cores across `MobileCLIPService`, `RamPlusService`, `ArcFaceService`, and `BGETextService`.
+- **UI Layout & Motion Polish**: Stabilized grid tile heights in `LibraryView.swift` (`.frame(height: 18)`) and added signature spring motion (`response: 0.35, dampingFraction: 0.78`) to sidebar navigation tabs in `Sidebar.swift`.
+- **Zero Compiler Warnings**: Resolved all unused variable and struct field warnings across `FaceClustering.swift` and `trash.rs`.
+- **CI Strict Concurrency**: Updated `.github/workflows/macos.yml` to include `-Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`.
+- **v0.1.2 Release & macOS DMG**: Built and verified clean `FileID.dmg` locally (32 MB), verified `cargo test` (660 passed / 0 failed, 100% green), and updated the `v0.1.2` GitHub Release asset.
+
 ## 2026-07-29 — Face over-detection, Restructure apply trust, and Deep Analyze folder exclusion: audit + fix session
 
 A full audit (adversarial-verified, source + real-catalog measurement against the 2026-07-29 Adlon

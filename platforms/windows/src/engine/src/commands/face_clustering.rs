@@ -870,6 +870,32 @@ pub(crate) async fn handle_run_face_clustering(
                 &excluded_face_ids,
             );
 
+        let protected_faces: HashSet<i64> = bucket_owner_by_face
+            .keys()
+            .copied()
+            .chain(verdict_pairs.iter().flat_map(|&(a, b)| [a, b]))
+            .collect();
+        let protected_clusters = crate::pipeline::face_clustering::protected_cluster_ids(
+            &assignments,
+            &protected_faces,
+        );
+        let before_bimodal_split = anchors.len();
+        let (assignments, anchors) =
+            crate::pipeline::face_clustering::split_bimodal_mega_clusters(
+                &faces,
+                assignments,
+                anchors,
+                &protected_clusters,
+            );
+        if anchors.len() != before_bimodal_split {
+            tracing::info!(
+                before = before_bimodal_split,
+                after = anchors.len(),
+                split = anchors.len() - before_bimodal_split,
+                "[CLUSTER] split strongly bimodal mega-clusters"
+            );
+        }
+
         // Auto-consolidate near-certain duplicate clusters the over-split-safe
         // clusterer left fragmented (the "WAY too many similar faces" symptom),
         // RIGHT HERE under the persist lock — not in the lock-free phase 2 — so
@@ -982,15 +1008,29 @@ pub(crate) async fn handle_run_face_clustering(
             }
             // Suppress unresolved low-quality micro-clusters only after recovery,
             // so corroborated doubleton fragments can join a recurring identity.
-            let protected_faces: HashSet<i64> = bucket_owner_by_face
-                .keys()
-                .copied()
-                .chain(verdict_pairs.iter().flat_map(|&(a, b)| [a, b]))
-                .collect();
             let always_keep = crate::pipeline::face_clustering::protected_cluster_ids(
                 &a,
                 &protected_faces,
             );
+            let outlier_floor = crate::pipeline::face_clustering::outlier_cosine_floor();
+            let before_outlier_suppression = a.len();
+            let (a, an) =
+                crate::pipeline::face_clustering::suppress_embedding_outliers_with_keep(
+                    &faces,
+                    a,
+                    an,
+                    outlier_floor,
+                    &always_keep,
+                );
+            if a.len() != before_outlier_suppression {
+                tracing::info!(
+                    before = before_outlier_suppression,
+                    after = a.len(),
+                    suppressed = before_outlier_suppression - a.len(),
+                    outlier_floor,
+                    "[CLUSTER] suppressed low-similarity embedding outliers"
+                );
+            }
             let min_size = crate::pipeline::face_clustering::min_cluster_size();
             let q_floor = crate::pipeline::face_clustering::solo_quality_floor();
             let before_supp = an.len();

@@ -24,6 +24,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
     private readonly Func<bool> _hideUnknown;
+    private readonly Func<bool> _showSmallClusters;
     private bool _isLoading;
     private string? _errorMessage;
     // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
@@ -45,19 +46,14 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>Minimum faces a cluster needs before it appears in the People
     /// grid (named clusters are always shown regardless — see the HAVING clause).
     ///
-    /// Face clustering over-splits: on a real 135k-file library it produced 3,108
-    /// clusters, of which 2,271 held 5 or fewer faces — overwhelmingly
-    /// duplicate-burst fragments of one shot rather than distinct people. Showing
-    /// all of them made the tab unusable ("thousands of leftover faces") and
-    /// buried the few dozen clusters actually worth naming. 6 is the measured
-    /// knee: clusters of >=6 faces have mean pairwise cosine 0.71-0.86 (coherent
-    /// identities), and dropping to >=6 cut the surfaced count by roughly 3/4
-    /// while keeping every large cluster.
+    /// A fresh 164k-file Adlon scan produced 1,143 unnamed clusters with 12 or
+    /// fewer faces. Holding that review tail behind an explicit Show control keeps
+    /// the primary grid near 1,100 cards without deleting evidence or guessing at
+    /// identity merges the embedder cannot support.
     ///
     /// Fragments are NOT deleted and remain fully searchable — they are only
-    /// held back from the grid, and any of them can still be reached by naming or
-    /// through merge suggestions.</summary>
-    public const int MinFacesPerCluster = 6;
+    /// held back from the grid and remain available through the Show control.</summary>
+    public const int MinFacesPerCluster = 13;
 
     /// <summary>Count of clusters withheld by <see cref="MinFacesPerCluster"/> on
     /// the last refresh, so the view can disclose them instead of silently
@@ -74,11 +70,16 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     }
     private int _hiddenSmallClusterCount;
 
-    public PeopleViewModel(string dbPath, DispatcherQueue ui, Func<bool>? hideUnknown = null)
+    public PeopleViewModel(
+        string dbPath,
+        DispatcherQueue ui,
+        Func<bool>? hideUnknown = null,
+        Func<bool>? showSmallClusters = null)
     {
         _dbPath = dbPath;
         _ui = ui;
         _hideUnknown = hideUnknown ?? (() => false);
+        _showSmallClusters = showSmallClusters ?? (() => false);
     }
 
     public void Dispose()
@@ -169,9 +170,9 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
-            var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
+            var result = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(clusters, myGen);
+            ApplyOnUi(result, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -195,12 +196,12 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private List<PersonCluster> LoadClusters(CancellationToken ct)
+    private (List<PersonCluster> Clusters, int HiddenSmallClusterCount) LoadClusters(CancellationToken ct)
     {
         // First-launch guard: the engine creates the DB on first scan.
         if (!File.Exists(_dbPath))
         {
-            return new List<PersonCluster>();
+            return (new List<PersonCluster>(), 0);
         }
         var connString = new SqliteConnectionStringBuilder
         {
@@ -211,14 +212,21 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         conn.Open();
         using var cmd = conn.CreateCommand();
         // Cluster shape: face_prints (one row per detected face) joins
-        // persons (one row per cluster). Display name = explicit `name`
-        // (legacy free-form) → `first_name` (v5 structured) → fallback
-        // "Person N". Anchor face = the face_prints row with the highest
+        // persons (one row per cluster). Display name = structured name
+        // components → legacy free-form `name` → fallback "Person N".
+        // Anchor face = the face_prints row with the highest
         // quality score in the cluster — picked via subquery so it's stable.
         cmd.CommandText = """
             SELECT
                 p.id                                                    AS cluster_id,
-                COALESCE(p.name, p.first_name, 'Person ' || p.id)       AS display_name,
+                COALESCE(
+                    NULLIF(TRIM(COALESCE(p.title, '') || ' ' ||
+                               COALESCE(p.first_name, '') || ' ' ||
+                               COALESCE(p.middle_name, '') || ' ' ||
+                               COALESCE(p.last_name, '') || ' ' ||
+                               COALESCE(p.suffix, '')), ''),
+                    NULLIF(TRIM(p.name), ''),
+                    'Person ' || p.id)                                  AS display_name,
                 COUNT(fp.id)                                            AS member_count,
                 COALESCE(
                     p.representative_face_id,
@@ -231,14 +239,18 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                  AND COALESCE(fp.excluded, 0) = 0
             WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
             GROUP BY p.id
-            HAVING COUNT(fp.id) >= $min_faces
+            HAVING $show_small = 1
+               OR COUNT(fp.id) >= $min_faces
+               OR COALESCE(p.is_unknown, 0) = 1
                -- A cluster the user has already named is always shown, however
                -- small: hiding someone's own labelled person would be wrong.
-               OR (p.name IS NOT NULL AND TRIM(p.name) <> '')
-               OR (p.first_name IS NOT NULL AND TRIM(p.first_name) <> '')
+               OR TRIM(COALESCE(p.name, '') || COALESCE(p.title, '') ||
+                       COALESCE(p.first_name, '') || COALESCE(p.middle_name, '') ||
+                       COALESCE(p.last_name, '') || COALESCE(p.suffix, '')) <> ''
             ORDER BY member_count DESC
             """;
         cmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
+        cmd.Parameters.AddWithValue("$show_small", _showSmallClusters() ? 1 : 0);
         cmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
@@ -264,26 +276,23 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 FROM persons p
                 JOIN face_prints fp ON fp.person_id = p.id
                      AND COALESCE(fp.excluded, 0) = 0
-                WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
+                WHERE COALESCE(p.is_unknown, 0) = 0
                 GROUP BY p.id
                 HAVING COUNT(fp.id) < $min_faces
-                   AND (p.name IS NULL OR TRIM(p.name) = '')
-                   AND (p.first_name IS NULL OR TRIM(p.first_name) = '')
+                   AND TRIM(COALESCE(p.name, '') || COALESCE(p.title, '') ||
+                            COALESCE(p.first_name, '') || COALESCE(p.middle_name, '') ||
+                            COALESCE(p.last_name, '') || COALESCE(p.suffix, '')) = ''
             )
             """;
-        hiddenCmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
         hiddenCmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
         var hidden = hiddenCmd.ExecuteScalar();
-        _pendingHiddenCount = hidden is long l ? (int)l : Convert.ToInt32(hidden ?? 0);
-
-        return rows;
+        var hiddenCount = hidden is long l ? (int)l : Convert.ToInt32(hidden ?? 0);
+        return (rows, hiddenCount);
     }
 
-    /// Carried from the DB worker to the UI thread by ApplyOnUi, so
-    /// HiddenSmallClusterCount is only published alongside its own row set.
-    private int _pendingHiddenCount;
-
-    private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
+    private void ApplyOnUi(
+        (List<PersonCluster> Clusters, int HiddenSmallClusterCount) result,
+        long gen)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -291,8 +300,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         void ApplySafely() => DebugLog.SafeRun("PeopleViewModel.ApplyOnUi", () =>
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
-            Replace(rows);
-            HiddenSmallClusterCount = _pendingHiddenCount;
+            Replace(result.Clusters);
+            HiddenSmallClusterCount = result.HiddenSmallClusterCount;
         });
         if (_ui.HasThreadAccess)
         {

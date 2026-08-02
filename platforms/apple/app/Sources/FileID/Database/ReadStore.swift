@@ -59,6 +59,22 @@ public final class ReadStore: @unchecked Sendable {
         AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
     }
 
+    private static let suppressedDisplayTags: Set<String> = [
+        "image", "photo", "picture", "photography", "shot", "view",
+        "object", "item", "background", "foreground", "indoor", "outdoor"
+    ]
+
+    private static let personHasNameSQL = """
+        (
+            (p.name IS NOT NULL AND TRIM(p.name) <> '')
+            OR (p.title IS NOT NULL AND TRIM(p.title) <> '')
+            OR (p.first_name IS NOT NULL AND TRIM(p.first_name) <> '')
+            OR (p.middle_name IS NOT NULL AND TRIM(p.middle_name) <> '')
+            OR (p.last_name IS NOT NULL AND TRIM(p.last_name) <> '')
+            OR (p.suffix IS NOT NULL AND TRIM(p.suffix) <> '')
+        )
+        """
+
     /// Idempotent. Safe to call after engine creates / migrates the DB.
     public func openIfPossible() {
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
@@ -502,7 +518,13 @@ public final class ReadStore: @unchecked Sendable {
     public func tags(forFileID id: Int64) -> [String] {
         guard let q = queue else { return [] }
         return (try? q.read { db in
-            try String.fetchAll(db, sql: "SELECT tag FROM tags WHERE file_id = ? ORDER BY tag", arguments: [id])
+            try String.fetchAll(db, sql: """
+                SELECT TRIM(tag) FROM tags
+                WHERE file_id = ? AND source IN ('auto', 'user', 'vlm')
+                  AND TRIM(tag) <> ''
+                  AND LOWER(TRIM(tag)) NOT IN ('image', 'photo', 'picture', 'photography', 'shot', 'view', 'object', 'item', 'background', 'foreground', 'indoor', 'outdoor')
+                ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, COALESCE(score, 0) DESC, rowid ASC
+                """, arguments: [id])
         }) ?? []
     }
 
@@ -516,27 +538,31 @@ public final class ReadStore: @unchecked Sendable {
         return (try? q.read { db -> [Int64: [String]] in
             let placeholders = ids.map { _ in "?" }.joined(separator: ",")
             let args: [DatabaseValueConvertible] = ids.map { Int($0) }
-            // Window-function ranking to keep only the top `limit` per
-            // file_id. Single round-trip; result post-processed by
-            // grouping in Swift.
             let rows = try Row.fetchAll(db, sql: """
-                SELECT file_id, tag, rowid_rank FROM (
-                    SELECT t.file_id, t.tag,
+                SELECT file_id, tag, rk FROM (
+                    SELECT t.file_id, TRIM(t.tag) AS tag,
                            ROW_NUMBER() OVER (
                                PARTITION BY t.file_id
-                               ORDER BY t.rowid ASC
-                           ) AS rowid_rank
+                               ORDER BY CASE t.source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,
+                                        COALESCE(t.score, 0) DESC,
+                                        t.rowid ASC
+                           ) AS rk
                     FROM tags t
                     WHERE t.file_id IN (\(placeholders))
-                      AND t.source = 'auto'
-                ) WHERE rowid_rank <= ?
+                      AND t.source IN ('auto', 'user', 'vlm')
+                      AND TRIM(t.tag) <> ''
+                      AND LOWER(TRIM(t.tag)) NOT IN ('image', 'photo', 'picture', 'photography', 'shot', 'view', 'object', 'item', 'background', 'foreground', 'indoor', 'outdoor')
+                ) WHERE rk <= ?
+                ORDER BY file_id ASC, rk ASC
                 """, arguments: StatementArguments(args + [limit]))
             var out: [Int64: [String]] = [:]
             out.reserveCapacity(ids.count)
             for r in rows {
                 guard let fid: Int64 = r["file_id"],
                       let tag: String = r["tag"] else { continue }
-                out[fid, default: []].append(tag)
+                if !Self.suppressedDisplayTags.contains(tag.lowercased()) {
+                    out[fid, default: []].append(tag)
+                }
             }
             return out
         }) ?? [:]
@@ -867,9 +893,12 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    public func persons(includeUnknown: Bool = false) -> [PersonRow] {
+    public func persons(includeUnknown: Bool = false, minFaces: Int = 0) -> [PersonRow] {
         guard let q = queue else { return [] }
         let where_ = includeUnknown ? "" : "WHERE IFNULL(p.is_unknown, 0) = 0"
+        let having_ = minFaces > 0
+            ? "HAVING COUNT(fp.id) >= \(minFaces) OR IFNULL(p.is_unknown, 0) = 1 OR \(Self.personHasNameSQL)"
+            : ""
         do {
             return try q.read { db in
                 let rows = try Row.fetchAll(db, sql: """
@@ -883,9 +912,10 @@ public final class ReadStore: @unchecked Sendable {
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
                     LEFT JOIN files ON files.id = f.file_id
-                    LEFT JOIN face_prints fp ON fp.person_id = p.id
+                    LEFT JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
                     \(where_)
                     GROUP BY p.id
+                    \(having_)
                     ORDER BY p.is_unknown ASC, p.file_count DESC, p.id ASC
                     """)
                 return rows.map { r in
@@ -913,6 +943,25 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
+    /// Count of persons with fewer than minFaces faces that are not named —
+    /// for the size floor disclosure banner.
+    public func hiddenSmallClusterCount(minFaces: Int = 13) -> Int {
+        guard let q = queue else { return 0 }
+        return (try? q.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM (
+                    SELECT p.id
+                    FROM persons p
+                    JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
+                    WHERE IFNULL(p.is_unknown, 0) = 0
+                    GROUP BY p.id
+                    HAVING COUNT(fp.id) < \(minFaces)
+                       AND NOT \(Self.personHasNameSQL)
+                )
+                """) ?? 0
+        }) ?? 0
+    }
+
     /// Count of persons currently marked as unknown — for the
     /// "X hidden, show them" footer on the People tab.
     public func hiddenUnknownCount() -> Int {
@@ -932,11 +981,9 @@ public final class ReadStore: @unchecked Sendable {
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM persons
                 WHERE IFNULL(is_unknown, 0) = 0
-                  AND (
-                    (name IS NOT NULL AND name <> '')
-                    OR (first_name IS NOT NULL AND first_name <> '')
-                    OR (last_name  IS NOT NULL AND last_name  <> '')
-                  )
+                  AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                           COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                           COALESCE(last_name, '') || COALESCE(suffix, '')) <> ''
             """) ?? 0
         }) ?? 0
     }
@@ -1350,7 +1397,12 @@ public final class ReadStore: @unchecked Sendable {
     // MARK: - Helpers
 
     private static func toFileRow(_ r: Row) -> FileRow {
-        FileRow(
+        let tagsString: String? = r["auto_tags"]
+        let rawTags = tagsString?.split(separator: "|").map(String.init)
+        let keptTags = rawTags?.filter { !Self.suppressedDisplayTags.contains($0.lowercased()) }
+        let finalTags = (keptTags?.isEmpty == false) ? keptTags : nil
+
+        return FileRow(
             id: r["id"],
             pathText: r["path_text"],
             sizeBytes: r["size_bytes"],
@@ -1369,7 +1421,8 @@ public final class ReadStore: @unchecked Sendable {
             vlmProposedName: r["vlm_proposed_name"],
             vlmModel: r["vlm_model"],
             vlmFullModel: r["vlm_full_model"],
-            vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSince1970: $0) }
+            vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
+            tags: finalTags
         )
     }
 

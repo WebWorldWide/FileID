@@ -170,7 +170,7 @@ try {
     if (Wait-For '"faceClusteringComplete"' 300) { OK "clustering complete" } else { Warn "clustering did not report complete in 5m" }
 
     # --- restructure PLAN (non-destructive) --------------------------
-    Step "Restructure plan (plan only — NOT applied)"
+    Step "Restructure plan (plan only - NOT applied)"
     Send-Cmd @{ id = "plan-1"; payload = @{ planRestructure = @{ libraryRoot = $Corpus } } }
     if (Wait-For '"restructurePlan"' 300) { OK "restructure plan produced" } else { Warn "no restructure plan in 5m" }
 

@@ -6,9 +6,26 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-07-30
+## [0.1.2] - 2026-08-01
 
 ### Fixed
+
+#### 2026-08-01 — People containment, deterministic clustering, and cancellation polish
+
+- **People is reviewable without deleting face evidence.** Windows, macOS, and Linux now keep
+  unnamed groups with fewer than 13 faces out of the primary grid, disclose how many are retained,
+  and provide a Show/Hide control. Named people and explicit Unknown groups always remain visible.
+- **Automatic grouping is safer on family libraries.** Different faces from the same physical photo
+  cannot be auto-grouped as one person, weak centroid outliers are suppressed unless protected by
+  user evidence, and every merge/order decision is deterministic. A candidate anti-correlation
+  splitter was removed after a real 164,518-file catalog proved it increased fragmentation and
+  reduced cohesion.
+- **Cancelling Restructure always ends cleanly.** A cancel during the plan-count or database-query
+  boundary now reports the cancellation terminal the app expects instead of being mislabeled as a
+  database failure and leaving the UI waiting.
+- **Windows maintenance scripts parse on both PowerShell generations.** Removed UTF-8 decoration
+  that Windows PowerShell 5.1 could misread as smart-quote syntax while retaining PowerShell 7.6
+  compatibility.
 
 #### 2026-07-29 — Fewer junk faces, trustworthy Restructure Apply, Deep Analyze folder exclusions
 
