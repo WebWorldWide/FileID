@@ -1,5 +1,35 @@
 # NEXT — resume here
 
+## STATUS 2026-08-02 — No hidden faces; safe reduction floor and release candidate
+
+The final Adlon evidence supports 2,215 active clusters, not a cosmetically smaller hidden grid.
+Every platform shows all active groups. Recovery thresholds `0.75`, `0.70`, and `0.60` produced the
+same partition, while exact-capture and exact-embedding checks found no additional evidence-backed
+merge. Keep `0.75`; further automatic reduction requires a commercially clean stronger embedder and
+an identity-disjoint labelled evaluation across age, pose, blur, lighting, and scanned photographs.
+
+Suggested merges remain per-pair human decisions. Preserve same-file cannot-link suppression,
+excluded-face filtering, different-person verdicts where supported, neutral numeric similarity, and
+the 50-pair bound. Do not restore bulk “likely/all” actions or reintroduce a presentation size floor.
+
+The final read-only Restructure and real Mistral Deep Analyze reports are GREEN at
+`.ralph/adlon-final-quality-20260802i-restructure-audit/summary.json` and
+`.ralph/adlon-final-quality-20260802m-deep-audit/summary.json`. Preserve their cancellation,
+collision, typed-error, persistence, fingerprint, and SQLite-integrity oracles for future changes.
+
+Resume in this order:
+
+1. **Run external platform and hardware gates.** Native macOS runtime/MLX/ANE validation, Windows
+   ARM64 and AMD/Intel/QNN, native distro/Flatpak/AppImage installs, accessibility, and clean-machine
+   install/upgrade/repair/uninstall remain external evidence.
+2. **Keep unsigned release status explicit.** Public-trust Windows signing and Apple Developer ID
+   notarization are not configured. Strict runtime egress still blocks the reviewed GitHub/NVIDIA
+   archive baseline until byte-identical, license-vetted Hugging Face mirrors replace it. Do not
+   weaken either gate; unsigned artifacts remain prereleases.
+3. **Measure before changing performance policy.** Provider availability filtering removes failed
+   startup work and Linux/macOS suggestion memory is bounded. Preserve real-corpus throughput, peak
+   RSS/VRAM, provider-binding, database-integrity, and content-quality evidence for any next change.
+
 ## STATUS 2026-08-01 — Face containment, native parity, and release refresh
 
 The final branch combines the Adlon-driven clustering containment work with macOS parity hardening.

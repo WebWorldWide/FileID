@@ -30,7 +30,6 @@ from typing import Any, Iterable, Iterator
 
 
 QUALITY_FLOOR = 0.25
-PEOPLE_MIN_FACES = 13
 PERSON_DISPLAY_NAME_SQL = (
     "COALESCE(NULLIF(TRIM(p.name),''),"
     "NULLIF(TRIM(COALESCE(p.title,'') || ' ' || "
@@ -1288,34 +1287,6 @@ def collect_face_metrics(
         unknown_persons = int(
             scalar(connection, "SELECT COUNT(*) FROM persons WHERE is_unknown=1")
         )
-        visible_candidate_persons = int(
-            scalar(
-                connection,
-                "SELECT COUNT(*) FROM ("
-                "SELECT p.id FROM persons p "
-                "JOIN face_prints fp ON fp.person_id=p.id "
-                "AND COALESCE(fp.excluded,0)=0 "
-                "WHERE COALESCE(p.is_unknown,0)=0 GROUP BY p.id "
-                "HAVING COUNT(fp.id)>=? OR "
-                f"{PERSON_DISPLAY_NAME_SQL}<>''"
-                ")",
-                (PEOPLE_MIN_FACES,),
-            )
-        )
-        hidden_small_candidate_persons = int(
-            scalar(
-                connection,
-                "SELECT COUNT(*) FROM ("
-                "SELECT p.id FROM persons p "
-                "JOIN face_prints fp ON fp.person_id=p.id "
-                "AND COALESCE(fp.excluded,0)=0 "
-                "WHERE COALESCE(p.is_unknown,0)=0 GROUP BY p.id "
-                "HAVING COUNT(fp.id)<? AND "
-                f"{PERSON_DISPLAY_NAME_SQL}=''"
-                ")",
-                (PEOPLE_MIN_FACES,),
-            )
-        )
         size_rows = connection.execute(
             "SELECT p.id, COUNT(f.id) AS faces "
             "FROM persons p LEFT JOIN face_prints f ON f.person_id=p.id "
@@ -1509,8 +1480,6 @@ def collect_face_metrics(
         "clusterInputFaces": cluster_input_faces,
         "unmatchedClusterInput": unmatched_cluster_input,
         "persons": persons,
-        "visibleCandidatePersons": visible_candidate_persons,
-        "hiddenSmallCandidatePersons": hidden_small_candidate_persons,
         "namedPersons": named_persons,
         "unknownPersons": unknown_persons,
         "personsAtMost12": tiny,
@@ -2747,7 +2716,9 @@ def merge_suggestion_db_oracle(
             "FROM persons p "
             "JOIN face_prints rep ON rep.id=p.representative_face_id "
             "AND rep.arcface_embedding IS NOT NULL "
+            "AND COALESCE(rep.excluded,0)=0 "
             "JOIN face_prints member ON member.person_id=p.id "
+            "AND COALESCE(member.excluded,0)=0 "
             "WHERE COALESCE(p.is_unknown,0)=0 GROUP BY p.id ORDER BY p.id"
         ).fetchall()
         people: dict[int, dict[str, Any]] = {}
@@ -2773,6 +2744,15 @@ def merge_suggestion_db_oracle(
             "FROM face_verifications WHERE same_person=0 "
             "ORDER BY person_a,person_b"
         ).fetchall()
+        files_by_person: dict[int, set[int]] = collections.defaultdict(set)
+        for membership in connection.execute(
+            "SELECT person_id,file_id FROM face_prints "
+            "WHERE person_id IS NOT NULL AND COALESCE(excluded,0)=0 "
+            "ORDER BY person_id,file_id"
+        ):
+            files_by_person[int(membership["person_id"])].add(
+                int(membership["file_id"])
+            )
 
         def resolve_face(
             legacy_id: Any, file_id: Any, bbox: Any
@@ -2850,6 +2830,7 @@ def merge_suggestion_db_oracle(
     comparisons = 0
     named_conflicts = 0
     verdict_suppressed = 0
+    same_file_suppressed = 0
     dimension_mismatches = 0
     for person_a, person_b in comparison_pairs:
         comparisons += 1
@@ -2866,6 +2847,15 @@ def merge_suggestion_db_oracle(
         if not 0.55 <= similarity < 0.97:
             continue
         person_pair = pair_key(person_a, person_b)
+        left_files = files_by_person.get(person_a)
+        right_files = files_by_person.get(person_b)
+        if (
+            left_files is None
+            or right_files is None
+            or not left_files.isdisjoint(right_files)
+        ):
+            same_file_suppressed += 1
+            continue
         if merge_oracle_identities_conflict(
             left["identity"], right["identity"]
         ):
@@ -2917,6 +2907,7 @@ def merge_suggestion_db_oracle(
         "eligibleCountIsLowerBound": not exact,
         "namedConflictCount": named_conflicts,
         "verdictSuppressedCount": verdict_suppressed,
+        "sameFileSuppressedCount": same_file_suppressed,
         "differentPersonVerdictCount": len(verdict_rows),
         "resolvedDifferentPersonVerdictCount": resolved_verdicts,
         "dimensionMismatchCount": dimension_mismatches,
@@ -2998,6 +2989,7 @@ def validate_merge_suggestions(
                 "SELECT p.id,p.name,p.title,p.first_name,p.middle_name,"
                 "p.last_name,p.suffix,COUNT(f.id) AS members "
                 "FROM persons p LEFT JOIN face_prints f ON f.person_id=p.id "
+                "AND COALESCE(f.excluded,0)=0 "
                 "GROUP BY p.id"
             )
         }
@@ -3007,12 +2999,19 @@ def validate_merge_suggestions(
             )
             for row in connection.execute("SELECT id,person_id FROM face_prints")
         }
+        files_by_person: dict[int, set[int]] = collections.defaultdict(set)
+        for row in connection.execute(
+            "SELECT person_id,file_id FROM face_prints "
+            "WHERE person_id IS NOT NULL AND COALESCE(excluded,0)=0"
+        ):
+            files_by_person[int(row["person_id"])].add(int(row["file_id"]))
     malformed: list[int] = []
     missing_people: list[int] = []
     bad_anchors: list[int] = []
     bad_member_counts: list[int] = []
     self_pairs: list[int] = []
     named_conflicts: list[int] = []
+    cooccurring_pairs: list[int] = []
     duplicate_pairs: list[int] = []
     non_finite_or_out_of_range: list[int] = []
     seen: set[tuple[int, int]] = set()
@@ -3057,6 +3056,14 @@ def validate_merge_suggestions(
             people[source]["identity"], people[destination]["identity"]
         ):
             named_conflicts.append(index)
+        source_files = files_by_person.get(source)
+        destination_files = files_by_person.get(destination)
+        if (
+            source_files is None
+            or destination_files is None
+            or not source_files.isdisjoint(destination_files)
+        ):
+            cooccurring_pairs.append(index)
     oracle = merge_suggestion_db_oracle(db_path, pairs)
     thresholds = (0.45, 0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.88)
     return {
@@ -3078,6 +3085,7 @@ def validate_merge_suggestions(
             "anchorsBelongToPeople": not bad_anchors,
             "memberCountsMatchDB": not bad_member_counts,
             "noConflictingNamedPair": not named_conflicts,
+            "noSameFilePair": not cooccurring_pairs,
             "boundedResult": len(pairs) <= 50,
             "independentDBOracleEligibleWitnessSurfaced": oracle["checks"][
                 "eligibleOracleWitnessSurfaced"
@@ -3092,6 +3100,7 @@ def validate_merge_suggestions(
             "badAnchorIndexes": bad_anchors[:50],
             "badMemberCountIndexes": bad_member_counts[:50],
             "namedConflictIndexes": named_conflicts[:50],
+            "cooccurringPairIndexes": cooccurring_pairs[:50],
         },
     }
 
@@ -4414,13 +4423,36 @@ DEEP_SELECTION_TARGETS = (
 )
 
 
-def required_deep_labels(model_kind: str, limit: int) -> tuple[str, ...]:
+def required_deep_labels(
+    model_kind: str, limit: int, available_labels: tuple[str, ...]
+) -> tuple[str, ...]:
     canonical_model = VLM_CANONICAL_IDS.get(model_kind)
     if canonical_model not in VLM_ALIASES or limit <= 0:
         return ()
     return tuple(
-        label for label, _kind, _extra in DEEP_SELECTION_TARGETS[:limit]
-    )
+        label
+        for label, _kind, _extra in DEEP_SELECTION_TARGETS
+        if label in available_labels
+    )[:limit]
+
+
+def available_deep_labels(
+    db_path: Path, corpus_files: set[str]
+) -> tuple[str, ...]:
+    available: list[str] = []
+    with connect_readonly(db_path) as connection:
+        for label, kind, extra in DEEP_SELECTION_TARGETS:
+            rows = connection.execute(
+                f"SELECT path_text FROM files WHERE failed=0 "
+                f"AND vlm_model IS NULL AND vlm_full_model IS NULL "
+                f"AND vlm_description IS NULL AND vlm_proposed_name IS NULL "
+                f"AND vlm_analyzed_at IS NULL AND size_bytes>0 "
+                f"AND kind=? AND {extra} ORDER BY id",
+                (kind,),
+            )
+            if any(normalized(row["path_text"]) in corpus_files for row in rows):
+                available.append(label)
+    return tuple(available)
 
 
 def deep_selection_label(item: dict[str, Any]) -> str | None:
@@ -4868,6 +4900,7 @@ def deep_event_metrics(
     command_elapsed: float,
     model_kind: str,
     configured_limit: int,
+    required_labels: tuple[str, ...],
 ) -> dict[str, Any]:
     kinds = [event_kind(item.value) for item in events]
     starting = [
@@ -4895,7 +4928,6 @@ def deep_event_metrics(
     done_ids = [int(item.get("fileID", -1)) for item in done]
     selected_paths = {normalized(str(item["path"])) for item in selected}
     selected_labels = [str(item.get("label") or "") for item in selected]
-    required_labels = required_deep_labels(model_kind, configured_limit)
     canonical_model = VLM_CANONICAL_IDS.get(model_kind)
     complete_event = next(
         (
@@ -5581,9 +5613,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-deep-analyze", action="store_true")
     parser.add_argument("--fingerprint-samples", type=int, default=1_000)
     parser.add_argument("--max-sample-bytes", type=int, default=8 * 1024 * 1024)
-    parser.add_argument("--face-max-persons", type=int, default=1_100)
+    parser.add_argument("--face-max-persons", type=int, default=2_300)
     parser.add_argument(
-        "--face-max-persons-per-1000-eligible", type=float, default=8.0
+        "--face-max-persons-per-1000-eligible", type=float, default=12.0
     )
     parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.80)
     parser.add_argument("--face-max-largest-cluster-share", type=float, default=0.35)
@@ -6153,7 +6185,7 @@ def run_validation() -> int:
             final_face = face_runs[-1]["metrics"]
             final_face_event = face_runs[-1]["event"]
             persons_per_1000_eligible = (
-                final_face["visibleCandidatePersons"]
+                final_face["persons"]
                 * 1000
                 / final_face["qualityEligible"]
                 if final_face["qualityEligible"]
@@ -6221,15 +6253,13 @@ def run_validation() -> int:
             observed_fragment_risk = centroid_fragment_risk(observed_pair_counts)
             summary["faces"]["acceptance"] = {
                 "maxPersons": args.face_max_persons,
-                "absoluteCeilingKind": "temporary non-regression guard",
+                "absoluteCeilingKind": "raw-cluster non-regression guard",
                 "absoluteCeilingRationale": {
-                    "modeledSurvivors": 1_077,
-                    "distinctCaptureIdentities": 845,
-                    "qualityOrProtectedLowCaptureCards": 232,
                     "reason": (
-                        "A 999-person hard gate would require hiding or merging "
-                        "evidence-backed identities; density, tiny-cluster, "
-                        "manual-verdict, and partition checks remain blocking."
+                        "The full People grid is measured without a size floor. "
+                        "The 2,300 ceiling bounds the 2,224-group Adlon baseline "
+                        "while cohesion, collision, and partition checks prevent "
+                        "unsafe reductions."
                     ),
                 },
                 "maxPersonsPer1000Eligible": (
@@ -6256,11 +6286,7 @@ def run_validation() -> int:
                     "p05Median": median_p05_floor,
                     "clusterMedianMinimum": cluster_median_floor,
                 },
-                "observedPersons": final_face["visibleCandidatePersons"],
-                "observedRawPersons": final_face["persons"],
-                "observedHiddenSmallCandidatePersons": final_face[
-                    "hiddenSmallCandidatePersons"
-                ],
+                "observedPersons": final_face["persons"],
                 "observedUnknownBuckets": final_face["unknownPersons"],
                 "observedPersonsPer1000Eligible": persons_per_1000_eligible,
                 "observedLargestClusterSize": final_face["maximumClusterSize"],
@@ -6277,7 +6303,7 @@ def run_validation() -> int:
                 },
                 "legacy999Diagnostic": {
                     "ceiling": 999,
-                    "wouldPass": final_face["visibleCandidatePersons"] <= 999,
+                    "wouldPass": final_face["persons"] <= 999,
                     "blocking": False,
                 },
             }
@@ -6294,7 +6320,7 @@ def run_validation() -> int:
                 <= baseline_face["persons"],
                 "personReductionBounded": final_face["persons"]
                 >= minimum_person_count,
-                "absolutePersonCeiling": final_face["visibleCandidatePersons"]
+                "absolutePersonCeiling": final_face["persons"]
                 <= args.face_max_persons,
                 "personRatioCeiling": persons_per_1000_eligible
                 <= args.face_max_persons_per_1000_eligible,
@@ -6528,6 +6554,11 @@ def run_validation() -> int:
         }
 
         if not args.skip_deep_analyze and args.deep_limit:
+            required_deep_selection = required_deep_labels(
+                args.model_kind,
+                args.deep_limit,
+                available_deep_labels(db_path, corpus_files),
+            )
             selected = select_deep_files(db_path, corpus_files, args.deep_limit)
             if len(selected) != args.deep_limit:
                 raise RuntimeError(
@@ -6573,6 +6604,7 @@ def run_validation() -> int:
                 deep_command_elapsed,
                 args.model_kind,
                 args.deep_limit,
+                required_deep_selection,
             )
             deep_metrics["wallSeconds"] = time.monotonic() - deep_started
             deep_metrics["selected"] = selected

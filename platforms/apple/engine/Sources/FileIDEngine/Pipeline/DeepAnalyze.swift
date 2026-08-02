@@ -572,7 +572,7 @@ public actor DeepAnalyze {
         Given an image, reply with EXACTLY two sections:
 
         DESCRIPTION: A 1-2 sentence natural description in plain English. Mention people by name if known.
-        FILENAME: A short human-readable filename (no extension). Lowercase words separated by underscores. 4-9 words. Avoid generic terms like "image" or "photo". Examples: "mom_playing_piano_living_room", "adam_at_grand_canyon_2019", "wedding_first_dance_venue".
+        FILENAME: A short human-readable filename (no extension). Lowercase words separated by underscores. 4-9 words. Avoid generic terms like "image" or "photo". For a form, receipt, or repeated document type, include a visible date, name, or reference that distinguishes this file from similar copies. Examples: "mom_playing_piano_living_room", "adam_at_grand_canyon_2019", "wedding_first_dance_venue".
 
         Do NOT speculate about identities of people not listed.\(nameContext)
         """
@@ -697,7 +697,7 @@ public actor DeepAnalyze {
     /// whitespace becomes `-`, runs of `-` collapse, and an empty/over-trimmed
     /// result falls back to the literal "untitled" (never nil) so the column
     /// round-trips identically across platforms.
-    private static func sanitize(filename raw: String) -> String? {
+    static func sanitize(filename raw: String) -> String? {
         // 1. Trim, then strip surrounding quotes, then trim again — mirrors
         //    raw.trim().trim_matches('"').trim_matches('\'').trim().
         let trimmed = raw

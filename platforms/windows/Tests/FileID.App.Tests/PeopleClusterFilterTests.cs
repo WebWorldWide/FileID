@@ -4,9 +4,8 @@ using Xunit;
 
 namespace FileID.App.Tests;
 
-/// Pins the People-grid size floor. The grid holds the low-evidence review tail
-/// back by default, but must never hide a named cluster and must provide an
-/// explicit way to reveal small groups.
+/// Pins the People-grid presentation contract: every active face cluster is
+/// visible regardless of size, while the explicit Unknown filter still applies.
 public class PeopleClusterFilterTests
 {
     private const string Schema = """
@@ -37,12 +36,6 @@ public class PeopleClusterFilterTests
              AND COALESCE(fp.excluded, 0) = 0
         WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
         GROUP BY p.id
-        HAVING $show_small = 1
-           OR COUNT(fp.id) >= $min_faces
-           OR COALESCE(p.is_unknown, 0) = 1
-           OR TRIM(COALESCE(p.name, '') || COALESCE(p.title, '') ||
-                   COALESCE(p.first_name, '') || COALESCE(p.middle_name, '') ||
-                   COALESCE(p.last_name, '') || COALESCE(p.suffix, '')) <> ''
         ORDER BY member_count DESC
         """;
 
@@ -78,14 +71,11 @@ public class PeopleClusterFilterTests
 
     private static List<long> Visible(
         SqliteConnection c,
-        bool hideUnknown,
-        bool showSmall = false)
+        bool hideUnknown)
     {
         using var cmd = c.CreateCommand();
         cmd.CommandText = VisibleSql;
         cmd.Parameters.AddWithValue("$hide_unknown", hideUnknown ? 1 : 0);
-        cmd.Parameters.AddWithValue("$show_small", showSmall ? 1 : 0);
-        cmd.Parameters.AddWithValue("$min_faces", PeopleViewModel.MinFacesPerCluster);
         var ids = new List<long>();
         using var r = cmd.ExecuteReader();
         while (r.Read()) ids.Add(r.GetInt64(0));
@@ -93,23 +83,21 @@ public class PeopleClusterFilterTests
     }
 
     [Fact]
-    public void SmallUnnamedClustersAreHidden_ButNamedOnesAlwaysSurvive()
+    public void SmallUnnamedClustersAreVisible()
     {
         using var c = Seed();
         var visible = Visible(c, hideUnknown: false);
 
-        Assert.Contains(1L, visible);                    // 15 faces, over the floor
-        Assert.Contains(3L, visible);                    // only 2 faces, but named
-        Assert.DoesNotContain(2L, visible);              // 2 faces, unnamed
+        Assert.Contains(1L, visible);
+        Assert.Contains(2L, visible);
+        Assert.Contains(3L, visible);
     }
 
     [Fact]
-    public void ExcludedFacesDoNotCountTowardTheFloor()
+    public void PeopleWithOnlyExcludedFacesAreNotVisible()
     {
         using var c = Seed();
-        // Person 5 has 8 face rows, but all are excluded=0-filtered out, so it is
-        // below the floor and must not appear — otherwise the grid fills with
-        // clusters whose faces the clusterer itself rejected.
+        // Person 5 has only excluded faces, so it has no active cluster card.
         Assert.DoesNotContain(5L, Visible(c, hideUnknown: false));
     }
 
@@ -121,19 +109,4 @@ public class PeopleClusterFilterTests
         Assert.DoesNotContain(4L, Visible(c, hideUnknown: true));
     }
 
-    [Fact]
-    public void SmallUnnamedClustersCanBeRevealed()
-    {
-        using var c = Seed();
-        Assert.Contains(2L, Visible(c, hideUnknown: false, showSmall: true));
-    }
-
-    [Fact]
-    public void FloorIsAboveTheMeasuredFragmentBand()
-    {
-        // 2,271 of 3,108 real clusters held <=5 faces. A floor of <=5 would leave
-        // essentially all of them on screen and not solve anything.
-        Assert.True(PeopleViewModel.MinFacesPerCluster >= 13,
-            "the floor must exclude the <=12-face review tail from the primary grid");
-    }
 }

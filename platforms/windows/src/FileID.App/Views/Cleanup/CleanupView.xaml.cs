@@ -293,7 +293,12 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             if (!string.IsNullOrEmpty(ViewModel.ErrorMessage)) return ViewModel.ErrorMessage!;
             if (ViewModel.IsLoading) return "Scanning for duplicates…";
-            if (ViewModel.Groups.Count == 0) return "No duplicates found yet — run a scan first.";
+            if (ViewModel.Groups.Count == 0)
+            {
+                return IsSimilarMode
+                    ? "No visually similar images to review. Scan again after adding files."
+                    : "No exact duplicates to review. Scan again after adding files.";
+            }
             return $"{ViewModel.Groups.Count} duplicate groups";
         }
     }

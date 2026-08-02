@@ -11,10 +11,8 @@
 //     `markPersonsAsUnknown` on close,
 //   * "Merge people" (checkbox mode → target picker → `mergeClusters`),
 //   * "Mark unknown" (checkbox mode → `markPersonsAsUnknown`), and
-//   * "Suggest merges" — borderline centroid pairs computed client-side from
-//     `face_prints.arcface_embedding` (cosine band 0.45–0.65), exactly
-//     mirroring macOS `ClusterSuggestions`, presented in a sheet whose Merge
-//     buttons fan out `mergeClusters`.
+//   * "Suggest merges" — the shared engine's corroborated candidate pairs,
+//     presented in a sheet whose Merge buttons fan out `mergeClusters`.
 //
 // Live-scan behaviour mirrors `library.rs`: the tab subscribes to engine events
 // and throttle-reloads as face detection lands during a scan, then reloads on
@@ -39,16 +37,6 @@ const CARD_THUMB_PX: i32 = 256;
 const PHOTO_THUMB_PX: i32 = 240;
 const PERSON_FILE_LIMIT: i64 = 500;
 const PERSON_THUMB_CACHE_CAP: usize = 256;
-const MIN_FACES_PER_CLUSTER: i64 = 13;
-
-// Cosine-similarity band the clusterer treats as "borderline" (might be the
-// same person; might not) — identical to macOS `ClusterSuggestions`.
-const BORDERLINE_MIN: f32 = 0.45;
-const BORDERLINE_MAX: f32 = 0.65;
-const VERY_LIKELY: f32 = 0.55;
-const SUGGESTION_FACE_ROW_CAP: usize = 100_000;
-const SUGGESTION_PERSON_CAP: usize = 2_000;
-const SUGGESTION_RESULT_CAP: usize = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -207,6 +195,7 @@ where
 struct PendingSuggestion {
     row: glib::WeakRef<gtk::Box>,
     button: glib::WeakRef<gtk::Button>,
+    dialog: glib::WeakRef<adw::Dialog>,
 }
 
 #[derive(Debug, Default)]
@@ -365,9 +354,7 @@ struct Ui {
     person_actions: PersonActionGate,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
-    hidden_small: Cell<i64>,
     show_hidden: Cell<bool>,
-    show_small: Cell<bool>,
     mode: Cell<Mode>,
     merge_checked: RefCell<HashSet<i64>>,
     unknown_checked: RefCell<HashSet<i64>>,
@@ -393,9 +380,6 @@ struct Ui {
     footer: gtk::Box,
     footer_label: gtk::Label,
     footer_button: gtk::Button,
-    small_footer: gtk::Box,
-    small_footer_label: gtk::Label,
-    small_footer_button: gtk::Button,
     anchor: gtk::Box,
 }
 
@@ -529,26 +513,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     footer.append(&footer_spacer);
     footer.append(&footer_button);
 
-    let small_footer_label = gtk::Label::builder()
-        .label("")
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .build();
-    let small_footer_spacer = gtk::Box::builder().hexpand(true).build();
-    let small_footer_button = gtk::Button::builder()
-        .label("Show")
-        .css_classes(["flat"])
-        .tooltip_text("Show or hide small unnamed face groups")
-        .build();
-    let small_footer = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .visible(false)
-        .build();
-    small_footer.append(&small_footer_label);
-    small_footer.append(&small_footer_spacer);
-    small_footer.append(&small_footer_button);
-
     // ── Root ─────────────────────────────────────────────────────────────────
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -564,7 +528,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     root.append(&empty_page);
     root.append(&no_clusters_page);
     root.append(&footer);
-    root.append(&small_footer);
 
     let engine_ready = engine.borrow().is_ready();
     let ui = Rc::new(Ui {
@@ -577,9 +540,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         person_actions: PersonActionGate::default(),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
-        hidden_small: Cell::new(0),
         show_hidden: Cell::new(false),
-        show_small: Cell::new(false),
         mode: Cell::new(Mode::Normal),
         merge_checked: RefCell::new(HashSet::new()),
         unknown_checked: RefCell::new(HashSet::new()),
@@ -601,9 +562,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         footer: footer.clone(),
         footer_label: footer_label.clone(),
         footer_button: footer_button.clone(),
-        small_footer: small_footer.clone(),
-        small_footer_label: small_footer_label.clone(),
-        small_footer_button: small_footer_button.clone(),
         anchor: root.clone(),
     });
 
@@ -622,14 +580,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             reload(&ui);
         });
     }
-    {
-        let ui = ui.clone();
-        small_footer_button.connect_clicked(move |_| {
-            ui.show_small.set(!ui.show_small.get());
-            reload(&ui);
-        });
-    }
-
     // Live-scan reloads (faces land during the scan): throttle on batches, final
     // on completion — same coalescing as `library.rs`.
     let ev_rx = ui.engine.borrow_mut().subscribe();
@@ -701,6 +651,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                 if let Some(row) = pending.row.upgrade() {
                                     row.set_visible(false);
                                 }
+                                if let Some(dialog) = pending.dialog.upgrade() {
+                                    dialog.close();
+                                }
+                                ui.suggestions.borrow_mut().clear();
                                 set_status(&ui, "Merge complete.".to_string());
                                 schedule_reload_burst(&ui);
                             } else {
@@ -797,25 +751,6 @@ fn refresh_view(ui: &Rc<Ui>) {
         } else {
             ui.footer_label.set_text(&format!("{n} hidden as unknown"));
             ui.footer_button.set_label("Show them");
-        }
-    }
-
-    let show_small_footer = ui.hidden_small.get() > 0;
-    ui.small_footer.set_visible(show_small_footer);
-    if show_small_footer {
-        let n = ui.hidden_small.get();
-        if ui.show_small.get() {
-            ui.small_footer_label.set_text(&format!(
-                "Showing {n} small face group{} with fewer than {MIN_FACES_PER_CLUSTER} faces each",
-                plural(n)
-            ));
-            ui.small_footer_button.set_label("Hide");
-        } else {
-            ui.small_footer_label.set_text(&format!(
-                "{n} small face group{} hidden from the primary grid (fewer than {MIN_FACES_PER_CLUSTER} faces each)",
-                plural(n)
-            ));
-            ui.small_footer_button.set_label("Show");
         }
     }
 
@@ -1194,24 +1129,10 @@ fn reload(ui: &Rc<Ui>) {
         ui.hidden_unknown.set(hidden);
 
         let show_hidden = ui.show_hidden.get();
-        let eligible: Vec<PersonRow> = with_faces
+        let visible: Vec<PersonRow> = with_faces
             .iter()
             .filter(|p| !p.is_unknown || show_hidden)
             .cloned()
-            .collect();
-        let hidden_small = eligible
-            .iter()
-            .filter(|p| !p.is_unknown && p.face_count < MIN_FACES_PER_CLUSTER && !p.has_any_name())
-            .count() as i64;
-        ui.hidden_small.set(hidden_small);
-        let visible: Vec<PersonRow> = eligible
-            .into_iter()
-            .filter(|p| {
-                p.is_unknown
-                    || ui.show_small.get()
-                    || p.face_count >= MIN_FACES_PER_CLUSTER
-                    || p.has_any_name()
-            })
             .collect();
         let mut map = HashMap::with_capacity(visible.len());
         for p in &visible {
@@ -1755,11 +1676,32 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
 fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
     btn.set_sensitive(false);
     btn.set_label("Scanning…");
-    let rx = read_candidates_async();
+    let rx = ui.engine.borrow_mut().subscribe();
+    if !send_cmd(ui, CommandPayload::FindMergeSuggestions(Empty {})) {
+        btn.set_sensitive(true);
+        btn.set_label("Suggest merges");
+        return;
+    }
     let ui = ui.clone();
     let btn = btn.clone();
     glib::MainContext::default().spawn_local(async move {
-        let cands = rx.recv().await.unwrap_or_default();
+        let cands = loop {
+            match rx.recv().await {
+                Ok(EngineEvent::MergeSuggestions(result)) => {
+                    break result
+                        .pairs
+                        .into_iter()
+                        .map(|pair| Candidate {
+                            a: pair.source_person_id,
+                            b: pair.destination_person_id,
+                            sim: pair.similarity,
+                        })
+                        .collect();
+                }
+                Ok(EngineEvent::Exited) | Err(_) => break Vec::new(),
+                _ => {}
+            }
+        };
         btn.set_sensitive(true);
         btn.set_label("Suggest merges");
         // Don't preempt whatever the user navigated to while the scan ran.
@@ -1799,7 +1741,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
 
     let sub = gtk::Label::builder()
         .label(format!(
-            "{} cluster pair{} look like they might be the same person.",
+            "{} cluster pair{} are similar enough to review. Compare each pair before merging.",
             displayable.len(),
             plural(displayable.len() as i64)
         ))
@@ -1809,69 +1751,13 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
         .build();
     body.append(&sub);
 
-    let very_count = displayable.iter().filter(|c| c.sim >= VERY_LIKELY).count();
-    let btn_row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    let merge_very = gtk::Button::builder()
-        .label(format!("Merge {very_count} very-likely"))
-        .css_classes(["gold-button"])
-        .sensitive(very_count > 0)
-        .build();
-    let merge_all = gtk::Button::with_label(&format!("Merge all {}", displayable.len()));
-    merge_all.set_sensitive(!displayable.is_empty());
-    btn_row.append(&merge_very);
-    btn_row.append(&merge_all);
-    body.append(&btn_row);
-
-    {
-        let ui2 = ui.clone();
-        let disp = displayable.clone();
-        let dialog2 = dialog.clone();
-        merge_very.connect_clicked(move |_| {
-            let very: Vec<Candidate> = disp
-                .iter()
-                .copied()
-                .filter(|c| c.sim >= VERY_LIKELY)
-                .collect();
-            let (sent, total) = run_batch_merges(&ui2, &very);
-            if sent > 0 {
-                let status = if sent == total {
-                    format!("Merging {sent} very-likely pairs…")
-                } else {
-                    format!("Sent {sent} of {total} merges; waiting for engine results.")
-                };
-                set_status(&ui2, status);
-                dialog2.close();
-            }
-        });
-    }
-    {
-        let ui2 = ui.clone();
-        let disp = displayable.clone();
-        let dialog2 = dialog.clone();
-        merge_all.connect_clicked(move |_| {
-            let (sent, total) = run_batch_merges(&ui2, &disp);
-            if sent > 0 {
-                let status = if sent == total {
-                    format!("Merging {sent} pairs…")
-                } else {
-                    format!("Sent {sent} of {total} merges; waiting for engine results.")
-                };
-                set_status(&ui2, status);
-                dialog2.close();
-            }
-        });
-    }
-
     let listbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .build();
     if displayable.is_empty() {
         let none = gtk::Label::builder()
-            .label("No borderline pairs found — every cluster is reliably the same or different.")
+            .label("No merge-review candidates found.")
             .wrap(true)
             .xalign(0.0)
             .css_classes(["dim-label"])
@@ -1889,6 +1775,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
             let ui2 = ui.clone();
             let row_weak = row.downgrade();
             let button_weak = merge_btn.downgrade();
+            let dialog_weak = dialog.downgrade();
             merge_btn.connect_clicked(move |button| {
                 if ui2.merge_results_pending.get() > 0 {
                     set_status(&ui2, "Wait for the current merge to finish.".to_string());
@@ -1909,6 +1796,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                         .push_back(PendingSuggestion {
                             row: row_weak.clone(),
                             button: button_weak.clone(),
+                            dialog: dialog_weak.clone(),
                         });
                     set_status(&ui2, "Merging…".to_string());
                 }
@@ -2014,76 +1902,7 @@ fn preferred<'a>(a: &'a PersonRow, b: &'a PersonRow) -> (&'a PersonRow, &'a Pers
     }
 }
 
-fn run_batch_merges(ui: &Rc<Ui>, cands: &[Candidate]) -> (usize, usize) {
-    if ui.merge_results_pending.get() > 0 {
-        set_status(ui, "Wait for the current merge to finish.".to_string());
-        return (0, cands.len());
-    }
-    let plan = {
-        let map = ui.person_by_id.borrow();
-        plan_batch_merges(cands, &map)
-    };
-    let total = plan.len();
-    let sent = plan
-        .into_iter()
-        .take_while(|(source, destination)| {
-            send_cmd(
-                ui,
-                CommandPayload::MergeClusters(MergeClustersPayload {
-                    source_person_id: *source,
-                    destination_person_id: *destination,
-                }),
-            )
-        })
-        .count();
-    ui.merge_results_pending.set(sent);
-    (sent, total)
-}
-
-/// Union-find over candidate pairs so chained suggestions (A↔B, B↔C) collapse
-/// to a single root and we never emit a merge whose source was already
-/// absorbed — mirrors macOS `mergePersonsBatch`. Returns `(source, dest)` pairs.
-fn plan_batch_merges(cands: &[Candidate], by_id: &HashMap<i64, PersonRow>) -> Vec<(i64, i64)> {
-    let mut parent: HashMap<i64, i64> = HashMap::new();
-    let mut merges = Vec::new();
-    for c in cands {
-        if !by_id.contains_key(&c.a) || !by_id.contains_key(&c.b) {
-            continue;
-        }
-        parent.entry(c.a).or_insert(c.a);
-        parent.entry(c.b).or_insert(c.b);
-        let ra = uf_find(&mut parent, c.a);
-        let rb = uf_find(&mut parent, c.b);
-        if ra == rb {
-            continue;
-        }
-        let (target, source) = preferred(&by_id[&ra], &by_id[&rb]);
-        parent.insert(source.id, target.id);
-        merges.push((source.id, target.id));
-    }
-    merges
-}
-
-fn uf_find(parent: &mut HashMap<i64, i64>, x: i64) -> i64 {
-    let mut root = x;
-    while let Some(&p) = parent.get(&root) {
-        if p == root {
-            break;
-        }
-        root = p;
-    }
-    let mut cur = x;
-    while let Some(&p) = parent.get(&cur) {
-        if p == root {
-            break;
-        }
-        parent.insert(cur, root);
-        cur = p;
-    }
-    root
-}
-
-// ── DB reads (mirror of macOS/Windows ReadStore + ClusterSuggestions) ─────────
+// ── DB reads (mirror of macOS/Windows ReadStore) ──────────────────────────────
 
 fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     let (tx, rx) = async_channel::bounded::<Snapshot>(1);
@@ -2095,15 +1914,6 @@ fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
             Snapshot::default()
         });
         let _ = tx.send_blocking(snap);
-    });
-    rx
-}
-
-fn read_candidates_async() -> async_channel::Receiver<Vec<Candidate>> {
-    let (tx, rx) = async_channel::bounded::<Vec<Candidate>>(1);
-    std::thread::spawn(move || {
-        let cands = read_candidates().unwrap_or_default();
-        let _ = tx.send_blocking(cands);
     });
     rx
 }
@@ -2212,99 +2022,6 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<(i64, String)>> {
     Ok(rows)
 }
 
-fn read_candidates() -> anyhow::Result<Vec<Candidate>> {
-    let Ok(db_path) = fileid_engine::paths::db_path() else {
-        return Ok(Vec::new());
-    };
-    if !db_path.exists() {
-        return Ok(Vec::new());
-    }
-    let conn = fileid_engine::db::open_read(&db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT person_id, arcface_embedding FROM face_prints \
-         WHERE person_id IS NOT NULL AND LENGTH(arcface_embedding) > 0 \
-         ORDER BY person_id LIMIT ?1",
-    )?;
-    let rows = stmt
-        .query_map(rusqlite::params![SUGGESTION_FACE_ROW_CAP as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<(i64, Vec<u8>)>>>()?;
-    Ok(compute_candidates(rows))
-}
-
-/// Per-cluster centroid cosine over ArcFace/SFace embeddings, keeping pairs in
-/// the borderline band [0.45, 0.65]. A direct port of macOS `ClusterSuggestions`.
-fn compute_candidates(rows: Vec<(i64, Vec<u8>)>) -> Vec<Candidate> {
-    let mut dimension = None;
-    let mut by_person: HashMap<i64, Vec<f32>> = HashMap::new();
-    for (person_id, bytes) in rows.into_iter().take(SUGGESTION_FACE_ROW_CAP) {
-        let embedding = blob_to_f32(&bytes);
-        if embedding.is_empty() {
-            continue;
-        }
-        let dim = *dimension.get_or_insert(embedding.len());
-        if embedding.len() != dim {
-            continue;
-        }
-        if let Some(sum) = by_person.get_mut(&person_id) {
-            for (total, value) in sum.iter_mut().zip(embedding) {
-                *total += value;
-            }
-        } else if by_person.len() < SUGGESTION_PERSON_CAP {
-            by_person.insert(person_id, embedding);
-        }
-    }
-    if dimension.is_none() {
-        return Vec::new();
-    }
-    if by_person.len() < 2 {
-        return Vec::new();
-    }
-
-    let mut centroids: Vec<(i64, Vec<f32>)> = Vec::with_capacity(by_person.len());
-    for (pid, mut sum) in by_person {
-        let mut norm = 0f32;
-        for x in &sum {
-            norm += x * x;
-        }
-        let inv = 1.0 / norm.sqrt().max(f32::MIN_POSITIVE);
-        for x in sum.iter_mut() {
-            *x *= inv;
-        }
-        centroids.push((pid, sum));
-    }
-
-    let mut pairs = Vec::new();
-    for i in 0..centroids.len() {
-        for j in (i + 1)..centroids.len() {
-            let s = dot(&centroids[i].1, &centroids[j].1);
-            if (BORDERLINE_MIN..=BORDERLINE_MAX).contains(&s) {
-                let a = centroids[i].0.min(centroids[j].0);
-                let b = centroids[i].0.max(centroids[j].0);
-                pairs.push(Candidate { a, b, sim: s });
-            }
-        }
-    }
-    pairs.sort_by(|x, y| {
-        y.sim
-            .partial_cmp(&x.sim)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    pairs.truncate(SUGGESTION_RESULT_CAP);
-    pairs
-}
-
-fn blob_to_f32(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
 // ── Thumbnail decode + face crop ──────────────────────────────────────────────
 
 /// Decode raw image bytes, crop to the (pixel, top-left-origin) face bbox with
@@ -2405,14 +2122,7 @@ fn basename(path: &str) -> String {
 }
 
 fn sim_markup(s: f32) -> String {
-    let (color, text) = if s >= 0.55 {
-        ("#5FD35F", "Very likely same")
-    } else if s >= 0.50 {
-        ("#E8C547", "Likely same")
-    } else {
-        ("#E0944A", "Possibly same")
-    };
-    format!("<span foreground='{color}' weight='bold'>{text}</span>")
+    format!("<span foreground='#A0E2EA' weight='bold'>Similarity {s:.2}</span>")
 }
 
 #[cfg(test)]

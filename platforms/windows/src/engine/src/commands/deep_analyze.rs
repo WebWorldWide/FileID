@@ -14,7 +14,8 @@ use crate::ipc::{
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, EngineError, EventPayload, IpcEvent, Wrap,
 };
 use crate::pipeline::deep_analyze::{
-    analyze_file, analyze_file_via_server, is_vlm_server_request_error, AnalyzeMode,
+    analyze_file, analyze_file_via_server, is_vlm_server_request_error, sanitize_proposed_name,
+    AnalyzeMode, AnalyzeOutcome,
 };
 
 /// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
@@ -45,6 +46,68 @@ fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64
     } else {
         None
     }
+}
+
+fn suffixed_proposed_name(base: &str, suffix: &str) -> String {
+    let suffix = sanitize_proposed_name(suffix);
+    let max_base = 80usize.saturating_sub(suffix.len().saturating_add(1));
+    let mut prefix: String = base.chars().take(max_base).collect();
+    while prefix.ends_with('-') || prefix.ends_with('_') {
+        prefix.pop();
+    }
+    if prefix.is_empty() {
+        suffix
+    } else {
+        format!("{prefix}-{suffix}")
+    }
+}
+
+fn reserve_batch_proposed_name(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    outcome: &mut AnalyzeOutcome,
+    reserved: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let Some(base) = outcome.proposed_name.as_deref() else {
+        return Ok(());
+    };
+    if reserved.insert(base.to_ascii_lowercase()) {
+        return Ok(());
+    }
+    let path: String = {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT path_text FROM files WHERE id=?1",
+            [outcome.file_id],
+            |row| row.get(0),
+        )?
+    };
+    let source_stem = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(sanitize_proposed_name)
+        .unwrap_or_else(|| "source".to_string());
+    let mut ordinal = 1u32;
+    let unique = loop {
+        let suffix = if ordinal == 1 {
+            source_stem.clone()
+        } else {
+            format!("{source_stem}-{ordinal}")
+        };
+        let candidate = suffixed_proposed_name(base, &suffix);
+        if reserved.insert(candidate.to_ascii_lowercase()) {
+            break candidate;
+        }
+        ordinal = ordinal.saturating_add(1);
+    };
+    {
+        let conn = db.lock();
+        conn.execute(
+            "UPDATE files SET vlm_proposed_name=?1 WHERE id=?2",
+            rusqlite::params![unique, outcome.file_id],
+        )?;
+    }
+    outcome.proposed_name = Some(unique);
+    Ok(())
 }
 
 /// Distinct named people in a file, formatted for display. Skips clusters flagged
@@ -916,6 +979,7 @@ async fn run_deep_analyze_batch(
     // progress frames. EMA-smoothed (0.7 old / 0.3 new), mirroring the scan
     // pipeline (scan_session.rs). (F-C2-008)
     let mut rolling_fps = 0.0f64;
+    let mut reserved_proposed_names = HashSet::new();
 
     // No runtime can run the (present) weights: the persistent server didn't
     // start AND there's no CLI binary. Surface the runtime problem ONCE here
@@ -1158,7 +1222,16 @@ async fn run_deep_analyze_batch(
         let mut server_probed_this_wave = false;
         for (file_id, outcome) in outcomes {
             match outcome {
-                Ok(out) => {
+                Ok(mut out) => {
+                    if let Err(err) = reserve_batch_proposed_name(
+                        &db,
+                        &mut out,
+                        &mut reserved_proposed_names,
+                    ) {
+                        failed += 1;
+                        tracing::warn!(?err, file_id, "deep analyze proposed-name reservation failed");
+                        continue;
+                    }
                     processed += 1;
                     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(
                         DeepAnalyzeFileDone {
@@ -1252,7 +1325,20 @@ async fn run_deep_analyze_batch(
                             )
                             .await
                             {
-                                Ok(out) => {
+                                Ok(mut out) => {
+                                    if let Err(err) = reserve_batch_proposed_name(
+                                        &db,
+                                        &mut out,
+                                        &mut reserved_proposed_names,
+                                    ) {
+                                        failed += 1;
+                                        tracing::warn!(
+                                            ?err,
+                                            file_id,
+                                            "deep analyze proposed-name reservation failed"
+                                        );
+                                        continue;
+                                    }
                                     processed += 1;
                                     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(
                                         Wrap::new(DeepAnalyzeFileDone {
@@ -1346,8 +1432,9 @@ async fn run_deep_analyze_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_caption_chunk, GpuCancelBridge};
+    use super::{append_caption_chunk, reserve_batch_proposed_name, GpuCancelBridge};
     use parking_lot::Mutex;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -1358,6 +1445,56 @@ mod tests {
         }
         let result = buf.lock().clone();
         result
+    }
+
+    #[test]
+    fn batch_proposed_names_disambiguate_with_the_source_stem() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let paths = [
+            std::path::PathBuf::from("library").join("report-2026-08-01.pdf"),
+            std::path::PathBuf::from("library").join("report-2026-08-02.pdf"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let id = index as i64 + 1;
+            conn.execute(
+                "INSERT INTO files
+                    (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,vlm_proposed_name)
+                 VALUES (?1,?2,?1,10,1.0,'pdf','pdf',0,'service-report')",
+                rusqlite::params![id, path.to_string_lossy()],
+            )
+            .unwrap();
+        }
+        let db = Arc::new(Mutex::new(conn));
+        let mut reserved = HashSet::new();
+        let mut first = crate::pipeline::deep_analyze::AnalyzeOutcome {
+            file_id: 1,
+            proposed_name: Some("service-report".into()),
+            ..Default::default()
+        };
+        let mut second = crate::pipeline::deep_analyze::AnalyzeOutcome {
+            file_id: 2,
+            proposed_name: Some("service-report".into()),
+            ..Default::default()
+        };
+
+        reserve_batch_proposed_name(&db, &mut first, &mut reserved).unwrap();
+        reserve_batch_proposed_name(&db, &mut second, &mut reserved).unwrap();
+
+        assert_eq!(first.proposed_name.as_deref(), Some("service-report"));
+        assert_eq!(
+            second.proposed_name.as_deref(),
+            Some("service-report-report-2026-08-02")
+        );
+        let persisted: String = db
+            .lock()
+            .query_row(
+                "SELECT vlm_proposed_name FROM files WHERE id=2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, "service-report-report-2026-08-02");
     }
 
     #[test]

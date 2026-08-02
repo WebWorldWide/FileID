@@ -226,6 +226,24 @@ struct DeepAnalyzeRunnerTests {
 
     // F-C3-027 — a folder whose name contains `_` must not over-match a
     // sibling subtree where any character sits in the `_` position.
+    @Test("batch proposed names use source stems to avoid duplicates")
+    func batchProposedNamesAreDistinct() {
+        var reserved = Set<String>()
+        let first = DeepAnalyzeRunner.reserveProposedName(
+            "service-report",
+            sourcePath: "/library/report-2026-08-01.pdf",
+            reserved: &reserved
+        )
+        let second = DeepAnalyzeRunner.reserveProposedName(
+            "service-report",
+            sourcePath: "/library/report-2026-08-02.pdf",
+            reserved: &reserved
+        )
+
+        #expect(first == "service-report")
+        #expect(second == "service-report-report-2026-08-02")
+    }
+
     @Test("resolveTargets folder scope: '_' does not over-match siblings")
     func folderScopeEscapesUnderscore() async throws {
         let (db, tmp) = try makeDB()

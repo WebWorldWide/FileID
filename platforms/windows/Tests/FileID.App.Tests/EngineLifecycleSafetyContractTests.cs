@@ -423,6 +423,19 @@ public sealed class EngineLifecycleSafetyContractTests
     }
 
     [Fact]
+    public void EngineStartWaitsForTheUnsolicitedReadyEvent()
+    {
+        var client = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
+        var start = client.IndexOf("private async Task StartCoreAsync(", StringComparison.Ordinal);
+        var end = client.IndexOf("private void TerminateSupersededStart", start, StringComparison.Ordinal);
+
+        Assert.True(start >= 0 && end > start, "StartCoreAsync source region must remain discoverable.");
+        Assert.DoesNotContain("new RequestStatusCommand()", client[start..end], StringComparison.Ordinal);
+        Assert.Contains("_stdoutLoop = Task.Run(", client[start..end], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void StaleEngineEventsCannotMutateTheReplacementProcessState()
     {
         var client = File.ReadAllText(PathInRepo(
@@ -694,6 +707,17 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("ScanPhase.Cancelled", app, StringComparison.Ordinal);
         Assert.Contains("LifecycleState.Crashed", app, StringComparison.Ordinal);
         Assert.Contains("SpawnGeneration != scanGeneration", app, StringComparison.Ordinal);
+        Assert.Contains("var applyDrained = new TaskCompletionSource<bool>", app, StringComparison.Ordinal);
+        Assert.Contains("applyDrained.TrySetResult(true)", app, StringComparison.Ordinal);
+        Assert.Contains("faceTerminal!.Task.WaitAsync(TimeSpan.FromHours(12))", app, StringComparison.Ordinal);
+        Assert.Contains("nameof(ViewModels.EngineClient.LastFaceClustering)", app, StringComparison.Ordinal);
+        Assert.Contains("processed={EngineClient.Instance.LastScanProcessedFiles}", app, StringComparison.Ordinal);
+        Assert.Contains("persons={faceResult?.PersonCount ?? 0}", app, StringComparison.Ordinal);
+        var guiHarness = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "build", "gui-regression.ps1"));
+        Assert.Contains("[string]$AppExecutable", guiHarness, StringComparison.Ordinal);
+        Assert.Contains("-AppExecutable requires -SkipBuild", guiHarness, StringComparison.Ordinal);
+        Assert.Contains("face clustering completed", guiHarness, StringComparison.Ordinal);
         Assert.Contains("JobsRepeater.ItemsSource = _visibleRows", queue, StringComparison.Ordinal);
         Assert.Contains("_visibleRows.Move(currentIndex, index)", queue, StringComparison.Ordinal);
         Assert.DoesNotContain("Children.Clear", queue, StringComparison.Ordinal);
