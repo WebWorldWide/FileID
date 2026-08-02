@@ -60,20 +60,22 @@ public enum FaceClustering {
         minQuality: Double,
         limit: Int
     ) throws -> (rows: [ClusteringFaceRow], overflowed: Bool) {
-        var cursor = try GRDB.Row.fetchCursor(db, sql: """
+        let cursor = try GRDB.Row.fetchCursor(db, sql: """
             SELECT face_prints.id, face_prints.arcface_embedding, face_prints.face_quality
             FROM face_prints
             LEFT JOIN persons ON persons.id = face_prints.person_id
             WHERE face_prints.excluded = 0
               AND LENGTH(face_prints.arcface_embedding) > 0
               AND COALESCE(persons.is_unknown, 0) = 0
+              AND (? <= 0 OR face_prints.face_quality >= ?)
             ORDER BY face_prints.id ASC
-            """)
+            """, arguments: [minQuality, minQuality])
         var loaded: [ClusteringFaceRow] = []
         loaded.reserveCapacity(min(limit, 16_384))
         var overflowed = false
         while let row = try cursor.next() {
             let id: Int64 = row["id"] ?? 0
+            guard id != 0 else { continue }
             if phaseZeroUnknownFaceIDs.contains(id) { continue }
             let quality: Double = row["face_quality"] ?? -1
             if minQuality > 0, quality < minQuality { continue }

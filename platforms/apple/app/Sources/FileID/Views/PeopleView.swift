@@ -562,8 +562,8 @@ struct PeopleView: View {
                     ? .easeOut(duration: 0.15)
                     : .spring(response: 0.35, dampingFraction: 0.78),
                             value: persons.count)
-                hiddenUnknownsFooter
                 hiddenSmallClustersFooter
+                hiddenUnknownsFooter
             }
         }
     }
@@ -686,16 +686,12 @@ struct PeopleView: View {
         // Drop emptied clusters: moving every face out of a person leaves a
         // 0-face row whose stale representative_face_id now points at the
         // target's face — a ghost card showing the wrong person. Hide it.
-        let allRows = store.persons(includeUnknown: showHiddenUnknowns)
+        let minFaces = showSmallClusters ? 0 : Self.minFacesPerCluster
+        let rows = store.persons(includeUnknown: showHiddenUnknowns, minFaces: minFaces)
             .filter { $0.faceCount > 0 }
-        hiddenSmallClusterCount = allRows.filter {
-            !$0.isUnknown && $0.faceCount < Self.minFacesPerCluster && !$0.hasAnyName
-        }.count
-        let rows = allRows.filter {
-            $0.isUnknown || showSmallClusters || $0.faceCount >= Self.minFacesPerCluster || $0.hasAnyName
-        }
         persons = rows
         hiddenUnknownCount = store.hiddenUnknownCount()
+        hiddenSmallClusterCount = store.hiddenSmallClusterCount(minFaces: Self.minFacesPerCluster)
         // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
         personByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
     }

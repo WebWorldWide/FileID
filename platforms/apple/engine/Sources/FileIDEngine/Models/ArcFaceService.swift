@@ -32,7 +32,7 @@ public final class ArcFaceService: @unchecked Sendable {
     // Defaults to 4 (ANE-thrash cap); raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
     private static let inferenceConcurrency: Int =
         ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
-            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? 4
+            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
     private let inferenceSem = DispatchSemaphore(value: ArcFaceService.inferenceConcurrency)
 
     private init() {}

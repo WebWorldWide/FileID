@@ -106,8 +106,8 @@ jobs:
           # reader at a time, so the pool can't be starved. The tests are small
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
-          set +e
-          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel \
+            -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
