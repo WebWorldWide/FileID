@@ -244,3 +244,16 @@ jobs:
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" \
             .build/release/FileID \
             .build/release/FileIDEngine
+
+      - name: Package unsigned macOS prerelease DMG
+        if: github.event_name == 'workflow_dispatch'
+        run: bash scripts/build_dmg.sh --rebuild
+
+      - name: Upload unsigned macOS prerelease DMG
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-macOS-unsigned-${{ github.run_number }}
+          path: platforms/apple/dist/FileID.dmg
+          if-no-files-found: error
+          retention-days: 14

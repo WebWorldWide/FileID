@@ -932,11 +932,9 @@ public final class ReadStore: @unchecked Sendable {
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM persons
                 WHERE IFNULL(is_unknown, 0) = 0
-                  AND (
-                    (name IS NOT NULL AND name <> '')
-                    OR (first_name IS NOT NULL AND first_name <> '')
-                    OR (last_name  IS NOT NULL AND last_name  <> '')
-                  )
+                  AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                           COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                           COALESCE(last_name, '') || COALESCE(suffix, '')) <> ''
             """) ?? 0
         }) ?? 0
     }

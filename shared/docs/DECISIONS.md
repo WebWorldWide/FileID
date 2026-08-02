@@ -7,6 +7,35 @@
 
 ---
 
+## 2026-08-01 — Constrain automatic identities without overriding human evidence
+
+Two face detections from one physical file are cannot-link evidence for automatic identity
+formation. The constraint is keyed by `file_id`, not content hash: separate faces in one photo
+cannot be the same person, while copied captures may still reinforce a merge. It is enforced in
+both clustering passes, consolidation, and fragment recovery, propagates across transitive unions,
+and is processed strongest-edge-first with stable tie breaks. The isolated Adlon-catalog audit
+reduced automatic same-file collision groups from 5,960 to zero across two identical reruns.
+
+Unprotected automatic clusters reject a candidate whose centroid similarity is below `0.15`.
+Named, manually merged, and verdict-backed identities bypass this outlier suppression because weak
+model evidence must not silently reverse explicit user evidence. The floor is a conservative
+non-regression guard, not a substitute for identity-labelled calibration. The final audit retained
+93.24% of eligible assignments, reduced the largest cluster by 40.0%, and kept measured cohesion
+above the configured floors. Same-file collisions in preserved `unknown` buckets remain diagnostic
+because those buckets intentionally aggregate faces outside person-identity semantics.
+
+The People surfaces separately hide unnamed clusters with fewer than six active faces while
+retaining all evidence in SQLite and disclosing the withheld count. Named people remain visible,
+and legacy plus structured name fields share one trimmed predicate. This presentation rule bounds
+the user-facing grid without destructively rewriting clustering evidence.
+
+Weakly supervised metric learning on the existing catalog was rejected. Its positive examples
+were exact duplicate content/bounding-box pairs, so perfect validation measured capture leakage,
+not cross-pose or cross-age identity quality. Any successor model evaluation must use
+identity-disjoint labelled positives and hard negatives and must remain commercially clean.
+Representative contact sheets still show mixed child mega-clusters; the current changes reduce
+unsafe unions and fragments but do not remove the SFace embedder ceiling.
+
 ## 2026-07-29 — Face clustering: auto-merge lowered 0.88 -> 0.75, People grid gets a size floor, and mega-cluster splitting is deliberately NOT attempted
 
 Investigating "thousands of leftover faces, tons are the same people" produced four

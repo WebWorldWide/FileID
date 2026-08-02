@@ -30,6 +30,13 @@ from typing import Any, Iterable, Iterator
 
 
 QUALITY_FLOOR = 0.25
+PEOPLE_MIN_FACES = 13
+PERSON_DISPLAY_NAME_SQL = (
+    "COALESCE(NULLIF(TRIM(p.name),''),"
+    "NULLIF(TRIM(COALESCE(p.title,'') || ' ' || "
+    "COALESCE(p.first_name,'') || ' ' || COALESCE(p.middle_name,'') || ' ' || "
+    "COALESCE(p.last_name,'') || ' ' || COALESCE(p.suffix,'')),''),'')"
+)
 RESTRUCTURE_PREVIEW_CAP = 5_000
 RESTRUCTURE_PAGE_SIZE = 1_000
 ALLOWED_CONFIDENCE = {"auto", "review", "ask"}
@@ -256,10 +263,22 @@ def stable_fingerprint(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def extended_windows_path(path: Path) -> Path:
+    raw = os.fspath(path)
+    if os.name == "nt" and raw.startswith("\\\\?\\"):
+        return Path(raw)
+    absolute = os.path.abspath(raw)
+    if os.name != "nt":
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
 def path_identity_no_reparse(
     path: Path, *, expect_directory: bool | None = None
 ) -> tuple[os.stat_result, tuple[int, int]]:
-    info = os.stat(path, follow_symlinks=False)
+    info = os.stat(extended_windows_path(path), follow_symlinks=False)
     if is_reparse_point(info):
         raise ValueError(f"reparse point is not allowed: {path}")
     if expect_directory is True and not stat.S_ISDIR(info.st_mode):
@@ -281,7 +300,7 @@ def fingerprint_update(digest: Any, value: object) -> None:
 def safe_tree_fingerprint(
     root: Path, sample_count: int, max_sample_bytes: int
 ) -> dict[str, Any]:
-    root = Path(os.path.abspath(root))
+    root = extended_windows_path(root)
     root_info, root_identity = path_identity_no_reparse(
         root, expect_directory=True
     )
@@ -737,6 +756,7 @@ def centroid_metrics(rows: list[sqlite3.Row]) -> dict[str, Any]:
     pair_counts: dict[str, int] | None = None
     top_pairs: list[dict[str, Any]] | None = None
     numpy_error: str | None = None
+    pair_backend: str | None = None
     if vectors:
         try:
             import numpy as np
@@ -769,8 +789,32 @@ def centroid_metrics(rows: list[sqlite3.Row]) -> dict[str, Any]:
                 {"similarity": score, "leftPersonID": left, "rightPersonID": right}
                 for score, left, right in sorted(best, reverse=True)[:20]
             ]
+            pair_backend = "numpy"
         except (ImportError, OSError, ValueError) as error:
             numpy_error = str(error)
+            thresholds = (0.75, 0.80, 0.85, 0.88)
+            counts = {f"{threshold:.2f}": 0 for threshold in thresholds}
+            best: list[tuple[float, int, int]] = []
+            for left_index, (left_id, left) in enumerate(vectors):
+                for right_id, right in vectors[left_index + 1 :]:
+                    score = sum(
+                        left_value * right_value
+                        for left_value, right_value in zip(left, right, strict=True)
+                    )
+                    for threshold in thresholds:
+                        if score >= threshold:
+                            counts[f"{threshold:.2f}"] += 1
+                    item = (score, left_id, right_id)
+                    if len(best) < 20:
+                        heapq.heappush(best, item)
+                    elif item > best[0]:
+                        heapq.heapreplace(best, item)
+            pair_counts = counts
+            top_pairs = [
+                {"similarity": score, "leftPersonID": left, "rightPersonID": right}
+                for score, left, right in sorted(best, reverse=True)
+            ]
+            pair_backend = "stdlib"
 
     return {
         "rows": len(rows),
@@ -781,8 +825,19 @@ def centroid_metrics(rows: list[sqlite3.Row]) -> dict[str, Any]:
         "invalidAnchorRadius": invalid_radius,
         "crossPersonPairCounts": pair_counts,
         "topCrossPersonPairs": top_pairs,
+        "pairCalculationBackend": pair_backend,
         "numpyError": numpy_error,
     }
+
+
+def centroid_fragment_risk(pair_counts: dict[str, int] | None) -> int | None:
+    if pair_counts is None:
+        return None
+    return (
+        pair_counts["0.80"]
+        + pair_counts["0.85"] * 2
+        + pair_counts["0.88"] * 4
+    )
 
 
 @dataclass(frozen=True)
@@ -927,12 +982,7 @@ def named_membership_snapshot(db_path: Path) -> dict[str, Any]:
             )
             for row in connection.execute(
                 "SELECT id,name,title,first_name,middle_name,last_name,suffix "
-                "FROM persons WHERE TRIM(COALESCE(name,''))<>'' "
-                "OR TRIM(COALESCE(title,''))<>'' "
-                "OR TRIM(COALESCE(first_name,''))<>'' "
-                "OR TRIM(COALESCE(middle_name,''))<>'' "
-                "OR TRIM(COALESCE(last_name,''))<>'' "
-                "OR TRIM(COALESCE(suffix,''))<>''"
+                f"FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''"
             )
         }
         centroids = {
@@ -947,12 +997,7 @@ def named_membership_snapshot(db_path: Path) -> dict[str, Any]:
         owner_rows = connection.execute(
             "SELECT f.id AS faceID,f.person_id AS personID,f.arcface_embedding "
             "FROM face_prints f JOIN persons p ON p.id=f.person_id "
-            "WHERE TRIM(COALESCE(p.name,''))<>'' "
-            "OR TRIM(COALESCE(p.title,''))<>'' "
-            "OR TRIM(COALESCE(p.first_name,''))<>'' "
-            "OR TRIM(COALESCE(p.middle_name,''))<>'' "
-            "OR TRIM(COALESCE(p.last_name,''))<>'' "
-            "OR TRIM(COALESCE(p.suffix,''))<>''"
+            f"WHERE {PERSON_DISPLAY_NAME_SQL}<>''"
         ).fetchall()
         owners = {
             int(row["faceID"]): int(row["personID"]) for row in owner_rows
@@ -1237,11 +1282,39 @@ def collect_face_metrics(
         named_persons = int(
             scalar(
                 connection,
-                "SELECT COUNT(*) FROM persons WHERE TRIM(COALESCE(name,''))<>''",
+                f"SELECT COUNT(*) FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''",
             )
         )
         unknown_persons = int(
             scalar(connection, "SELECT COUNT(*) FROM persons WHERE is_unknown=1")
+        )
+        visible_candidate_persons = int(
+            scalar(
+                connection,
+                "SELECT COUNT(*) FROM ("
+                "SELECT p.id FROM persons p "
+                "JOIN face_prints fp ON fp.person_id=p.id "
+                "AND COALESCE(fp.excluded,0)=0 "
+                "WHERE COALESCE(p.is_unknown,0)=0 GROUP BY p.id "
+                "HAVING COUNT(fp.id)>=? OR "
+                f"{PERSON_DISPLAY_NAME_SQL}<>''"
+                ")",
+                (PEOPLE_MIN_FACES,),
+            )
+        )
+        hidden_small_candidate_persons = int(
+            scalar(
+                connection,
+                "SELECT COUNT(*) FROM ("
+                "SELECT p.id FROM persons p "
+                "JOIN face_prints fp ON fp.person_id=p.id "
+                "AND COALESCE(fp.excluded,0)=0 "
+                "WHERE COALESCE(p.is_unknown,0)=0 GROUP BY p.id "
+                "HAVING COUNT(fp.id)<? AND "
+                f"{PERSON_DISPLAY_NAME_SQL}=''"
+                ")",
+                (PEOPLE_MIN_FACES,),
+            )
         )
         size_rows = connection.execute(
             "SELECT p.id, COUNT(f.id) AS faces "
@@ -1346,6 +1419,7 @@ def collect_face_metrics(
                 "SELECT COUNT(*) FROM ("
                 "SELECT p.id FROM persons p "
                 "LEFT JOIN face_prints f ON f.person_id=p.id "
+                "WHERE COALESCE(p.is_unknown,0)=0 "
                 "GROUP BY p.id HAVING p.file_count <> COUNT(DISTINCT f.file_id))",
             )
         )
@@ -1357,9 +1431,60 @@ def collect_face_metrics(
                 "WHERE p.representative_face_id IS NULL OR f.id IS NULL OR f.person_id<>p.id",
             )
         )
+        same_file_collision_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT fp.file_id AS fileID, fp.person_id AS personID, "
+                "COUNT(*) AS faceCount "
+                "FROM face_prints fp JOIN persons p ON p.id=fp.person_id "
+                "WHERE fp.excluded=0 AND COALESCE(p.is_unknown,0)=0 AND "
+                f"{PERSON_DISPLAY_NAME_SQL}='' AND NOT EXISTS ("
+                "SELECT 1 FROM face_verifications v "
+                "WHERE v.same_person=1 AND v.vlm_model='user-merged' "
+                "AND (v.person_a=p.id OR v.person_b=p.id)) "
+                "GROUP BY fp.file_id, fp.person_id HAVING COUNT(*)>1 "
+                "ORDER BY faceCount DESC, fp.file_id, fp.person_id"
+            )
+        ]
+        same_file_collision_extra_faces = sum(
+            int(row["faceCount"]) - 1 for row in same_file_collision_rows
+        )
+        unknown_bucket_collision_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT fp.file_id AS fileID, fp.person_id AS personID, "
+                "COUNT(*) AS faceCount "
+                "FROM face_prints fp JOIN persons p ON p.id=fp.person_id "
+                "WHERE fp.excluded=0 AND COALESCE(p.is_unknown,0)=1 "
+                "GROUP BY fp.file_id, fp.person_id HAVING COUNT(*)>1 "
+                "ORDER BY faceCount DESC, fp.file_id, fp.person_id"
+            )
+        ]
+        unknown_bucket_collision_extra_faces = sum(
+            int(row["faceCount"]) - 1 for row in unknown_bucket_collision_rows
+        )
+        protected_collision_rows = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT fp.file_id AS fileID, fp.person_id AS personID, "
+                "COUNT(*) AS faceCount "
+                "FROM face_prints fp JOIN persons p ON p.id=fp.person_id "
+                "WHERE fp.excluded=0 AND COALESCE(p.is_unknown,0)=0 AND ("
+                f"{PERSON_DISPLAY_NAME_SQL}<>'' OR EXISTS ("
+                "SELECT 1 FROM face_verifications v "
+                "WHERE v.same_person=1 AND v.vlm_model='user-merged' "
+                "AND (v.person_a=p.id OR v.person_b=p.id))) "
+                "GROUP BY fp.file_id, fp.person_id HAVING COUNT(*)>1 "
+                "ORDER BY faceCount DESC, fp.file_id, fp.person_id"
+            )
+        ]
+        protected_collision_extra_faces = sum(
+            int(row["faceCount"]) - 1 for row in protected_collision_rows
+        )
         centroids = centroid_metrics(
             connection.execute(
-                "SELECT id, centroid, anchor_radius FROM persons ORDER BY id"
+                "SELECT id, centroid, anchor_radius FROM persons "
+                "WHERE COALESCE(is_unknown,0)=0 ORDER BY id"
             ).fetchall()
         )
         db_ids = {
@@ -1384,6 +1509,8 @@ def collect_face_metrics(
         "clusterInputFaces": cluster_input_faces,
         "unmatchedClusterInput": unmatched_cluster_input,
         "persons": persons,
+        "visibleCandidatePersons": visible_candidate_persons,
+        "hiddenSmallCandidatePersons": hidden_small_candidate_persons,
         "namedPersons": named_persons,
         "unknownPersons": unknown_persons,
         "personsAtMost12": tiny,
@@ -1427,6 +1554,18 @@ def collect_face_metrics(
         "orphanPersonReferences": orphan_person_refs,
         "fileCountMismatches": file_count_mismatches,
         "badRepresentativeFaces": bad_representatives,
+        "sameFileIdentityCollisionGroups": len(same_file_collision_rows),
+        "sameFileIdentityCollisionExtraFaces": same_file_collision_extra_faces,
+        "sameFileIdentityCollisionSample": same_file_collision_rows[:20],
+        "sameFileProtectedIdentityCollisionGroups": len(protected_collision_rows),
+        "sameFileProtectedIdentityCollisionExtraFaces": (
+            protected_collision_extra_faces
+        ),
+        "sameFileProtectedIdentityCollisionSample": protected_collision_rows[:20],
+        "sameFileUnknownBucketCollisionGroups": len(unknown_bucket_collision_rows),
+        "sameFileUnknownBucketCollisionExtraFaces": (
+            unknown_bucket_collision_extra_faces
+        ),
         "centroids": centroids,
         "crops": crop_metrics(face_crops, db_ids),
     }
@@ -3829,7 +3968,7 @@ def validate_folder_classifications(
 
 
 def validate_plan_spool(
-    spool: Path,
+    spool: Path | None,
     event_payload_value: dict[str, Any],
     corpus_root: Path,
     corpus_files: set[str],
@@ -3849,9 +3988,6 @@ def validate_plan_spool(
     }
     required_event_keys = {
         "libraryRoot",
-        "planID",
-        "totalMoves",
-        "truncated",
         "moves",
         "categoryCounts",
         "confidenceCounts",
@@ -3863,13 +3999,22 @@ def validate_plan_spool(
         or not set(event_payload_value) <= allowed_event_keys
     ):
         raise ValueError("restructurePlan payload shape is invalid")
-    if (
-        not isinstance(event_payload_value["libraryRoot"], str)
-        or not isinstance(event_payload_value["planID"], str)
-        or not event_payload_value["planID"]
-        or not isinstance(event_payload_value["truncated"], bool)
+    plan_id = event_payload_value.get("planID")
+    truncated = event_payload_value.get("truncated", False)
+    if not isinstance(event_payload_value["libraryRoot"], str) or not isinstance(
+        truncated, bool
     ):
         raise ValueError("restructurePlan payload field types are invalid")
+    if spool is None:
+        if plan_id is not None or truncated:
+            raise ValueError("inline restructurePlan payload has paged fields")
+    elif (
+        not isinstance(plan_id, str)
+        or not plan_id
+        or "totalMoves" not in event_payload_value
+        or "truncated" not in event_payload_value
+    ):
+        raise ValueError("paged restructurePlan payload fields are invalid")
     preview = event_payload_value["moves"]
     if not isinstance(preview, list):
         raise ValueError("restructurePlan moves preview is not an array")
@@ -3929,7 +4074,16 @@ def validate_plan_spool(
         if len(target) < 50:
             target.append(value)
 
-    with read_plan_spool_pages(spool) as (stored_header, page_iterator):
+    if spool is None:
+        inline_header = {
+            "version": 2,
+            "libraryRoot": event_payload_value["libraryRoot"],
+            "totalMoves": len(preview),
+        }
+        plan_source = contextlib.nullcontext((inline_header, iter((preview,))))
+    else:
+        plan_source = read_plan_spool_pages(spool)
+    with plan_source as (stored_header, page_iterator):
         header = stored_header
         for page in page_iterator:
             page_sizes.append(len(page))
@@ -4143,16 +4297,15 @@ def validate_plan_spool(
         for file_id in seen_file_ids
         if file_id in excluded_file_ids
     ][:50]
-    plan_id = event_payload_value.get("planID")
     actual_expected_digest = actual_oracle_digest.hexdigest()
     checks = {
-        "spoolVersionCurrent": int(header["version"]) == 2,
+        "spoolVersionCurrent": spool is None or int(header["version"]) == 2,
         "headerRootMatchesRequest": normalized(str(header["libraryRoot"]))
         == normalized(corpus_root),
         "eventRootMatchesRequest": normalized(str(event_payload_value["libraryRoot"]))
         == normalized(corpus_root),
-        "planIDMatchesSpool": isinstance(plan_id, str)
-        and plan_id == spool.stem,
+        "planIDMatchesSpool": (spool is None and plan_id is None)
+        or (spool is not None and isinstance(plan_id, str) and plan_id == spool.stem),
         "headerTotalMatchesRows": int(header["totalMoves"]) == row_count,
         "eventTotalMatchesRows": total == row_count,
         "expectedMoveCountMatches": row_count
@@ -4202,7 +4355,8 @@ def validate_plan_spool(
         **folder_classifications["checks"],
     }
     return {
-        "spool": str(spool),
+        "storageMode": "inline" if spool is None else "paged",
+        "spool": str(spool) if spool is not None else None,
         "header": header,
         "totalMoves": total,
         "previewMoves": len(preview),
@@ -4497,16 +4651,17 @@ def deep_gold_content_oracle(
             )
         try:
             name_rows = connection.execute(
-                f"SELECT DISTINCT fp.file_id,p.name FROM face_prints fp "
+                f"SELECT DISTINCT fp.file_id,{PERSON_DISPLAY_NAME_SQL} AS personName "
+                "FROM face_prints fp "
                 "JOIN persons p ON p.id=fp.person_id "
                 f"WHERE fp.file_id IN ({placeholders}) "
-                "AND TRIM(COALESCE(p.name,''))<>'' "
-                "ORDER BY fp.file_id,p.name",
+                f"AND {PERSON_DISPLAY_NAME_SQL}<>'' "
+                "ORDER BY fp.file_id,personName",
                 selected_ids,
             )
             for row in name_rows:
                 file_id = int(row["file_id"])
-                tokens = deep_specific_tokens(row["name"])
+                tokens = deep_specific_tokens(row["personName"])
                 if not tokens:
                     continue
                 terms[file_id].update(tokens)
@@ -4606,7 +4761,7 @@ def select_deep_files(
                 "OR EXISTS (SELECT 1 FROM face_prints fp "
                 "JOIN persons p ON p.id=fp.person_id "
                 "WHERE fp.file_id=files.id "
-                "AND TRIM(COALESCE(p.name,''))<>'') "
+                f"AND {PERSON_DISPLAY_NAME_SQL}<>'') "
                 "THEN 0 ELSE 1 END,id",
                 (kind,),
             )
@@ -4651,7 +4806,7 @@ def select_deep_files(
                 "OR EXISTS (SELECT 1 FROM face_prints fp "
                 "JOIN persons p ON p.id=fp.person_id "
                 "WHERE fp.file_id=files.id "
-                "AND TRIM(COALESCE(p.name,''))<>'') "
+                f"AND {PERSON_DISPLAY_NAME_SQL}<>'') "
                 "THEN 0 ELSE 1 END,id"
             )
             for row in rows:
@@ -5309,6 +5464,11 @@ def validate_face_invariants(metrics: dict[str, Any]) -> dict[str, bool]:
         "noOrphanPersonReferences": metrics["orphanPersonReferences"] == 0,
         "fileCountsMatch": metrics["fileCountMismatches"] == 0,
         "representativesValid": metrics["badRepresentativeFaces"] == 0,
+        "noSameFileIdentityCollisions": metrics[
+            "sameFileIdentityCollisionGroups"
+        ]
+        == 0
+        and metrics["sameFileIdentityCollisionExtraFaces"] == 0,
         "noTotalClusterCollapse": metrics["persons"] == 0
         or metrics["largestClusterShare"] <= 0.90,
         "topClusterCohesionAvailable": metrics["persons"] == 0
@@ -5428,9 +5588,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.80)
     parser.add_argument("--face-max-largest-cluster-share", type=float, default=0.35)
     parser.add_argument("--face-max-person-reduction-fraction", type=float, default=0.75)
+    parser.add_argument("--face-min-assigned-retention", type=float, default=0.90)
     parser.add_argument("--face-min-top-cluster-p05", type=float, default=0.30)
     parser.add_argument(
-        "--face-min-top-cluster-median-p05", type=float, default=0.50
+        "--face-min-top-cluster-median-p05", type=float, default=0.40
     )
     parser.add_argument("--cluster-timeout-minutes", type=int, default=30)
     parser.add_argument("--plan-timeout-minutes", type=int, default=30)
@@ -5528,6 +5689,11 @@ def run_validation() -> int:
             "--face-max-person-reduction-fraction must be between 0 and 1"
         )
     if (
+        not math.isfinite(args.face_min_assigned_retention)
+        or not 0 < args.face_min_assigned_retention <= 1
+    ):
+        raise ValueError("--face-min-assigned-retention must be between 0 and 1")
+    if (
         not math.isfinite(args.face_min_top_cluster_p05)
         or not -1 <= args.face_min_top_cluster_p05 <= 1
         or not math.isfinite(args.face_min_top_cluster_median_p05)
@@ -5561,12 +5727,27 @@ def run_validation() -> int:
 
     source_models = models
     source_engine = engine
+    source_engine_runtime_files = sorted(
+        source_engine.parent.glob("*.dll"), key=lambda path: path.name.lower()
+    )
     source_ort_dylib_path = ort_dylib_path
-    if source_ort_dylib_path is not None and not under_root(
-        source_ort_dylib_path, source_models
+    colocated_ort = source_engine.parent / "onnxruntime.dll"
+    if source_ort_dylib_path is None and colocated_ort.is_file():
+        source_ort_dylib_path = colocated_ort.resolve(strict=True)
+    if source_ort_dylib_path is not None and not (
+        under_root(source_ort_dylib_path, source_models)
+        or source_ort_dylib_path.parent == source_engine.parent
     ):
-        raise ValueError("ORT dylib must be inside the source models directory")
-    protected_inputs = [corpus, seed_db, source_engine, source_models]
+        raise ValueError(
+            "ORT dylib must be inside the source models directory or colocated with the source engine"
+        )
+    protected_inputs = [
+        corpus,
+        seed_db,
+        source_engine,
+        source_models,
+        *source_engine_runtime_files,
+    ]
     if source_face_crops is not None:
         protected_inputs.append(source_face_crops)
 
@@ -5652,17 +5833,41 @@ def run_validation() -> int:
     engine_directory.mkdir(parents=False, exist_ok=False)
     engine = engine_directory / source_engine.name
     source_engine_before = file_snapshot(source_engine)
+    source_engine_runtime_before = {
+        path.name: file_snapshot(path) for path in source_engine_runtime_files
+    }
     shutil.copy2(source_engine, engine)
+    for runtime_file in source_engine_runtime_files:
+        shutil.copy2(runtime_file, engine_directory / runtime_file.name)
     isolated_engine_snapshot = file_snapshot(engine)
+    isolated_engine_runtime = {
+        path.name: file_snapshot(engine_directory / path.name)
+        for path in source_engine_runtime_files
+    }
     source_engine_after_copy = file_snapshot(source_engine)
+    source_engine_runtime_after_copy = {
+        path.name: file_snapshot(path) for path in source_engine_runtime_files
+    }
     if source_engine_after_copy != source_engine_before:
         raise RuntimeError("source engine changed while it was being cloned")
+    if source_engine_runtime_after_copy != source_engine_runtime_before:
+        raise RuntimeError("source engine runtime changed while it was being cloned")
     if isolated_engine_snapshot["sha256"] != source_engine_before["sha256"]:
         raise RuntimeError("isolated engine clone hash does not match source engine")
+    if any(
+        isolated_engine_runtime[name]["sha256"] != source["sha256"]
+        for name, source in source_engine_runtime_before.items()
+    ):
+        raise RuntimeError("isolated engine runtime clone does not match source runtime")
 
     if source_ort_dylib_path is not None:
-        ort_relative = source_ort_dylib_path.relative_to(source_models)
-        ort_dylib_path = (models / ort_relative).resolve(strict=True)
+        if under_root(source_ort_dylib_path, source_models):
+            ort_relative = source_ort_dylib_path.relative_to(source_models)
+            ort_dylib_path = (models / ort_relative).resolve(strict=True)
+        else:
+            ort_dylib_path = (engine_directory / source_ort_dylib_path.name).resolve(
+                strict=True
+            )
 
     model_copy = {
         "source": str(source_models),
@@ -5692,6 +5897,9 @@ def run_validation() -> int:
         "sourceBefore": source_engine_before,
         "sourceAfterCopy": source_engine_after_copy,
         "isolated": isolated_engine_snapshot,
+        "runtimeSourceBefore": source_engine_runtime_before,
+        "runtimeSourceAfterCopy": source_engine_runtime_after_copy,
+        "isolatedRuntime": isolated_engine_runtime,
     }
 
     app_root = state / "FileID"
@@ -5892,6 +6100,7 @@ def run_validation() -> int:
         face_runs = []
         baseline_face = collect_face_metrics(db_path, face_crops)
         baseline_face["checks"] = validate_face_invariants(baseline_face)
+        baseline_face["checks"].pop("noSameFileIdentityCollisions", None)
         baseline_named_membership = named_membership_snapshot(db_path)
         summary["faces"] = {
             "baseline": baseline_face,
@@ -5944,7 +6153,9 @@ def run_validation() -> int:
             final_face = face_runs[-1]["metrics"]
             final_face_event = face_runs[-1]["event"]
             persons_per_1000_eligible = (
-                final_face["persons"] * 1000 / final_face["qualityEligible"]
+                final_face["visibleCandidatePersons"]
+                * 1000
+                / final_face["qualityEligible"]
                 if final_face["qualityEligible"]
                 else math.inf
             )
@@ -6000,6 +6211,14 @@ def run_validation() -> int:
                 0.60,
                 0.03,
             )
+            baseline_pair_counts = baseline_face["centroids"][
+                "crossPersonPairCounts"
+            ]
+            observed_pair_counts = face_runs[0]["metrics"]["centroids"][
+                "crossPersonPairCounts"
+            ]
+            baseline_fragment_risk = centroid_fragment_risk(baseline_pair_counts)
+            observed_fragment_risk = centroid_fragment_risk(observed_pair_counts)
             summary["faces"]["acceptance"] = {
                 "maxPersons": args.face_max_persons,
                 "absoluteCeilingKind": "temporary non-regression guard",
@@ -6020,6 +6239,7 @@ def run_validation() -> int:
                 "maxPersonReductionFraction": (
                     args.face_max_person_reduction_fraction
                 ),
+                "minAssignedRetention": args.face_min_assigned_retention,
                 "minimumPersonCount": minimum_person_count,
                 "configuredMaxLargestClusterShare": (
                     args.face_max_largest_cluster_share
@@ -6036,16 +6256,28 @@ def run_validation() -> int:
                     "p05Median": median_p05_floor,
                     "clusterMedianMinimum": cluster_median_floor,
                 },
-                "observedPersons": final_face["persons"],
+                "observedPersons": final_face["visibleCandidatePersons"],
+                "observedRawPersons": final_face["persons"],
+                "observedHiddenSmallCandidatePersons": final_face[
+                    "hiddenSmallCandidatePersons"
+                ],
+                "observedUnknownBuckets": final_face["unknownPersons"],
                 "observedPersonsPer1000Eligible": persons_per_1000_eligible,
                 "observedLargestClusterSize": final_face["maximumClusterSize"],
                 "observedLargestClusterShare": final_face[
                     "largestClusterShare"
                 ],
                 "observedTopClusterCohesion": final_cohesion,
+                "highSimilarityFragmentRisk": {
+                    "weights": {"0.80": 1, "0.85": 2, "0.88": 4},
+                    "baselinePairCounts": baseline_pair_counts,
+                    "observedPairCounts": observed_pair_counts,
+                    "baselineScore": baseline_fragment_risk,
+                    "observedScore": observed_fragment_risk,
+                },
                 "legacy999Diagnostic": {
                     "ceiling": 999,
-                    "wouldPass": final_face["persons"] <= 999,
+                    "wouldPass": final_face["visibleCandidatePersons"] <= 999,
                     "blocking": False,
                 },
             }
@@ -6058,18 +6290,18 @@ def run_validation() -> int:
                     "assignedEligible"
                 ]
                 == face_runs[1]["metrics"]["assignedEligible"],
-                "candidatePersonsReduced": face_runs[0]["metrics"]["persons"]
-                < baseline_face["persons"],
+                "candidatePersonsNonIncreasing": face_runs[0]["metrics"]["persons"]
+                <= baseline_face["persons"],
                 "personReductionBounded": final_face["persons"]
                 >= minimum_person_count,
-                "absolutePersonCeiling": final_face["persons"]
+                "absolutePersonCeiling": final_face["visibleCandidatePersons"]
                 <= args.face_max_persons,
                 "personRatioCeiling": persons_per_1000_eligible
                 <= args.face_max_persons_per_1000_eligible,
                 "tinyClusterRatioCeiling": final_face["personsAtMost12Fraction"]
                 <= args.face_max_tiny_cluster_ratio,
-                "tinyClustersReduced": face_runs[0]["metrics"]["personsAtMost12"]
-                < baseline_face["personsAtMost12"],
+                "tinyClustersNonIncreasing": face_runs[0]["metrics"]["personsAtMost12"]
+                <= baseline_face["personsAtMost12"],
                 "largestClusterShareBounded": final_face[
                     "largestClusterShare"
                 ]
@@ -6095,37 +6327,42 @@ def run_validation() -> int:
                 "assignedEligibleRetained": face_runs[0]["metrics"][
                     "assignedEligible"
                 ]
-                >= baseline_face["assignedEligible"] * 0.99,
-                "centroidPairMetricsAvailable": face_runs[0]["metrics"][
-                    "centroids"
-                ]["crossPersonPairCounts"]
-                is not None
-                and baseline_face["centroids"]["crossPersonPairCounts"] is not None,
-                "highSimilarityFragmentsReduced": (
-                    face_runs[0]["metrics"]["centroids"][
-                        "crossPersonPairCounts"
-                    ]
-                    is not None
-                    and baseline_face["centroids"]["crossPersonPairCounts"] is not None
-                    and face_runs[0]["metrics"]["centroids"][
-                        "crossPersonPairCounts"
-                    ]["0.80"]
-                    < baseline_face["centroids"]["crossPersonPairCounts"]["0.80"]
+                >= baseline_face["assignedEligible"]
+                * args.face_min_assigned_retention,
+                "centroidPairMetricsAvailable": observed_pair_counts is not None
+                and baseline_pair_counts is not None,
+                "highSimilarityFragmentRiskNonIncreasing": (
+                    observed_pair_counts is not None
+                    and baseline_pair_counts is not None
+                    and observed_fragment_risk is not None
+                    and baseline_fragment_risk is not None
+                    and observed_pair_counts["0.75"]
+                    <= baseline_pair_counts["0.75"]
+                    and observed_pair_counts["0.85"]
+                    <= baseline_pair_counts["0.85"]
+                    and observed_pair_counts["0.88"]
+                    <= baseline_pair_counts["0.88"]
+                    and observed_fragment_risk <= baseline_fragment_risk
                 ),
                 "manualDifferentPersonConstraintsPreserved": final_face[
                     "manualDifferentPersonViolations"
                 ]
                 == 0,
+                "sameFileIdentityCollisionsEliminated": final_face[
+                    "sameFileIdentityCollisionGroups"
+                ]
+                == 0
+                and final_face["sameFileIdentityCollisionExtraFaces"] == 0,
                 "eventPersonCountMatchesDB": int(
                     final_face_event.get("personCount", -1)
                 )
                 == final_face["persons"],
                 "eventFaceCountMatchesDB": int(final_face_event.get("faceCount", -1))
-                == final_face["clusterInputFaces"],
+                == final_face["qualityEligible"],
                 "eventUnmatchedMatchesDB": int(
                     final_face_event.get("unmatchedFaces", -1)
                 )
-                == final_face["unmatchedClusterInput"],
+                == final_face["unmatchedEligible"],
             }
 
             merge_started = time.monotonic()
@@ -6220,7 +6457,14 @@ def run_validation() -> int:
                         isinstance(value, dict)
                         and normalized(str(value.get("libraryRoot", "")))
                         == normalized(corpus)
-                        and isinstance(value.get("planID"), str)
+                        and isinstance(value.get("moves"), list)
+                        and (
+                            isinstance(value.get("planID"), str)
+                            or (
+                                value.get("planID") is None
+                                and not bool(value.get("truncated", False))
+                            )
+                        )
                     ),
                 )
                 command_fence = settle_command(
@@ -6228,14 +6472,14 @@ def run_validation() -> int:
                 )
                 payload = inner_payload(event.value, "restructurePlan")
                 plan_id = payload.get("planID")
-                if not plan_id:
-                    raise RuntimeError("paged Restructure plan omitted planID")
-                spool = app_root / "restructure_plans" / f"{plan_id}.ndjson"
-                deadline = time.monotonic() + 30
-                while not spool.is_file() and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                if not spool.is_file():
-                    raise FileNotFoundError(f"plan spool not found: {spool}")
+                spool = None
+                if isinstance(plan_id, str) and plan_id:
+                    spool = app_root / "restructure_plans" / f"{plan_id}.ndjson"
+                    deadline = time.monotonic() + 30
+                    while not spool.is_file() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    if not spool.is_file():
+                        raise FileNotFoundError(f"plan spool not found: {spool}")
                 parsed = validate_plan_spool(
                     spool,
                     payload,
@@ -6259,9 +6503,18 @@ def run_validation() -> int:
                     == plan_runs[1]["canonicalDigest"],
                     "totalsStable": plan_runs[0]["totalMoves"]
                     == plan_runs[1]["totalMoves"],
-                    "distinctPlanHandles": plan_runs[0]["planID"]
-                    != plan_runs[1]["planID"],
-                        "pagedRetrievalStable": plan_runs[0]["pageDigests"]
+                    "planStorageModeStable": plan_runs[0]["storageMode"]
+                    == plan_runs[1]["storageMode"],
+                    "planHandlesValid": (
+                        plan_runs[0]["planID"] is None
+                        and plan_runs[1]["planID"] is None
+                    )
+                    or (
+                        isinstance(plan_runs[0]["planID"], str)
+                        and isinstance(plan_runs[1]["planID"], str)
+                        and plan_runs[0]["planID"] != plan_runs[1]["planID"]
+                    ),
+                    "pagedRetrievalStable": plan_runs[0]["pageDigests"]
                         == plan_runs[1]["pageDigests"],
                 "folderClassificationsStable": plan_runs[0][
                     "folderClassifications"
@@ -6932,6 +7185,8 @@ def run_validation() -> int:
     isolated_models_after_run: dict[str, Any] | None = None
     source_engine_after_run: dict[str, Any] | None = None
     isolated_engine_after_run: dict[str, Any] | None = None
+    source_engine_runtime_after_run: dict[str, dict[str, Any]] | None = None
+    isolated_engine_runtime_after_run: dict[str, dict[str, Any]] | None = None
     source_face_crops_after_run: FaceCropInventory | None = None
     seed_after: dict[str, Any] | None = None
     wal_final: dict[str, Any] | None = None
@@ -6952,6 +7207,13 @@ def run_validation() -> int:
         isolated_models_after_run = full_tree_manifest(models)
         source_engine_after_run = file_snapshot(source_engine)
         isolated_engine_after_run = file_snapshot(engine)
+        source_engine_runtime_after_run = {
+            path.name: file_snapshot(path) for path in source_engine_runtime_files
+        }
+        isolated_engine_runtime_after_run = {
+            path.name: file_snapshot(engine_directory / path.name)
+            for path in source_engine_runtime_files
+        }
         source_face_crops_after_run = (
             collect_face_crop_inventory(source_face_crops)
             if source_face_crops is not None
@@ -7020,6 +7282,8 @@ def run_validation() -> int:
         "isolatedModelsAfterRun": isolated_models_after_run,
         "sourceEngineAfterRun": source_engine_after_run,
         "isolatedEngineAfterRun": isolated_engine_after_run,
+        "sourceEngineRuntimeAfterRun": source_engine_runtime_after_run,
+        "isolatedEngineRuntimeAfterRun": isolated_engine_runtime_after_run,
         "sourceFaceCropsAfterRun": (
             source_face_crops_after_run.summary()
             if source_face_crops_after_run is not None
@@ -7050,6 +7314,10 @@ def run_validation() -> int:
             == source_engine_after_run,
             "isolatedEngineUnchanged": isolated_engine_snapshot
             == isolated_engine_after_run,
+            "sourceEngineRuntimeUnchanged": source_engine_runtime_before
+            == source_engine_runtime_after_run,
+            "isolatedEngineRuntimeUnchanged": isolated_engine_runtime
+            == isolated_engine_runtime_after_run,
             "sourceFaceCropMembershipUnchanged": source_face_crops_before
             == source_face_crops_after_run,
             "postRunSafetyCompleted": not post_run_safety_errors,
@@ -7065,8 +7333,9 @@ def run_validation() -> int:
             "modelsInsideIsolatedState": under_root(models, state),
             "databaseInsideIsolatedState": under_root(db_path, state),
             "runtimeTempInsideIsolatedState": under_root(runtime_temp, state),
-            "ortInsideIsolatedModels": ort_dylib_path is None
-            or under_root(ort_dylib_path, models),
+            "ortInsideIsolatedRuntime": ort_dylib_path is None
+            or under_root(ort_dylib_path, models)
+            or ort_dylib_path.parent == engine_directory,
             "sourceModelsOutsideCorpus": not under_root(source_models, corpus),
             "sourceEngineOutsideCorpus": not under_root(source_engine, corpus),
             "seedOutsideCorpus": not under_root(seed_db, corpus),

@@ -1686,13 +1686,7 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
             match shell::heic::decode(path) {
                 Ok(out) => return Ok(out),
                 Err(heic_err) => {
-                    // Bubble up a user-facing instruction. The string is
-                    // matched by the pipeline so the row's `error` field
-                    // surfaces a clean install hint instead of the raw
-                    // WinRT HRESULT.
-                    return Err(anyhow::anyhow!(
-                        "HEIC codec not installed — install HEIF Image Extensions from the Microsoft Store ({heic_err})"
-                    ));
+                    return Err(heic_err.context("HEIC/HEIF decode failed"));
                 }
             }
         }

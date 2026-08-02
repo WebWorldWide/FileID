@@ -5,6 +5,8 @@ import AppKit
 import FileIDShared
 
 struct PeopleView: View {
+    private static let minFacesPerCluster = 13
+
     let engine: EngineClient
     let store: ReadStore
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
@@ -14,7 +16,9 @@ struct PeopleView: View {
     @State private var personByID: [Int64: ReadStore.PersonRow] = [:]
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
+    @State private var hiddenSmallClusterCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
+    @State private var showSmallClusters: Bool = false
     @State private var lastVersionSeen: Int = -1
     /// Throttle state for the `store.version` reload coalescer (see
     /// `throttledReload`): leading-edge timestamp + trailing debounce.
@@ -559,6 +563,7 @@ struct PeopleView: View {
                     : .spring(response: 0.35, dampingFraction: 0.78),
                             value: persons.count)
                 hiddenUnknownsFooter
+                hiddenSmallClustersFooter
             }
         }
     }
@@ -592,6 +597,31 @@ struct PeopleView: View {
         }
     }
 
+    @ViewBuilder
+    private var hiddenSmallClustersFooter: some View {
+        if hiddenSmallClusterCount > 0 {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.stack.badge.person.crop")
+                    .foregroundStyle(.tertiary)
+                Text(showSmallClusters
+                     ? "Showing \(hiddenSmallClusterCount) small face group\(hiddenSmallClusterCount == 1 ? "" : "s") with fewer than \(Self.minFacesPerCluster) faces each"
+                     : "\(hiddenSmallClusterCount) small face group\(hiddenSmallClusterCount == 1 ? "" : "s") hidden from the primary grid (fewer than \(Self.minFacesPerCluster) faces each)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button(showSmallClusters ? "Hide" : "Show") {
+                    showSmallClusters.toggle()
+                    reload()
+                }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .help("Show or hide small unnamed face groups.")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
     private var emptyState: some View {
         EmptyStateView(
             icon: "person.2.crop.square.stack",
@@ -613,6 +643,7 @@ struct PeopleView: View {
                 ProgressView("Grouping…")
                     .padding(.top, 4)
             }
+            hiddenSmallClustersFooter
         }
     }
 
@@ -655,8 +686,14 @@ struct PeopleView: View {
         // Drop emptied clusters: moving every face out of a person leaves a
         // 0-face row whose stale representative_face_id now points at the
         // target's face — a ghost card showing the wrong person. Hide it.
-        let rows = store.persons(includeUnknown: showHiddenUnknowns)
+        let allRows = store.persons(includeUnknown: showHiddenUnknowns)
             .filter { $0.faceCount > 0 }
+        hiddenSmallClusterCount = allRows.filter {
+            !$0.isUnknown && $0.faceCount < Self.minFacesPerCluster && !$0.hasAnyName
+        }.count
+        let rows = allRows.filter {
+            $0.isUnknown || showSmallClusters || $0.faceCount >= Self.minFacesPerCluster || $0.hasAnyName
+        }
         persons = rows
         hiddenUnknownCount = store.hiddenUnknownCount()
         // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
