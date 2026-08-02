@@ -1211,6 +1211,9 @@ pub(crate) async fn handle_plan_restructure(
                 tracing::warn!(?err, "counting restructure scope task failed");
             }
         }
+        if stop_cancelled_plan(&sink, &cancel).await {
+            return;
+        }
     }
     let query_cancel = std::sync::Arc::clone(&cancel);
     let files: Vec<FileForClassify> =
@@ -1239,6 +1242,9 @@ pub(crate) async fn handle_plan_restructure(
             Ok(Ok(v)) => v,
             Ok(Err(err)) => {
                 tracing::warn!(?err, "planRestructure query failed");
+                if stop_cancelled_plan(&sink, &cancel).await {
+                    return;
+                }
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                     kind: "plan_restructure_db".into(),
                     message: format!("planRestructure query failed: {err}"),

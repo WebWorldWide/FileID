@@ -7,6 +7,34 @@
 
 ---
 
+## 2026-08-01 — Real-data oracles reject anti-correlation splitting; presentation uses a 13-face floor
+
+The final Adlon A/B rejected Pass-3 anti-correlation splitting in both Rust and Swift. With eight
+deterministic lowest-centroid probes enabled, the unchanged validator produced 2,426 raw groups,
+1,220 visible People cards, a 19,411-face largest cluster, and 0.5595 minimum cluster-median
+cohesion; it failed the absolute-person, candidate-count, tiny-cluster, and cohesion gates. Removing
+only that split restored 2,215 raw groups, 1,074 visible cards, a 14,645-face largest cluster, 0.6773
+minimum cluster-median cohesion, and identical partitions across two runs. Exhaustive pair checking
+was also rejected because it is quadratic on mega-clusters and has no labelled identity oracle.
+Same-file cannot-links, protected centroid outlier suppression, and the calibrated mean/variance
+validation remain because they pass the full-catalog checks.
+
+The cross-platform presentation floor is 13 active faces. Named identities and explicit Unknown
+groups bypass it, and every UI exposes the retained smaller groups through a disclosed Show/Hide
+control. This supersedes the earlier six-face presentation decision: the higher floor is the lowest
+shared setting that keeps the measured primary grid within the 1,100-card temporary acceptance
+ceiling without merging or deleting evidence-backed identities.
+
+## 2026-08-01 — Restructure cancellation keeps its typed terminal across query boundaries
+
+Cancellation after the paged-plan scope count or during the ordinary file query emits
+`plan_restructure_cancelled`, never `plan_restructure_db`. Falling through after a cancelled count
+was rejected because native clients wait for the typed cancellation terminal and the real-data
+harness correctly treated a database-shaped error as unexpected. The final read-only Adlon gate
+observed exactly one typed cancellation, then two identical inline nine-move plans with no `planID`.
+The runtime-egress source digest was refreshed only after reviewing the six-line control-flow diff
+and confirming it adds no network capability.
+
 ## 2026-08-01 — Constrain automatic identities without overriding human evidence
 
 Two face detections from one physical file are cannot-link evidence for automatic identity

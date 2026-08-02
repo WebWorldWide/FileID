@@ -619,7 +619,7 @@ struct LibraryView: View {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
                         kindFilterRaw = k.value ?? ""
                     }
                 } label: {
@@ -908,14 +908,10 @@ struct FileTile: View {
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // Vision tag chips — at-a-glance content cues. Informational,
-            // not actionable, so they use a neutral secondary tint
-            // (gold is reserved for primary actions + the Smart name
-            // result). Up to 2 highest-confidence labels.
-            // Uses .caption2 (semantic, scales with Dynamic Type) instead
-            // of fixed .system(size: 9) for accessibility.
-            if !topTags.isEmpty {
-                HStack(spacing: 3) {
+            // Vision tag chips — at-a-glance content cues. Reserved 18pt height
+            // eliminates vertical grid popping when tags land asynchronously.
+            HStack(spacing: 3) {
+                if !topTags.isEmpty {
                     ForEach(topTags.prefix(2), id: \.self) { tag in
                         Text(Self.formatTag(tag))
                             .font(.caption2.weight(.medium))
@@ -927,9 +923,10 @@ struct FileTile: View {
                             )
                             .lineLimit(1)
                     }
-                    Spacer(minLength: 0)
                 }
+                Spacer(minLength: 0)
             }
+            .frame(height: 18)
             HStack(spacing: 4) {
                 Text(formatBytes(row.sizeBytes))
                     .font(.system(size: 9, design: .monospaced))
