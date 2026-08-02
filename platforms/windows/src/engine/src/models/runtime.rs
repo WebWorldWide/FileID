@@ -183,6 +183,26 @@ pub fn priority_chain(vendor: GpuVendor) -> Vec<ExecutionProvider> {
     chain
 }
 
+fn bind_chain(probe: &RuntimeProbe) -> Vec<ExecutionProvider> {
+    bind_chain_with_availability(probe, tensorrt_provider_present())
+}
+
+fn bind_chain_with_availability(
+    probe: &RuntimeProbe,
+    tensorrt_provider_present: bool,
+) -> Vec<ExecutionProvider> {
+    priority_chain(probe.vendor)
+        .into_iter()
+        .filter(|ep| match ep {
+            ExecutionProvider::Cuda => probe.cuda_pack_present,
+            ExecutionProvider::TensorRt => tensorrt_provider_present,
+            ExecutionProvider::OpenVino => probe.openvino_pack_present,
+            ExecutionProvider::Qnn => probe.qnn_pack_present,
+            ExecutionProvider::DirectMl | ExecutionProvider::Cpu => true,
+        })
+        .collect()
+}
+
 fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
     if !chain.contains(&ep) {
         chain.push(ep);
@@ -357,7 +377,7 @@ pub fn armed_provider() -> ExecutionProvider {
     // Only reads the Copy `vendor` field; the loop re-queries pack/disable state
     // live, so the memoized probe is byte-identical and skips a DXGI re-walk.
     let probe = RuntimeProbe::shared();
-    for ep in priority_chain(probe.vendor) {
+    for ep in bind_chain(probe) {
         match ep {
             ExecutionProvider::Cuda
                 if cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda") =>
@@ -400,6 +420,7 @@ pub fn armed_provider() -> ExecutionProvider {
 pub fn configure_session_builder(
     builder: ort::session::builder::SessionBuilder,
 ) -> ort::Result<ort::session::builder::SessionBuilder> {
+    use ort::logging::LogLevel;
     use ort::session::builder::GraphOptimizationLevel;
     // Use the EP that will ACTUALLY bind — the first in the override-aware
     // priority chain — not active_provider() (which is derived from pick_provider
@@ -408,7 +429,7 @@ pub fn configure_session_builder(
     // would be tuned with the GPU default of 1 intra-op thread → single-threaded
     // CPU inference on a multi-core box. priority_chain always ends with Cpu, so
     // next() is always Some.
-    let ep = priority_chain(RuntimeProbe::shared().vendor)
+    let ep = bind_chain(RuntimeProbe::shared())
         .into_iter()
         .next()
         .unwrap_or(ExecutionProvider::Cpu);
@@ -422,7 +443,10 @@ pub fn configure_session_builder(
     } else {
         1
     };
-    builder.with_optimization_level(opt)?.with_intra_threads(intra)
+    builder
+        .with_log_level(LogLevel::Error)?
+        .with_optimization_level(opt)?
+        .with_intra_threads(intra)
 }
 
 /// Build -> configure -> register-EPs -> commit an ORT session from `onnx_path`
@@ -438,7 +462,7 @@ pub fn commit_chain_session(
     use anyhow::Context;
     ensure_gpu_inference_alive()?;
     let probe = RuntimeProbe::shared();
-    let chain = priority_chain(probe.vendor);
+    let chain = bind_chain(probe);
     let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
     let builder = ort::session::Session::builder().context("ORT session builder")?;
     let mut builder =
@@ -551,6 +575,18 @@ fn cuda_provider_present() -> bool {
     crate::platform::find_file_under(
         &root.join("packs").join("cuda"),
         "onnxruntime_providers_cuda.dll",
+        4,
+    )
+    .is_some()
+}
+
+fn tensorrt_provider_present() -> bool {
+    let Ok(root) = crate::paths::models_dir() else {
+        return false;
+    };
+    crate::platform::find_file_under(
+        &root.join("packs").join("cuda"),
+        "onnxruntime_providers_tensorrt.dll",
         4,
     )
     .is_some()
@@ -1015,6 +1051,24 @@ mod tests {
                 ExecutionProvider::DirectMl,
                 ExecutionProvider::Cpu,
             ]
+        );
+    }
+
+    #[test]
+    fn nvidia_bind_chain_skips_uninstalled_pack_providers() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let probe = RuntimeProbe {
+            vendor: GpuVendor::Nvidia,
+            adapter_name: None,
+            adapter_index: Some(0),
+            provider: ExecutionProvider::DirectMl,
+            cuda_pack_present: false,
+            openvino_pack_present: false,
+            qnn_pack_present: false,
+        };
+        assert_eq!(
+            bind_chain_with_availability(&probe, false),
+            vec![ExecutionProvider::DirectMl, ExecutionProvider::Cpu]
         );
     }
 

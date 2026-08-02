@@ -6,6 +6,52 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-02
+
+### Fixed
+
+- **People never hides an active face group by size.** Windows, macOS, and Linux now show every
+  active cluster by default. Named and explicit Unknown behavior remains intact, and excluded
+  outlier faces still stay out of active counts.
+- **Suggested merges fail closed on strong different-person evidence.** A pair is not suggested
+  when both people appear in the same physical photo, incomplete membership evidence suppresses
+  the pair, and excluded faces cannot influence counts or co-occurrence. Accepted merges invalidate
+  every suggestion involving either changed endpoint so stale centroids cannot drive a second merge.
+- **Every suggestion requires per-pair review.** The macOS and Linux bulk “merge likely/all” actions
+  are removed. The remaining Merge action is explicit for each displayed pair, and similarity is
+  shown as a neutral numeric score rather than a “very likely same” identity claim.
+- **Linux uses the shared bounded suggestion engine.** It no longer truncates the first 100,000 face
+  rows or recomputes an incomplete quadratic result in the GTK process; verdict handling,
+  corroboration, deterministic ordering, and same-photo rejection now match Windows.
+- **macOS suggestion loading uses persisted person centroids.** The review scan no longer retains
+  every individual face vector just to rebuild centroids, substantially reducing peak memory on
+  large libraries while preserving full active-file co-occurrence checks and matching the shared
+  `0.55..<0.97` review band and 50-pair bound.
+- **Deep Analyze avoids repeated smart names.** When a batch produces the same proposed filename
+  more than once, Windows/Linux and macOS retain the first and disambiguate later results with the
+  sanitized source stem. Repeated-document prompts now ask for a visible date, name, or reference.
+- **GPU provider startup skips unavailable packs.** ONNX Runtime sessions bind only providers whose
+  packs are present, so NVIDIA systems without CUDA/TensorRT go directly to DirectML instead of
+  paying failed-provider startup work. Routine ORT optimizer chatter is held to error-level output.
+- **Native scan automation waits for People.** The Windows release harness now waits for both scan
+  completion and the authoritative face-clustering terminal, accepts an explicit published app,
+  and records processed-file, person, and face totals. Engine startup now trusts the unsolicited
+  Ready handshake instead of issuing a guaranteed-too-early status request. Cleanup empty states
+  distinguish exact duplicates from visually similar-image review.
+
+### Validation
+
+- The frozen 164,518-file Adlon catalog produced the same 2,215-cluster, 166,266-assigned-face
+  partition at recovery thresholds 0.75, 0.70, and 0.60, with identical membership digests and no
+  merges, splits, or swaps. Exact-capture and exact-embedding analysis found no additional cluster
+  that could be removed without introducing identity inference, so the production threshold remains
+  0.75 rather than claiming a reduction that the evidence does not support.
+- A read-only Restructure audit produced two identical 15-move review-only plans and passed
+  cancellation, collision, source, fingerprint, and SQLite-integrity checks without applying a move.
+- A real Mistral Deep Analyze audit passed image, video, PDF, typed-error, cancellation,
+  skip-existing, partial/full upgrade, content-quality, persistence, fingerprint, and integrity
+  checks with zero failed assertions.
+
 ## [0.1.2] - 2026-08-01
 
 ### Fixed
@@ -240,5 +286,6 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...v0.1.2

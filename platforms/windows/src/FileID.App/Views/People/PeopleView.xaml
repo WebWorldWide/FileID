@@ -29,7 +29,7 @@
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}"
                            AutomationProperties.HeadingLevel="Level1"/>
-                <TextBlock Text="Faces clustered into named cards. Drag to merge."
+                <TextBlock Text="Faces grouped into person cards. Name or merge them as you review."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
@@ -289,31 +289,6 @@
                         AutomationProperties.Name="Show hidden unknown people"
                         AutomationProperties.HelpText="Reveal clusters you've marked as unknown.">
                     <TextBlock x:Name="HiddenUnknownsButtonText" Text="Show" />
-                </Button>
-            </Grid>
-            <!-- Small-fragment disclosure. Face clustering over-splits into many
-                 tiny duplicate-burst clusters; the grid holds those back so the
-                 real people are findable. Say so plainly rather than dropping
-                 them silently — they stay searchable either way. -->
-            <Grid x:Name="HiddenSmallClustersFooter"
-                  Visibility="Collapsed"
-                  ColumnSpacing="10"
-                  Padding="12,8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
-                           x:Name="HiddenSmallClustersText"
-                           VerticalAlignment="Center"
-                           TextWrapping="Wrap"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                <Button Grid.Column="1"
-                        Click="OnToggleSmallClusters"
-                        ToolTipService.ToolTip="Show or hide small unnamed face groups."
-                        AutomationProperties.Name="Show or hide small face groups">
-                    <TextBlock x:Name="HiddenSmallClustersButtonText" Text="Show" />
                 </Button>
             </Grid>
             <StackPanel Orientation="Horizontal"

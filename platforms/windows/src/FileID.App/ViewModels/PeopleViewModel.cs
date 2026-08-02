@@ -24,7 +24,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
     private readonly Func<bool> _hideUnknown;
-    private readonly Func<bool> _showSmallClusters;
     private bool _isLoading;
     private string? _errorMessage;
     // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
@@ -43,43 +42,14 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private long _refreshGen;
     private int _activeLoads;
 
-    /// <summary>Minimum faces a cluster needs before it appears in the People
-    /// grid (named clusters are always shown regardless — see the HAVING clause).
-    ///
-    /// A fresh 164k-file Adlon scan produced 1,143 unnamed clusters with 12 or
-    /// fewer faces. Holding that review tail behind an explicit Show control keeps
-    /// the primary grid near 1,100 cards without deleting evidence or guessing at
-    /// identity merges the embedder cannot support.
-    ///
-    /// Fragments are NOT deleted and remain fully searchable — they are only
-    /// held back from the grid and remain available through the Show control.</summary>
-    public const int MinFacesPerCluster = 13;
-
-    /// <summary>Count of clusters withheld by <see cref="MinFacesPerCluster"/> on
-    /// the last refresh, so the view can disclose them instead of silently
-    /// dropping them.</summary>
-    public int HiddenSmallClusterCount
-    {
-        get => _hiddenSmallClusterCount;
-        private set
-        {
-            if (_hiddenSmallClusterCount == value) return;
-            _hiddenSmallClusterCount = value;
-            OnPropertyChanged();
-        }
-    }
-    private int _hiddenSmallClusterCount;
-
     public PeopleViewModel(
         string dbPath,
         DispatcherQueue ui,
-        Func<bool>? hideUnknown = null,
-        Func<bool>? showSmallClusters = null)
+        Func<bool>? hideUnknown = null)
     {
         _dbPath = dbPath;
         _ui = ui;
         _hideUnknown = hideUnknown ?? (() => false);
-        _showSmallClusters = showSmallClusters ?? (() => false);
     }
 
     public void Dispose()
@@ -196,12 +166,12 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private (List<PersonCluster> Clusters, int HiddenSmallClusterCount) LoadClusters(CancellationToken ct)
+    private List<PersonCluster> LoadClusters(CancellationToken ct)
     {
         // First-launch guard: the engine creates the DB on first scan.
         if (!File.Exists(_dbPath))
         {
-            return (new List<PersonCluster>(), 0);
+            return new List<PersonCluster>();
         }
         var connString = new SqliteConnectionStringBuilder
         {
@@ -239,19 +209,9 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                  AND COALESCE(fp.excluded, 0) = 0
             WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
             GROUP BY p.id
-            HAVING $show_small = 1
-               OR COUNT(fp.id) >= $min_faces
-               OR COALESCE(p.is_unknown, 0) = 1
-               -- A cluster the user has already named is always shown, however
-               -- small: hiding someone's own labelled person would be wrong.
-               OR TRIM(COALESCE(p.name, '') || COALESCE(p.title, '') ||
-                       COALESCE(p.first_name, '') || COALESCE(p.middle_name, '') ||
-                       COALESCE(p.last_name, '') || COALESCE(p.suffix, '')) <> ''
             ORDER BY member_count DESC
             """;
         cmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
-        cmd.Parameters.AddWithValue("$show_small", _showSmallClusters() ? 1 : 0);
-        cmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -265,34 +225,10 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 AnchorFaceId = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
             });
         }
-        reader.Close();
-
-        // Count what the size floor withheld, so the view can disclose it rather
-        // than silently hiding clusters. Same predicate as above, inverted.
-        using var hiddenCmd = conn.CreateCommand();
-        hiddenCmd.CommandText = """
-            SELECT COUNT(*) FROM (
-                SELECT p.id
-                FROM persons p
-                JOIN face_prints fp ON fp.person_id = p.id
-                     AND COALESCE(fp.excluded, 0) = 0
-                WHERE COALESCE(p.is_unknown, 0) = 0
-                GROUP BY p.id
-                HAVING COUNT(fp.id) < $min_faces
-                   AND TRIM(COALESCE(p.name, '') || COALESCE(p.title, '') ||
-                            COALESCE(p.first_name, '') || COALESCE(p.middle_name, '') ||
-                            COALESCE(p.last_name, '') || COALESCE(p.suffix, '')) = ''
-            )
-            """;
-        hiddenCmd.Parameters.AddWithValue("$min_faces", MinFacesPerCluster);
-        var hidden = hiddenCmd.ExecuteScalar();
-        var hiddenCount = hidden is long l ? (int)l : Convert.ToInt32(hidden ?? 0);
-        return (rows, hiddenCount);
+        return rows;
     }
 
-    private void ApplyOnUi(
-        (List<PersonCluster> Clusters, int HiddenSmallClusterCount) result,
-        long gen)
+    private void ApplyOnUi(List<PersonCluster> result, long gen)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -300,8 +236,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         void ApplySafely() => DebugLog.SafeRun("PeopleViewModel.ApplyOnUi", () =>
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
-            Replace(result.Clusters);
-            HiddenSmallClusterCount = result.HiddenSmallClusterCount;
+            Replace(result);
         });
         if (_ui.HasThreadAccess)
         {

@@ -57,7 +57,7 @@ public sealed class SuggestedMergesBusyStateTests
             "SetBusy(false) must run on the success, timeout, and error paths and in Render()");
 
         // Render() must not clear the busy state on a null (not-yet-arrived)
-        // result, or the ring vanishes and "No likely merges found." flashes
+        // result, or the ring vanishes and "No merge-review candidates found." flashes
         // before the real reply lands.
         var render = code[code.IndexOf("private void Render()", StringComparison.Ordinal)..];
         var nullGuard = render.IndexOf("if (sug is null) return;", StringComparison.Ordinal);
@@ -65,6 +65,17 @@ public sealed class SuggestedMergesBusyStateTests
         Assert.True(nullGuard >= 0, "Render must early-return on a null result");
         Assert.True(nullGuard < clear,
             "the null guard must precede SetBusy(false) so a pending fetch keeps its indicator");
+    }
+
+    [Fact]
+    public void SuccessfulMergeInvalidatesSuggestionsForBothChangedEndpoints()
+    {
+        var code = File.ReadAllText(SheetCode());
+
+        Assert.Contains("other.SourcePersonId == vm.SourcePersonId", code, StringComparison.Ordinal);
+        Assert.Contains("other.DestinationPersonId == vm.SourcePersonId", code, StringComparison.Ordinal);
+        Assert.Contains("other.SourcePersonId == vm.DestinationPersonId", code, StringComparison.Ordinal);
+        Assert.Contains("other.DestinationPersonId == vm.DestinationPersonId", code, StringComparison.Ordinal);
     }
 
     private static int CountOf(string haystack, string needle)

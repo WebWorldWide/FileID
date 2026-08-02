@@ -1693,7 +1693,7 @@ pub(crate) async fn handle_mark_persons_different(
     emit_bulk_result(&sink, "markPersonsDifferent", result).await;
 }
 
-/// Find merge-candidate cluster pairs by ArcFace cosine similarity in the
+/// Find merge-candidate cluster pairs by SFace cosine similarity in the
 /// suggestion band (MERGE_SUGGEST_COS_LOW..MERGE_SUGGEST_COS_HIGH from
 /// face_clustering — 0.55..0.97, distinct from the clusterer's own VLM-verify
 /// band). The floor drops impostor-territory noise; the ceiling surfaces the
@@ -1832,6 +1832,20 @@ fn suggestion_candidates(people: &[SuggestionPerson]) -> Vec<SuggestionCandidate
     candidates
 }
 
+fn candidate_people_cooccur(
+    candidate: &SuggestionCandidate,
+    people: &[SuggestionPerson],
+    files_by_person: &HashMap<i64, HashSet<i64>>,
+) -> bool {
+    let Some(left) = files_by_person.get(&people[candidate.a].person_id) else {
+        return true;
+    };
+    let Some(right) = files_by_person.get(&people[candidate.b].person_id) else {
+        return true;
+    };
+    !left.is_disjoint(right)
+}
+
 pub(crate) async fn handle_find_merge_suggestions(
     sink: Sink,
     db_path: std::path::PathBuf,
@@ -1853,7 +1867,8 @@ pub(crate) async fn handle_find_merge_suggestions(
                  FROM persons p
                  JOIN face_prints rep
                    ON rep.id = p.representative_face_id AND rep.arcface_embedding IS NOT NULL
-                 JOIN face_prints fpc ON fpc.person_id = p.id
+                 JOIN face_prints fpc
+                   ON fpc.person_id = p.id AND COALESCE(fpc.excluded, 0) = 0
                  WHERE COALESCE(p.is_unknown, 0) = 0
                  GROUP BY p.id",
             )?;
@@ -2011,6 +2026,24 @@ pub(crate) async fn handle_find_merge_suggestions(
         // math. Release the single-writer lock so the (potentially multi-second
         // on a large over-split library) sweep doesn't serialize other writes.
         let mut candidates = suggestion_candidates(&people);
+        let mut files_by_person: HashMap<i64, HashSet<i64>> = HashMap::new();
+        {
+            let mut statement = conn.prepare(
+                "SELECT person_id, file_id FROM face_prints \
+                 WHERE person_id IS NOT NULL AND excluded = 0 \
+                 ORDER BY person_id, file_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (person_id, file_id) = row?;
+                files_by_person
+                    .entry(person_id)
+                    .or_default()
+                    .insert(file_id);
+            }
+        }
         candidates.retain(|candidate| {
             let a = &people[candidate.a];
             let b = &people[candidate.b];
@@ -2027,6 +2060,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             !verified_persons.contains(&person_pair)
                 && !verified_faces.contains(&face_pair)
                 && !verified_membership_persons.contains(&person_pair)
+                && !candidate_people_cooccur(candidate, &people, &files_by_person)
         });
         let is_fragment_pair = |candidate: &SuggestionCandidate| {
             let a = people[candidate.a].member_count;
@@ -2888,6 +2922,37 @@ mod tests {
         assert!((decoded[1] - 0.8).abs() < 1e-6);
         assert!(decode_unit_embedding(&[0, 1, 2]).is_none());
         assert!(decode_unit_embedding(&[0; 8]).is_none());
+    }
+
+    #[test]
+    fn suggestion_rejects_people_who_cooccur_in_a_file() {
+        let people = vec![
+            test_suggestion_person(1, vec![1.0, 0.0]),
+            test_suggestion_person(2, vec![0.8, 0.6]),
+            test_suggestion_person(3, vec![0.6, 0.8]),
+        ];
+        let candidates = suggestion_candidates(&people);
+        let files_by_person = HashMap::from([
+            (1, HashSet::from([10, 11])),
+            (2, HashSet::from([11, 12])),
+            (3, HashSet::from([13])),
+        ]);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.a == 0
+                && candidate.b == 1
+                && candidate_people_cooccur(candidate, &people, &files_by_person)
+        }));
+        assert!(candidates.iter().any(|candidate| {
+            candidate.a == 1
+                && candidate.b == 2
+                && !candidate_people_cooccur(candidate, &people, &files_by_person)
+        }));
+        let incomplete_files = HashMap::from([(1, HashSet::from([10, 11]))]);
+        assert!(candidates.iter().any(|candidate| {
+            candidate.a == 0
+                && candidate.b == 1
+                && candidate_people_cooccur(candidate, &people, &incomplete_files)
+        }));
     }
 
     #[test]

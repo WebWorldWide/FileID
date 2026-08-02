@@ -1487,19 +1487,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
 
             ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
-            // Send a status request — when the engine returns ready, we'll
-            // populate Info and flip State to Ready.
-            try
-            {
-                await SendCommandAsync(
-                    new RequestStatusCommand(),
-                    CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
-            }
-            ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken);
         }
         catch (OperationCanceledException)
             when (lifecycleToken.IsCancellationRequested

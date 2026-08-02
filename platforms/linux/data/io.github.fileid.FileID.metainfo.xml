@@ -75,6 +75,11 @@
   </branding>
 
   <releases>
+    <release version="0.1.3" date="2026-08-02">
+      <description>
+        <p>Face groups are no longer hidden by a size threshold. Merge suggestions reject people who appear together in the same photo, require per-pair review, and use the shared bounded engine path on Linux. Suggested-pair processing uses persisted centroids on macOS to reduce memory use, and stale suggestions are invalidated after every accepted merge.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-07-30">
       <description>
         <p>People grouping and Restructure reliability. Faces are judged by pixel size instead of frame share, recovering real faces that were discarded; near-identical face groups now merge, so one person is no longer split across many groups; and People hides one-moment fragments while keeping every named group. Restructure Apply no longer abandons a whole batch over one changed file, states only the moves it will actually make, and keeps Undo available after a cancelled undo. Deep Analyze gains a folder-exclusion list.</p>

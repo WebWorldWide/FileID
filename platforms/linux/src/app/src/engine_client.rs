@@ -69,6 +69,7 @@ pub enum EngineEvent {
     FaceClusteringComplete(fileid_engine::ipc::FaceClusteringResult),
     FaceClusteringFailed(String),
     FaceClusteringBusy(String),
+    MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
 
     // ── Deep Analyze lifecycle (consumed by the Deep Analyze tab) ────────────
     DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
@@ -790,6 +791,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<EngineEvent> {
         EventPayload::FaceClusteringComplete(w) => {
             Some(EngineEvent::FaceClusteringComplete(w.inner))
         }
+        EventPayload::MergeSuggestions(w) => Some(EngineEvent::MergeSuggestions(w.inner)),
         EventPayload::DeepAnalyzeStarting(w) => Some(EngineEvent::DeepAnalyzeStarting(w.inner)),
         EventPayload::DeepAnalyzeProgress(w) => Some(EngineEvent::DeepAnalyzeProgress(w.inner)),
         EventPayload::DeepAnalyzeFileDone(w) => Some(EngineEvent::DeepAnalyzeFileDone(w.inner)),
@@ -1364,6 +1366,19 @@ mod tests {
         assert!(
             matches!(busy, Some(EngineEvent::FaceClusteringBusy(message)) if message == "busy")
         );
+    }
+
+    #[test]
+    fn merge_suggestions_are_forwarded() {
+        let mapped = map_engine_payload(EventPayload::MergeSuggestions(
+            fileid_engine::ipc::Wrap::new(fileid_engine::ipc::MergeSuggestions {
+                pairs: Vec::new(),
+            }),
+        ));
+        assert!(matches!(
+            mapped,
+            Some(EngineEvent::MergeSuggestions(result)) if result.pairs.is_empty()
+        ));
     }
 
     #[test]

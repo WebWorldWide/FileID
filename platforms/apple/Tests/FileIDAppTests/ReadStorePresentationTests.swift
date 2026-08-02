@@ -43,7 +43,8 @@ struct ReadStorePresentationTests {
                     suffix TEXT,
                     is_unknown INTEGER NOT NULL DEFAULT 0,
                     representative_face_id INTEGER,
-                    file_count INTEGER NOT NULL DEFAULT 0
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    centroid BLOB
                 )
                 """)
             try db.execute(sql: """
@@ -52,7 +53,8 @@ struct ReadStorePresentationTests {
                     person_id INTEGER,
                     excluded INTEGER NOT NULL DEFAULT 0,
                     bbox TEXT,
-                    file_id INTEGER
+                    file_id INTEGER,
+                    arcface_embedding BLOB
                 )
                 """)
             try seed(db)
@@ -83,8 +85,8 @@ struct ReadStorePresentationTests {
         #expect(fixture.store.tags(forFileID: 1) == ["favorite", "sunset", "cat"])
     }
 
-    @Test("structured names and explicit unknowns keep small clusters visible")
-    func smallClusterOverridesRemainVisible() throws {
+    @Test("all active clusters remain visible regardless of size")
+    func allClusterSizesRemainVisible() throws {
         let fixture = try makeStore { db in
             try db.execute(sql: """
                 INSERT INTO persons (id, last_name, is_unknown, file_count) VALUES
@@ -104,8 +106,73 @@ struct ReadStorePresentationTests {
             try? FileManager.default.removeItem(at: fixture.root)
         }
 
-        #expect(fixture.store.persons(minFaces: 6).map(\.id) == [1])
-        #expect(fixture.store.persons(includeUnknown: true, minFaces: 13).map(\.id) == [1, 3])
-        #expect(fixture.store.hiddenSmallClusterCount() == 1)
+        #expect(fixture.store.persons().map(\.id) == [1, 2])
+        #expect(fixture.store.persons(includeUnknown: true).map(\.id) == [1, 2, 3])
+    }
+
+    @Test("merge suggestions reject people who appear in the same file")
+    func mergeSuggestionsRejectCooccurringPeople() throws {
+        let blob = { (values: [Float]) in
+            values.withUnsafeBytes { Data($0) }
+        }
+        let fixture = try makeStore { db in
+            try db.execute(sql: """
+                INSERT INTO persons (id, representative_face_id) VALUES
+                    (1, 1), (2, 2), (3, 3)
+                """)
+            try db.execute(
+                sql: "INSERT INTO face_prints (id, person_id, file_id, arcface_embedding) VALUES (?, ?, ?, ?)",
+                arguments: [1, 1, 10, blob([1.0, 0.0])]
+            )
+            try db.execute(
+                sql: "INSERT INTO face_prints (id, person_id, file_id, arcface_embedding) VALUES (?, ?, ?, ?)",
+                arguments: [2, 2, 10, blob([0.6, 0.8])]
+            )
+            try db.execute(
+                sql: "INSERT INTO face_prints (id, person_id, file_id, arcface_embedding) VALUES (?, ?, ?, ?)",
+                arguments: [3, 3, 11, blob([0.6, 0.8])]
+            )
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        let candidates = ClusterSuggestions.findCandidates(
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+        )
+        #expect(!candidates.contains { ($0.personA, $0.personB) == (1, 2) })
+        #expect(candidates.contains { ($0.personA, $0.personB) == (1, 3) })
+    }
+
+    @Test("merge suggestions stay bounded")
+    func mergeSuggestionsStayBounded() throws {
+        let blob = { (values: [Float]) in
+            values.withUnsafeBytes { Data($0) }
+        }
+        let fixture = try makeStore { db in
+            for id in 1...30 {
+                var vector = [Float](repeating: 0, count: 31)
+                vector[0] = Float(0.6).squareRoot()
+                vector[id] = Float(0.4).squareRoot()
+                try db.execute(
+                    sql: "INSERT INTO persons (id, representative_face_id) VALUES (?, ?)",
+                    arguments: [id, id]
+                )
+                try db.execute(
+                    sql: "INSERT INTO face_prints (id, person_id, file_id, arcface_embedding) VALUES (?, ?, ?, ?)",
+                    arguments: [id, id, id, blob(vector)]
+                )
+            }
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        let candidates = ClusterSuggestions.findCandidates(
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+        )
+        #expect(candidates.count == ClusterSuggestions.resultLimit)
     }
 }

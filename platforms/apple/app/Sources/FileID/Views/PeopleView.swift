@@ -5,8 +5,6 @@ import AppKit
 import FileIDShared
 
 struct PeopleView: View {
-    private static let minFacesPerCluster = 13
-
     let engine: EngineClient
     let store: ReadStore
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
@@ -16,9 +14,7 @@ struct PeopleView: View {
     @State private var personByID: [Int64: ReadStore.PersonRow] = [:]
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
-    @State private var hiddenSmallClusterCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
-    @State private var showSmallClusters: Bool = false
     @State private var lastVersionSeen: Int = -1
     /// Throttle state for the `store.version` reload coalescer (see
     /// `throttledReload`): leading-edge timestamp + trailing debounce.
@@ -99,7 +95,6 @@ struct PeopleView: View {
                             // of clusters this can take 5–15 s and would
                             // freeze the UI on the main thread.
                             let storeRef = store
-                            let candidateID = candidate.id
                             let displayName = t.displayName
                             mergeInFlight = true
                             Task.detached(priority: .userInitiated) {
@@ -107,7 +102,10 @@ struct PeopleView: View {
                                 await MainActor.run {
                                     if let n {
                                         mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
-                                        suggestions.removeAll { $0.id == candidateID }
+                                        suggestions.removeAll {
+                                            $0.personA == t.id || $0.personB == t.id ||
+                                            $0.personA == s.id || $0.personB == s.id
+                                        }
                                     } else {
                                         mergeStatus = "Merge failed — see logs."
                                     }
@@ -118,43 +116,6 @@ struct PeopleView: View {
                         } else {
                             suggestions.removeAll { $0.id == candidate.id }
                             reload()
-                        }
-                    },
-                    onAcceptMany: { batch in
-                        guard !mergeInFlight else { return }
-                        // One transaction for the whole batch. ReadStore's
-                        // union-find resolves chains (A→B, B→C → A→C),
-                        // so we just submit raw (target, source) pairs.
-                        var pairs: [(target: Int64, source: Int64)] = []
-                        pairs.reserveCapacity(batch.count)
-                        for candidate in batch {
-                            let a = personByID[candidate.personA]
-                            let b = personByID[candidate.personB]
-                            guard let target = preferredTarget(a, b) ?? a ?? b else { continue }
-                            let source = (target.id == a?.id) ? b : a
-                            guard let s = source, s.id != target.id else { continue }
-                            pairs.append((target.id, s.id))
-                        }
-                        let batchToRemove = batch
-                        guard !pairs.isEmpty else {
-                            suggestions.removeAll { batchToRemove.contains($0) }
-                            reload()
-                            return
-                        }
-                        let storeRef = store
-                        mergeInFlight = true
-                        Task.detached(priority: .userInitiated) {
-                            let merged = storeRef.mergePersonsBatch(pairs)
-                            await MainActor.run {
-                                if merged > 0 {
-                                    suggestions.removeAll { batchToRemove.contains($0) }
-                                    mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
-                                } else {
-                                    mergeStatus = "Merge failed — see logs."
-                                }
-                                mergeInFlight = false
-                                reload()
-                            }
                         }
                     },
                     onDismiss: { activeSheet = nil }
@@ -562,7 +523,6 @@ struct PeopleView: View {
                     ? .easeOut(duration: 0.15)
                     : .spring(response: 0.35, dampingFraction: 0.78),
                             value: persons.count)
-                hiddenSmallClustersFooter
                 hiddenUnknownsFooter
             }
         }
@@ -597,31 +557,6 @@ struct PeopleView: View {
         }
     }
 
-    @ViewBuilder
-    private var hiddenSmallClustersFooter: some View {
-        if hiddenSmallClusterCount > 0 {
-            HStack(spacing: 8) {
-                Image(systemName: "rectangle.stack.badge.person.crop")
-                    .foregroundStyle(.tertiary)
-                Text(showSmallClusters
-                     ? "Showing \(hiddenSmallClusterCount) small face group\(hiddenSmallClusterCount == 1 ? "" : "s") with fewer than \(Self.minFacesPerCluster) faces each"
-                     : "\(hiddenSmallClusterCount) small face group\(hiddenSmallClusterCount == 1 ? "" : "s") hidden from the primary grid (fewer than \(Self.minFacesPerCluster) faces each)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button(showSmallClusters ? "Hide" : "Show") {
-                    showSmallClusters.toggle()
-                    reload()
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .help("Show or hide small unnamed face groups.")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-        }
-    }
-
     private var emptyState: some View {
         EmptyStateView(
             icon: "person.2.crop.square.stack",
@@ -643,7 +578,6 @@ struct PeopleView: View {
                 ProgressView("Grouping…")
                     .padding(.top, 4)
             }
-            hiddenSmallClustersFooter
         }
     }
 
@@ -686,12 +620,10 @@ struct PeopleView: View {
         // Drop emptied clusters: moving every face out of a person leaves a
         // 0-face row whose stale representative_face_id now points at the
         // target's face — a ghost card showing the wrong person. Hide it.
-        let minFaces = showSmallClusters ? 0 : Self.minFacesPerCluster
-        let rows = store.persons(includeUnknown: showHiddenUnknowns, minFaces: minFaces)
+        let rows = store.persons(includeUnknown: showHiddenUnknowns)
             .filter { $0.faceCount > 0 }
         persons = rows
         hiddenUnknownCount = store.hiddenUnknownCount()
-        hiddenSmallClusterCount = store.hiddenSmallClusterCount(minFaces: Self.minFacesPerCluster)
         // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
         personByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
     }
@@ -1365,7 +1297,6 @@ private struct SuggestedMergesSheet: View {
     let store: ReadStore
     let inFlight: Bool
     let onAccept: (ClusterSuggestions.Candidate) -> Void
-    let onAcceptMany: ([ClusterSuggestions.Candidate]) -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -1385,42 +1316,9 @@ private struct SuggestedMergesSheet: View {
                 Button("Done", action: onDismiss)
                     .keyboardShortcut(.defaultAction)
             }
-            Text("These pairs were close enough to look like the same person, but not close enough to merge automatically. Review and merge the ones that match.")
+            Text("These pairs fall within the similarity review band. Compare each pair and merge only when you recognize the same person.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                // Bulk-accept the highest-confidence ("Very likely same",
-                // cosine ≥ 0.55) pairs in one click. Lets the user clear
-                // the easy cases without 100 individual Merge clicks.
-                let veryLikely = candidates.filter { $0.similarity >= 0.55 }
-                Button {
-                    onAcceptMany(veryLikely)
-                } label: {
-                    Label("Merge \(veryLikely.count) very-likely-same",
-                          systemImage: "checkmark.circle.fill")
-                        .font(.callout.bold())
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.18)))
-                        .foregroundStyle(.green)
-                }
-                .buttonStyle(.plain)
-                .disabled(veryLikely.isEmpty || inFlight)
-                .help("Bulk-merge every pair with cosine similarity ≥ 0.55 (the strongest 'same person' signal). The remaining pairs stay for manual review.")
-                Button {
-                    onAcceptMany(candidates)
-                } label: {
-                    Label("Merge all \(candidates.count)",
-                          systemImage: "rectangle.stack.fill")
-                        .font(.callout.bold())
-                        .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary, lineWidth: 1))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .disabled(candidates.isEmpty || inFlight)
-                .help("Merge every pair in the list. Use carefully — pairs near the lower end of the borderline band may not actually be the same person.")
-                Spacer()
-            }
             // Outcome already rendered above the action row, no duplicate here.
             Divider().opacity(0.3)
             if candidates.isEmpty {
@@ -1428,9 +1326,9 @@ private struct SuggestedMergesSheet: View {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 48))
                         .foregroundStyle(.green)
-                    Text("No borderline pairs found.")
+                    Text("No merge-review candidates found.")
                         .font(.callout.bold())
-                    Text("Every cluster centroid is either reliably the same person (already merged) or reliably different. Re-run after adding more photos.")
+                    Text("No current pair falls within the review band and passes the safety checks. Re-run after adding more photos.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1469,9 +1367,9 @@ private struct SuggestedMergesSheet: View {
                 miniCard(b)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(similarityLabel(cand.similarity))
+                    Text("Similarity \(cand.similarity, format: .number.precision(.fractionLength(2)))")
                         .font(.caption.bold())
-                        .foregroundStyle(similarityColor(cand.similarity))
+                        .foregroundStyle(.secondary)
                     Button("Merge") { onAccept(cand) }
                         .buttonStyle(.borderedProminent)
                         .tint(Theme.gold)
@@ -1504,17 +1402,6 @@ private struct SuggestedMergesSheet: View {
         .frame(width: 170, alignment: .leading)
     }
 
-    private func similarityColor(_ s: Float) -> Color {
-        if s >= 0.55 { return .green }
-        if s >= 0.50 { return .yellow }
-        return .orange
-    }
-
-    private func similarityLabel(_ s: Float) -> String {
-        if s >= 0.55 { return "Very likely same" }
-        if s >= 0.50 { return "Likely same" }
-        return "Possibly same"
-    }
 }
 
 // MARK: - Merge target picker

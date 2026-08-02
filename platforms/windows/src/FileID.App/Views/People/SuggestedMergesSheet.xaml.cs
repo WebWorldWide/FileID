@@ -102,13 +102,13 @@ public sealed partial class SuggestedMergesSheet : UserControl
         if (_unloaded) return;
         var sug = EngineClient.Instance.LastMergeSuggestions;
         // A null result means the reply hasn't landed yet — stay in the busy
-        // state rather than flashing "No likely merges found." over the ring.
+        // state rather than flashing "No merge-review candidates found." over the ring.
         if (sug is null) return;
         SetBusy(false);
         _rows.Clear();
         if (sug.Pairs.Count == 0)
         {
-            HeaderText.Text = "No likely merges found. (Try after a fresh scan + re-cluster.)";
+            HeaderText.Text = "No merge-review candidates found. (Try after a fresh scan + re-cluster.)";
             return;
         }
         HeaderText.Text = $"{sug.Pairs.Count} candidate pair{(sug.Pairs.Count == 1 ? "" : "s")} — review each.";
@@ -145,13 +145,14 @@ public sealed partial class SuggestedMergesSheet : UserControl
             PeopleView.PushMergeUndo(vm.SourcePersonId, vm.DestinationPersonId, movedFaceIds,
                 $"merge people #{vm.SourcePersonId} into #{vm.DestinationPersonId}");
             vm.IsResolved = true;
-            // The merged-away source person no longer exists; resolve any other
-            // visible pair that references it so the user can't act on a
-            // now-dangling person (which would be a no-op merge).
+            // Both endpoint memberships and the destination centroid changed.
+            // Require a fresh engine result before either endpoint is reviewed again.
             foreach (var other in _rows)
             {
                 if (other.SourcePersonId == vm.SourcePersonId
-                    || other.DestinationPersonId == vm.SourcePersonId)
+                    || other.DestinationPersonId == vm.SourcePersonId
+                    || other.SourcePersonId == vm.DestinationPersonId
+                    || other.DestinationPersonId == vm.DestinationPersonId)
                 {
                     other.IsResolved = true;
                 }

@@ -295,6 +295,7 @@ public enum DeepAnalyzeRunner {
         var failed    = 0
         var cancelled = false
         let batchStart = Date()
+        var reservedProposedNames = Set<String>()
 
         for (i, target) in targets.enumerated() {
             if await DeepAnalyze.shared.isCancelled() {
@@ -368,6 +369,16 @@ public enum DeepAnalyzeRunner {
             if isFailure {
                 failed += 1
             } else {
+                let proposedName: String?
+                if proposeRenames && !tagsOnly {
+                    proposedName = Self.reserveProposedName(
+                        result.proposedName,
+                        sourcePath: target.path,
+                        reserved: &reservedProposedNames
+                    )
+                } else {
+                    proposedName = nil
+                }
                 // Success is contingent on the result actually persisting. A
                 // swallowed write used to report the file as done while the
                 // caption/name never reached the DB (the UI then shows nothing
@@ -376,7 +387,7 @@ public enum DeepAnalyzeRunner {
                     try await persist(database: database,
                                       fileID: target.id,
                                       description: tagsOnly ? nil : result.description,
-                                      proposedName: proposeRenames && !tagsOnly ? result.proposedName : nil,
+                                      proposedName: proposedName,
                                       tags: result.tags,
                                       modelKey: modelKey,
                                       updatesDescription: !tagsOnly,
@@ -386,7 +397,7 @@ public enum DeepAnalyzeRunner {
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
                         description: result.description,
-                        proposedName: proposeRenames && !tagsOnly ? result.proposedName : nil,
+                        proposedName: proposedName,
                         modelKind: modelKey
                     )))
                 } catch {
@@ -412,6 +423,29 @@ public enum DeepAnalyzeRunner {
         description.hasPrefix("Inference failed")
             || description.hasPrefix("Could not decode")
             || description == "Model not loaded."
+    }
+
+    static func reserveProposedName(
+        _ proposedName: String?,
+        sourcePath: String,
+        reserved: inout Set<String>
+    ) -> String? {
+        guard let base = proposedName, !base.isEmpty else { return nil }
+        if reserved.insert(base.lowercased()).inserted { return base }
+        let stem = ((sourcePath as NSString).lastPathComponent as NSString)
+            .deletingPathExtension
+        let sourceStem = DeepAnalyze.sanitize(filename: stem) ?? "source"
+        var ordinal = 1
+        while true {
+            let suffix = ordinal == 1 ? sourceStem : "\(sourceStem)-\(ordinal)"
+            let suffixCount = suffix.utf8.count
+            let budget = max(0, 80 - suffixCount - 1)
+            var prefix = String(base.prefix(budget))
+            while prefix.last == "-" || prefix.last == "_" { prefix.removeLast() }
+            let candidate = prefix.isEmpty ? suffix : "\(prefix)-\(suffix)"
+            if reserved.insert(candidate.lowercased()).inserted { return candidate }
+            ordinal += 1
+        }
     }
 
     static func persist(

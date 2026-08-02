@@ -12,7 +12,7 @@
 #   2. A corpus folder (use build/gen-corpus.ps1 to make a 50K synthetic one).
 #
 # Pass criteria:
-#   - App reaches ScanCompleteEvent (Phase=Completed) within TimeoutMinutes
+#   - App reaches scan and face-clustering completion within TimeoutMinutes
 #   - App exits cleanly (last-session.txt: clean_exit=true)
 #   - No new WER crash dumps written during the run
 #   - No unmatched [APPLY:N] enter in app.log (would name the killer subscriber)
@@ -25,6 +25,7 @@
 # Usage:
 #   pwsh build/gui-regression.ps1 -Corpus C:\path\to\library
 #   pwsh build/gui-regression.ps1 -Corpus C:\path -TimeoutMinutes 90 -SkipBuild
+#   pwsh build/gui-regression.ps1 -Corpus C:\path -SkipBuild -AppExecutable C:\release\FileID.exe
 
 param(
     [Parameter(Mandatory=$true)][string]$Corpus,
@@ -33,6 +34,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipWipe,
     [string]$StateDirectory = "",
+    [string]$AppExecutable = "",
     [switch]$UseLiveState
 )
 
@@ -94,7 +96,14 @@ if ($runningFileId.Count -gt 0) {
 }
 
 # --- 2. Build ---------------------------------------------------------
-$AppExe = Join-Path $AppDir "bin\x64\$Configuration\$AppTfm\win-x64\FileID.exe"
+$AppExe = if ([string]::IsNullOrWhiteSpace($AppExecutable)) {
+    Join-Path $AppDir "bin\x64\$Configuration\$AppTfm\win-x64\FileID.exe"
+} else {
+    [System.IO.Path]::GetFullPath($AppExecutable)
+}
+if (-not [string]::IsNullOrWhiteSpace($AppExecutable) -and -not $SkipBuild) {
+    throw "-AppExecutable requires -SkipBuild so the requested binary cannot be replaced or ignored."
+}
 if (-not $SkipBuild) {
     Step "Building app ($Configuration)"
     Push-Location $PlatformDir
@@ -141,8 +150,10 @@ try {
             $env:FILEID_MODELS_DIR = $liveModels
         }
     }
+    # Start-Process joins ArgumentList without quoting entries that contain spaces.
+    $quotedCorpus = '"' + $Corpus + '"'
     $proc = Start-Process -FilePath $AppExe `
-        -ArgumentList @("--auto-scan-folder", $Corpus, "--auto-exit-after-scan") `
+        -ArgumentList @("--auto-scan-folder", $quotedCorpus, "--auto-exit-after-scan") `
         -PassThru
 } finally {
     $env:LOCALAPPDATA = $priorLocalAppData
@@ -155,6 +166,9 @@ $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $scanStarted = $false
 $scanEnded = $false
 $scanOk = $false
+$scanProcessed = -1
+$clusterPersons = -1
+$clusterFaces = -1
 
 while ((Get-Date) -lt $deadline) {
     if ($proc.HasExited) { break }
@@ -167,7 +181,14 @@ while ((Get-Date) -lt $deadline) {
         $endLine = $tail | Where-Object { $_ -match '\[AUTO-SCAN\] scan ended ok=(\w+)' } | Select-Object -Last 1
         if ($endLine) {
             $scanEnded = $true
-            $scanOk = ($endLine -match 'ok=True')
+            if ($endLine -match 'scan ended ok=(\w+) processed=(\d+) persons=(\d+) faces=(\d+)') {
+                $scanOk = ($Matches[1] -eq 'True')
+                $scanProcessed = [long]$Matches[2]
+                $clusterPersons = [long]$Matches[3]
+                $clusterFaces = [long]$Matches[4]
+            } else {
+                $scanOk = ($endLine -match 'ok=True')
+            }
             break
         }
         if ($tail | Where-Object { $_ -match '\[AUTO-SCAN\] failed:' }) {
@@ -196,12 +217,18 @@ if (Test-Path $AppLog) {
     $scanStarted = $false
     $scanEnded = $false
     $scanOk = $false
+    $scanProcessed = -1
+    $clusterPersons = -1
+    $clusterFaces = -1
     foreach ($line in Get-Content -Path $AppLog -ErrorAction SilentlyContinue) {
         if ($line -match '\[AUTO-SCAN\] starting scan') {
             $scanStarted = $true
-        } elseif ($line -match '\[AUTO-SCAN\] scan ended ok=(\w+)') {
+        } elseif ($line -match '\[AUTO-SCAN\] scan ended ok=(\w+) processed=(\d+) persons=(\d+) faces=(\d+)') {
             $scanEnded = $true
             $scanOk = ($Matches[1] -eq 'True')
+            $scanProcessed = [long]$Matches[2]
+            $clusterPersons = [long]$Matches[3]
+            $clusterFaces = [long]$Matches[4]
         } elseif ($line -match '\[AUTO-SCAN\] failed:') {
             $scanEnded = $true
             $scanOk = $false
@@ -214,6 +241,10 @@ Step "Assertions"
 Assert "scan started"   $scanStarted
 Assert "scan ended"     $scanEnded
 Assert "scan ok"        $scanOk
+Assert "scan processed files" ($scanProcessed -gt 0) `
+    "(processed=$scanProcessed discovered=$corpusFileCount)"
+Assert "face clustering completed" ($clusterPersons -ge 0 -and $clusterFaces -ge 0) `
+    "(persons=$clusterPersons faces=$clusterFaces)"
 
 # clean_exit marker
 $cleanExit = $false

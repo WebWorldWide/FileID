@@ -233,8 +233,8 @@ public partial class App : Application
     /// <summary>harness entry point. Awaits engine readiness, sets
     /// the folder on AppViewModel (so the UI reflects it), kicks off
     /// StartScanAsync, and — if --auto-exit-after-scan was passed — closes
-    /// the window once ScanCompleteEvent fires so MarkCleanExit runs and
-    /// the harness can assert clean_exit=true.</summary>
+    /// the window once scan and face clustering both finish so MarkCleanExit
+    /// runs and the harness can assert the complete native pipeline.</summary>
     private static async Task AutoScanAsync(string folderPath, bool exitAfterScan, Window window)
     {
         try
@@ -251,17 +251,23 @@ public partial class App : Application
             DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
 
             var scanGeneration = EngineClient.Instance.SpawnGeneration;
+            var faceResultAtStart = EngineClient.Instance.LastFaceClustering;
             TaskCompletionSource<bool>? terminal = null;
+            TaskCompletionSource<bool>? faceTerminal = null;
             System.ComponentModel.PropertyChangedEventHandler? phaseHandler = null;
             if (exitAfterScan)
             {
                 terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                faceTerminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                var scanCompleted = false;
+                var clusteringStarted = false;
                 void ObserveTerminalPhase()
                 {
                     if (EngineClient.Instance.SpawnGeneration != scanGeneration
                         || EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed)
                     {
                         terminal!.TrySetResult(false);
+                        faceTerminal!.TrySetResult(false);
                         return;
                     }
                     var phase = EngineClient.Instance.Phase;
@@ -269,20 +275,54 @@ public partial class App : Application
                         or FileID.IpcSchema.ScanPhase.Failed
                         or FileID.IpcSchema.ScanPhase.Cancelled)
                     {
+                        scanCompleted = phase == FileID.IpcSchema.ScanPhase.Completed;
                         terminal!.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
+                    }
+                }
+                void ObserveFaceTerminal(string? propertyName)
+                {
+                    if (!scanCompleted)
+                    {
+                        return;
+                    }
+                    if (propertyName == nameof(ViewModels.EngineClient.FaceClusteringInFlight))
+                    {
+                        if (EngineClient.Instance.FaceClusteringInFlight)
+                        {
+                            clusteringStarted = true;
+                        }
+                        else if (clusteringStarted
+                            && Equals(EngineClient.Instance.LastFaceClustering, faceResultAtStart))
+                        {
+                            faceTerminal!.TrySetResult(false);
+                        }
+                    }
+                    if (propertyName == nameof(ViewModels.EngineClient.LastFaceClustering)
+                        && !Equals(EngineClient.Instance.LastFaceClustering, faceResultAtStart))
+                    {
+                        faceTerminal!.TrySetResult(true);
+                    }
+                    else if (propertyName == nameof(ViewModels.EngineClient.LastError)
+                        && EngineClient.Instance.LastError?.Kind == "face_clustering_failed")
+                    {
+                        faceTerminal!.TrySetResult(false);
                     }
                 }
                 phaseHandler = (_, e) => DebugLog.SafeRun("App.AutoScan.TerminalChanged", () =>
                 {
                     if (e.PropertyName is not nameof(ViewModels.EngineClient.Phase)
                         and not nameof(ViewModels.EngineClient.State)
-                        and not nameof(ViewModels.EngineClient.SpawnGeneration))
+                        and not nameof(ViewModels.EngineClient.SpawnGeneration)
+                        and not nameof(ViewModels.EngineClient.FaceClusteringInFlight)
+                        and not nameof(ViewModels.EngineClient.LastFaceClustering)
+                        and not nameof(ViewModels.EngineClient.LastError))
                     {
                         return;
                     }
 
                     DebugLog.Debug($"[ENGINE-SUB:App.AutoScan] {e.PropertyName}");
                     ObserveTerminalPhase();
+                    ObserveFaceTerminal(e.PropertyName);
                 });
                 EngineClient.Instance.PropertyChanged += phaseHandler;
             }
@@ -305,7 +345,18 @@ public partial class App : Application
                     terminal!.TrySetResult(true);
                 }
                 var ok = await terminal!.Task.WaitAsync(TimeSpan.FromHours(12));
-                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok}; closing window.");
+                var applyDrained = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!window.DispatcherQueue.TryEnqueue(() => applyDrained.TrySetResult(true)))
+                {
+                    throw new InvalidOperationException("Could not verify the final scan event on the UI thread.");
+                }
+                await applyDrained.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (ok)
+                {
+                    ok = await faceTerminal!.Task.WaitAsync(TimeSpan.FromHours(12));
+                }
+                var faceResult = EngineClient.Instance.LastFaceClustering;
+                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok} processed={EngineClient.Instance.LastScanProcessedFiles} persons={faceResult?.PersonCount ?? 0} faces={faceResult?.FaceCount ?? 0}; closing window.");
             }
             finally
             {

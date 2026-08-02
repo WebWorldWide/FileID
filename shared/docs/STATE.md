@@ -8,6 +8,50 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-02 — Identity-safe People reduction and final real-data quality pass
+
+People no longer hides any active cluster by size on Windows, macOS, or Linux. The full 164,518-file
+Adlon catalog contains 193,133 quality-eligible faces: 166,266 are assigned across 2,215 active
+clusters and 26,867 remain unmatched. Controlled recovery runs at `0.75`, `0.70`, and `0.60` yielded
+the identical partition and membership digest. Exact-capture and exact-embedding analysis found no
+further cluster that could be removed without inferring identity, so production remains at the
+measured-safe `0.75` threshold instead of hiding evidence or spending identity precision.
+
+Merge suggestions are now explicitly review-only. Every platform suppresses people who co-occur in
+the same source file, excludes rejected faces, bounds the review list to 50, displays neutral numeric
+similarity, and removes bulk “likely/all” merge actions. Linux now consumes the shared engine result
+instead of retaining and comparing up to 100,000 face vectors in GTK. macOS reads one persisted
+centroid per person, reducing peak memory, and Windows invalidates every stale pair involving either
+endpoint after a merge.
+
+Deep Analyze disambiguates repeated proposed names with the sanitized source stem on the shared Rust
+engine and macOS. Repeated-document prompts ask for a visible date, name, or reference. The final
+real Mistral report `.ralph/adlon-final-quality-20260802m-deep-audit/summary.json` is GREEN with zero
+failed checks across image, video, PDF, typed-error, cancellation, skip-existing, partial/full
+upgrade, content, persistence, fingerprint, and SQLite-integrity oracles.
+
+Restructure's final read-only report
+`.ralph/adlon-final-quality-20260802i-restructure-audit/summary.json` is GREEN with zero failed
+checks. Cancellation is typed and bounded; two runs produced the identical 15-move review-only plan
+with collision-safe destinations, exact source/file identity, stable ordering, preserved drive
+fingerprints, and an intact database. No apply command or file mutation was issued.
+
+Windows ONNX Runtime sessions now skip absent accelerator packs and go directly to the first provider
+that can bind; routine optimizer output is held to error level. The native staged Release scan of
+`F:\Kyle\File Cabinet` discovered 1,173 files, processed 938 supported items, produced 1,186 faces
+and 48 person clusters, exited cleanly, and had no WER dump or unmatched `[APPLY:N]` scope. The
+automation now waits for authoritative face-clustering completion and can target an explicit
+published `FileID.exe`. The app also waits for the engine's `Ready` event before requesting status,
+closing the deterministic cold-start write-before-ready race; the rebuilt Release scan completed
+with zero premature-status warnings, provider failures, optimizer warnings, or engine errors.
+
+Local final gates pass on Rust 1.90: Windows strict Clippy and the complete engine suite; Windows
+format plus 453 App and 53 IPC tests; the 71-test shared repository policy suite; and WSL engine
+format/Clippy/release/lib tests (690 passed, two ignored), CLI (61 passed, two ignored), TUI
+(104 passed, one ignored), and GTK build/strict Clippy. Engine and GTK Linux binaries are
+privacy-clean. Native macOS compilation, hosted matrices, signing/notarization, and clean-machine
+install behavior remain external gates and are not inferred from Windows or WSL.
+
 ## 2026-08-01 — Final face containment, Adlon acceptance, and native release polish
 
 The People overload fix is now mirrored across Windows, macOS, and Linux. Unnamed clusters with
