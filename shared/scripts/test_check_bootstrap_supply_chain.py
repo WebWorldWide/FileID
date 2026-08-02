@@ -290,7 +290,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
         self.assertEqual(REVIEWED_SHELL_SCRIPT_SHA256, {
             "build.sh": "9e18d3ed14e88eab1cbb642ff5e3fff47d5ffd988bdf668002621c583f67caf5",
             "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
-            "packaging/aur/PKGBUILD": "ec34b3536efadbc28ea14f2c22a7bdb928b4271c4e323f136879e91d936ac409",
+            "packaging/aur/PKGBUILD": "37f45e9aabd9a0f0d0ed15bf3700706741712a81e4cee7021ab72a76557dacfc",
             "platforms/apple/run.sh": "09fbe948fd1488f5bca529bf97059df1be4da74b5227b5b1ac0fa787dabf4864",
             "platforms/apple/scripts/assemble_app.sh": "4e191d83b63e17814c7a42b3476cc07ceef6238a0fc10df17fe627dda3b32f5f",
             "platforms/apple/scripts/build_corpus.sh": "a5f53f4df77c07dc7aefd4e0c31dbbaa90dac92e68d3e614c789c36320cced87",
