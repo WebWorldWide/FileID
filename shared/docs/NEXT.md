@@ -1,31 +1,48 @@
 # NEXT — resume here
 
-## ACTION FOR THE OWNER — add strict concurrency to macOS CI (needs `workflow` token scope)
+## STATUS 2026-08-01 — Face containment, native parity, and release refresh
 
-`shared/scripts/run_local_audit_gate.sh` runs the macOS suite as
-`swift test -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`,
-but `.github/workflows/macos.yml` runs a plain `swift test --no-parallel`. Swift 6
-data races therefore fail the local gate and pass CI. The agent token used on
-2026-07-28 carries only `gist, read:org, repo` — pushing any `.github/workflows/`
-change is rejected — so this one is left for the owner.
+The final branch combines the Adlon-driven clustering containment work with macOS parity hardening.
+Same-file cannot-links, protected centroid outlier suppression, and deterministic neighbor ordering
+apply without lowering the global merge threshold. A candidate anti-correlation split was removed
+after a controlled Adlon A/B failed four blocking quality oracles. Windows, macOS, and Linux share a
+13-face presentation floor with explicit Show/Hide controls; named and Unknown groups remain visible
+regardless of size. The macOS read path also ranks useful user/VLM/auto tags ahead of generic labels,
+and its Factory Reset and global Cancel behavior match what the UI promises.
 
-In `macos.yml`, the `Run tests` step's final command is:
+The exact final Rust 1.90 engine is
+`.ralph/target-rust190-consolidated-final/release/FileIDEngine.exe` with SHA-256
+`8a4c96991fb476cc30b10fdd2744569bcd9e8e4ae3b96fd722bb344a34a55540`. Face acceptance is pinned at
+`.ralph/adlon-face-validation-20260801-consolidated-final-audit3/summary.json`; Restructure acceptance
+is pinned at `.ralph/adlon-restructure-validation-20260801-consolidated-final-audit2/summary.json`.
 
-```
-perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
-```
+Resume in this order:
 
-Change it to:
+1. **Keep identity quality evidence-backed.** The remaining mixed-child risk is an SFace embedder
+   limit, not a reason to lower global thresholds. Evaluate any successor with commercially clean,
+   identity-disjoint labels across pose, age, lighting, blur, and scanned photos.
+2. **Close external release gates.** Public-trust Windows signing, macOS Developer ID notarization,
+   clean-VM install/upgrade/uninstall, and AMD/Intel/QNN hardware remain owner/external gates.
+3. **Preserve the real-data acceptance discipline.** Use isolated state, hash the colocated runtime,
+   require authoritative completion events, and keep the Adlon corpus read-only.
 
-```
-perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel \
-  -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
-```
+## Current macOS gate — live app and hardware validation
 
-Land it on a branch first: this has never run in CI, so expect it to surface
-pre-existing concurrency warnings that the 12-minute alarm budget also has to
-absorb. If it is noisy, keep it as a separate non-required job rather than
-weakening the local gate.
+Xcode 26.6 now passes the complete strict suite: 336 tests in 68 suites with
+`swift test --no-parallel -Xswiftc -strict-concurrency=complete -Xswiftc
+-warnings-as-errors`. `bash run.sh --no-wipe` also assembles and launches the
+production app and child engine, including the cached MLX Metal library. The
+remaining validation is intentionally runtime-only:
+
+1. Assemble with `cd platforms/apple && bash run.sh --no-wipe`; do this with
+   no existing FileID instance running because the script stops stale app and
+   engine processes before launch.
+2. Check the People 13-face disclosure, including a last-name-only and explicit Unknown cluster;
+   Library tags with generic plus useful labels; and global Cancel during Scan,
+   Restructure, and Deep Analyze.
+3. Test Factory Reset against a disposable profile. It must clear FileID data
+   while retaining the shared `~/Documents/huggingface/models` cache as the UI
+   discloses.
 
 ## STATUS 2026-07-29 — Face size-gate, Restructure apply-trust, and Deep Analyze exclusion fixes are locally complete on Windows/Linux/Rust; macOS is unverified
 

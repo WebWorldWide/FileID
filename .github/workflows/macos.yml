@@ -106,8 +106,8 @@ jobs:
           # reader at a time, so the pool can't be starved. The tests are small
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
-          set +e
-          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel \
+            -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -244,3 +244,16 @@ jobs:
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" \
             .build/release/FileID \
             .build/release/FileIDEngine
+
+      - name: Package unsigned macOS prerelease DMG
+        if: github.event_name == 'workflow_dispatch'
+        run: bash scripts/build_dmg.sh --rebuild
+
+      - name: Upload unsigned macOS prerelease DMG
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-macOS-unsigned-${{ github.run_number }}
+          path: platforms/apple/dist/FileID.dmg
+          if-no-files-found: error
+          retention-days: 14

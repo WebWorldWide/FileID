@@ -357,7 +357,9 @@ fn prepare_restore_target(
 struct PreparedRestore {
     index: usize,
     original: std::path::PathBuf,
+    #[allow(dead_code)]
     target: PlatformRestoreTarget,
+    #[allow(dead_code)]
     claim: Option<std::path::PathBuf>,
     #[cfg(windows)]
     recycle_physical: Option<std::path::PathBuf>,
@@ -914,6 +916,7 @@ fn system_powershell_path() -> Option<std::path::PathBuf> {
     )
 }
 
+#[allow(dead_code)]
 fn restore_error_kind(error: &anyhow::Error) -> Option<std::io::ErrorKind> {
     error
         .chain()

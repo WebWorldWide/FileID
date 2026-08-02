@@ -27,6 +27,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public let vlmModel: String?
     public let vlmFullModel: String?
     public let vlmAnalyzedAt: Date?
+    public let tags: [String]?
 
     public init(
         id: Int64, pathText: String, sizeBytes: Int64,
@@ -37,7 +38,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         failed: Bool, errorMessage: String?,
         vlmDescription: String? = nil, vlmProposedName: String? = nil,
         vlmModel: String? = nil, vlmFullModel: String? = nil,
-        vlmAnalyzedAt: Date? = nil
+        vlmAnalyzedAt: Date? = nil, tags: [String]? = nil
     ) {
         self.id = id
         self.pathText = pathText
@@ -61,6 +62,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         self.vlmModel = vlmModel
         self.vlmFullModel = vlmFullModel
         self.vlmAnalyzedAt = vlmAnalyzedAt
+        self.tags = tags
     }
 
     public var url: URL { URL(fileURLWithPath: pathText) }
