@@ -8,6 +8,24 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — macOS release packaging now fails closed on Deep Analyze
+
+Post-merge inspection found that the workflow-dispatched macOS artifact omitted the 96 MB
+`mlx.metallib`: SwiftPM builds the app and engine but does not compile MLX's Metal kernels, and the
+bundle assembler only warned when its local cache was absent. That downloaded artifact was never
+published. Metal-library compilation now lives in one shared helper used by both `run.sh` and the
+unsigned DMG rebuild; workflow dispatch prepares the separately downloadable Xcode Metal Toolchain;
+and app assembly refuses to create a bundle without the library. Both unsigned and production DMG
+paths mount the completed image and explicitly require `Contents/MacOS/mlx.metallib`.
+
+A clean-cache local build reproduced `mlx.metallib` with SHA-256
+`cf80bc0944705308a955f5537d8834512e0d0016fece1d8133491da2f346b2fb`, byte-identical to the
+established cache. The rebuilt unsigned DMG has SHA-256
+`ba4de72f3fbafb025ef44629095321a79b476de9e8953c1169929965f6af337f`; its image checksum and strict
+bundle signature verify from a read-only mount, and its engine emits `ready` without
+`deep_analyze_unavailable` against an isolated database. The separate security review remains
+skipped at the owner's direction.
+
 ## 2026-08-03 — Final production artifact and real-data acceptance
 
 The final macOS strict build passes 381 tests across 73 suites with complete concurrency checking
