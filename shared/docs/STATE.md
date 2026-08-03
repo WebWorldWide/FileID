@@ -18,9 +18,10 @@ exit-code-and-message signature; genuine formatting failures still fail immediat
 
 The same inspection found that the test step changed into `platforms/windows/Tests` and then checked
 for another relative `Tests` directory, causing both tracked xUnit projects to be skipped. The gate
-now invokes each project explicitly and fails if either project is missing or red. Workflow YAML,
-action-pin policy, binary-privacy regressions, and diff hygiene pass locally; hosted Windows x64
-execution remains the authoritative platform validation.
+now invokes each project in a separate bounded step, collects app-test hang diagnostics, and fails
+if either project is missing, red, or wedged. Workflow YAML, action-pin policy, binary-privacy
+regressions, and diff hygiene pass locally; hosted Windows x64 execution remains the authoritative
+platform validation.
 
 ## 2026-08-03 — macOS scan ETA and background-only engine release candidate
 

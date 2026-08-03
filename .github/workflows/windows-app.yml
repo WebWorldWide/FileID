@@ -123,20 +123,24 @@ jobs:
           -m
         shell: pwsh
 
-      - name: Run all test projects
-        # V15.3: was IpcSchema-only with continue-on-error. Now runs every
-        # discoverable test project in Tests/, fails on red. Tests run on
-        # x64 only — ARM64 cross-building tests is rarely useful here.
-        # `dotnet test` triggers its own restore for the Tests/ projects;
-        # safe to run here because the x64 build is already complete.
+      - name: Test — IPC schema (x64 only)
         if: matrix.arch == 'x64'
         shell: pwsh
-        run: |
-          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug --verbosity minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
+        timeout-minutes: 10
+        run: dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal
+
+      - name: Test — app services (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: platforms/windows/Tests
+        timeout-minutes: 20
+        run: >
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj
+          -c Debug
+          --verbosity minimal
+          --blame-hang-timeout 5m
+          --blame-hang-dump-type mini
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
       # caused `dotnet format FileID.sln`'s solution-level restore to
