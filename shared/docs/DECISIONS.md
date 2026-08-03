@@ -4862,8 +4862,19 @@ owns the pre-XAML runtime error surface and lifecycle ordering; skipping the app
 rejected because those contracts must execute in CI. Project tests preserve both sides of the
 invariant, and the published-app startup smoke verifies the production bootstrap path.
 
+## 2026-08-03 — The Windows test DLL bootstraps its generic host
+
+`FileID.App.Tests` explicitly enables `WindowsAppSdkBootstrapInitialize` even though the production
+app disables it. The xUnit process is a generic host and never calls FileID's `Program.Main`, so it
+must establish the Windows App SDK package graph before DispatcherQueue-backed services are tested.
+Leaving the test host uninitialized was rejected after the bounded suite completed 450 tests but
+failed all five `ModelSlot` tests with `REGDB_E_CLASSNOTREG`; excluding those tests would hide real
+progress-binding behavior. Separate contract assertions preserve the production-false/test-true
+bootstrap split.
+
 ## 2026-08-03 — The Windows test host stays unbootstrapped and ModelSlot narrows its fallback
 
+This supersedes the preceding test-host bootstrap decision after hosted execution disproved it.
 `FileID.App.Tests` explicitly disables `WindowsAppSdkBootstrapInitialize`, matching the app project
 but for a different reason: the generic xUnit host never calls FileID's `Program.Main`, and enabling
 the generated initializer wedged the hosted runner while it waited on runtime-resolution UI. A
