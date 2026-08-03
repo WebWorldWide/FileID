@@ -96,7 +96,7 @@ public sealed class InstallerContractTests
         var versionVerifier = File.ReadAllText(PathInRepo(
             "platforms", "windows", "build", "verify-version.ps1"));
 
-        Assert.Equal("0.1.3", version);
+        Assert.Equal("0.1.4", version);
         Assert.Equal(version, cargoVersion);
         Assert.Contains("Verify tag matches product version", releaseWorkflow, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", releaseWorkflow, StringComparison.Ordinal);
@@ -152,16 +152,48 @@ public sealed class InstallerContractTests
         var appSdkVersion = packages.Descendants("PackageVersion")
             .Single(element => string.Equals((string?)element.Attribute("Include"), "Microsoft.WindowsAppSDK", StringComparison.Ordinal))
             .Attribute("Version")?.Value;
+        var appProject = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "FileID.App.csproj"));
+        var testProject = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "Tests", "FileID.App.Tests", "FileID.App.Tests.csproj"));
         var publishScript = File.ReadAllText(PathInRepo("platforms", "windows", "build", "publish-bundle.ps1"));
         var program = File.ReadAllText(PathInRepo("platforms", "windows", "src", "FileID.App", "Program.cs"));
 
         Assert.Equal("1.7.250606001", appSdkVersion);
+        Assert.Contains("<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>", appProject, StringComparison.Ordinal);
+        Assert.Contains("<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsPackageType>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsAppSDKSelfContained>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsAppSdkDeploymentManagerInitialize>", testProject, StringComparison.Ordinal);
         Assert.Contains("$WinAppRuntimeVersion = \"1.7.250606001\"", publishScript, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Count(publishScript,
             "^\\$WinAppRuntime(?:X64|Arm64)Sha256 = \"[0-9a-f]{64}\"\\r?$",
             RegexOptions.Multiline));
         Assert.Contains("Assert-MicrosoftSignature", publishScript, StringComparison.Ordinal);
+        Assert.Contains("Bootstrap.TryInitialize(0x00010007u", program, StringComparison.Ordinal);
+        Assert.Contains("Bootstrap.Shutdown()", program, StringComparison.Ordinal);
         Assert.Contains("Windows App SDK 1.7 runtime", program, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowsWorkflow_RunsBothTestProjects_AndOnlyRetriesTheFormatProbeRace()
+    {
+        var workflow = File.ReadAllText(PathInRepo(".github", "workflows", "windows-app.yml"));
+
+        Assert.Contains(
+            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:RuntimeIdentifier=win-x64", workflow, StringComparison.Ordinal);
+        Assert.Contains("$formatExit -eq 4", workflow, StringComparison.Ordinal);
+        Assert.Contains("*Unable to locate dotnet CLI*", workflow, StringComparison.Ordinal);
+        Assert.Contains("exit $formatExit", workflow, StringComparison.Ordinal);
     }
 
     private static (int Width, int Height) ReadPngDimensions(string path)

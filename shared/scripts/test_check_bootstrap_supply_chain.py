@@ -292,7 +292,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
             "packaging/aur/PKGBUILD": "37f45e9aabd9a0f0d0ed15bf3700706741712a81e4cee7021ab72a76557dacfc",
             "platforms/apple/run.sh": "7e5479a450f25744457915ce8824b86b0f29a4d9518939beca6815949396a660",
-            "platforms/apple/scripts/assemble_app.sh": "fccbc3299625869041feee2d0695af6a8b9a5c8366fc384ebc4e07e15c0d66cd",
+            "platforms/apple/scripts/assemble_app.sh": "3b6799619cd09cc0384543b90372de6c6e30760001bdbc2e6c2d28a78d81239e",
             "platforms/apple/scripts/build_corpus.sh": "a5f53f4df77c07dc7aefd4e0c31dbbaa90dac92e68d3e614c789c36320cced87",
             "platforms/apple/scripts/build_dmg.sh": "45e074444c3d59fb94a39f086460ece87a1d3c4fae57be5ef461dc30baf09bea",
             "platforms/apple/scripts/ensure_mlx_metallib.sh": "00bc071a793e01afb782f43ab12279f00bd17cd6d6cc15d71921a7543d5fc068",

@@ -574,7 +574,7 @@ dependencies = [
 
 [[package]]
 name = "fileid-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "fileid-engine"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-channel",
