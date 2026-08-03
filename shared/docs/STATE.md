@@ -22,9 +22,10 @@ now invokes each project in a separate bounded step, collects app-test hang diag
 if either project is missing, red, or wedged. The app-service test build is explicitly x64/win-x64,
 and the app disables the Windows App SDK generated bootstrap initializer: FileID's custom
 `Program.Main` already owns bootstrap and shutdown, while the duplicate module initializer wedged a
-generic xUnit host as soon as it loaded the app assembly. Workflow YAML, action-pin policy,
-binary-privacy regressions, and diff hygiene pass locally; hosted Windows x64 execution remains the
-authoritative platform validation.
+generic xUnit host as soon as it loaded the app assembly. The test DLL explicitly owns bootstrap in
+that host so DispatcherQueue-backed service tests receive the required WinRT class registration.
+Workflow YAML, action-pin policy, binary-privacy regressions, and diff hygiene pass locally; hosted
+Windows x64 execution remains the authoritative platform validation.
 
 ## 2026-08-03 — macOS scan ETA and background-only engine release candidate
 

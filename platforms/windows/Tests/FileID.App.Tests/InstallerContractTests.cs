@@ -154,11 +154,14 @@ public sealed class InstallerContractTests
             .Attribute("Version")?.Value;
         var appProject = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "FileID.App.csproj"));
+        var testProject = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "Tests", "FileID.App.Tests", "FileID.App.Tests.csproj"));
         var publishScript = File.ReadAllText(PathInRepo("platforms", "windows", "build", "publish-bundle.ps1"));
         var program = File.ReadAllText(PathInRepo("platforms", "windows", "src", "FileID.App", "Program.cs"));
 
         Assert.Equal("1.7.250606001", appSdkVersion);
         Assert.Contains("<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>", appProject, StringComparison.Ordinal);
+        Assert.Contains("<WindowsAppSdkBootstrapInitialize>true</WindowsAppSdkBootstrapInitialize>", testProject, StringComparison.Ordinal);
         Assert.Contains("$WinAppRuntimeVersion = \"1.7.250606001\"", publishScript, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Count(publishScript,
             "^\\$WinAppRuntime(?:X64|Arm64)Sha256 = \"[0-9a-f]{64}\"\\r?$",
