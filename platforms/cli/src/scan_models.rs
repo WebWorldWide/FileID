@@ -29,8 +29,11 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use crate::context::display_path;
 use anyhow::{Context as _, Result};
-use fileid_engine::ipc::{CommandPayload, EventPayload, IpcCommand, IpcEvent, StartScanPayload};
+use fileid_engine::ipc::{
+    CommandPayload, Empty, EventPayload, IpcCommand, IpcEvent, StartScanPayload,
+};
 use fileid_engine::models::registry::{self, LookupResult};
 
 use crate::context::{print_json, Ctx};
@@ -199,7 +202,10 @@ fn report_missing_models(ctx: &Ctx, missing: &[(&'static str, String)], models_d
         println!("    {} {}", name, ctx.dim(&format!("({kind})")));
     }
     if let Some(dir) = models_dir {
-        println!("  Expected under: {}", dir.display());
+        println!(
+            "  Expected under: {}",
+            display_path(dir.to_string_lossy().as_ref())
+        );
     }
     println!("  {}", ctx.bold("To install:"));
     println!("    {}", ctx.bold(&install_command));
@@ -324,14 +330,9 @@ fn drive_scan(
             excluded_paths: None,
         }),
     };
-    let line = serde_json::to_string(&cmd).context("serialize startScan command")?;
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|()| stdin.write_all(b"\n"))
-        .and_then(|()| stdin.flush())
-        .context("sending startScan to engine")?;
+    send_command(&mut stdin, &cmd).context("sending startScan to engine")?;
 
-    let outcome = stream_events(ctx, stdout);
+    let outcome = stream_events(ctx, stdout, &mut stdin);
 
     // EOF on stdin → the engine's watchdog exits; then reap it.
     drop(stdin);
@@ -343,6 +344,10 @@ fn drive_scan(
             processed,
             failed,
             seconds,
+            people,
+            faces,
+            unmatched_faces,
+            clustering_seconds,
         } => {
             if ctx.json {
                 print_json(&serde_json::json!({
@@ -353,6 +358,12 @@ fn drive_scan(
                     "processedFiles": processed,
                     "failedFiles": failed,
                     "durationSeconds": seconds,
+                    "faceClustering": {
+                        "people": people,
+                        "faces": faces,
+                        "unmatchedFaces": unmatched_faces,
+                        "durationSeconds": clustering_seconds,
+                    },
                 }));
             } else {
                 let rate = if seconds > 0.0 {
@@ -361,7 +372,10 @@ fn drive_scan(
                     String::new()
                 };
                 println!("{}", ctx.bold("AI scan complete."));
-                println!("  Root:       {}", root.display());
+                println!(
+                    "  Root:       {}",
+                    display_path(root.to_string_lossy().as_ref())
+                );
                 println!(
                     "  Processed:  {processed} / {total}{}",
                     if failed > 0 {
@@ -375,6 +389,9 @@ fn drive_scan(
                         "  Results:    {tags} tags · {faces} files with faces · {people} people"
                     );
                 }
+                println!(
+                    "  Clustering: {people} people · {faces} faces · {unmatched_faces} unmatched ({clustering_seconds:.2}s)"
+                );
                 println!("  Duration:   {seconds:.2}s{rate}");
                 // The engine wrote its OWN library; when the CLI's reads default
                 // elsewhere (the macOS desktop-app library), qualify the explore
@@ -411,6 +428,9 @@ fn drive_scan(
                 // the same clean install guidance rather than a raw engine error.
                 report_runtime_missing(ctx);
             }
+            if kind.starts_with("face_clustering") {
+                anyhow::bail!("scan completed, but face grouping failed: {message}")
+            }
             anyhow::bail!("engine scan failed [{kind}]: {message}")
         }
         ScanOutcome::Aborted => {
@@ -425,6 +445,10 @@ enum ScanOutcome {
         processed: u64,
         failed: u64,
         seconds: f64,
+        people: u32,
+        faces: u64,
+        unmatched_faces: u64,
+        clustering_seconds: f64,
     },
     Error {
         kind: String,
@@ -433,7 +457,24 @@ enum ScanOutcome {
     Aborted,
 }
 
-fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
+#[derive(Clone, Copy)]
+struct ScanStats {
+    total: u64,
+    processed: u64,
+    failed: u64,
+    seconds: f64,
+}
+
+fn send_command<W: Write>(writer: &mut W, command: &IpcCommand) -> Result<()> {
+    let line = serde_json::to_string(command).context("serializing engine command")?;
+    writer
+        .write_all(line.as_bytes())
+        .and_then(|()| writer.write_all(b"\n"))
+        .and_then(|()| writer.flush())
+        .context("writing engine command")
+}
+
+fn stream_events<R: std::io::Read, W: Write>(ctx: &Ctx, stdout: R, stdin: &mut W) -> ScanOutcome {
     // Live carriage-return progress only at a TTY; clear it before any milestone
     // (phase change) or terminal outcome so nothing is glued to the bar.
     let live = !ctx.quiet && !ctx.json && std::io::stderr().is_terminal();
@@ -444,6 +485,7 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
         }
     };
     let reader = BufReader::new(stdout);
+    let mut scan: Option<ScanStats> = None;
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
@@ -498,11 +540,39 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
             EventPayload::ScanComplete(w) => {
                 clear();
                 let c = w.inner;
-                return ScanOutcome::Complete {
+                scan = Some(ScanStats {
                     total: c.total_files,
                     processed: c.processed_files,
                     failed: c.failed_files,
                     seconds: c.total_seconds,
+                });
+                ctx.progress(&format!("  {}", ctx.dim("grouping detected faces…")));
+                let command = IpcCommand {
+                    id: "fileid-cli-face-clustering".to_string(),
+                    payload: CommandPayload::RunFaceClustering(Empty {}),
+                };
+                if let Err(error) = send_command(stdin, &command) {
+                    return ScanOutcome::Error {
+                        kind: "face_clustering_start_failed".to_string(),
+                        message: error.to_string(),
+                    };
+                }
+            }
+            EventPayload::FaceClusteringComplete(w) => {
+                clear();
+                let Some(scan) = scan else {
+                    continue;
+                };
+                let result = w.inner;
+                return ScanOutcome::Complete {
+                    total: scan.total,
+                    processed: scan.processed,
+                    failed: scan.failed,
+                    seconds: scan.seconds,
+                    people: result.person_count,
+                    faces: result.face_count,
+                    unmatched_faces: result.unmatched_faces,
+                    clustering_seconds: result.duration_seconds,
                 };
             }
             EventPayload::Error(w) => {
@@ -519,7 +589,13 @@ fn stream_events<R: std::io::Read>(ctx: &Ctx, stdout: R) -> ScanOutcome {
         }
     }
     clear();
-    ScanOutcome::Aborted
+    match scan {
+        Some(_) => ScanOutcome::Error {
+            kind: "face_clustering_aborted".to_string(),
+            message: "engine exited before face clustering completed".to_string(),
+        },
+        None => ScanOutcome::Aborted,
+    }
 }
 
 /// Best-effort `(tags, files-with-faces, people)` for the completion summary.
@@ -612,7 +688,58 @@ fn which_on_path(exe: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fileid_engine::ipc::{FaceClusteringResult, ScanComplete, Wrap};
     use std::path::Path;
+
+    #[test]
+    fn scan_completion_triggers_face_clustering_before_success() {
+        let events = [
+            IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ScanComplete {
+                session_id: "test".into(),
+                total_files: 12,
+                processed_files: 11,
+                failed_files: 1,
+                total_seconds: 2.5,
+            }))),
+            IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(
+                FaceClusteringResult {
+                    person_count: 3,
+                    face_count: 9,
+                    unmatched_faces: 2,
+                    duration_seconds: 0.4,
+                },
+            ))),
+        ]
+        .into_iter()
+        .map(|event| serde_json::to_string(&event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let ctx = Ctx {
+            json: false,
+            quiet: true,
+            color: false,
+            color_allowed: false,
+            db: PathBuf::from("/tmp/test.sqlite"),
+            db_explicit: true,
+        };
+        let mut commands = Vec::new();
+
+        let outcome = stream_events(&ctx, events.as_bytes(), &mut commands);
+        match outcome {
+            ScanOutcome::Complete {
+                people,
+                faces,
+                unmatched_faces,
+                ..
+            } => assert_eq!((people, faces, unmatched_faces), (3, 9, 2)),
+            _ => panic!("scan must wait for face clustering"),
+        }
+        let command: IpcCommand = serde_json::from_slice(&commands).unwrap();
+        assert!(matches!(
+            command.payload,
+            CommandPayload::RunFaceClustering(_)
+        ));
+    }
 
     // Regression for the macOS default invocation: a successful `scan --models`
     // writes the engine's XDG library, but the CLI's reads default to the

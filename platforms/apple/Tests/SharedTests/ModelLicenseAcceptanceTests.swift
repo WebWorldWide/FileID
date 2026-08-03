@@ -26,5 +26,6 @@ struct ModelLicenseAcceptanceTests {
         let root = FileManager.default.temporaryDirectory
             .appending(component: "fileid-license-\(UUID().uuidString)", directoryHint: .isDirectory)
         #expect(ModelLicenseAcceptance.isAccepted(for: .qwen3VL4B, root: root))
+        #expect(ModelLicenseAcceptance.isAccepted(for: .qwen3VL8B, root: root))
     }
 }

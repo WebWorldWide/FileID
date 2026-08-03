@@ -28,7 +28,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-use context::Ctx;
+use context::{terminal_text, Ctx};
 
 /// Shown at the foot of `fileid --help`: a few copy-pasteable starting points.
 const HELP_FOOTER: &str = "\
@@ -52,17 +52,15 @@ Everything runs on-device — no cloud, no telemetry. Run a bare `fileid` for a 
 struct Cli {
     #[command(flatten)]
     global: GlobalArgs,
-    // Optional so bare `fileid` prints a friendly getting-started intro (FIX 4)
-    // instead of clap's terse usage error. `--help` / `--version` still work
-    // (clap intercepts them); an *unknown* subcommand still errors.
+    // A bare invocation prints the guided introduction below. Clap still owns
+    // help, version, and invalid-command errors.
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Args)]
 struct GlobalArgs {
-    /// Library SQLite path. Overrides $FILEID_DB / $CFFIXED_USER_HOME /
-    /// the engine default ($XDG_DATA_HOME or %LOCALAPPDATA%).
+    /// Library SQLite path. Overrides environment and platform defaults.
     #[arg(long, global = true, value_name = "PATH")]
     db: Option<PathBuf>,
 
@@ -111,14 +109,14 @@ enum Command {
     /// Example: fileid search "vacation 2023"   ·   fileid search --similar 1234
     Search {
         /// Search terms (FTS keyword search). Omit when using `--similar`.
-        #[arg(value_name = "QUERY", num_args = 0..)]
+        #[arg(value_name = "QUERY", num_args = 0.., conflicts_with = "similar")]
         query: Vec<String>,
         /// Find files visually/semantically nearest to this file
         /// (`<path-or-id>`) using stored CLIP embeddings.
         #[arg(long, value_name = "PATH-OR-ID")]
         similar: Option<String>,
         /// Maximum results.
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 50, value_parser = parse_result_limit)]
         limit: usize,
     },
 
@@ -146,7 +144,7 @@ enum Command {
     /// Example: fileid dedupe --exact            (list byte-identical groups)
     ///          fileid dedupe --exact --apply    (trash all but one per group)
     Dedupe {
-        /// Group byte-identical files (BLAKE3 content hash). Default.
+        /// Group byte-identical files (live SHA-256 verification). Default.
         #[arg(long)]
         exact: bool,
         /// Group near-duplicates by perceptual-hash Hamming distance.
@@ -159,13 +157,13 @@ enum Command {
         #[arg(long)]
         apply: bool,
         /// Preview what `--apply` would remove; change nothing.
-        #[arg(long = "dry-run")]
+        #[arg(long = "dry-run", requires = "apply")]
         dry_run: bool,
         /// Permanently delete instead of trashing (irreversible).
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         delete: bool,
         /// Skip the confirmation prompt.
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         yes: bool,
     },
 
@@ -185,13 +183,13 @@ enum Command {
         #[arg(long)]
         apply: bool,
         /// Preview what `--apply` would move; change nothing.
-        #[arg(long = "dry-run")]
+        #[arg(long = "dry-run", requires = "apply")]
         dry_run: bool,
         /// Create symlinks to the proposed layout instead of moving originals.
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         symlinks: bool,
         /// Skip the confirmation prompt.
-        #[arg(long)]
+        #[arg(long, requires = "apply")]
         yes: bool,
         /// Library root the plan organizes into. Defaults to the indexed
         /// files' common ancestor.
@@ -282,9 +280,20 @@ enum ModelsCmd {
         #[arg(long = "porcelain-progress", hide = true)]
         porcelain_progress: bool,
         /// Model names to download (e.g. `arcface mobileclip_s2 ram_plus`).
-        #[arg(value_name = "NAME", num_args = 0..)]
+        #[arg(value_name = "NAME", num_args = 0.., conflicts_with = "all")]
         names: Vec<String>,
     },
+}
+
+fn parse_result_limit(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| "limit must be a whole number".to_string())?;
+    if (1..=10_000).contains(&value) {
+        Ok(value)
+    } else {
+        Err("limit must be between 1 and 10000".to_string())
+    }
 }
 
 /// Friendly getting-started shown for a bare `fileid` (no subcommand) — what it
@@ -344,7 +353,7 @@ fn report_failure(json: bool, level: &str, kind: &str, e: &anyhow::Error) {
             serde_json::json!({ "level": level, "kind": kind, "message": format!("{e:#}") })
         );
     } else {
-        eprintln!("{level}: {e:#}");
+        eprintln!("{level}: {}", terminal_text(&format!("{e:#}")));
     }
 }
 
@@ -435,5 +444,35 @@ fn main() -> ExitCode {
             report_failure(json_output, "error", "command", &e);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_rejects_ambiguous_mode_and_unbounded_limits() {
+        assert!(Cli::try_parse_from(["fileid", "search", "cats", "--similar", "1"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "search", "cats", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "search", "cats", "--limit", "10001"]).is_err());
+        assert!(Cli::try_parse_from(["fileid", "search", "cats", "--limit", "10000"]).is_ok());
+    }
+
+    #[test]
+    fn mutating_options_require_an_explicit_apply() {
+        for args in [
+            ["fileid", "dedupe", "--dry-run"].as_slice(),
+            ["fileid", "dedupe", "--delete"].as_slice(),
+            ["fileid", "restructure", "--symlinks"].as_slice(),
+            ["fileid", "restructure", "--yes"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(args).is_err(), "accepted {args:?}");
+        }
+    }
+
+    #[test]
+    fn model_download_rejects_all_plus_named_selection() {
+        assert!(Cli::try_parse_from(["fileid", "models", "download", "--all", "arcface"]).is_err());
     }
 }

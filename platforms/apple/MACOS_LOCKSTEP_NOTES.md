@@ -1,13 +1,59 @@
 # macOS lockstep (WS-MAC) — build + verify notes
 
-Branch: **`macos-lockstep`**. Mirrors the Windows commercial-clean / RAM++ stack
-(merged to `main` 2026-05-30) into the macOS app. **All Swift here was written in
-a Windows environment and has NOT been compiled or run — `swift build` on your
-Mac and we iterate on the errors.** Cross-platform face-embedding parity is
-*approximate*, not byte-exact: Windows detects faces with YuNet, macOS with
-Apple Vision, so landmark positions (and thus aligned crops) differ slightly.
-The goal is that the same person clusters together on both platforms, not
-byte-identical embeddings.
+Current branch: **`agent/macos-parity-hardening`**, based on `origin/main` at
+`f96a6e1` after a 2026-08-02 fetch found no newer Windows changes. The Swift below
+has now been compiled, tested, launched, and exercised natively on Apple Silicon.
+
+## Current native validation — 2026-08-02
+
+- The strict Swift gate passes all 354 tests in 70 suites with complete concurrency
+  checking and warnings treated as errors. `run.sh --no-wipe` assembled and launched
+  the production `FileID.app` plus its child engine.
+- A read-only scan of 181 supported files on the external Adlon corpus exercised
+  discovery, full-source bounded image decoding, RAM++, CLIP, SFace, People, Deep
+  Analyze, and Restructure. One corrupt GIF failed explicitly rather than being
+  counted as a success.
+- The corrected face pipeline detected 226 faces, retained and embedded 174,
+  assigned 171, and produced 29 visible people. Representative cards render real
+  face crops. Same-file cannot-links suppress unsafe merge suggestions, and
+  persisted “Different people” verdicts use stable face anchors.
+- Qwen3-VL 4B is the recommendation for 8 GB Macs; Qwen3-VL 8B is the default on
+  this 16 GB Mac. Across six copied Adlon images, 4B completed in 30.92 s at a
+  4.8 GiB peak footprint and 8B completed in 47.49 s at 7.2 GiB. The 8B output was
+  generally more concise and grounded. Deterministic decoding plus the year,
+  identity, OCR, and filename guards protect both Swift MLX and Rust llama.cpp
+  paths from unsupported claims; the final adversarial rerun produced
+  `boys-sitting-bench-windows` without inventing names.
+- RAM++ uses its static Core ML shapes and four bounded workers. A copied-Adlon
+  benchmark improved from 27.73 s to 22.59 s while preserving all 222 emitted tags
+  and scores byte-for-byte.
+- Live production screenshots confirm Cleanup is pinned to the top and the sidebar
+  track ends at the active dot. Geometry tests cover the exact center of all five
+  dots. The preview tag field has a visible gold **Apply tag** button and Return
+  default action.
+- Restructure generated a read-only 27-action plan: 16 tidying and 11 reorganizing,
+  with no source-equals-destination rows. The tab now follows the active scanned
+  library root, matching Windows and the engine contract. Apply was never invoked.
+- Process-level engine tests now use an isolated database path. The 334 fake-JPEG
+  failures and eight temporary scan sessions created by older local runs were backed
+  up and removed, restoring the live catalog to 181 Adlon rows. Preview tags also
+  deduplicate equal VLM/RAM++ labels without discarding source provenance.
+- The acceptance-pass Adlon path/size/mtime fingerprint remained
+  `e1e52c67d0d93e45704284aa17868fab9bd3885c84b2e9207adc5c79ac44e58f` before
+  and after testing. The final audit also found every one of the 181 indexed paths
+  present with its cataloged size and modification time unchanged. SQLite
+  `quick_check` is `ok`, and `face_verifications` is empty.
+- Cross-platform behavior is the contract, not byte-identical face embeddings:
+  Windows detects with YuNet while macOS uses Apple Vision, so landmark positions
+  and aligned crops can differ slightly. Hosted CI, signing/notarization,
+  clean-machine installation, Windows GPU runtime, and ARM64/other-hardware gates
+  remain external evidence.
+
+## Historical implementation notes
+
+The sections below record the original `macos-lockstep` bring-up and are retained
+for archaeology. Their “not compiled/run” and pending task statements describe the
+state at the time they were written, not the current status above.
 
 ## Part 1 — committed (`ab9b9ae`)
 

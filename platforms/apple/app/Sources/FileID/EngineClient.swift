@@ -93,6 +93,8 @@ public final class EngineClient {
     public private(set) var restructureApplyResult: RestructureApplyResult?
     public private(set) var restructurePlanSignal: Int = 0
     public private(set) var restructureApplyResultSignal: Int = 0
+    public private(set) var bulkActionResult: BulkActionResult?
+    public private(set) var bulkActionResultSignal: Int = 0
     /// True once an applyRestructure has moved files and they haven't been undone
     /// yet — drives the "Undo last run" affordance. (R2)
     public private(set) var canUndoRestructure = false
@@ -707,12 +709,14 @@ public final class EngineClient {
             } else {
                 canUndoRestructure = result.applied > 0
             }
+        case .bulkActionResult(let result):
+            bulkActionResult = result
+            bulkActionResultSignal &+= 1
         // ── Remaining Windows-originated reply events. The mac app's
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
         case .healthCheckResult,
-             .bulkActionResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -1067,6 +1071,21 @@ public final class EngineClient {
     public func runFaceClustering() {
         guard !faceClusteringInFlight, send(.runFaceClustering) else { return }
         faceClusteringInFlight = true
+    }
+
+    @discardableResult
+    public func markPersonsDifferent(
+        sourcePersonID: Int64,
+        destinationPersonID: Int64,
+        sourceAnchorFaceID: Int64,
+        destinationAnchorFaceID: Int64
+    ) -> Bool {
+        send(.markPersonsDifferent(
+            sourcePersonID: sourcePersonID,
+            destinationPersonID: destinationPersonID,
+            sourceAnchorFaceID: sourceAnchorFaceID,
+            destinationAnchorFaceID: destinationAnchorFaceID
+        ))
     }
 
     public func deepAnalyzeFile(fileID: Int64, modelKind: String) {

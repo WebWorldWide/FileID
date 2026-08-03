@@ -28,7 +28,7 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use crate::context::{print_json, strip_extended_length, Ctx};
+use crate::context::{display_path, print_json, strip_extended_length, terminal_text, Ctx};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;
@@ -272,12 +272,15 @@ pub fn run(
     }
 
     println!("{}", ctx.bold("Proposed restructure (read-only plan):"));
-    println!("  Library root: {}", library_root.display());
+    println!(
+        "  Library root: {}",
+        display_path(library_root.to_string_lossy().as_ref())
+    );
     println!("  Files:        {file_count}");
     println!("  Moves:        {move_count}");
     println!("  {}", ctx.bold("By category:"));
     for c in &counts {
-        println!("    {:<22} {}", c.category, c.count);
+        println!("    {:<22} {}", terminal_text(&c.category), c.count);
     }
     println!("  {}", ctx.bold("Moves:"));
     for m in &sample {
@@ -287,7 +290,12 @@ pub fn run(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| m.source.to_string_lossy().into_owned());
         let dest = rel_to(&library_root, &m.destination);
-        println!("    {}  {}  {}", src, ctx.dim("→"), dest);
+        println!(
+            "    {}  {}  {}",
+            terminal_text(&src),
+            ctx.dim("→"),
+            terminal_text(&dest)
+        );
         if let Some(reason) = &m.reason {
             println!(
                 "        {}",
@@ -523,7 +531,7 @@ fn apply_spooled(
                 ctx.bold(&format!("Will {verb}"))
             },
             move_count,
-            library_root.display(),
+            display_path(library_root.to_string_lossy().as_ref()),
         );
         for m in sample {
             let src = m
@@ -532,7 +540,12 @@ fn apply_spooled(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| m.source.to_string_lossy().into_owned());
             let dest = rel_to(library_root, &m.destination);
-            println!("    {}  {}  {}", src, ctx.dim("→"), dest);
+            println!(
+                "    {}  {}  {}",
+                terminal_text(&src),
+                ctx.dim("→"),
+                terminal_text(&dest)
+            );
         }
         if move_count > MAX_PRINTED_MOVES as u64 {
             println!(
@@ -613,7 +626,7 @@ fn apply_spooled(
         println!("  Failed:   {}", result.failed);
     }
     if let Some(pe) = &result.privilege_error {
-        println!("  {} {}", ctx.bold("Symlink privilege:"), pe);
+        println!("  {} {}", ctx.bold("Symlink privilege:"), terminal_text(pe));
     }
     apply_outcome(&result)?;
     Ok(())

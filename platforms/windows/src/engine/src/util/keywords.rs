@@ -75,7 +75,7 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
     }
 
     let mut out: Vec<(String, f32)> = scores.into_iter().collect();
-    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.truncate(MAX_TAGS);
     out
 }
@@ -153,6 +153,13 @@ mod tests {
         for w in tags.windows(2) {
             assert!(w[0].1 >= w[1].1, "tags must be descending by score: {tags:?}");
         }
+    }
+
+    #[test]
+    fn equal_scores_use_label_order() {
+        let tags = extract("gamma. alpha. beta.");
+        let labels: Vec<&str> = tags.iter().map(|tag| tag.0.as_str()).collect();
+        assert_eq!(labels, vec!["alpha", "beta", "gamma"]);
     }
 
     #[test]

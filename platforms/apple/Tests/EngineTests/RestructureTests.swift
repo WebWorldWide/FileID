@@ -218,6 +218,38 @@ struct RestructureApplyTests {
         #expect(!FileManager.default.fileExists(atPath: dest.path))
     }
 
+    @Test("A distinct case-only live path fails the stale-plan guard")
+    func applyRejectsDistinctCaseOnlyLivePath() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDCaseSensitiveStale-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let plannedSource = root.appendingPathComponent("Report.jpg")
+        let liveSource = root.appendingPathComponent("report.jpg")
+        try Data("planned-original".utf8).write(to: plannedSource)
+        guard !FileManager.default.fileExists(atPath: liveSource.path) else {
+            return
+        }
+        try FileManager.default.moveItem(at: plannedSource, to: liveSource)
+        try Data("replacement".utf8).write(to: plannedSource)
+
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: liveSource.path)
+        let dest = root.appendingPathComponent("Sorted/report.jpg")
+        let result = try await Restructure.apply(
+            proposals: [RestructureProposal(
+                fileID: 1, oldPath: plannedSource.path,
+                newPath: dest.path, bucket: "document")],
+            database: db, libraryRoot: root)
+
+        #expect(result.moved == 0)
+        #expect(result.failed == 1)
+        #expect(try Data(contentsOf: plannedSource) == Data("replacement".utf8))
+        #expect(try Data(contentsOf: liveSource) == Data("planned-original".utf8))
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
     /// R-#14: a real same-path SWAP — the DB recorded one file_ref (inode) for the
     /// planned file, but a DIFFERENT file now occupies that exact path — must be
     /// skipped, not moved. Real inodes (runs on the dev Mac); mirrors the Windows
@@ -268,6 +300,34 @@ struct RestructureApplyTests {
         #expect(!Restructure.fileRefSwapped(dbRef: nil, currentRef: 200))
         #expect(!Restructure.fileRefSwapped(dbRef: 100, currentRef: nil))
         #expect(!Restructure.fileRefSwapped(dbRef: nil, currentRef: nil))
+    }
+
+    @Test("Case-only paths require positive same-file identity")
+    func caseOnlyPathIdentityPredicate() {
+        let upper = "/Volumes/CaseSensitive/Report.jpg"
+        let lower = "/Volumes/CaseSensitive/report.jpg"
+        #expect(Restructure.pathsEqual(upper, lower) { _ in NSNumber(value: 7) })
+        #expect(!Restructure.pathsEqual(upper, lower) { url in
+            NSString(string: url.lastPathComponent)
+        })
+        #expect(!Restructure.pathsEqual(upper, lower) { _ in nil })
+    }
+
+    @Test("Path equality follows the mounted volume's case semantics")
+    func pathEqualityFollowsVolumeCaseSemantics() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDPathIdentity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let upper = tmp.appendingPathComponent("Report.jpg")
+        let lower = tmp.appendingPathComponent("report.jpg")
+        try Data("upper".utf8).write(to: upper)
+        if FileManager.default.fileExists(atPath: lower.path) {
+            #expect(Restructure.pathsEqual(upper.path, lower.path))
+        } else {
+            try Data("lower".utf8).write(to: lower)
+            #expect(!Restructure.pathsEqual(upper.path, lower.path))
+        }
     }
 
     /// F-C3-012: when the on-disk move succeeds but the DB UPDATE fails, the move
@@ -669,6 +729,87 @@ struct RestructureApplyTests {
         let planID = try #require(plan.planID)
         #expect(FileManager.default.fileExists(
             atPath: planDir.appendingPathComponent("\(planID).ndjson").path))
+    }
+
+    @Test("small and disk-backed planners omit moves already at their destination")
+    func plannersOmitNoOpMoves() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDNoOpPlanner-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let current = root.appendingPathComponent("Photos/2024/March/already-sorted.jpg")
+        try FileManager.default.createDirectory(
+            at: current.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("image".utf8).write(to: current)
+        let db = try makeDB(tmp)
+        try await db.pool.write { d in
+            try d.execute(sql: """
+                INSERT INTO files
+                  (id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,extension,failed)
+                VALUES (1,?,?,?,?,?,?, 'image','jpg',0)
+                """, arguments: [
+                    current.path, StablePathHash.hash(current.path), 5,
+                    1_710_504_000.0, 1_710_504_000.0, 1_710_504_000.0])
+        }
+
+        let small = try await Restructure.proposeAll(database: db, libraryRoot: root)
+        #expect(small.proposals.isEmpty)
+
+        let large = try #require(try await Restructure.proposeLargeStoredIfNeeded(
+            database: db,
+            libraryRoot: root,
+            directory: tmp.appendingPathComponent("plans"),
+            threshold: 0
+        ))
+        #expect(large.moves.isEmpty)
+        #expect(large.totalMoves == nil)
+        let confidence = try #require(large.confidenceCounts)
+        #expect(confidence.auto + confidence.review + confidence.ask + confidence.unknown == 0)
+    }
+
+    @Test("planners preserve the mounted volume's case-only path semantics")
+    func plannersRespectCaseOnlyPathIdentity() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDCasePlanner-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let source = root.appendingPathComponent("Photos/2024/March/Already-Sorted.jpg")
+        let caseOnlyDestination = source.deletingLastPathComponent()
+            .appendingPathComponent("already-sorted.jpg")
+        try FileManager.default.createDirectory(
+            at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("image".utf8).write(to: source)
+        let aliasesSameFile = FileManager.default.fileExists(atPath: caseOnlyDestination.path)
+
+        let db = try makeDB(tmp)
+        try await db.pool.write { d in
+            try d.execute(sql: """
+                INSERT INTO files
+                  (id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,kind,
+                   extension,failed,vlm_proposed_name)
+                VALUES (1,?,?,?,?,?,?, 'image','jpg',0,'already-sorted')
+                """, arguments: [
+                    source.path, StablePathHash.hash(source.path), 5,
+                    1_710_504_000.0, 1_710_504_000.0, 1_710_504_000.0])
+        }
+
+        let small = try await Restructure.proposeAll(database: db, libraryRoot: root)
+        let large = try #require(try await Restructure.proposeLargeStoredIfNeeded(
+            database: db,
+            libraryRoot: root,
+            directory: tmp.appendingPathComponent("plans"),
+            threshold: 0
+        ))
+        if aliasesSameFile {
+            #expect(small.proposals.isEmpty)
+            #expect(large.moves.isEmpty)
+            #expect(large.totalMoves == nil)
+        } else {
+            #expect(small.proposals.count == 1)
+            #expect(small.proposals.first?.newPath == caseOnlyDestination.path)
+            #expect(large.moves.count == 1)
+            #expect(large.moves.first?.destination == caseOnlyDestination.path)
+        }
     }
 
     @Test("Stored restructure plans expose a bounded preview")

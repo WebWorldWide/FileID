@@ -1,14 +1,12 @@
 //! Backend-agnostic application state + key handling.
 //!
-//! This module owns NO terminal types — it's a state machine over
+//! This module owns no terminal types—it is a state machine over
 //! [`crossterm::event::KeyCode`], which makes it unit-testable headlessly
 //! (navigation clamps, tab cycling, search filtering, the load-event reducer).
 //! `ui.rs` renders a `&App`; `main.rs` feeds it key codes + load messages.
 //!
-//! The one filesystem touch is the scan-path prompt: confirming the typed path
-//! checks `exists()` / `is_dir()` so a bad path gets an *inline* error instead
-//! of a deferred async one. The `~`-expansion is factored into a pure helper so
-//! it stays unit-testable.
+//! Filesystem access is limited to the bounded folder browser and typed-path
+//! validation. Errors stay inline rather than escaping into the render loop.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,17 +39,6 @@ impl Tab {
         Tab::Settings,
     ];
 
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Library => "Library",
-            Tab::People => "People",
-            Tab::Cleanup => "Cleanup",
-            Tab::DeepAnalyze => "Deep Analyze",
-            Tab::Restructure => "Restructure",
-            Tab::Settings => "Settings",
-        }
-    }
-
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
     }
@@ -69,11 +56,7 @@ impl Tab {
     }
 }
 
-/// Live AI-model install progress backing the gauge (`ui.rs`). Set when a
-/// download is armed (at 0%), advanced by each [`LoadMsg::DownloadProgress`], and
-/// cleared when the worker finishes (its terminal `Done`/`Error`). `done` flips
-/// once the final `PROGRESS\t100\tdone` lands, switching the gauge to its brief
-/// success state before it clears.
+/// Live AI-model install progress backing the Settings gauge.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DownloadState {
     pub percent: u16,
@@ -103,7 +86,7 @@ pub struct App {
     /// desktop app's library. Drives the friendly empty-screen + Settings copy.
     pub scratch: bool,
 
-    // ── Folder-pick + scan (FIX 2) ──────────────────────────────────────────
+    // Folder picker and scan state.
     /// The single-line path-input prompt is open (typing a folder to scan).
     pub input_active: bool,
     /// The text typed so far in the path prompt.
@@ -118,8 +101,7 @@ pub struct App {
     /// Set when a scan is confirmed; `main` consumes it, spawns the engine-driven
     /// scan thread, and clears it (mirrors `reload_requested`).
     pub scan_requested: Option<PathBuf>,
-    /// The folder-browser overlay (the PRIMARY `s` UX, FIX 2). `Some` while the
-    /// user is navigating directories to pick one to scan; `None` otherwise.
+    /// The folder-browser overlay opened by `s`.
     pub browser: Option<Browser>,
 
     // ── AI-model download (Settings `D`) ────────────────────────────────────
@@ -207,7 +189,7 @@ impl App {
             Tab::Library => self.visible_files().len(),
             Tab::People => self.data.people.len(),
             Tab::Cleanup => self.data.dupes.len(),
-            Tab::DeepAnalyze => 0,
+            Tab::DeepAnalyze => self.data.analyses.len(),
             Tab::Restructure => self.data.plan.len(),
             Tab::Settings => 0,
         }
@@ -259,6 +241,17 @@ impl App {
         self.set_cursor(len.saturating_sub(1));
     }
 
+    fn select_page_next(&mut self) {
+        let len = self.list_len();
+        if len > 0 {
+            self.set_cursor((self.cursor_clamped(len) + 10).min(len - 1));
+        }
+    }
+
+    fn select_page_prev(&mut self) {
+        self.set_cursor(self.cursor().saturating_sub(10));
+    }
+
     fn switch_tab(&mut self, tab: Tab) {
         self.tab = tab;
     }
@@ -306,7 +299,7 @@ impl App {
             }
             LoadMsg::Dupes(report) => {
                 // Deferred duplicate verification landing after Done — fold it
-                // into the already-painted snapshot. (audit 2026-07-14)
+                // into the already-painted snapshot.
                 self.data.dupes = report.dupes;
                 self.data.dupes_truncated = report.dupes_truncated;
                 self.data.dupe_candidate_count = report.dupe_candidate_count;
@@ -371,13 +364,12 @@ impl App {
             self.on_key_search(code);
             return;
         }
-        // The `?` help overlay is modal for quit keys: Esc/q dismiss it instead of
-        // quitting the app, so a user reading the keys can back out safely.
+        // Help is modal: its close keys cannot trigger an action behind it.
         if self.show_help {
-            if let KeyCode::Esc | KeyCode::Char('q') = code {
+            if matches!(code, KeyCode::Esc | KeyCode::Char('q' | '?')) {
                 self.show_help = false;
-                return;
             }
+            return;
         }
         match code {
             // A committed search (Enter) leaves `search_active` false but keeps
@@ -400,6 +392,8 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => self.select_next(),
             KeyCode::Up | KeyCode::Char('k') => self.select_prev(),
+            KeyCode::PageDown => self.select_page_next(),
+            KeyCode::PageUp => self.select_page_prev(),
             KeyCode::Home | KeyCode::Char('g') => self.select_first(),
             KeyCode::End | KeyCode::Char('G') => self.select_last(),
             KeyCode::Char('s') => self.open_browser(),
@@ -476,7 +470,7 @@ impl App {
         self.show_help = false;
     }
 
-    /// Open the folder BROWSER (the primary `s` UX, FIX 2). Starts at `$HOME`
+    /// Open the folder browser at `$HOME`
     /// (falling back to the cwd, then `/`), so the user navigates with arrows +
     /// Enter instead of typing a raw path. Ignored mid-scan so two scans can't
     /// race the engine.
@@ -540,14 +534,13 @@ impl App {
                     self.arm_scan(browser.cwd);
                 }
             }
-            // Jump straight to where external/removable drives mount (FEATURE 1).
+            // Jump to external/removable-drive roots.
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if let Some(b) = self.browser.as_mut() {
                     b.go_to_drives();
                 }
             }
-            // Toggle showing dot-prefixed (hidden) entries — hidden by default
-            // (FEATURE 2).
+            // Toggle dot-prefixed entries, hidden by default.
             KeyCode::Char('.') => {
                 if let Some(b) = self.browser.as_mut() {
                     b.toggle_hidden();
@@ -683,7 +676,7 @@ const FILE_LIST_CAP: usize = 64;
 /// above `COUNT_CAP` so merely file-heavy folders still surface their subdirs.
 const WALK_CAP: usize = COUNT_CAP * 10;
 
-/// A cheap, shallow tally of a directory's immediate contents (FIX 2): how many
+/// A cheap, shallow tally of a directory's immediate contents: how many
 /// images, total files, and subfolders it holds. `capped` means the walk hit
 /// [`COUNT_CAP`] and the real totals are at least these — rendered with a `+`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -694,7 +687,7 @@ pub struct DirCounts {
     pub capped: bool,
 }
 
-/// One file in the current folder's dimmed preview list (FIX 2): its display
+/// One file in the current folder's dimmed preview list: its display
 /// name plus whether it's an image, so a scan's actual targets are visible.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FileEntry {
@@ -712,7 +705,7 @@ pub enum BrowseRow {
     Dir(PathBuf),
 }
 
-/// Folder-navigator state (the `s` key, FIX 2). Replaces raw path-typing as the
+/// Folder-navigator state opened by `s`. Replaces raw path-typing as the
 /// primary "what do I scan?" UX: start at `$HOME`, list this folder's
 /// subdirectories, walk in with Enter, up with Backspace, and scan the *current*
 /// folder with `s`.
@@ -729,15 +722,15 @@ pub struct Browser {
     pub selected: usize,
     /// A transient one-line notice (e.g. a permission-denied skip).
     pub notice: Option<String>,
-    /// `cwd`'s OWN shallow counts (FIX 2) — shown in the browser title so the
+    /// `cwd`'s shallow counts — shown in the browser title so the
     /// user sees what a "scan this folder" would pick up at a glance.
     pub here: DirCounts,
-    /// `cwd`'s immediate files (FIX 2), capped at [`FILE_LIST_CAP`] for the
+    /// `cwd`'s immediate files, capped at [`FILE_LIST_CAP`] for the
     /// dimmed preview; `files_total` is how many there really are.
     pub files: Vec<FileEntry>,
     /// Total files in `cwd` (≥ `files.len()`), for the `+N more` line.
     pub files_total: usize,
-    /// Show dot-prefixed (hidden) entries. Hidden by DEFAULT (FEATURE 2);
+    /// Show dot-prefixed (hidden) entries. Hidden by default;
     /// toggled with `.`. Applies to the subdir list, the file preview, AND every
     /// count so what's shown and what's tallied always agree.
     pub show_hidden: bool,
@@ -745,7 +738,7 @@ pub struct Browser {
     /// parent above `C:\\`, `D:\\`, …, so this state is what makes every local
     /// and removable drive reachable from the keyboard-only picker.
     pub virtual_drives: bool,
-    /// Lazy per-subdir count cache (FIX 2), filled DURING RENDER for the rows
+    /// Lazy per-subdir count cache, filled during rendering for the rows
     /// actually on screen so opening a folder never eagerly walks every child.
     /// `None` caches an unreadable subdir so it isn't retried each frame.
     /// `RefCell` because rendering takes `&Browser`; the cache is per-`cwd` and
@@ -773,7 +766,7 @@ impl Browser {
         b
     }
 
-    /// Re-read `cwd` in ONE shallow pass (FIX 2): split it into subdirectories
+    /// Re-read `cwd` in one shallow pass: split it into subdirectories
     /// (→ `rows`, sorted case-insensitively, prefixed by `..`), a dimmed file
     /// preview (→ `files`, capped), and `cwd`'s own [`DirCounts`] (→ `here`,
     /// for the title). File and directory work have independent [`COUNT_CAP`]
@@ -809,7 +802,7 @@ impl Browser {
                     let name = dir_label(&path);
                     // Hidden-by-default: skip dot-entries unless toggled on, so the
                     // subdir list, the file preview, and the counts below all
-                    // agree (FEATURE 2).
+                    // agree.
                     if !self.show_hidden && name.starts_with('.') {
                         continue;
                     }
@@ -867,7 +860,7 @@ impl Browser {
         }
     }
 
-    /// Shallow counts for a subdirectory `path` (FIX 2), memoized. Called from
+    /// Shallow counts for a subdirectory `path`, memoized. Called from
     /// the renderer for the rows currently ON SCREEN, so scrolling computes at
     /// most one `read_dir` per newly-visible row and never re-walks a folder.
     /// `None` = unreadable (rendered without counts); cached so it isn't retried
@@ -933,7 +926,7 @@ impl Browser {
     }
 
     /// Jump straight to where external/removable drives mount (the `d` key,
-    /// FEATURE 1): macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt`;
+    /// macOS `/Volumes`; Linux `/media/$USER` · `/media` · `/mnt`;
     /// else the filesystem root `/`. Re-reads the listing so the user can step
     /// into a drive. Panic-free (an unreadable target just shows a notice).
     fn go_to_drives(&mut self) {
@@ -948,7 +941,7 @@ impl Browser {
         self.counts.borrow_mut().clear();
     }
 
-    /// Toggle showing dot-prefixed (hidden) entries (the `.` key, FEATURE 2).
+    /// Toggle showing dot-prefixed entries with `.`.
     /// Re-reads `cwd` — which also clears the per-subdir count cache — so the
     /// subdir list, file preview, and counts all reflect the new state at once.
     fn toggle_hidden(&mut self) {
@@ -985,7 +978,7 @@ fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// One shallow, bounded `read_dir` tally of `path`'s immediate children (FIX 2):
+/// One shallow, bounded `read_dir` tally of `path`'s immediate children:
 /// images / total files / subfolders. Stops at [`COUNT_CAP`] entries (sets
 /// `capped`) so a folder with a million files can't hang the count. Returns
 /// `None` on a read error (permission denied / unavailable) so the caller can
@@ -1000,7 +993,7 @@ fn count_dir_shallow(path: &Path, show_hidden: bool) -> Option<DirCounts> {
         }
         let p = entry.path();
         // Honor the same hidden-by-default policy as the visible listing so a
-        // folder's preview count matches what a scan-here would show (FEATURE 2).
+        // folder's preview count matches what a scan here would show.
         if !show_hidden && dir_label(&p).starts_with('.') {
             continue;
         }
@@ -1150,6 +1143,21 @@ mod tests {
             app.select_next();
         }
         assert_eq!(app.cursor(), 2);
+    }
+
+    #[test]
+    fn page_navigation_moves_ten_rows_and_clamps() {
+        let mut app = app_with_files(25);
+        app.on_key(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.cursor(), 10);
+        app.on_key(KeyCode::PageDown, KeyModifiers::NONE);
+        app.on_key(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(app.cursor(), 24);
+        app.on_key(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(app.cursor(), 14);
+        app.on_key(KeyCode::PageUp, KeyModifiers::NONE);
+        app.on_key(KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(app.cursor(), 0);
     }
 
     #[test]
@@ -1375,6 +1383,13 @@ mod tests {
         app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(!app.show_help, "q closes the help overlay");
         assert!(!app.should_quit, "q must NOT quit while help is open");
+
+        app.show_help = true;
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(app.show_help, "unrelated keys leave the help open");
+        assert!(app.browser.is_none(), "help blocks actions behind it");
+        app.on_key(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(!app.show_help, "? closes the help it opened");
 
         // With help closed, q quits as normal.
         app.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1717,7 +1732,7 @@ mod tests {
     }
 
     /// A tree with one visible + one hidden subdir AND one visible + one hidden
-    /// file, so the default-hidden filter (FEATURE 2) has something to drop.
+    /// file, so the default-hidden filter has something to drop.
     fn dotfile_tree(tag: &str) -> PathBuf {
         let mut base = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()

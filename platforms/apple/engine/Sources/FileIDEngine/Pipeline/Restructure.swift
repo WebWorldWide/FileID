@@ -111,7 +111,8 @@ public enum Restructure {
                     destination TEXT NOT NULL,
                     category TEXT NOT NULL,
                     confidence TEXT NOT NULL,
-                    reason TEXT);
+                    reason TEXT,
+                    actionable INTEGER NOT NULL);
                 CREATE TABLE folder_stats(
                     folder TEXT NOT NULL,
                     category TEXT NOT NULL,
@@ -175,12 +176,14 @@ public enum Restructure {
                     let folder = (proposal.oldPath as NSString).deletingLastPathComponent
                     try plan.execute(sql: """
                         INSERT INTO raw_moves
-                          (seq,file_id,source,source_folder,destination,category,confidence,reason)
-                        VALUES (?,?,?,?,?,?,?,?)
+                          (seq,file_id,source,source_folder,destination,category,confidence,reason,
+                           actionable)
+                        VALUES (?,?,?,?,?,?,?,?,?)
                         """, arguments: [
                             chunkBase + offset, proposal.fileID, proposal.oldPath, folder,
                             proposal.newPath, proposal.bucket,
-                            proposal.confidence, proposal.reason])
+                            proposal.confidence, proposal.reason,
+                            pathsEqual(proposal.oldPath, proposal.newPath) ? 0 : 1])
                     try plan.execute(sql: """
                         INSERT INTO folder_stats(folder,category,count) VALUES (?,?,1)
                         ON CONFLICT(folder,category) DO UPDATE SET count=count+1
@@ -228,11 +231,13 @@ public enum Restructure {
                 SELECT COUNT(*) FROM raw_moves r
                 JOIN folder_tiers t ON t.folder=r.source_folder
                 WHERE t.tier <> 'Anchor'
+                  AND r.actionable <> 0
                 """) ?? 0
             let categories = try Row.fetchAll(db, sql: """
                 SELECT r.category, COUNT(*) AS n FROM raw_moves r
                 JOIN folder_tiers t ON t.folder=r.source_folder
                 WHERE t.tier <> 'Anchor'
+                  AND r.actionable <> 0
                 GROUP BY r.category ORDER BY n DESC, r.category ASC
                 """).map {
                     RestructureCategoryCount(
@@ -252,6 +257,7 @@ public enum Restructure {
                 FROM raw_moves r
                 JOIN folder_tiers t ON t.folder=r.source_folder
                 WHERE t.tier <> 'Anchor'
+                  AND r.actionable <> 0
                 """).map {
                     RestructureConfidenceCounts(
                         auto: $0["auto_count"] ?? 0,
@@ -285,7 +291,9 @@ public enum Restructure {
                 SELECT r.file_id,r.source,r.destination,r.category,t.tier,
                        r.confidence,r.reason
                 FROM raw_moves r JOIN folder_tiers t ON t.folder=r.source_folder
-                WHERE t.tier <> 'Anchor' ORDER BY r.seq
+                WHERE t.tier <> 'Anchor'
+                  AND r.actionable <> 0
+                ORDER BY r.seq
                 """)
             return try storePlanStream(
                 libraryRoot: libraryRoot.path,
@@ -576,8 +584,9 @@ public enum Restructure {
         let tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
         let stripped = stripAnchorFolderMovesExcept(
             proposals, classified: folderClass, exempt: semanticSourceFolders)
+        let actionable = stripped.filter { !pathsEqual($0.oldPath, $0.newPath) }
         return PlanResult(
-            proposals: stripped, tierByFolder: tiers.tierByFolder,
+            proposals: actionable, tierByFolder: tiers.tierByFolder,
             anchorFolders: tiers.anchor, mixedFolders: tiers.mixed, junkFolders: tiers.junk)
     }
 
@@ -1786,13 +1795,32 @@ public enum Restructure {
         return dest
     }
 
-    /// Path equality tolerant of separator/symlink differences. Fast path is a
-    /// string compare (the normal case — both came from the same row at plan
-    /// time); otherwise compare resolved forms. (B4 helper, F-C3-010)
+    /// Path equality tolerant of symlink and case-only aliases without treating
+    /// distinct case-only files on a case-sensitive volume as the same source.
     static func pathsEqual(_ a: String, _ b: String) -> Bool {
+        return pathsEqual(a, b, fileIdentity: { url in
+            (try? url.resourceValues(forKeys: [.fileResourceIdentifierKey]))?
+                .fileResourceIdentifier
+        })
+    }
+
+    static func pathsEqual(
+        _ a: String,
+        _ b: String,
+        fileIdentity: (URL) -> (any NSObjectProtocol)?
+    ) -> Bool {
         if a == b { return true }
-        return URL(fileURLWithPath: a).resolvingSymlinksInPath().path
-            == URL(fileURLWithPath: b).resolvingSymlinksInPath().path
+        let aURL = URL(fileURLWithPath: a)
+        let bURL = URL(fileURLWithPath: b)
+        let resolvedA = aURL.resolvingSymlinksInPath().path
+        let resolvedB = bURL.resolvingSymlinksInPath().path
+        if resolvedA == resolvedB { return true }
+        guard a.caseInsensitiveCompare(b) == .orderedSame
+                || resolvedA.caseInsensitiveCompare(resolvedB) == .orderedSame,
+              let aIdentity = fileIdentity(aURL),
+              let bIdentity = fileIdentity(bURL)
+        else { return false }
+        return aIdentity.isEqual(bIdentity)
     }
 
     /// R-#14 positive-evidence swap detector — mirrors the Windows engine's

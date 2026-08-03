@@ -47,6 +47,7 @@
   "vlmRepoLicenses": {
     "mlx-community/Qwen2.5-VL-7B-Instruct-4bit": "Apache-2.0",
     "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit": "Apache-2.0",
+    "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Apache-2.0",
     "mlx-community/gemma-3-4b-it-qat-4bit": "Gemma",
     "mlx-community/gemma-3-12b-it-qat-4bit": "Gemma",
     "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit": "Apache-2.0",
@@ -92,6 +93,7 @@
   "vlmRepos": [
     { "repo": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",                 "kind": "qwen2_5_vl_7b",     "platforms": ["macos"], "revision": "fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b", "approxBytes": 4300000000 },
     { "repo": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",          "kind": "qwen3_vl_4b",       "platforms": ["macos"], "revision": "552af30c9952c44f1e1a27c7c5810ded58e892bc", "approxBytes": 3500000000 },
+    { "repo": "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",          "kind": "qwen3_vl_8b",       "platforms": ["macos"], "revision": "a0afc48efd9308fb14b4d58bbd49d382f7d4f845", "approxBytes": 5776636403 },
     { "repo": "mlx-community/gemma-3-4b-it-qat-4bit",                      "kind": "gemma_3_4b",        "platforms": ["macos"], "revision": "3d9ef289111449933c22761961f16a5df237ce2a", "approxBytes": 3300000000 },
     { "repo": "mlx-community/gemma-3-12b-it-qat-4bit",                     "kind": "gemma_3_12b",       "platforms": ["macos"], "revision": "66fc51ef25778c03d33c4c8bc446973d062e73f4", "approxBytes": 7500000000 },
     { "repo": "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit",    "kind": "mistral_small_3_2", "platforms": ["macos"], "revision": "2a1d5eabfc504747bdc24178394821a1efc0edde", "approxBytes": 13500000000 },

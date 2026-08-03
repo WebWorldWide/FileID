@@ -86,7 +86,7 @@ impl Ctx {
         if !std::io::stdin().is_terminal() {
             return false;
         }
-        eprint!("{prompt} [y/N] ");
+        eprint!("{} [y/N] ", terminal_output(prompt));
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
@@ -99,23 +99,25 @@ impl Ctx {
     /// so it can't corrupt `--json` output (which is the only thing on stdout).
     pub fn progress(&self, msg: &str) {
         if !self.quiet {
-            eprintln!("{msg}");
+            eprintln!("{}", terminal_output(msg));
         }
     }
 
     pub fn bold(&self, s: &str) -> String {
+        let s = terminal_text(s);
         if self.color {
             format!("\x1b[1m{s}\x1b[0m")
         } else {
-            s.to_string()
+            s
         }
     }
 
     pub fn dim(&self, s: &str) -> String {
+        let s = terminal_text(s);
         if self.color {
             format!("\x1b[2m{s}\x1b[0m")
         } else {
-            s.to_string()
+            s
         }
     }
 
@@ -123,19 +125,21 @@ impl Ctx {
     /// other identity accents. Pad text to its column width BEFORE wrapping, so
     /// the invisible escape bytes never throw off `{:<width}` alignment.
     pub fn gold(&self, s: &str) -> String {
+        let s = terminal_text(s);
         if self.color {
             format!("\x1b[38;5;220m{s}\x1b[0m")
         } else {
-            s.to_string()
+            s
         }
     }
 
     /// Green accent — used for the "installed" state.
     pub fn green(&self, s: &str) -> String {
+        let s = terminal_text(s);
         if self.color {
             format!("\x1b[32m{s}\x1b[0m")
         } else {
-            s.to_string()
+            s
         }
     }
 
@@ -252,11 +256,62 @@ pub fn display_path(p: &str) -> String {
         if let Some(home) = std::env::var_os(name).filter(|value| !value.is_empty()) {
             let home = home.to_string_lossy();
             if let Some(rest) = p.strip_prefix(home.as_ref()) {
-                return format!("~{rest}");
+                return terminal_text(&format!("~{rest}"));
             }
         }
     }
-    p.to_string()
+    terminal_text(p)
+}
+
+/// Neutralize control characters before data-derived text reaches a terminal.
+/// JSON output keeps the original value and relies on JSON escaping.
+pub fn terminal_text(s: &str) -> String {
+    s.chars()
+        .map(|ch| {
+            if matches!(ch, '\n' | '\r' | '\t') {
+                ' '
+            } else if ch.is_control() {
+                '\u{fffd}'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn terminal_output(s: &str) -> String {
+    const SAFE_SGR: [&str; 5] = [
+        "\x1b[0m",
+        "\x1b[1m",
+        "\x1b[2m",
+        "\x1b[32m",
+        "\x1b[38;5;220m",
+    ];
+    let mut output = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        if let Some(sequence) = SAFE_SGR
+            .iter()
+            .find(|sequence| rest.starts_with(**sequence))
+        {
+            output.push_str(sequence);
+            rest = &rest[sequence.len()..];
+            continue;
+        }
+        let ch = rest
+            .chars()
+            .next()
+            .expect("non-empty string has a character");
+        if matches!(ch, '\n' | '\r' | '\t') {
+            output.push(' ');
+        } else if ch.is_control() {
+            output.push('\u{fffd}');
+        } else {
+            output.push(ch);
+        }
+        rest = &rest[ch.len_utf8()..];
+    }
+    output
 }
 
 /// Human-readable byte size.
@@ -370,6 +425,31 @@ mod tests {
         assert_eq!(escape_like("50%off.png"), "50\\%off.png");
         // Backslash is escaped first so it can't swallow the wildcard escapes.
         assert_eq!(escape_like("a\\b_c%"), "a\\\\b\\_c\\%");
+    }
+
+    #[test]
+    fn terminal_text_neutralizes_escape_and_line_controls() {
+        assert_eq!(
+            terminal_text("safe\x1b[2J\nnext\tcell"),
+            "safe�[2J next cell"
+        );
+        assert_eq!(terminal_text("café 📷"), "café 📷");
+    }
+
+    #[test]
+    fn terminal_output_preserves_only_fileid_sgr_sequences() {
+        assert_eq!(
+            terminal_output("\x1b[2msafe\x1b[0m\x1b[2J\x1b]0;owned\x07"),
+            "\x1b[2msafe\x1b[0m�[2J�]0;owned�"
+        );
+    }
+
+    #[test]
+    fn display_path_neutralizes_filename_escape_sequences() {
+        assert_eq!(
+            display_path("/tmp/report\x1b[2J.pdf"),
+            "/tmp/report�[2J.pdf"
+        );
     }
 
     #[test]

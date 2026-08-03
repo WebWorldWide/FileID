@@ -8,8 +8,40 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [0.1.3] - 2026-08-02
 
+### Added
+
+- **macOS analyzes and tags document content across the promised file matrix.** PDFs, Word,
+  PowerPoint, Excel, and plain documents now contribute bounded extracted text and deterministic
+  keyword tags during scan. Deep Analyze combines text with a safe raster preview when available;
+  Keynote/Numbers use their native preview path, and text-bearing files fall back to grounded
+  text-only results when no preview can be rendered.
+- **The terminal dashboard now exposes all six product areas cleanly.** Its responsive header keeps
+  Settings reachable in narrow terminals, live Deep Analyze results are readable in-place, the full
+  key map is discoverable, and scan completion includes authoritative face clustering.
+
+### Changed
+
+- **Qwen3-VL 8B is the recommended quality tier for 16 GB Macs.** A copied-Adlon comparison found it
+  more concise and grounded than the 4B model while staying inside the measured memory budget;
+  Qwen3-VL 4B remains the 8 GB recommendation.
+- **macOS tagging is faster without changing results.** Static Core ML tensor shapes and four bounded
+  RAM++ workers reduced the copied-Adlon benchmark from 27.73 seconds to 22.59 seconds with identical
+  tags and scores.
+- **CLI and TUI model commands explain their stable compatibility IDs.** `mobileclip_s2` installs
+  CLIP ViT-B/32 and `arcface` installs YuNet + SFace; the retired research weights are not restored.
+
 ### Fixed
 
+- **macOS production UI polish.** Cleanup starts at the top of its tab, the five-stage progress line
+  stops at each dot center, and file-preview tagging has a visible gold Apply button with Return-key
+  activation.
+- **Document and media analysis fails safely.** Corrupt PDFs remain retryable, MTS/M2TS files route
+  through video keyframes, untrusted extracted text cannot become model instructions, empty
+  metadata-only results no longer count as complete analysis, and OBJ material references cannot
+  escape through absolute paths, traversal, or symlinks. If an uncancellable PDFKit text read ever
+  times out, later documents fail fast into the raster/metadata fallback instead of queueing behind it.
+- **Rust async notification code uses the patched `event-listener` 5.4.2.** All four shipped lockfiles
+  no longer contain the `RUSTSEC-2026-0221`-affected 5.4.1 release.
 - **People never hides an active face group by size.** Windows, macOS, and Linux now show every
   active cluster by default. Named and explicit Unknown behavior remains intact, and excluded
   outlier faces still stay out of active counts.
@@ -41,6 +73,13 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ### Validation
 
+- Strict macOS concurrency/warnings-as-errors passed 381 tests across 73 suites. The ad-hoc release
+  dry run produced a checksum-valid DMG; the app and nested engine verified and launched directly
+  from a read-only mounted image. The Adlon source volume remained read-only.
+- The shared Rust engine passed strict Clippy and 684 library tests plus manifest conformance; CLI
+  passed 65 unit + 14 smoke tests and both explicit scale suites; TUI passed 111 normal tests and its
+  million-row suite. Model-license, supply-chain, workflow, documentation, and binary-privacy gates
+  passed locally; WinUI/.NET and native GTK compilation remain hosted/native-platform gates.
 - The frozen 164,518-file Adlon catalog produced the same 2,215-cluster, 166,266-assigned-face
   partition at recovery thresholds 0.75, 0.70, and 0.60, with identical membership digests and no
   merges, splits, or swaps. Exact-capture and exact-embedding analysis found no additional cluster

@@ -42,13 +42,20 @@ done
 
 APP="FileID.app"
 DIST_DIR="dist"
-STAGE_DIR="$DIST_DIR/dmg-staging"
+STAGE_DIR="$(mktemp -d /tmp/fileid-dmg-staging.XXXXXX)"
 DMG_RW="$DIST_DIR/FileID-rw.dmg"
 DMG_OUT="$DIST_DIR/FileID.dmg"
 VOL_NAME="FileID"
 XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
+VERIFY_MOUNT=""
 
 cleanup() {
+    if [ -n "$VERIFY_MOUNT" ] && mount | grep -Fq "on $VERIFY_MOUNT "; then
+        hdiutil detach "$VERIFY_MOUNT" -force -quiet 2>/dev/null || true
+    fi
+    if [ -n "$VERIFY_MOUNT" ]; then
+        rmdir "$VERIFY_MOUNT" 2>/dev/null || true
+    fi
     if [ -d "/Volumes/$VOL_NAME" ]; then
         hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true
     fi
@@ -135,11 +142,13 @@ fi
 mkdir -p "$DIST_DIR"
 # Wipe any stale numbered duplicates Finder leaves behind (FileID 2.dmg,
 # FileID 3.dmg, etc.) plus the working files for this run.
-rm -rf "$STAGE_DIR" "$DMG_RW" "$DMG_OUT"
+rm -f "$DMG_RW" "$DMG_OUT"
 find "$DIST_DIR" -maxdepth 1 -name "FileID *.dmg" -delete 2>/dev/null || true
 find "$DIST_DIR" -maxdepth 1 -name "dmg-background*" -delete 2>/dev/null || true
-mkdir -p "$STAGE_DIR"
 cp -R "$APP" "$STAGE_DIR/"
+find "$STAGE_DIR/$APP" -exec xattr -c {} \; 2>/dev/null || true
+codesign --force --sign - --deep --timestamp=none "$STAGE_DIR/$APP" >/dev/null
+codesign --verify --deep --strict "$STAGE_DIR/$APP"
 ln -s /Applications "$STAGE_DIR/Applications"
 
 APP_KB=$(du -sk "$APP" | cut -f1)
@@ -157,6 +166,14 @@ hdiutil create \
 echo "📦 Compressing…"
 hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUT" >/dev/null
 rm -f "$DMG_RW"
+hdiutil verify "$DMG_OUT" >/dev/null
+
+VERIFY_MOUNT="$(mktemp -d /tmp/fileid-dmg-mount.XXXXXX)"
+hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" "$DMG_OUT" >/dev/null
+codesign --verify --deep --strict "$VERIFY_MOUNT/$APP"
+hdiutil detach "$VERIFY_MOUNT" -quiet
+rmdir "$VERIFY_MOUNT"
+VERIFY_MOUNT=""
 
 # Mirror to ~/Desktop for one-click access. Wipe any prior copy first
 # so Finder doesn't number the new one (FileID 2.dmg, FileID 3.dmg…).

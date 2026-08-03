@@ -3,14 +3,14 @@ import Testing
 
 @Suite("AI model hardware recommendation")
 struct AIModelRecommendationTests {
-    @Test func eightGBSelectsRunnableGemma() {
+    @Test func eightGBSelectsRunnableQwen3() {
         let choice = AIModelKind.safeDefaultFor(ramGB: 8)
-        #expect(choice == .gemma3_4B)
+        #expect(choice == .qwen3VL4B)
         #expect(choice.fits(ramGB: 8))
     }
 
-    @Test func sixteenGBSelectsQwen() {
-        #expect(AIModelKind.safeDefaultFor(ramGB: 16) == .qwen2VL7B)
+    @Test func sixteenGBSelectsQwen3EightB() {
+        #expect(AIModelKind.safeDefaultFor(ramGB: 16) == .qwen3VL8B)
     }
 
     @Test func nominalThirtyTwoGBSelectsMistral() {
@@ -21,7 +21,7 @@ struct AIModelRecommendationTests {
         let qwenOnly = AIModelKind.qwen2VL7B.requiredFreeBytes + 1
         #expect(qwenOnly < AIModelKind.mistralSmall32.requiredFreeBytes)
         #expect(AIModelKind.safeDefaultFor(ramGB: 30.9,
-                                          freeDiskBytes: qwenOnly) == .qwen2VL7B)
+                                          freeDiskBytes: qwenOnly) == .qwen3VL4B)
     }
 
     @Test func onboardingPreservesAnExplicitExistingChoice() {
