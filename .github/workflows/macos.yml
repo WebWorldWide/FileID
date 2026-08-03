@@ -245,6 +245,16 @@ jobs:
             .build/release/FileID \
             .build/release/FileIDEngine
 
+      - name: Validate packaging scripts
+        run: bash -n run.sh scripts/ensure_mlx_metallib.sh scripts/assemble_app.sh scripts/build_dmg.sh scripts/release.sh
+
+      - name: Prepare Metal Toolchain for packaging
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          xcodebuild -downloadComponent MetalToolchain
+          TOOLCHAINS=Metal xcrun metal --version
+
       - name: Package unsigned macOS prerelease DMG
         if: github.event_name == 'workflow_dispatch'
         run: bash scripts/build_dmg.sh --rebuild

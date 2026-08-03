@@ -46,7 +46,7 @@ STAGE_DIR="$(mktemp -d /tmp/fileid-dmg-staging.XXXXXX)"
 DMG_RW="$DIST_DIR/FileID-rw.dmg"
 DMG_OUT="$DIST_DIR/FileID.dmg"
 VOL_NAME="FileID"
-XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
+XCODE_DEV_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 VERIFY_MOUNT=""
 
 cleanup() {
@@ -70,13 +70,15 @@ fi
 
 if [ "$REBUILD" = "1" ]; then
     echo "🔨 Building release binaries…"
-    if [ -d "$XCODE_DEV_DIR" ]; then
+    if [ -x "$XCODE_DEV_DIR/usr/bin/xcodebuild" ]; then
         DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
         DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
     else
         swift build -c release --product FileID
         swift build -c release --product FileIDEngine
     fi
+
+    bash "$PROJECT_DIR/scripts/ensure_mlx_metallib.sh"
 
     echo "📦 Assembling FileID.app bundle…"
     bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP"
@@ -127,6 +129,7 @@ fi
 [ -d "$APP" ] || { echo "❌ $APP not found. Run with --rebuild or run.sh first."; exit 1; }
 [ -x "$APP/Contents/MacOS/FileID" ] || { echo "❌ Missing $APP/Contents/MacOS/FileID"; exit 1; }
 [ -x "$APP/Contents/MacOS/FileIDEngine" ] || { echo "❌ Missing $APP/Contents/MacOS/FileIDEngine"; exit 1; }
+[ -s "$APP/Contents/MacOS/mlx.metallib" ] || { echo "❌ Missing $APP/Contents/MacOS/mlx.metallib"; exit 1; }
 
 echo "🔒 Scanning shipped binaries for forbidden telemetry markers…"
 python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
@@ -171,6 +174,10 @@ hdiutil verify "$DMG_OUT" >/dev/null
 VERIFY_MOUNT="$(mktemp -d /tmp/fileid-dmg-mount.XXXXXX)"
 hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" "$DMG_OUT" >/dev/null
 codesign --verify --deep --strict "$VERIFY_MOUNT/$APP"
+[ -s "$VERIFY_MOUNT/$APP/Contents/MacOS/mlx.metallib" ] || {
+    echo "❌ Packaged DMG is missing Contents/MacOS/mlx.metallib"
+    exit 1
+}
 hdiutil detach "$VERIFY_MOUNT" -quiet
 rmdir "$VERIFY_MOUNT"
 VERIFY_MOUNT=""

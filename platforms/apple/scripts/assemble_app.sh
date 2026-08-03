@@ -6,9 +6,7 @@
 # Usage:
 #   bash scripts/assemble_app.sh <output-bundle-path> [version] [build-number]
 #
-# Expects .build/release/{FileID,FileIDEngine} to exist (caller builds).
-# Copies the cached mlx.metallib when present; warns when absent (Deep
-# Analyze needs it at runtime).
+# Expects .build/release/{FileID,FileIDEngine} and the cached mlx.metallib.
 
 set -euo pipefail
 
@@ -30,6 +28,7 @@ METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 
 [ -x "$BUILD_DIR/FileID" ]       || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 [ -x "$BUILD_DIR/FileIDEngine" ] || { echo "❌ $BUILD_DIR/FileIDEngine missing — build first"; exit 1; }
+[ -s "$METALLIB_CACHE" ]         || { echo "❌ $METALLIB_CACHE missing — refusing to assemble an app without Deep Analyze"; exit 1; }
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
@@ -38,13 +37,7 @@ cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
 cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
 chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
 
-# MLX first loads a colocated mlx.metallib beside the engine binary.
-if [ -f "$METALLIB_CACHE" ]; then
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
-else
-    echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
-    echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
-fi
+cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
 
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

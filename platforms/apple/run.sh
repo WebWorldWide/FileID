@@ -53,19 +53,10 @@ BUILD_DIR="$PROJECT_DIR/.build/$CONFIGURATION"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 CONTENTS="$APP_BUNDLE/Contents"
 
-# Xcode is only required to BUILD mlx.metallib (cmake + Metal Toolchain).
-# Once the cache exists, CommandLineTools alone builds + bundles everything.
-XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
-METALLIB_CACHE_CHECK="$PROJECT_DIR/.build/cache/mlx.metallib"
-if [ ! -d "$XCODE_DEV_DIR" ] && [ ! -f "$METALLIB_CACHE_CHECK" ]; then
-    echo "❌ Xcode not found at $XCODE_DEV_DIR and no cached mlx.metallib."
-    echo "   Building the Deep Analyze GPU kernels needs Xcode + the Metal Toolchain once;"
-    echo "   after that the cache at $METALLIB_CACHE_CHECK suffices."
-    exit 1
-fi
+XCODE_DEV_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
 
 echo "🔨 Building FileID + FileIDEngine ($CONFIGURATION)..."
-if [ -d "$XCODE_DEV_DIR" ]; then
+if [ -x "$XCODE_DEV_DIR/usr/bin/xcodebuild" ]; then
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileID
     DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c "$CONFIGURATION" --product FileIDEngine
 else
@@ -73,71 +64,7 @@ else
     swift build -c "$CONFIGURATION" --product FileIDEngine
 fi
 
-# MLX requires a precompiled mlx.metallib for GPU kernels. SwiftPM doesn't
-# build it (it's a cmake-driven step inside the mlx-c subproject), so we
-# build it on demand here and stash it under a tools dir for fast reuse on
-# subsequent runs. ~96 MB, takes ~30 s on first build.
-#
-# Requires:
-#   - cmake (`brew install cmake`)
-#   - Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
-#     plus `TOOLCHAINS=Metal` env var to expose `metal` to xcrun.
-METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
-if [ ! -f "$METALLIB_CACHE" ]; then
-    if ! command -v cmake >/dev/null 2>&1; then
-        echo "❌ cmake not found — required to build Deep Analyze GPU kernels."
-        echo "   Install: brew install cmake"
-        echo "   Then re-run ./run.sh."
-        exit 1
-    fi
-    # `xcrun --find metal` only locates the shim binary — on Xcode 26 /
-    # macOS Tahoe the actual Metal Toolchain is a separate downloadable
-    # component, and the shim errors with "cannot execute tool 'metal'
-    # due to missing Metal Toolchain" if it isn't installed. Actually
-    # invoke `metal --version` so this fails fast with a clear message
-    # instead of bombing out 6s into the cmake configure.
-    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" xcrun metal --version >/dev/null 2>&1; then
-        echo "❌ Metal Toolchain not installed — required to build Deep Analyze GPU kernels."
-        echo "   The 'metal' shim exists, but the toolchain component is missing."
-        echo "   Install: xcodebuild -downloadComponent MetalToolchain"
-        echo "   (Several-hundred-MB download; may prompt for auth.)"
-        echo "   Then re-run ./run.sh."
-        exit 1
-    fi
-    LOG="$PROJECT_DIR/.build/cache/metallib-build.log"
-    mkdir -p "$(dirname "$LOG")"
-    echo "⚙️  Building mlx.metallib (one-time, 1–3 min on first run)…"
-    echo "    Streaming output to $LOG"
-    # tee through a pipeline; pipefail surfaces cmake's exit code instead of tee's.
-    set -o pipefail
-    BUILDDIR=$(mktemp -d)
-    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
-        "$PROJECT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx" \
-        -B "$BUILDDIR" \
-        -DMLX_BUILD_METAL=ON -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
-        -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-        -DCMAKE_BUILD_TYPE=Release 2>&1 | tee "$LOG"; then
-        echo "❌ cmake configure failed — full log at $LOG"
-        exit 1
-    fi
-    if ! TOOLCHAINS=Metal DEVELOPER_DIR="$XCODE_DEV_DIR" cmake \
-        --build "$BUILDDIR" --target mlx-metallib 2>&1 | tee -a "$LOG"; then
-        echo "❌ cmake build failed — full log at $LOG"
-        exit 1
-    fi
-    BUILT="$BUILDDIR/mlx/backend/metal/kernels/mlx.metallib"
-    if [ -f "$BUILT" ]; then
-        mkdir -p "$(dirname "$METALLIB_CACHE")"
-        cp "$BUILT" "$METALLIB_CACHE"
-        echo "✅ Built mlx.metallib ($(du -sh "$METALLIB_CACHE" | cut -f1))"
-        rm -rf "$BUILDDIR"
-    else
-        echo "❌ metallib build failed; cmake + Metal Toolchain are present but the build step did not produce mlx.metallib."
-        echo "   Build artifacts at $BUILDDIR (kept for inspection)."
-        echo "   Re-run ./run.sh after fixing the build."
-        exit 1
-    fi
-fi
+bash "$PROJECT_DIR/scripts/ensure_mlx_metallib.sh"
 
 echo "🛑 Quitting any running FileID processes..."
 # Stop the running app + engine BEFORE we touch the DB. If we wipe the
