@@ -4842,3 +4842,12 @@ Both layers are intentional. Embedded metadata makes the helper's role unambiguo
 Services, while the activation policy is the runtime invariant even if a linked framework touches
 AppKit. Assembly and hosted packaging verify that the embedded section, identifier, and agent key
 survive the release build; packaging must fail rather than ship a helper that can occupy the Dock.
+
+## 2026-08-03 — Retry only dotnet-format's exact hosted-runner race
+
+The Windows format gate resolves the absolute .NET host, pins `DOTNET_HOST_PATH` and `DOTNET_ROOT`,
+and retries once only when `dotnet format` returns exit code 4 with `Unable to locate dotnet CLI`.
+That combination identifies the upstream asynchronous CLI-probe race seen on loaded hosted runners;
+the same workflow and SDK passed earlier the same day. Retrying every failure was rejected because
+it could mask a real format diff, while relying only on the ambient PATH was rejected because the
+child probe performs its own host lookup. All other exit codes and messages remain hard failures.

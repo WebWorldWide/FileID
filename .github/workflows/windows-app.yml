@@ -132,14 +132,10 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          if (Test-Path Tests) {
-            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No Tests/ directory; skipping."
-          }
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug --verbosity minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
@@ -150,7 +146,23 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
+        shell: pwsh
+        run: |
+          $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+          $env:DOTNET_HOST_PATH = $dotnet
+          $env:DOTNET_ROOT = Split-Path -Parent $dotnet
+
+          $formatOutput = & $dotnet format FileID.sln --verify-no-changes 2>&1
+          $formatExit = $LASTEXITCODE
+          $formatOutput | ForEach-Object { Write-Host $_ }
+
+          if ($formatExit -eq 4 -and (($formatOutput | Out-String) -like '*Unable to locate dotnet CLI*')) {
+            Write-Warning 'dotnet format hit its upstream CLI-probe race; retrying once.'
+            & $dotnet format FileID.sln --verify-no-changes
+            exit $LASTEXITCODE
+          }
+
+          exit $formatExit
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'
