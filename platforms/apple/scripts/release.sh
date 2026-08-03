@@ -219,6 +219,10 @@ hdiutil verify "$DMG_OUT" >/dev/null
 VERIFY_MOUNT="$(mktemp -d /tmp/fileid-release-mount.XXXXXX)"
 hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" "$DMG_OUT" >/dev/null
 codesign --verify --deep --strict "$VERIFY_MOUNT/$APP"
+[ -s "$VERIFY_MOUNT/$APP/Contents/MacOS/mlx.metallib" ] || {
+    echo "❌ Packaged DMG is missing Contents/MacOS/mlx.metallib"
+    exit 1
+}
 hdiutil detach "$VERIFY_MOUNT" -quiet
 rmdir "$VERIFY_MOUNT"
 VERIFY_MOUNT=""

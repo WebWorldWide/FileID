@@ -4817,3 +4817,14 @@ Two consent/recovery gaps the audit surfaced. (1) The feedback learner's `boost(
 ## 2026-07-22 — Deep Analyze can't hang or orphan VRAM
 
 The VLM subprocess path had three unbounded waits and one leak. The mid-batch server liveness re-probe was a bare await on a 300s-timeout HTTP client — a wedged llama-server froze the batch and ignored cancel; it is now cancel-raced and 15s-bounded. The `llama-mtmd-cli --version` capability probe had no timeout, so a binary loading against a missing/mismatched CUDA DLL could hang `VlmRunner::find()` forever; it is now spawn+timeout(20s)+kill, and the engine sets `SetErrorMode(SEM_FAILCRITICALERRORS|…)` process-wide so a bad DLL load fails fast instead of popping a blocking modal the headless engine can never dismiss. The weights-missing batch branch emitted an Error with no terminal `DeepAnalyzeComplete`, wedging the app's command slot (the app also now releases the slot on terminal error kinds as belt-and-suspenders). And a non-unwinding engine death (fast-fail, `taskkill`) — which the parent-PID watchdog and `kill_on_drop` can't cover — could orphan a 9-14GB-VRAM llama-server; every llama.cpp child (server, CLI, both device probes) is now assigned to a process-lifetime Win32 Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so the OS reaps them exactly when the engine handle closes.
+
+## 2026-08-03 — macOS packaging treats MLX Metal kernels as a required runtime component
+
+SwiftPM compiles the macOS app and engine but does not build MLX's cmake-driven `mlx.metallib`.
+Local launches happened to reuse a populated cache, while a clean hosted runner assembled a validly
+signed DMG without the library and left Deep Analyze disabled at engine startup. Metal-library
+compilation therefore has one shared, cache-aware helper used by local launch and unsigned release
+rebuilds. Hosted packaging installs the separate Xcode Metal Toolchain first. Bundle assembly and
+both mounted-DMG verification paths now fail closed when the colocated library is absent. A warning
+was rejected because checksum and code-signature success prove artifact integrity, not feature
+completeness; a release artifact that cannot perform Deep Analyze is invalid.
