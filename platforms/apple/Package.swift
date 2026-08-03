@@ -1,5 +1,11 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
+
+let engineInfoPlist = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("Resources/FileIDEngine-Info.plist")
+    .path
 
 // FileID — workspace package.
 //
@@ -63,7 +69,15 @@ let package = Package(
                 .product(name: "onnxruntime",          package: "onnxruntime-swift-package-manager")
             ],
             path: "engine/Sources/FileIDEngine",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", engineInfoPlist
+                ])
+            ]
         ),
 
         // SwiftUI app. Spawns FileIDEngine via Process API.

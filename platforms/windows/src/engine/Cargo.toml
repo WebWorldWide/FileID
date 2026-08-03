@@ -5,7 +5,7 @@ name = "fileid-engine"
 # script (no new deps) and exposes its own version via CARGO_PKG_VERSION
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."

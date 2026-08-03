@@ -87,7 +87,7 @@ packaged Qwen3-VL 8B analysis for representative DOCX and PPTX inputs without
 changing the source fingerprint. The separate security review was skipped at
 the owner's direction and is not claimed by this audit.
 
-This evidence supports refreshing the clearly labeled **unsigned v0.1.3
+This evidence supports refreshing the clearly labeled **unsigned v0.1.4
 prerelease**, not production-trust publication. No Developer ID Application
 identity, notarization profile, or Windows protected signing provider is
 configured. The strict no-flag runtime-egress gate also continues to reject the
