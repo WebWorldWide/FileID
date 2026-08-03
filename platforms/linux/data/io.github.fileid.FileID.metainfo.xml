@@ -75,6 +75,11 @@
   </branding>
 
   <releases>
+    <release version="0.1.4" date="2026-08-03">
+      <description>
+        <p>The macOS scan sidebar now keeps counting, estimating, and time-left feedback visible throughout a scan. The macOS engine is packaged and launched as a background agent, preventing a second Dock application during local AI processing.</p>
+      </description>
+    </release>
     <release version="0.1.3" date="2026-08-02">
       <description>
         <p>Face groups are no longer hidden by a size threshold. Merge suggestions reject people who appear together in the same photo, require per-pair review, and use the shared bounded engine path on Linux. Suggested-pair processing uses persisted centroids on macOS to reduce memory use, and stale suggestions are invalidated after every accepted merge.</p>

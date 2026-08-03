@@ -96,7 +96,7 @@ public sealed class InstallerContractTests
         var versionVerifier = File.ReadAllText(PathInRepo(
             "platforms", "windows", "build", "verify-version.ps1"));
 
-        Assert.Equal("0.1.3", version);
+        Assert.Equal("0.1.4", version);
         Assert.Equal(version, cargoVersion);
         Assert.Contains("Verify tag matches product version", releaseWorkflow, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", releaseWorkflow, StringComparison.Ordinal);

@@ -8,6 +8,25 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — macOS scan ETA and background-only engine release candidate
+
+The macOS sidebar now keeps scan timing visible through discovery, tagging, and post-scan work. It
+reports the live discovered-file count while the total is open-ended, changes to an explicit
+estimating state when work is measurable but throughput is not yet stable, and then presents the
+engine's rolling ETA. Four focused presentation tests cover counting, estimating, active ETA, and
+post-scan ETA behavior.
+
+`FileIDEngine` now embeds a dedicated `com.fileid.app.engine` Info.plist with `LSUIElement` and also
+sets AppKit's activation policy to `.prohibited` before model initialization. This prevents AppKit,
+ML, and document frameworks from promoting the child engine into a separate Dock application.
+Local assembly and hosted macOS packaging fail if the helper metadata is absent. Runtime inspection
+confirmed that FileID remains foreground while its engine remains background-only during model
+prewarm, and the assembled release helper contains the expected `__TEXT,__info_plist` section.
+
+The strict Swift validation passes 385 tests across 74 suites. Debug and release build-and-launch
+paths pass, including release bundle assembly with the required `mlx.metallib`.
+This is the unsigned v0.1.4 prerelease candidate; no Developer ID signing or notarization is claimed.
+
 ## 2026-08-03 — macOS release packaging now fails closed on Deep Analyze
 
 Post-merge inspection found that the workflow-dispatched macOS artifact omitted the 96 MB

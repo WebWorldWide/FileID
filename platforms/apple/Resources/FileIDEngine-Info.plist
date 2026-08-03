@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.fileid.app.engine</string>
+    <key>CFBundleName</key>
+    <string>FileID</string>
+    <key>CFBundleDisplayName</key>
+    <string>FileID</string>
+    <key>CFBundleExecutable</key>
+    <string>FileIDEngine</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>FileID transcribes audio on-device to give voice memos and recordings descriptive names. Nothing leaves your Mac.</string>
+</dict>
+</plist>

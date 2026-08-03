@@ -9,6 +9,7 @@
 // Lifetime: bound to the parent. Pipe close → LineReader EOF → clean
 // exit. A getppid() poll catches force-quits where the pipe lingers.
 import Foundation
+import AppKit
 import Darwin
 import FileIDShared
 import AsyncAlgorithms
@@ -22,6 +23,12 @@ struct FileIDEngineMain {
         // U4: must run before ANY library can write to fd 2 (and before
         // the IPCSink singleton captures its wire handle).
         IPCTransport.bootstrap()
+
+        // The engine is a faceless child process. AppKit-backed ML and document
+        // frameworks must never promote it into a second Dock application.
+        await MainActor.run {
+            _ = NSApplication.shared.setActivationPolicy(.prohibited)
+        }
 
         // Ignore SIGPIPE — writes to a closed parent pipe shouldn't crash
         // the engine; the LineReader will detect the closed pipe on the next
@@ -92,7 +99,7 @@ struct FileIDEngineMain {
         // Engine ready handshake. App waits for this before sending the first
         // command, so it knows the pipe is live and the engine started clean.
         await sink.emit(.ready(EngineInfo(
-            version: "0.1.3",
+            version: "0.1.4",
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
             physicalMemoryGB: Hardware.physicalMemoryGB

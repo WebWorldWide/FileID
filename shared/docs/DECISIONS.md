@@ -4828,3 +4828,17 @@ rebuilds. Hosted packaging installs the separate Xcode Metal Toolchain first. Bu
 both mounted-DMG verification paths now fail closed when the colocated library is absent. A warning
 was rejected because checksum and code-signature success prove artifact integrity, not feature
 completeness; a release artifact that cannot perform Deep Analyze is invalid.
+
+## 2026-08-03 — The macOS engine is both metadata-hidden and activation-prohibited
+
+`FileIDEngine` is a child executable inside the main app's `Contents/MacOS`, not its own nested app
+bundle. A naked Mach-O at that location gives Launch Services no background-agent identity, and
+loading AppKit-backed ML or document frameworks can therefore register or promote it as a second
+Dock application. The engine now embeds a minimal Info.plist in `__TEXT,__info_plist` with the
+dedicated bundle identifier `com.fileid.app.engine` and `LSUIElement=true`, while startup explicitly
+sets `NSApplication` activation policy to `.prohibited` before any model initialization.
+
+Both layers are intentional. Embedded metadata makes the helper's role unambiguous to Launch
+Services, while the activation policy is the runtime invariant even if a linked framework touches
+AppKit. Assembly and hosted packaging verify that the embedded section, identifier, and agent key
+survive the release build; packaging must fail rather than ship a helper that can occupy the Dock.

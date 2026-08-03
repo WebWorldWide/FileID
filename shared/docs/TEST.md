@@ -88,7 +88,7 @@ Run against an isolated `--db`. Expected results in **bold**.
 
 ```bash
 FID=~/.cargo/bin/fileid; DB=/tmp/fid_cli.sqlite; rm -f $DB
-$FID --version                       # -> fileid 0.1.1
+$FID --version                       # -> fileid 0.1.4
 $FID                                 # -> first-run tour (what it is + Get-started commands)
 $FID --help                          # -> all subcommands, each with an Example
 
