@@ -79,21 +79,31 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
                 """;
             cmd.ExecuteNonQuery();
         }
+        using var transaction = conn.BeginTransaction();
+        using var insert = conn.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT INTO files (id, path_text, kind, size_bytes, modified_at, has_faces, has_text, failed, vlm_proposed_name)
+            VALUES ($id, $path, $kind, 100, NULL, 0, 0, $failed, NULL);
+            INSERT INTO clip_embeddings (file_id, embedding) VALUES ($id, $emb);
+            """;
+        var id = insert.Parameters.Add("$id", SqliteType.Integer);
+        var path = insert.Parameters.Add("$path", SqliteType.Text);
+        var kind = insert.Parameters.Add("$kind", SqliteType.Text);
+        var failed = insert.Parameters.Add("$failed", SqliteType.Integer);
+        var embedding = insert.Parameters.Add("$emb", SqliteType.Blob);
+        insert.Prepare();
+
         foreach (var r in rows)
         {
-            using var ins = conn.CreateCommand();
-            ins.CommandText = """
-                INSERT INTO files (id, path_text, kind, size_bytes, modified_at, has_faces, has_text, failed, vlm_proposed_name)
-                VALUES ($id, $path, $kind, 100, NULL, 0, 0, $failed, NULL);
-                INSERT INTO clip_embeddings (file_id, embedding) VALUES ($id, $emb);
-                """;
-            ins.Parameters.AddWithValue("$id", r.Id);
-            ins.Parameters.AddWithValue("$path", $"C:/photos/{r.Id}.jpg");
-            ins.Parameters.AddWithValue("$kind", r.Kind);
-            ins.Parameters.AddWithValue("$failed", r.Failed ? 1 : 0);
-            ins.Parameters.AddWithValue("$emb", FloatsToBlob(r.Emb));
-            ins.ExecuteNonQuery();
+            id.Value = r.Id;
+            path.Value = $"C:/photos/{r.Id}.jpg";
+            kind.Value = r.Kind;
+            failed.Value = r.Failed ? 1 : 0;
+            embedding.Value = FloatsToBlob(r.Emb);
+            insert.ExecuteNonQuery();
         }
+        transaction.Commit();
     }
 
     private static float Dot(float[] q, float[] e)
