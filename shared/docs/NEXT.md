@@ -1,16 +1,19 @@
 # NEXT — resume here
 
-## STATUS 2026-08-03 — Production candidate complete; publication and credential gates remain
+## STATUS 2026-08-03 — Deep Analyze-safe release packaging complete; hosted refresh in progress
 
 The macOS parity/polish implementation is complete and locally green. Preserve the 381-test strict
 Swift result, the complete Rust/CLI/TUI normal and million-file scale results, and the read-only
-Adlon Office-document acceptance. The final versioned DMG verifies, mounts read-only, and launches
-both the app and bundled engine. Adlon's acceptance fingerprint is unchanged, and Restructure Apply
-was never invoked against the drive.
+Adlon Office-document acceptance. The macOS assembler now fails closed without `mlx.metallib`, both
+DMG paths verify that library inside a read-only mount, and a clean-cache local build reproduced the
+expected Metal library byte for byte. The corrected DMG launches its isolated engine without the
+`deep_analyze_unavailable` capability warning. Adlon's acceptance fingerprint is unchanged, and
+Restructure Apply was never invoked against the drive.
 
-The next maintainer should not reopen this implementation pass unless CI exposes a regression. The
-remaining work is release operations or evidence that requires credentials/hardware unavailable on
-this Mac:
+Do not publish or restore the earlier `FileID-macOS-unsigned-253` artifact; it is checksum-valid but
+missing `mlx.metallib`. Replace it only with a workflow-dispatched artifact built after this fix and
+verify the library inside the downloaded DMG before release upload. Beyond that hosted refresh, the
+remaining evidence requires credentials or hardware unavailable on this Mac:
 
 1. Keep the v0.1.3 artifact labeled **unsigned prerelease** until Apple Developer ID notarization
    and a protected Windows signing provider are configured.
