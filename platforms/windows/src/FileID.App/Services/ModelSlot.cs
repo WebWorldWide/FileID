@@ -7,6 +7,7 @@
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using FileID.IpcSchema;
 using Microsoft.UI.Dispatching;
 
@@ -26,6 +27,9 @@ internal enum ModelInstallStatus
 /// </summary>
 internal sealed class ModelSlot : INotifyPropertyChanged
 {
+    private const int ClassNotRegistered = unchecked((int)0x80040154);
+    private const int ClassNotAvailable = unchecked((int)0x80040111);
+
     private string _displayLabel;
     public string DisplayLabel
     {
@@ -60,7 +64,19 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         _displayLabel = displayLabel;
         _approxBytes = approxBytes;
         _installAction = installAction;
-        _ui = DispatcherQueue.GetForCurrentThread();
+        _ui = CaptureDispatcherQueue();
+    }
+
+    private static DispatcherQueue? CaptureDispatcherQueue()
+    {
+        try
+        {
+            return DispatcherQueue.GetForCurrentThread();
+        }
+        catch (COMException error) when (error.HResult is ClassNotRegistered or ClassNotAvailable)
+        {
+            return null;
+        }
     }
 
     private ModelInstallStatus _status;
@@ -352,4 +368,3 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         }
     }
 }
-

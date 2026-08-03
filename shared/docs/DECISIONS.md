@@ -4862,12 +4862,17 @@ owns the pre-XAML runtime error surface and lifecycle ordering; skipping the app
 rejected because those contracts must execute in CI. Project tests preserve both sides of the
 invariant, and the published-app startup smoke verifies the production bootstrap path.
 
-## 2026-08-03 — The Windows test DLL bootstraps its generic host
+## 2026-08-03 — The Windows test host stays unbootstrapped and ModelSlot narrows its fallback
 
-`FileID.App.Tests` explicitly enables `WindowsAppSdkBootstrapInitialize` even though the production
-app disables it. The xUnit process is a generic host and never calls FileID's `Program.Main`, so it
-must establish the Windows App SDK package graph before DispatcherQueue-backed services are tested.
-Leaving the test host uninitialized was rejected after the bounded suite completed 450 tests but
-failed all five `ModelSlot` tests with `REGDB_E_CLASSNOTREG`; excluding those tests would hide real
-progress-binding behavior. Separate contract assertions preserve the production-false/test-true
-bootstrap split.
+`FileID.App.Tests` explicitly disables `WindowsAppSdkBootstrapInitialize`, matching the app project
+but for a different reason: the generic xUnit host never calls FileID's `Program.Main`, and enabling
+the generated initializer wedged the hosted runner while it waited on runtime-resolution UI. A
+no-bootstrap run completed 450/455 tests, with only the five `ModelSlot` constructors failing on
+`REGDB_E_CLASSNOTREG`. Registration-free self-contained deployment removed the wedge but produced
+the same 450/455 result with `CLASS_E_CLASSNOTAVAILABLE`, so those properties do not solve dispatcher
+activation in this host and are not retained.
+
+`ModelSlot` still captures a real dispatcher in the production UI. Its capture helper returns null
+only for those two expected registration/class-factory HRESULTs, allowing the existing synchronous
+notification path to test non-XAML state binding; all other COM failures propagate. Skipping the
+five progress-binding tests was rejected because their state-transition contracts remain valuable.
