@@ -8,6 +8,20 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — Windows CI test gate and format-runner hardening
+
+The Windows x64 app job exposed two release-gate defects while validating the macOS release
+candidate. `dotnet format` hit the upstream .NET 8 CLI-probe race after restore, Debug/Release
+builds, and publish had otherwise succeeded. The format step now resolves the absolute
+host, pins the host environment used by child processes, and retries once only for the race's exact
+exit-code-and-message signature; genuine formatting failures still fail immediately.
+
+The same inspection found that the test step changed into `platforms/windows/Tests` and then checked
+for another relative `Tests` directory, causing both tracked xUnit projects to be skipped. The gate
+now invokes each project explicitly and fails if either project is missing or red. Workflow YAML,
+action-pin policy, binary-privacy regressions, and diff hygiene pass locally; hosted Windows x64
+execution remains the authoritative platform validation.
+
 ## 2026-08-03 — macOS scan ETA and background-only engine release candidate
 
 The macOS sidebar now keeps scan timing visible through discovery, tagging, and post-scan work. It

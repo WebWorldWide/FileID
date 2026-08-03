@@ -164,6 +164,25 @@ public sealed class InstallerContractTests
         Assert.Contains("Windows App SDK 1.7 runtime", program, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void WindowsWorkflow_RunsBothTestProjects_AndOnlyRetriesTheFormatProbeRace()
+    {
+        var workflow = File.ReadAllText(PathInRepo(".github", "workflows", "windows-app.yml"));
+
+        Assert.Contains(
+            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
+        Assert.Contains("$formatExit -eq 4", workflow, StringComparison.Ordinal);
+        Assert.Contains("*Unable to locate dotnet CLI*", workflow, StringComparison.Ordinal);
+        Assert.Contains("exit $formatExit", workflow, StringComparison.Ordinal);
+    }
+
     private static (int Width, int Height) ReadPngDimensions(string path)
     {
         var bytes = File.ReadAllBytes(path);
