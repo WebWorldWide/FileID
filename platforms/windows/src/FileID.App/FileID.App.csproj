@@ -38,6 +38,7 @@
          also present. Source-build users can install the prerequisite with
          `winget install Microsoft.WindowsAppRuntime.1.7`. -->
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <SelfContained>true</SelfContained>
 
     <!-- We provide our own [STAThread] Main in Program.cs so we can run the
