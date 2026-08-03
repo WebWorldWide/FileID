@@ -178,6 +178,8 @@ public sealed class InstallerContractTests
             workflow,
             StringComparison.Ordinal);
         Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:RuntimeIdentifier=win-x64", workflow, StringComparison.Ordinal);
         Assert.Contains("$formatExit -eq 4", workflow, StringComparison.Ordinal);
         Assert.Contains("*Unable to locate dotnet CLI*", workflow, StringComparison.Ordinal);
         Assert.Contains("exit $formatExit", workflow, StringComparison.Ordinal);
