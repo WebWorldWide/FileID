@@ -59,39 +59,43 @@ For the overall product:
 - Signed, packaged, downloadable from a public GitHub release.
 - README + LICENSE + CONTRIBUTING + PRIVACY + screenshots in the repo.
 
-## Current audit status (2026-07-29)
+## Current audit status (2026-08-03)
 
-Locally runnable source gates are green on Windows and native WSL: locked Rust
-format/clippy/tests for the shared engine (693 tests), CLI, TUI, and GTK app (57
-tests); Windows app build plus App (446) / IPC (53) tests and format; shared
-policy regressions; model-license/bootstrap/workflow policy; the current-doc
-contract; and the reviewed runtime-egress known-blocker baseline with its 23-test
-self-test.
+Native Apple-Silicon gates are now locally covered. Strict Swift 6 concurrency
+with warnings as errors passes 381 tests in 73 suites, including document/PDF/
+presentation extraction, all-file Deep Analyze routing, OBJ containment, audio
+and Quick Look deadlines, face clustering, restructure apply/undo, terminal IPC,
+and UI data/geometry contracts. The release app and engine build, binary privacy
+scan, ad-hoc signing dry run, DMG checksum, mounted-app signature, and mounted-app
+launch all pass. The mounted app spawns its separately signed engine and includes
+one verified `mlx.metallib`.
 
-Note on the two gates re-greened on 2026-07-29: `check_current_docs.py` and
-`check_runtime_egress.py --known-blockers` were both RED before that date (the
-latter since commit `6aea8ac`). The doc gate was fixed by correcting stale
-migration-version claims; the egress gate by deliberately refreshing 14 reviewed
-source digests after verifying zero added network capability in every drifted
-file, plus reviewing and allowlisting two false-positive boundary files. See
-`DECISIONS.md` (2026-07-29) for exactly what that refresh does and does **not**
-assert — in particular it does not claim the four `6aea8ac`-era files were
-re-read line-by-line for non-network defects.
+The current Rust 1.90 tree passes format and strict Clippy for the shared engine,
+CLI, and TUI. Normal tests pass 684 engine library tests plus two manifest tests,
+65 CLI unit + 14 smoke tests, and 111 TUI tests; the CLI's two explicit scale
+suites and TUI's million-row suite also pass. All four shipped lockfiles resolve
+`event-listener` 5.4.2, clearing `RUSTSEC-2026-0221`. Shared model-license,
+bootstrap supply-chain, workflow pin/permission, current-document, packaging,
+and binary-privacy gates pass. The .NET SDK and native GTK development libraries
+are unavailable on this Mac, so WinUI and GTK builds remain hosted/native-platform
+gates rather than inferred successes.
 
-**macOS is not covered by any local gate.** There is no Swift toolchain in the
-Windows dev env, so the substantial 2026-07-29 macOS changes (Restructure
-apply/undo semantics, `cancelRestructure`, Deep Analyze folder exclusion, the
-face size gate mirror) were verified only by static review. They must pass the
-hosted `macos.yml` workflow before publication.
+The final versioned DMG also passes a read-only mounted-artifact launch: both the
+UI and its bundled engine start directly from the image. A 25-file read-only
+Adlon acceptance set scanned all 16 supported Office documents and completed
+packaged Qwen3-VL 8B analysis for representative DOCX and PPTX inputs without
+changing the source fingerprint. The separate security review was skipped at
+the owner's direction and is not claimed by this audit.
 
-This does **not** authorize publication. The strict no-flag runtime-egress gate
-still rejects the ten reviewed GitHub/NVIDIA archives and widened downloader host
-set described in `PRIVACY.md`; release staging must remain blocked until those
-artifacts are removed or mirrored to Hugging Face. Native macOS, ARM64 and other
-vendor hardware, distro/clean-VM lifecycle, accessibility, signing/notarization,
-and hosted CI also remain required. Blocking filesystem/codec calls receive
-bounded cooperative shutdown, not a guarantee that pathological kernel reads can
-be cancelled inside the process.
+This evidence supports refreshing the clearly labeled **unsigned v0.1.3
+prerelease**, not production-trust publication. No Developer ID Application
+identity, notarization profile, or Windows protected signing provider is
+configured. The strict no-flag runtime-egress gate also continues to reject the
+ten reviewed GitHub/NVIDIA development runtime archives and widened downloader
+host set described in `PRIVACY.md`; those artifacts must be removed or mirrored
+byte-identically to license-vetted Hugging Face locations before a signed release.
+AMD/Intel/QNN, Windows ARM64, native distro/Flatpak lifecycle, clean-machine
+install/upgrade/uninstall, and full accessibility matrices remain external gates.
 
 ## Model stack (commercial-clean)
 
@@ -105,9 +109,9 @@ and SHA/revision-pinned; the full registry and acceptance policies live in
 | In-scan image tagging (primary) | RAM++ Swin-L @384 — 4585-tag ONNX, per-class thresholds + generic-tag suppress-list | Apache-2.0 |
 | Image tagging (fallback) | CLIP zero-shot scene tags (when RAM++ isn't installed) | MIT |
 | Image + text semantic search | CLIP ViT-B/32 — 512-d embeddings | MIT |
-| Face detection + 5-pt landmarks | YuNet | MIT |
+| Face detection + 5-pt landmarks | YuNet (Rust engine) · Apple Vision (macOS) | MIT / OS-provided |
 | Face embedding | SFace — 128-d, 5-point aligned | Apache-2.0 |
-| Deep Analyze (VLM, opt-in) | Qwen2.5-VL 7B (default) · Gemma 3 4B · Mistral-Small-3.2 24B, via llama.cpp | Apache-2.0 (Gemma: Gemma Terms) |
+| Deep Analyze (VLM, opt-in) | macOS: Qwen3-VL 8B/4B · Qwen2.5-VL · Gemma 3 · Mistral-Small-3.2; Rust: Qwen2.5-VL · Gemma 3 · Mistral-Small-3.2 | Apache-2.0 (Gemma: Gemma Terms) |
 
 Removed in the commercial-clean pass: the non-commercial Qwen2.5-VL-3B,
 InsightFace ArcFace/SCRFD, and research-only MobileCLIP-S2.

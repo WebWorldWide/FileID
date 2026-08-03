@@ -362,7 +362,7 @@ public actor Discovery {
             ))
             kept += 1
             sinceLastProgress += 1
-            if sinceLastProgress >= 256 {
+            if kept == 1 || sinceLastProgress >= 16 {
                 progress(kept)
                 sinceLastProgress = 0
             }

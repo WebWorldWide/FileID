@@ -21,7 +21,9 @@ struct ReadStorePresentationTests {
                     content_hash BLOB,
                     size_bytes INTEGER NOT NULL DEFAULT 0,
                     aesthetic REAL,
-                    created_at REAL
+                    created_at REAL,
+                    vlm_proposed_name TEXT,
+                    vlm_full_model TEXT
                 )
                 """)
             try db.execute(sql: """
@@ -57,6 +59,23 @@ struct ReadStorePresentationTests {
                     arcface_embedding BLOB
                 )
                 """)
+            try db.execute(sql: """
+                CREATE TABLE face_verifications (
+                    person_a INTEGER NOT NULL,
+                    person_b INTEGER NOT NULL,
+                    same_person INTEGER NOT NULL,
+                    confidence REAL NOT NULL,
+                    vlm_model TEXT NOT NULL,
+                    verified_at REAL NOT NULL,
+                    face_a INTEGER,
+                    face_b INTEGER,
+                    file_a INTEGER,
+                    bbox_a TEXT,
+                    file_b INTEGER,
+                    bbox_b TEXT,
+                    PRIMARY KEY (person_a, person_b)
+                )
+                """)
             try seed(db)
         }
         let store = ReadStore(dbURL: databaseURL)
@@ -73,7 +92,9 @@ struct ReadStorePresentationTests {
                     (1, ' favorite ', 'user', NULL),
                     (1, 'image', 'vlm', 1.0),
                     (1, 'sunset', 'vlm', NULL),
-                    (1, 'cat', 'auto', 0.9)
+                    (1, 'Sunset', 'auto', 0.99),
+                    (1, 'cat', 'auto', 0.9),
+                    (1, 'CAT', 'auto', 0.8)
                 """)
         }
         defer {
@@ -83,6 +104,37 @@ struct ReadStorePresentationTests {
 
         #expect(fixture.store.topVisionTagsBulk(forFileIDs: [1]) == [1: ["favorite", "sunset"]])
         #expect(fixture.store.tags(forFileID: 1) == ["favorite", "sunset", "cat"])
+    }
+
+    @Test("Deep Analyze counts mirror every engine-supported kind")
+    func deepAnalyzeCountsCoverAllKinds() throws {
+        let fixture = try makeStore { db in
+            let rows = [
+                (1, "image", "model", "photo-name"),
+                (2, "pdf", "model", "report-name"),
+                (3, "video", nil, nil),
+                (4, "doc", "older", nil),
+                (5, "audio", nil, nil),
+                (6, "model", nil, nil),
+                (7, "other", nil, nil),
+            ] as [(Int, String, String?, String?)]
+            for row in rows {
+                try db.execute(sql: """
+                    INSERT INTO files
+                      (id, kind, failed, vlm_full_model, vlm_proposed_name)
+                    VALUES (?, ?, 0, ?, ?)
+                    """, arguments: [row.0, row.1, row.2, row.3])
+            }
+            try db.execute(sql: "INSERT INTO files (id, kind, failed) VALUES (8, 'audio', 1)")
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        #expect(fixture.store.totalAnalyzableFiles() == 6)
+        #expect(fixture.store.filesAnalysisStats() == (analyzable: 6, captioned: 2))
+        #expect(fixture.store.deepAnalyzePending(modelKey: "model") == (total: 6, pending: 4))
     }
 
     @Test("all active clusters remain visible regardless of size")
@@ -143,6 +195,40 @@ struct ReadStorePresentationTests {
         )
         #expect(!candidates.contains { ($0.personA, $0.personB) == (1, 2) })
         #expect(candidates.contains { ($0.personA, $0.personB) == (1, 3) })
+    }
+
+    @Test("merge suggestions honor a persisted different-people verdict")
+    func mergeSuggestionsHonorDifferentVerdict() throws {
+        let blob = { (values: [Float]) in values.withUnsafeBytes { Data($0) } }
+        let fixture = try makeStore { db in
+            try db.execute(sql: """
+                INSERT INTO persons (id, representative_face_id) VALUES (1, 1), (2, 2)
+                """)
+            try db.execute(
+                sql: "INSERT INTO face_prints (id, person_id, file_id, bbox, arcface_embedding) VALUES (?, ?, ?, ?, ?)",
+                arguments: [1, 1, 10, "0,0,0.2,0.2", blob([1.0, 0.0])]
+            )
+            try db.execute(
+                sql: "INSERT INTO face_prints (id, person_id, file_id, bbox, arcface_embedding) VALUES (?, ?, ?, ?, ?)",
+                arguments: [2, 2, 11, "0.5,0.5,0.2,0.2", blob([0.6, 0.8])]
+            )
+            try db.execute(sql: """
+                INSERT INTO face_verifications
+                    (person_a, person_b, same_person, confidence, vlm_model, verified_at,
+                     face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+                VALUES (1, 2, 0, 1, 'user-verified', 1, 1, 2,
+                        10, '0,0,0.2,0.2', 11, '0.5,0.5,0.2,0.2')
+                """)
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        let candidates = ClusterSuggestions.findCandidates(
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+        )
+        #expect(candidates.isEmpty)
     }
 
     @Test("merge suggestions stay bounded")

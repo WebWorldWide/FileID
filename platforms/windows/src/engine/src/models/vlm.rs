@@ -19,7 +19,9 @@ pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual s
 
 /// Default rename prompt — produces a short, kebab-cased filename
 /// suitable for `sanitize_proposed_name`.
-pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension. For a form, receipt, or repeated document type, include a visible date, name, or reference that distinguishes this file from similar copies.";
+pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), using separate words joined by hyphens. Never concatenate words. No quotes or extension. For a form, receipt, or repeated document type, include a visible name or reference that distinguishes this file from similar copies. Only include a date when it is visibly legible in the image or document; never infer or invent a year.";
+
+pub const RENAME_RETRY_PROMPT: &str = "Return only a filename stem made of exactly 3 to 5 separate lowercase words joined by hyphens. Use only visible subjects, text, setting, or actions. Do not concatenate words, add quotes, an extension, a date unless visibly legible, or any explanation. Example: boy-getting-face-paint";
 
 /// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
@@ -575,7 +577,18 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_weights, parse_best_vulkan_device, redact_vlm_stderr_line};
+    use super::{
+        find_weights, parse_best_vulkan_device, redact_vlm_stderr_line, RENAME_PROMPT,
+        RENAME_RETRY_PROMPT,
+    };
+
+    #[test]
+    fn rename_prompt_forbids_invented_dates() {
+        assert!(RENAME_PROMPT.contains("visibly legible"));
+        assert!(RENAME_PROMPT.contains("never infer or invent a year"));
+        assert!(RENAME_PROMPT.contains("Never concatenate words"));
+        assert!(RENAME_RETRY_PROMPT.contains("exactly 3 to 5 separate lowercase words"));
+    }
 
     #[test]
     fn stderr_redaction_replaces_every_known_persistent_path() {

@@ -270,7 +270,9 @@ public enum Tagging {
                     // tags.score; the Vision fallback has none. The OCR doc-hint
                     // above keeps using pass.classifyTags (its heuristic was tuned
                     // for the Vision vocab).
+                    let ramStart = CFAbsoluteTimeGetCurrent()
                     let ramTags = RamPlusService.shared.tag(cgImage)
+                    let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
                     var tagScores: [String: Double]? = nil
                     var primaryTags: [String]
                     if !ramTags.isEmpty {
@@ -334,6 +336,7 @@ public enum Tagging {
                     tagged.loadMs = loadMs
                     tagged.visionMs = visionMs
                     tagged.clipMs = clipMs
+                    tagged.ramMs = ramMs
                     tagged.ocrMs = ocrMs
                     return tagged
                 }
@@ -436,6 +439,13 @@ public enum Tagging {
                 let extracted = bgeTextAndEmbedding(url: url)
                 tagged.docText = extracted.text
                 tagged.textEmbeddingBlob = extracted.blob
+                if let text = extracted.text {
+                    let keywords = DocumentKeywords.extract(text)
+                    tagged.visionTags.append(contentsOf: keywords.map(\.label))
+                    tagged.tagScores = Dictionary(
+                        uniqueKeysWithValues: keywords.map { ($0.label, $0.score) }
+                    )
+                }
                 tagged.textStageDone = true   // attempted — stops the backfill carve-out re-walk
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
                 cont.resume(returning: tagged)
@@ -466,9 +476,8 @@ public enum Tagging {
 
     private static let maxPDFRenderPixels: CGFloat = 50_000_000
 
-    /// First-page OCR (fast tier), 3-page cap, skip files > 20 MB.
-    /// Mirrors v1's Batch 10 heuristics — anything bigger is usually a
-    /// scanned manual where filename + Large_Document tag is enough.
+    /// Large PDFs take the metadata-only fast path before PDFKit. Smaller PDFs extract
+    /// a text layer first, then use OCR for up to three pages when no text is available.
     private static func processPDF(
         discovered: DiscoveredFile,
         worker: VisionWorker,
@@ -476,8 +485,6 @@ public enum Tagging {
     ) async -> TaggedFile {
         let url = discovered.url
         let sizeMB = Double(discovered.sizeBytes) / 1_048_576
-        // Skip OCR on large PDFs — usually scanned manuals where OCR cost
-        // far exceeds the value of the indexable text.
         if sizeMB > 20 {
             return TaggedFile(
                 url: url, kind: "pdf", extension: "pdf",
@@ -489,7 +496,6 @@ public enum Tagging {
                 tagsEvaluated: true
             )
         }
-
         return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
             visionQueue.async {
                 // De-dup the NAS read: extract the PDF's text layer ONCE (PDFKit via
@@ -503,12 +509,16 @@ public enum Tagging {
                 let extracted = bgeTextAndEmbedding(url: url)
                 var result = autoreleasepool { () -> TaggedFile in
                     if let docText = extracted.text, !docText.isEmpty {
+                        let keywords = DocumentKeywords.extract(docText)
                         return TaggedFile(
                             url: url, kind: "pdf", extension: "pdf",
                             sizeBytes: discovered.sizeBytes,
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
-                            visionTags: ["PDF"],
+                            visionTags: ["PDF"] + keywords.map(\.label),
+                            tagScores: Dictionary(
+                                uniqueKeysWithValues: keywords.map { ($0.label, $0.score) }
+                            ),
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
                             tagsEvaluated: true
                         )
@@ -627,27 +637,18 @@ public enum Tagging {
         if effectiveSize > 0 && effectiveSize < 256 { return nil }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         // Iteration 5 perf finding: load (NAS I/O + decode) was P95 252ms — by
-        // far the dominant per-file cost. Two changes:
-        //   - `IfAbsent` (was `Always`): use embedded JPEG thumbnails when
-        //     present (every modern camera + iPhone photo embeds one). ~5-10x
-        //     faster read on photos-with-thumbs; ImageIO falls back to decoding
-        //     the full image only when the file lacks an embedded preview.
-        //   - Resolution: CLIP (256) / RAM++ (384) / phash / OCR all downsample
+        // far the dominant per-file cost. CLIP (256) / RAM++ (384) / phash / OCR all downsample
         //     internally, so they're unaffected by the source size — but face
         //     DETECTION is NOT: at 512 px a face that's ~10% of a 4000 px frame is
         //     only ~50 px, right at Vision's limit, so medium / group / background
         //     faces get missed. 1536 catches them (the prior 512 was the dominant
         //     "faces aren't detected" cause). Tunable via FILEID_SCAN_MAX_PIXELS —
         //     lower = faster scan + fewer faces, higher = slower + more faces.
+        // Always generate the bounded decode from the source: embedded JPEG
+        // previews are commonly only 160×120 and are too small for face gating.
         let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
             .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
-        let opts: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixels
-        ]
-        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+        guard let img = decodeBoundedImage(src, maxPixelSize: maxPixels) else {
             return nil
         }
         return (img, readEXIF(from: src))

@@ -1,12 +1,6 @@
-// Document text extraction for the restructure document-content pass (feeds BGETextService).
-// macOS-native readers: `textutil` for Word/RTF/HTML, `unzip` + tag-extraction for OOXML
-// presentations/spreadsheets (pptx/xlsx — textutil can't read those), PDFKit for PDF, a
-// bounded read for plain text. Only the document's beginning matters — BGE tokenizes the
-// first 256 tokens — so every reader is BOUNDED in time and size: a stuck file (unresponsive
-// mount, zip-bomb, locked file) must never hang the plan, and a giant document must never
-// OOM it. The Windows engine extracts the same content via `doc_extract` (which mines the
-// same `a:t`/`t` runs from pptx/xlsx); the readers differ per-platform, so a doc-heavy
-// library round-trips to a near-identical, not bit-identical, plan.
+// Bounded document text extraction for search, restructure, tagging, and Deep Analyze.
+// Uses native PDFKit, system textutil/unzip, and capped plain-text reads. PowerPoint and
+// Excel extract the same OOXML text runs as the Windows engine.
 
 import Foundation
 import PDFKit
@@ -14,6 +8,11 @@ import PDFKit
 enum DocText {
     private static let maxBytes = 16_384
     private static let procTimeout: TimeInterval = 8
+    private static let deepAnalyzeQueue = DispatchQueue(
+        label: "com.fileid.deep-analyze.document-text",
+        qos: .userInitiated
+    )
+    private static let deepAnalyzeCircuit = DocumentTextExtractionCircuit()
 
     /// Extract up to `maxChars` of a document's text, or nil if unsupported / empty /
     /// unreadable. Bounded in time + size.
@@ -42,6 +41,31 @@ enum DocText {
             return nil
         }
         return String(t.prefix(maxChars))
+    }
+
+    static func extractForDeepAnalyze(path: String, timeoutSeconds: TimeInterval = 10) async -> String? {
+        guard deepAnalyzeCircuit.isOpen else { return nil }
+        let state = DocumentTextExtractionState()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard state.install(continuation) else { return }
+                deepAnalyzeQueue.async {
+                    guard state.start() else { return }
+                    state.finish(Self.extract(path: path))
+                }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + max(0, timeoutSeconds)
+                ) {
+                    if state.finish(nil) {
+                        Self.deepAnalyzeCircuit.trip()
+                    }
+                }
+            }
+        } onCancel: {
+            if state.finish(nil) {
+                Self.deepAnalyzeCircuit.trip()
+            }
+        }
     }
 
     /// Read at most `maxBytes` of a plain-text file (a multi-GB log can't OOM the plan).
@@ -81,11 +105,42 @@ enum DocText {
         let ns = xml as NSString
         var parts: [String] = []
         for m in re.matches(in: xml, range: NSRange(location: 0, length: ns.length)) {
-            if m.numberOfRanges > 1 { parts.append(ns.substring(with: m.range(at: 1))) }
+            if m.numberOfRanges > 1 {
+                parts.append(decodeXMLEntities(ns.substring(with: m.range(at: 1))))
+            }
             if parts.count > 4000 { break }
         }
         let joined = parts.joined(separator: " ")
         return joined.isEmpty ? nil : joined
+    }
+
+    static func decodeXMLEntities(_ text: String) -> String {
+        var result = text
+        guard let regex = try? NSRegularExpression(pattern: #"&#(?:x([0-9A-Fa-f]+)|([0-9]+));"#) else {
+            return result
+        }
+        let matches = regex.matches(
+            in: result,
+            range: NSRange(result.startIndex..., in: result)
+        )
+        for match in matches.reversed() {
+            let source = result as NSString
+            let hex = match.range(at: 1).location == NSNotFound
+                ? nil : source.substring(with: match.range(at: 1))
+            let decimal = match.range(at: 2).location == NSNotFound
+                ? nil : source.substring(with: match.range(at: 2))
+            let scalar = hex.flatMap { UInt32($0, radix: 16) }
+                ?? decimal.flatMap { UInt32($0, radix: 10) }
+            guard let scalar, let unicode = UnicodeScalar(scalar),
+                  let range = Range(match.range, in: result) else { continue }
+            result.replaceSubrange(range, with: String(unicode))
+        }
+        return result
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 
     /// EPUB → text: an EPUB is a zip of XHTML, so concatenate the content members (`unzip`'s
@@ -125,5 +180,60 @@ enum DocText {
         proc.terminate()
         proc.waitUntilExit()
         return data.isEmpty ? nil : data.prefix(maxBytes)
+    }
+}
+
+private final class DocumentTextExtractionState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String?, Never>?
+    private var finished = false
+    private var started = false
+
+    func install(_ continuation: CheckedContinuation<String?, Never>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else {
+            continuation.resume(returning: nil)
+            return false
+        }
+        self.continuation = continuation
+        return true
+    }
+
+    func start() -> Bool {
+        lock.withLock {
+            guard !finished else { return false }
+            started = true
+            return true
+        }
+    }
+
+    @discardableResult
+    func finish(_ value: String?) -> Bool {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return false
+        }
+        finished = true
+        let wasStarted = started
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+        return wasStarted
+    }
+}
+
+private final class DocumentTextExtractionCircuit: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tripped = false
+
+    var isOpen: Bool {
+        lock.withLock { !tripped }
+    }
+
+    func trip() {
+        lock.withLock { tripped = true }
     }
 }

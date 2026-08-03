@@ -68,6 +68,7 @@ struct CleanupView: View {
                 list
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear {
             store.openIfPossible()
             reload()
@@ -306,9 +307,6 @@ struct CleanupView: View {
                             .font(.callout)
                         Spacer()
                         Button("Open Trash") {
-                            // Reveal the user's Trash in Finder. macOS
-                            // Cmd+Z in Finder restores the most recent
-                            // trash operation — that's the undo path.
                             NSWorkspace.shared.open(
                                 URL(fileURLWithPath: NSHomeDirectory())
                                     .appendingPathComponent(".Trash")
@@ -327,7 +325,7 @@ struct CleanupView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(
                         (statusWarning ? Color.orange : Color.green).opacity(0.4),
                         lineWidth: 1))
-                    .help("Files moved to Trash can be restored. In Finder, open Trash and press ⌘Z (or right-click → Put Back) to restore the most recent items.")
+                    .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
                 }
             }
             .padding(20)

@@ -495,6 +495,17 @@ public class FileTileKindChipTests
             TopTwoTags = tags ?? Array.Empty<string>(),
         };
 
+    [Fact]
+    public void From_DeduplicatesDisplayTagsCaseInsensitively()
+    {
+        var tile = FileTile.From(new FileRow(
+            1, "C:/x.jpg", "image", 0, null, false, false,
+            ["favorite", "sunset", "Sunset", "cat", "CAT"], null));
+
+        Assert.Equal(["Favorite", "Sunset", "Cat"], tile.Tags);
+        Assert.Equal(["Favorite", "Sunset"], tile.TopTwoTags);
+    }
+
     [Theory]
     [InlineData("image", "Image")]
     [InlineData("video", "Video")]

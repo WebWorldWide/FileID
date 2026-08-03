@@ -506,7 +506,7 @@ public final class ReadStore: @unchecked Sendable {
 
     public func tags(forFileID id: Int64) -> [String] {
         guard let q = queue else { return [] }
-        return (try? q.read { db in
+        let tags = (try? q.read { db in
             try String.fetchAll(db, sql: """
                 SELECT TRIM(tag) FROM tags
                 WHERE file_id = ? AND source IN ('auto', 'user', 'vlm')
@@ -515,6 +515,7 @@ public final class ReadStore: @unchecked Sendable {
                 ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, COALESCE(score, 0) DESC, rowid ASC
                 """, arguments: [id])
         }) ?? []
+        return Self.uniqueDisplayTags(tags)
     }
 
     /// Bulk-fetch top vision tags for many files in one SQL query
@@ -528,33 +529,36 @@ public final class ReadStore: @unchecked Sendable {
             let placeholders = ids.map { _ in "?" }.joined(separator: ",")
             let args: [DatabaseValueConvertible] = ids.map { Int($0) }
             let rows = try Row.fetchAll(db, sql: """
-                SELECT file_id, tag, rk FROM (
-                    SELECT t.file_id, TRIM(t.tag) AS tag,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY t.file_id
-                               ORDER BY CASE t.source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,
-                                        COALESCE(t.score, 0) DESC,
-                                        t.rowid ASC
-                           ) AS rk
-                    FROM tags t
-                    WHERE t.file_id IN (\(placeholders))
-                      AND t.source IN ('auto', 'user', 'vlm')
-                      AND TRIM(t.tag) <> ''
-                      AND LOWER(TRIM(t.tag)) NOT IN ('image', 'photo', 'picture', 'photography', 'shot', 'view', 'object', 'item', 'background', 'foreground', 'indoor', 'outdoor')
-                ) WHERE rk <= ?
-                ORDER BY file_id ASC, rk ASC
-                """, arguments: StatementArguments(args + [limit]))
+                SELECT t.file_id, TRIM(t.tag) AS tag
+                FROM tags t
+                WHERE t.file_id IN (\(placeholders))
+                  AND t.source IN ('auto', 'user', 'vlm')
+                  AND TRIM(t.tag) <> ''
+                  AND LOWER(TRIM(t.tag)) NOT IN ('image', 'photo', 'picture', 'photography', 'shot', 'view', 'object', 'item', 'background', 'foreground', 'indoor', 'outdoor')
+                ORDER BY t.file_id ASC,
+                         CASE t.source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,
+                         COALESCE(t.score, 0) DESC,
+                         t.rowid ASC
+                """, arguments: StatementArguments(args))
             var out: [Int64: [String]] = [:]
+            var seen: [Int64: Set<String>] = [:]
             out.reserveCapacity(ids.count)
             for r in rows {
                 guard let fid: Int64 = r["file_id"],
                       let tag: String = r["tag"] else { continue }
-                if !Self.suppressedDisplayTags.contains(tag.lowercased()) {
-                    out[fid, default: []].append(tag)
-                }
+                guard out[fid, default: []].count < limit else { continue }
+                let key = tag.lowercased()
+                guard !Self.suppressedDisplayTags.contains(key),
+                      seen[fid, default: []].insert(key).inserted else { continue }
+                out[fid, default: []].append(tag)
             }
             return out
         }) ?? [:]
+    }
+
+    private static func uniqueDisplayTags(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        return tags.filter { seen.insert($0.lowercased()).inserted }
     }
 
     // MARK: - Cleanup queries
@@ -981,7 +985,7 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
-    /// Files Deep Analyze can target (image / pdf / video / doc).
+    /// Files supported by the engine's Deep Analyze runner.
     /// Used by the Restructure tab's hint banner to decide whether to
     /// nudge the user toward running Deep Analyze for sharper proposals.
     public func totalAnalyzableFiles() -> Int {
@@ -990,7 +994,7 @@ public final class ReadStore: @unchecked Sendable {
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM files
                 WHERE failed = 0
-                  AND kind IN ('image', 'pdf', 'video', 'doc')
+                  AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model')
             """) ?? 0
         }) ?? 0
     }
@@ -1004,7 +1008,7 @@ public final class ReadStore: @unchecked Sendable {
         return (try? q.read { db in
             let row = try Row.fetchOne(db, sql: """
                 SELECT
-                  SUM(CASE WHEN kind IN ('image', 'pdf', 'video', 'doc')
+                  SUM(CASE WHEN kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model')
                       THEN 1 ELSE 0 END) AS analyzable,
                   SUM(CASE WHEN vlm_proposed_name IS NOT NULL
                             AND vlm_proposed_name <> ''
@@ -1398,10 +1402,10 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return (0, 0) }
         return (try? q.read { db in
             let total = try Int.fetchOne(db, sql:
-                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf') AND failed = 0") ?? 0
+                "SELECT COUNT(*) FROM files WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0") ?? 0
             let pending = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM files
-                WHERE kind IN ('image', 'pdf') AND failed = 0
+                WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                   AND (vlm_full_model IS NULL OR vlm_full_model != ?)
                 """, arguments: [modelKey]) ?? 0
             return (total, pending)

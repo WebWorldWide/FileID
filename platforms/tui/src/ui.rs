@@ -1,20 +1,6 @@
-//! Rendering. Pure read of `&App` → ratatui widgets. No state mutation here.
-//!
-//! The look mirrors the FileID terminal design: calm near-black panels, the
-//! signature accents (gold `#FFCC00`, lavender `#B19BCE`, cyan `#A0E2EA`, pink
-//! `#F2A6C0`) used sparingly, plus a quiet green `#86d9a4` for "kept / safe /
-//! on-device". Brand `FileID` + numbered tabs sit on top with a gold underline
-//! under the active tab; every screen states what it is in plain words; the keys
-//! you can press are always pinned along the bottom in pill-styled hints.
-//!
-//! READABLE ON ANY TERMINAL THEME: we paint our OWN brand-dark background (`BG`)
-//! across the whole frame first, with a near-white default foreground (`FG`);
-//! every widget below patches only its `fg`, inheriting the dark `bg`. So a
-//! light-background terminal can't wash out the gold/light accents — we never
-//! depend on the terminal's default colors anywhere visible (overlays
-//! re-establish `BG` after `Clear`). The selected row is a gold-tinted band with
-//! a solid gold left edge — the terminal stand-in for the mockup's `inset 3px 0
-//! #FFCC00` highlight.
+//! Pure `&App` to ratatui rendering. The UI paints its own near-black surface,
+//! uses FileID's gold/lavender/cyan/pink palette, and pairs every color cue with
+//! text or a symbol so status remains readable without color perception.
 
 use std::rc::Rc;
 
@@ -25,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, 
 use ratatui::Frame;
 
 use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, DownloadState, Tab};
+use crate::context::terminal_text;
 use crate::data::{human_size, short, PLAN_CAP};
 
 // ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
@@ -37,12 +24,12 @@ const SURFACE: Color = Color::Rgb(27, 27, 33);
 const FG: Color = Color::Rgb(230, 230, 234);
 /// Quieter body text for unselected list rows (`#cfcfd6`).
 const SECONDARY: Color = Color::Rgb(207, 207, 214);
-/// Secondary labels (`#8a8a94`).
-const DIM: Color = Color::Rgb(138, 138, 148);
-/// Tertiary / hint text (`#74747e`).
-const FAINT: Color = Color::Rgb(116, 116, 126);
-/// Inactive tab label (`#76767f`).
-const TAB_OFF: Color = Color::Rgb(118, 118, 127);
+/// Secondary labels (`#9a9aa4`).
+const DIM: Color = Color::Rgb(154, 154, 164);
+/// Tertiary / hint text (`#84848e`), 4.97:1 against `BG`.
+const FAINT: Color = Color::Rgb(132, 132, 142);
+/// Inactive tab label (`#91919a`).
+const TAB_OFF: Color = Color::Rgb(145, 145, 154);
 /// Hairline divider (`#25252c`).
 const DIVIDER: Color = Color::Rgb(37, 37, 44);
 /// Panel border (`#2a2a32`).
@@ -105,16 +92,47 @@ pub fn render(f: &mut Frame, app: &App) {
 /// hairline on row 1 with a bright-gold underline drawn under the active tab —
 /// the terminal stand-in for the mockup's `border-bottom:2px solid #FFCC00`.
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
+    const FULL: [&str; 6] = [
+        "Library",
+        "People",
+        "Cleanup",
+        "Deep Analyze",
+        "Restructure",
+        "Settings",
+    ];
+    const COMPACT: [&str; 6] = ["Lib", "Ppl", "Clean", "Analyze", "Tidy", "Set"];
+    const MINIMAL: [&str; 6] = ["", "", "", "", "", ""];
+
+    let width_for = |names: &[&str; 6], brand_gap: usize, tab_gap: usize| {
+        6 + brand_gap
+            + names
+                .iter()
+                .map(|name| 1 + usize::from(!name.is_empty()) + name.chars().count())
+                .sum::<usize>()
+            + tab_gap * (names.len() - 1)
+    };
+    let (names, brand_gap, tab_gap) = if width_for(&FULL, 3, 3) <= area.width as usize {
+        (&FULL, "   ", "   ")
+    } else if width_for(&COMPACT, 3, 3) <= area.width as usize {
+        (&COMPACT, "   ", "   ")
+    } else {
+        (&MINIMAL, "  ", " ")
+    };
+
     let mut spans: Vec<Span> = Vec::with_capacity(Tab::ALL.len() * 2 + 2);
     spans.push(Span::styled(
         "FileID",
         Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::raw("   "));
-    let mut col = area.x.saturating_add(9); // "FileID" (6) + 3-space gap
+    spans.push(Span::raw(brand_gap));
+    let mut col = area.x.saturating_add(6 + brand_gap.chars().count() as u16);
     let mut active: Option<(u16, u16)> = None;
     for (i, t) in Tab::ALL.iter().enumerate() {
-        let label = format!("{} {}", i + 1, t.title());
+        let label = if names[i].is_empty() {
+            format!("{}", i + 1)
+        } else {
+            format!("{} {}", i + 1, names[i])
+        };
         let w = label.chars().count() as u16;
         if *t == app.tab {
             spans.push(Span::styled(
@@ -127,8 +145,8 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         }
         col = col.saturating_add(w);
         if i + 1 < Tab::ALL.len() {
-            spans.push(Span::raw("   "));
-            col = col.saturating_add(3);
+            spans.push(Span::raw(tab_gap));
+            col = col.saturating_add(tab_gap.chars().count() as u16);
         }
     }
     f.render_widget(
@@ -402,13 +420,13 @@ fn render_welcome(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(FAINT),
         )));
         lines.push(Line::from(Span::styled(
-            format!("scratch: {}", app.db_label),
+            format!("scratch: {}", terminal_text(&app.db_label)),
             Style::default().fg(FAINT),
         )));
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("Resolved path: {}", app.db_label),
+            format!("Resolved path: {}", terminal_text(&app.db_label)),
             Style::default().fg(FAINT),
         )));
         lines.push(Line::from(Span::styled(
@@ -445,7 +463,7 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
         let left = if app.search_active {
             vec![
                 Span::styled("⌕ ", Style::default().fg(CYAN)),
-                Span::styled(app.search.clone(), Style::default().fg(FG)),
+                Span::styled(terminal_text(&app.search), Style::default().fg(FG)),
                 Span::styled("█", Style::default().fg(GOLD)),
             ]
         } else if !app.search.is_empty() {
@@ -456,7 +474,10 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
             };
             vec![
                 Span::styled("⌕ ", Style::default().fg(CYAN)),
-                Span::styled(format!("/{}", app.search), Style::default().fg(FG)),
+                Span::styled(
+                    format!("/{}", terminal_text(&app.search)),
+                    Style::default().fg(FG),
+                ),
                 Span::styled(format!("   {matches}"), Style::default().fg(DIM)),
             ]
         } else {
@@ -490,7 +511,7 @@ fn render_library(f: &mut Frame, app: &App, area: Rect) {
                 "No matches.",
                 &format!(
                     "Nothing in this library matches \u{201c}{}\u{201d}.",
-                    app.search
+                    terminal_text(&app.search)
                 ),
                 Some(cta("Esc", "clear the search")),
             );
@@ -567,7 +588,7 @@ fn render_file_detail(f: &mut Frame, app: &App, area: Rect, file: Option<&crate:
     lines.push(section("Tags"));
     match app.data.tags.get(&fr.id).filter(|t| !t.is_empty()) {
         Some(tags) => lines.push(Line::from(Span::styled(
-            tags.join("  ·  "),
+            terminal_text(&tags.join("  ·  ")),
             Style::default().fg(LAVENDER),
         ))),
         None => lines.push(Line::from(Span::styled(
@@ -580,7 +601,7 @@ fn render_file_detail(f: &mut Frame, app: &App, area: Rect, file: Option<&crate:
         lines.push(Line::from(""));
         lines.push(section("What's in it"));
         lines.push(Line::from(Span::styled(
-            snip.clone(),
+            terminal_text(snip),
             Style::default().fg(DIM),
         )));
     }
@@ -757,25 +778,96 @@ fn render_cleanup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(detail.block(block), cols[1]);
 }
 
-fn render_deep_analyze(f: &mut Frame, _app: &App, area: Rect) {
+fn render_deep_analyze(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let count = app.data.total_analyses.max(0) as usize;
     render_context(
         f,
         rows[0],
-        vec![Span::styled(
-            "Deep Analyze — VLM captions and smart names.",
-            Style::default().fg(DIM),
-        )],
-        None,
+        vec![
+            Span::styled(
+                "Deep Analyze — captions and suggested names generated on-device.",
+                Style::default().fg(DIM),
+            ),
+            if app.data.analyses_truncated {
+                Span::styled("  PARTIAL LIST", Style::default().fg(GOLD))
+            } else {
+                Span::raw("")
+            },
+        ],
+        Some(plural(count, "result", "results")),
     );
-    render_empty(
+    if app.data.analyses.is_empty() {
+        render_empty(
+            f,
+            rows[1],
+            "Deep Analyze",
+            "No analyzed files yet.",
+            "Run Deep Analyze in a FileID desktop app, then reload here to review its captions and filename suggestions. Applying names remains an explicit desktop action.",
+            Some(cta("r", "reload results from the library")),
+        );
+        return;
+    }
+
+    let cols =
+        Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(56)]).split(rows[1]);
+    let cursor = app.cursor();
+    let content_w = content_width(cols[0]);
+    render_calm_list(
         f,
-        rows[1],
-        "Deep Analyze",
-        "Use the desktop app for VLM review.",
-        "The terminal client installs scanning/search models and scans folders. Deep Analyze VLM weights and review/rename stay in the native desktop app.",
-        Some(cta("D", "download the TUI scan/search model set")),
+        cols[0],
+        "Analyzed files",
+        &app.data.analyses,
+        cursor,
+        |row| analyze_row(content_w, row),
     );
+
+    let detail = match app.data.analyses.get(cursor) {
+        Some(row) => {
+            let mut lines = vec![
+                section("Original"),
+                Line::from(Span::styled(
+                    basename(&row.path),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(short(&row.path), Style::default().fg(FAINT))),
+            ];
+            if let Some(name) = &row.proposed_name {
+                lines.extend([
+                    Line::from(""),
+                    section("Suggested filename"),
+                    Line::from(Span::styled(
+                        terminal_text(name),
+                        Style::default().fg(LAVENDER),
+                    )),
+                ]);
+            }
+            if !row.description.is_empty() {
+                lines.extend([
+                    Line::from(""),
+                    section("Description"),
+                    Line::from(Span::styled(
+                        terminal_text(&row.description),
+                        Style::default().fg(FG),
+                    )),
+                ]);
+            }
+            lines.push(Line::from(""));
+            lines.push(kv("Model", row.model.as_deref().unwrap_or("—")));
+            lines.push(kv(
+                "Analyzed",
+                &row.analyzed_at.map_or_else(|| "—".into(), fmt_date),
+            ));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Review-only — no filename is changed from the terminal.",
+                Style::default().fg(GREEN),
+            )));
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true })
+        }
+        None => Paragraph::new(Span::styled("Select a result.", Style::default().fg(DIM))),
+    };
+    f.render_widget(detail.block(titled_block("Review", CYAN)), cols[1]);
 }
 
 fn render_restructure(f: &mut Frame, app: &App, area: Rect) {
@@ -896,6 +988,7 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
         kv("Files indexed", &app.data.total_files.to_string()),
         kv("Tags", &app.data.total_tags.to_string()),
         kv("People", &app.data.people.len().to_string()),
+        kv("Deep Analyze", &app.data.total_analyses.to_string()),
         kv("Duplicate sets", &app.data.dupes.len().to_string()),
         Line::from(""),
         section("Privacy"),
@@ -929,7 +1022,7 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(DIM),
         )),
         Line::from(Span::styled(
-            "Scan (s) drives the engine; face clustering & semantic search are follow-ons.",
+            "Scan (s) drives the engine and groups faces; semantic search stays in the CLI.",
             Style::default().fg(DIM),
         )),
     ];
@@ -1026,7 +1119,11 @@ fn render_key_bar(f: &mut Frame, app: &App, area: Rect) {
 /// something are advertised (no aspirational actions).
 fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.show_help {
-        return vec![("?", "close help"), ("q", "quit")];
+        return vec![
+            ("?", "close help"),
+            ("Esc", "close help"),
+            ("Ctrl-C", "quit"),
+        ];
     }
     if app.input_active {
         return vec![
@@ -1037,7 +1134,7 @@ fn key_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     if let Some(b) = &app.browser {
         // `hidden off`/`hidden on` are both static, so the bar stays a Vec of
-        // `&'static str` while still reflecting the toggle state (FEATURE 2).
+        // `&'static str` while still reflecting the toggle state.
         let hidden = if b.show_hidden {
             "hidden on"
         } else {
@@ -1085,15 +1182,16 @@ fn render_help(f: &mut Frame, area: Rect) {
     let note = |s: &'static str| Line::from(Span::styled(s, Style::default().fg(LAVENDER)));
     let lines = vec![
         hrow("Tab / Shift-Tab", "next / previous tab"),
-        hrow("1 – 5", "jump to a tab"),
+        hrow("1 – 6", "jump to a tab"),
         hrow("↑↓  /  j k", "move selection"),
+        hrow("PgUp / PgDn", "move ten rows"),
         hrow("g / G", "first / last in list"),
         hrow("s", "browse folders + scan"),
         hrow("D", "download AI models (any tab)"),
         hrow("/", "search (Library tab)"),
         hrow("r", "reload from the library DB"),
-        hrow("?", "toggle this help"),
-        hrow("q / Esc", "quit"),
+        hrow("? / q / Esc", "close this help"),
+        hrow("Ctrl-C", "quit from anywhere"),
         Line::from(""),
         header("Folder browser (press s):"),
         hrow("↑↓  Enter", "highlight / open a subfolder"),
@@ -1584,9 +1682,10 @@ fn overlay_bg(f: &mut Frame, area: Rect) {
 /// Show the END of a path field (what the user is typing) when it overflows,
 /// prefixing `…`. Mirrors how shells keep the cursor end visible.
 fn input_tail(s: &str, max: usize) -> String {
+    let s = terminal_text(s);
     let count = s.chars().count();
     if max == 0 || count <= max {
-        return s.to_string();
+        return s;
     }
     let tail: String = s.chars().skip(count - (max - 1)).collect();
     format!("…{tail}")
@@ -1663,6 +1762,19 @@ fn dup_row(content_w: usize, g: &crate::data::DupGroup) -> Vec<Span<'static>> {
     ]
 }
 
+fn analyze_row(content_w: usize, row: &crate::data::AnalyzeRow) -> Vec<Span<'static>> {
+    let proposed = row.proposed_name.as_deref().unwrap_or("caption only");
+    let proposed = truncate(proposed, content_w.saturating_div(2).max(8));
+    let tail_width = proposed.chars().count();
+    let (name, pad) = name_pad(content_w, 3, tail_width, &basename(&row.path), 2, 5);
+    vec![
+        Span::styled("AI ", Style::default().fg(LAVENDER)),
+        Span::styled(name, Style::default().fg(SECONDARY)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(proposed, Style::default().fg(DIM)),
+    ]
+}
+
 /// One Restructure row: a confidence dot, a cyan category tag, the source name,
 /// and a right-aligned `→ destination` (the mockup's "Sure? · File · Goes to").
 fn plan_row(content_w: usize, m: &crate::data::PlanRow) -> Vec<Span<'static>> {
@@ -1691,7 +1803,7 @@ fn plan_row(content_w: usize, m: &crate::data::PlanRow) -> Vec<Span<'static>> {
 /// captions).
 fn section(s: &str) -> Line<'static> {
     Line::from(Span::styled(
-        s.to_uppercase(),
+        terminal_text(s).to_uppercase(),
         Style::default().fg(FAINT).add_modifier(Modifier::BOLD),
     ))
 }
@@ -1699,8 +1811,11 @@ fn section(s: &str) -> Line<'static> {
 /// A key/value detail row: dim padded key + body-coloured value.
 fn kv(key: &str, value: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{key:<16}"), Style::default().fg(DIM)),
-        Span::styled(value.to_string(), Style::default().fg(FG)),
+        Span::styled(
+            format!("{:<16}", terminal_text(key)),
+            Style::default().fg(DIM),
+        ),
+        Span::styled(terminal_text(value), Style::default().fg(FG)),
     ])
 }
 
@@ -1745,19 +1860,21 @@ fn friendly_kind(kind: &str) -> &'static str {
 }
 
 fn basename(path: &str) -> String {
-    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+    terminal_text(path.rsplit(['/', '\\']).next().unwrap_or(path))
 }
 
 /// Show the destination relative to its trailing segments (the category folder +
 /// filename), which is what matters in the plan view.
 fn rel_dest(dest: &str) -> String {
+    let dest = terminal_text(dest);
     let parts: Vec<&str> = dest.rsplit(['/', '\\']).take(2).collect();
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
 fn truncate(s: &str, max: usize) -> String {
+    let s = terminal_text(s);
     if s.chars().count() <= max {
-        s.to_string()
+        s
     } else {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
@@ -1820,6 +1937,7 @@ mod tests {
     #[test]
     fn rel_dest_keeps_two_tail_segments() {
         assert_eq!(rel_dest("/lib/Images/2021/p.jpg"), "2021/p.jpg");
+        assert_eq!(rel_dest("/lib/Images/2021/p\x1b[2J.jpg"), "2021/p�[2J.jpg");
     }
 
     #[test]
@@ -1833,6 +1951,12 @@ mod tests {
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("ab", 4), "ab");
+    }
+
+    #[test]
+    fn terminal_text_neutralizes_control_sequences() {
+        assert_eq!(terminal_text("name\x1b[2J\nnext"), "name�[2J next");
+        assert_eq!(terminal_text("café 📷"), "café 📷");
     }
 
     #[test]
@@ -1953,6 +2077,7 @@ mod tests {
     #[test]
     fn input_tail_keeps_end_visible() {
         assert_eq!(input_tail("/short", 20), "/short");
+        assert_eq!(input_tail("/unsafe\x1b[2J", 20), "/unsafe�[2J");
         // Overflow keeps the trailing chars (where the cursor is), prefixed `…`.
         let out = input_tail("/very/long/path/to/some/deep/folder", 10);
         assert_eq!(out.chars().count(), 10);
@@ -2013,6 +2138,29 @@ mod tests {
         assert!(has_gold, "gold brand accent not rendered in any cell");
     }
 
+    #[test]
+    fn muted_text_meets_normal_text_contrast() {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("palette test requires RGB colors")
+            };
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        let background = luminance(BG);
+        for color in [DIM, FAINT, TAB_OFF] {
+            let ratio = (luminance(color) + 0.05) / (background + 0.05);
+            assert!(ratio >= 4.5, "muted text contrast is only {ratio:.2}:1");
+        }
+    }
+
     /// The active tab is underlined in bright gold on the header's divider row
     /// (row 1) — the terminal stand-in for the mockup's 2px gold underline.
     #[test]
@@ -2030,6 +2178,23 @@ mod tests {
         // active tab), and the rest of the rule is the dim divider colour.
         let gold_rule = (0..80).any(|x| buf[(x, 1)].fg == GOLD && buf[(x, 1)].symbol() == "─");
         assert!(gold_rule, "no gold underline on the active tab");
+    }
+
+    #[test]
+    fn header_keeps_all_six_tabs_visible_at_standard_widths() {
+        use crate::app::{App, Tab};
+
+        let wide = frame_text(100, 24, &App::new("/tmp/x.sqlite".into()));
+        let wide_header = wide.lines().next().unwrap_or("");
+        assert!(wide_header.contains("6 Settings"));
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::Settings;
+        let standard = frame_text(80, 24, &app);
+        let standard_header = standard.lines().next().unwrap_or("");
+        assert!(standard_header.contains("1 Lib"));
+        assert!(standard_header.contains("6 Set"));
+        assert_eq!(standard_header.chars().count(), 80);
     }
 
     /// Sweep a whole `TestBackend` buffer into one string (row-major).
@@ -2154,7 +2319,7 @@ mod tests {
         );
     }
 
-    /// FEATURE 2: dotfiles are hidden by default, and the browser hint reflects
+    /// Dotfiles are hidden by default, and the browser hint reflects
     /// the toggle state; pressing `.` flips it to `hidden:on`.
     #[test]
     fn browser_dotfile_toggle_reflects_state_in_hint() {
@@ -2194,7 +2359,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// FEATURE 3: the Settings panel surfaces the model-download action, and the
+    /// The Settings panel surfaces the model-download action, and the
     /// always-visible key bar advertises `D` — fitting an 80-col row.
     #[test]
     fn settings_tab_shows_model_download_action_and_key() {
@@ -2468,11 +2633,7 @@ mod tests {
         for (tab, headline, cta_text) in [
             (Tab::People, "No people yet.", "detect & group faces"),
             (Tab::Cleanup, "No duplicates found.", "check for duplicates"),
-            (
-                Tab::DeepAnalyze,
-                "Use the desktop app for VLM review.",
-                "scan/search model",
-            ),
+            (Tab::DeepAnalyze, "No analyzed files yet.", "reload results"),
             (
                 Tab::Restructure,
                 "No moves to suggest yet.",
@@ -2521,5 +2682,33 @@ mod tests {
             t.contains("all required models installed"),
             "Settings must confirm when all models are present",
         );
+    }
+
+    #[test]
+    fn deep_analyze_renders_live_results_as_review_only() {
+        use crate::app::{App, Tab};
+        use crate::data::{AnalyzeRow, LoadMsg, Snapshot};
+
+        let mut app = App::new("/tmp/x.sqlite".into());
+        app.tab = Tab::DeepAnalyze;
+        app.apply_load(LoadMsg::Done(Box::new(Snapshot {
+            db_exists: true,
+            analyses: vec![AnalyzeRow {
+                path: "/library/IMG_0007.jpg".into(),
+                description: "Two people walking beside a lake at sunset.".into(),
+                proposed_name: Some("people-walking-lake-sunset.jpg".into()),
+                model: Some("qwen3_vl_8b".into()),
+                analyzed_at: Some(1_609_459_200.0),
+            }],
+            total_analyses: 1,
+            ..Snapshot::default()
+        })));
+
+        let text = frame_text(100, 30, &app);
+        assert!(text.contains("IMG_0007.jpg"));
+        assert!(text.contains("people-walking-lake-sunset.jpg"));
+        assert!(text.contains("Two people walking beside a lake"));
+        assert!(text.contains("qwen3_vl_8b"));
+        assert!(text.contains("Review-only"));
     }
 }

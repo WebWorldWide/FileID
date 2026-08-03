@@ -1672,7 +1672,7 @@ mod tests {
     /// groups verify first, straddle pairs (byte-identical files whose stored
     /// hashes differ across recipes) still meet in their size class, and an
     /// over-budget class is skipped with an explicit partial report instead of
-    /// aborting the whole listing. (audit 2026-07-14)
+    /// aborting the whole listing.
     #[test]
     fn listing_verifies_by_priority_and_reports_partial_instead_of_bailing() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

@@ -22,7 +22,7 @@ The core weight stack is permissively licensed (Apache-2.0 / MIT), and no non-co
 | Face detection + 5-pt landmarks | Apple Vision (`VNDetectFaceRectanglesRequest`) | **YuNet (ONNX, OpenCV Zoo)** | YuNet is MIT. Different detectors → boxes aren't byte-identical, but 5-pt landmarks feed a shared alignment template so embeddings match. |
 | Face embedding | SFace (ONNX via CoreML EP) *(lockstep pending)* | **SFace (ONNX via DirectML / CUDA / CPU EP)** | SFace (OpenCV Zoo) is Apache-2.0, **128-d** L2-normalized. Replaces 512-d ArcFace; person-clustering DBs round-trip once both platforms are on SFace. |
 | OCR | Apple Vision `VNRecognizeTextRequest` (fast tier) | Windows.Media.Ocr (built-in WinRT) default; PaddleOCR ONNX opt-in | Built-in OCR is fast + free + multilingual on both. |
-| Vision-language models (Deep Analyze) | MLX: Qwen 2.5-VL · Gemma 3 · PaliGemma | llama.cpp: Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Curated lineup per platform to use the best-supported quants. |
+| Vision-language models (Deep Analyze) | MLX: **Qwen3-VL 8B / 4B** · Qwen 2.5-VL · Gemma 3 · Mistral-Small-3.2 | llama.cpp: Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Qwen3-VL 8B is the measured 16 GB macOS recommendation and 4B is the 8 GB recommendation; each platform uses the best-supported commercial-clean quant. |
 
 ## In-scan tagger
 
@@ -103,7 +103,7 @@ The non-commercial InsightFace stack (ArcFace `w600k_r50` + SCRFD, *"non-commerc
 | Input | letterboxed to 640×640, BGR raw [0,255], NCHW |
 | Output | per-stride (8/16/32) cls/obj/bbox/kps → score = √(cls·obj), center/exp box, 5-point landmarks remapped to the FileID order |
 
-### SFace face embedding (Windows; macOS via CoreML EP — lockstep pending)
+### SFace face embedding (Windows; macOS via CoreML EP — native validation complete, cross-platform byte comparison pending)
 
 | Aspect | Value |
 |---|---|
@@ -143,9 +143,11 @@ All default/recommended VLMs are commercial-clean (Apache-2.0). Gemma-3-4B is op
 
 | Model | Source | Notes |
 |---|---|---|
-| Qwen 2.5-VL 7B | swift-transformers HF cache | Default recommendation (Apache-2.0) |
+| **Qwen3-VL 4B (4-bit)** | [`lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit`](https://huggingface.co/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit) | **Recommended for 8 GB Macs** (Apache-2.0); ~3.5 GB download and 4.8 GiB measured peak footprint. |
+| **Qwen3-VL 8B (4-bit)** | [`lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit`](https://huggingface.co/lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit) | **Recommended for 16 GB Macs** (Apache-2.0); exact 5,776,636,403-byte download and 7.2 GiB measured peak footprint. A six-image copied-Adlon A/B found it generally more concise and grounded than 4B. Revision `a0afc48efd9308fb14b4d58bbd49d382f7d4f845`. |
+| Qwen 2.5-VL 7B | swift-transformers HF cache | Proven alternative (Apache-2.0); ~4.3 GB download and ~7 GB RAM. |
 | Gemma 3 4B | swift-transformers HF cache | Opt-in (Gemma Terms) |
-| Mistral-Small-3.2 | swift-transformers HF cache | Max quality (Apache-2.0) — lockstep pending |
+| Mistral-Small-3.2 | swift-transformers HF cache | Max-quality option for Macs with at least 30 GB RAM (Apache-2.0). |
 
 ## VLM storage
 

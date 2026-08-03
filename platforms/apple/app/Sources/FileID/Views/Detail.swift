@@ -104,7 +104,8 @@ struct Detail: View {
             case .cleanup:     CleanupView(engine: engine, store: store)
             case .deep:        DeepAnalyzeView(engine: engine, store: store,
                                                 onSwitchTab: onSwitchTab)
-            case .restructure: RestructureView(store: store, engine: engine)
+            case .restructure: RestructureView(store: store, engine: engine,
+                                                selectedRoot: pickedURL)
             case .settings:    SettingsTab(engine: engine, store: store)
             }
         }

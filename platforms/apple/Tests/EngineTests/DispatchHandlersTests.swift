@@ -15,6 +15,14 @@ import FileIDShared
 @Suite("Engine dispatch handlers (F-C3-032/021)", .serialized)
 struct DispatchHandlersTests {
 
+    @Test("database-open UI errors never expose local paths")
+    func databaseOpenErrorIsGeneric() {
+        let message = FileIDEngineMain.databaseOpenFailureMessage
+        #expect(!message.contains("/Users/"))
+        #expect(!message.contains("Library/Application Support"))
+        #expect(message.contains("local library database"))
+    }
+
     private func waitFor(_ needles: [Data], in cap: WireCapture,
                          timeout: TimeInterval = 10) async -> Data {
         let deadline = Date().addingTimeInterval(timeout)

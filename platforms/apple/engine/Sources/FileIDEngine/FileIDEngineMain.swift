@@ -16,6 +16,8 @@ import GRDB
 
 @main
 struct FileIDEngineMain {
+    static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
+
     static func main() async {
         // U4: must run before ANY library can write to fd 2 (and before
         // the IPCSink singleton captures its wire handle).
@@ -51,9 +53,11 @@ struct FileIDEngineMain {
         // pool per scan triggers SQLITE_BUSY when a prior pool is still alive
         // (which was the "database is locked" symptom from spam-clicking
         // Start). We open here, hand the same Database to every runScan.
+        let databaseURL = ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"]
+            .map { URL(fileURLWithPath: $0) } ?? Database.defaultURL
         let database: Database?
         do {
-            database = try Database(at: Database.defaultURL)
+            database = try Database(at: databaseURL)
         } catch let error as DatabaseOpenError {
             // Migration identifiers, not user paths — safe to log raw.
             await sink.emit(.error(EngineError(
@@ -65,9 +69,14 @@ struct FileIDEngineMain {
         } catch {
             await sink.emit(.error(EngineError(
                 kind: "db_open_failed",
-                message: "Could not open database at \(Database.defaultURL.path): \(error)"
+                message: databaseOpenFailureMessage
             )))
-            JSONLog.shared.error(ev: "db_open_failed", error: "\(error)")
+            let nsError = error as NSError
+            JSONLog.shared.error(
+                ev: "db_open_failed",
+                path: redactPathForLog(databaseURL.path),
+                error: "\(nsError.domain) \(nsError.code)"
+            )
             database = nil
         }
 
@@ -111,7 +120,7 @@ struct FileIDEngineMain {
         let progressTicker = Task.detached(priority: .background) {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if let snap = await coordinator.snapshot() {
+                if let snap = await coordinator.periodicSnapshot() {
                     await sink.emit(.progress(snap))
                 }
             }
@@ -796,6 +805,16 @@ struct FileIDEngineMain {
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
             await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
+        case .markPersonsDifferent(let sourcePersonID, let destinationPersonID,
+                                   let sourceAnchorFaceID, let destinationAnchorFaceID):
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsDifferent"); return }
+            await sink.emit(.bulkActionResult(await markPersonsDifferent(
+                database: database,
+                sourcePersonID: sourcePersonID,
+                destinationPersonID: destinationPersonID,
+                sourceAnchorFaceID: sourceAnchorFaceID,
+                destinationAnchorFaceID: destinationAnchorFaceID
+            )))
         case .wipeLibrary:
             guard let database else { await sink.emit(.libraryWiped(LibraryWiped(ok: false, message: "Database unavailable."))); return }
             await sink.emit(.libraryWiped(await wipeLibrary(database: database)))
@@ -804,7 +823,6 @@ struct FileIDEngineMain {
              .embedImageQuery,
              .restoreFromTrash,
              .revertMerge,
-             .markPersonsDifferent,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
@@ -1052,6 +1070,61 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "markPersonsAsUnknown", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
         } catch {
             return BulkActionResult(action: "markPersonsAsUnknown", succeeded: 0, failed: personIDs.count, messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func markPersonsDifferent(
+        database: Database,
+        sourcePersonID: Int64,
+        destinationPersonID: Int64,
+        sourceAnchorFaceID: Int64,
+        destinationAnchorFaceID: Int64
+    ) async -> BulkActionResult {
+        do {
+            try await database.pool.write { db in
+                let requested = [
+                    (personID: sourcePersonID, faceID: sourceAnchorFaceID),
+                    (personID: destinationPersonID, faceID: destinationAnchorFaceID)
+                ]
+                var anchors: [(faceID: Int64, fileID: Int64, bbox: String)] = []
+                for entry in requested {
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT person_id, file_id, bbox FROM face_prints WHERE id = ?
+                        """, arguments: [entry.faceID]),
+                          (row["person_id"] as Int64?) == entry.personID,
+                          let fileID: Int64 = row["file_id"],
+                          let bbox: String = row["bbox"] else {
+                        throw NSError(
+                            domain: "FileID.MarkPersonsDifferent",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "The suggested face pair is stale; refresh People and try again."]
+                        )
+                    }
+                    anchors.append((entry.faceID, fileID, bbox))
+                }
+                anchors.sort { $0.faceID < $1.faceID }
+                let personA = min(sourcePersonID, destinationPersonID)
+                let personB = max(sourcePersonID, destinationPersonID)
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO face_verifications
+                        (person_a, person_b, same_person, confidence, vlm_model, verified_at,
+                         face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+                    VALUES (?, ?, 0, 1.0, 'user-verified', ?, ?, ?, ?, ?, ?, ?)
+                    """, arguments: [
+                        personA, personB, Date().timeIntervalSince1970,
+                        anchors[0].faceID, anchors[1].faceID,
+                        anchors[0].fileID, anchors[0].bbox,
+                        anchors[1].fileID, anchors[1].bbox
+                    ])
+            }
+            return BulkActionResult(
+                action: "markPersonsDifferent", succeeded: 1, failed: 0,
+                messages: [item(nil, ok: true)])
+        } catch {
+            return BulkActionResult(
+                action: "markPersonsDifferent", succeeded: 0, failed: 1,
+                messages: [item(nil, ok: false, error.localizedDescription)])
         }
     }
 

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-use crate::context::{human_size, print_json, Ctx};
+use crate::context::{human_size, print_json, terminal_text, Ctx};
 
 struct FileRow {
     id: i64,
@@ -88,7 +88,11 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
 
     println!("{}", ctx.bold(&row.path));
     println!("  id:        {}", row.id);
-    println!("  kind:      {} (.{})", row.kind, row.extension);
+    println!(
+        "  kind:      {} (.{})",
+        terminal_text(&row.kind),
+        terminal_text(&row.extension)
+    );
     println!("  size:      {}", human_size(row.size));
     if let Some(c) = row.created {
         println!("  created:   {}", unix_to_date(c));
@@ -98,7 +102,7 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
     }
     println!("  scanned:   {}", unix_to_date(row.scanned));
     if let Some(cam) = &row.camera {
-        println!("  camera:    {cam}");
+        println!("  camera:    {}", terminal_text(cam));
     }
     if let (Some(la), Some(lo)) = (row.lat, row.lon) {
         println!("  location:  {la:.5}, {lo:.5}");
@@ -110,26 +114,30 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
         if row.failed { "FAILED" } else { "" }
     );
     if let Some(e) = &row.error {
-        println!("  error:     {e}");
+        println!("  error:     {}", terminal_text(e));
     }
     if let Some(d) = &row.vlm_desc {
-        println!("  caption:   {d}");
+        println!("  caption:   {}", terminal_text(d));
     }
     if let Some(n) = &row.vlm_name {
-        println!("  suggested: {n}");
+        println!("  suggested: {}", terminal_text(n));
     }
     if !people.is_empty() {
         let names: Vec<String> = people
             .iter()
             .map(|(id, n)| n.clone().unwrap_or_else(|| format!("#{id}")))
             .collect();
-        println!("  people:    {}", names.join(", "));
+        println!("  people:    {}", terminal_text(&names.join(", ")));
     }
     if !tags.is_empty() {
         println!("  {}", ctx.bold("tags:"));
         for (tag, source, score) in &tags {
             let score_s = score.map(|s| format!(" {s:.2}")).unwrap_or_default();
-            println!("    {tag} {}", ctx.dim(&format!("({source}{score_s})")));
+            println!(
+                "    {} {}",
+                terminal_text(tag),
+                ctx.dim(&format!("({source}{score_s})"))
+            );
         }
     }
     if let Some(s) = &snippet {

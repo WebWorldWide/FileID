@@ -5,7 +5,7 @@
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::context::{print_json, truncate, Ctx};
+use crate::context::{print_json, terminal_text, truncate, Ctx};
 
 struct Person {
     id: i64,
@@ -90,7 +90,7 @@ pub fn run(ctx: &Ctx) -> Result<()> {
         println!(
             "  {:<6} {:<28} {:>6} {:>6}",
             p.id,
-            truncate(&p.display_name(), 28),
+            truncate(&terminal_text(&p.display_name()), 28),
             p.faces,
             p.file_count
         );
