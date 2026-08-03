@@ -20,10 +20,13 @@ The same inspection found that the test step changed into `platforms/windows/Tes
 for another relative `Tests` directory, causing both tracked xUnit projects to be skipped. The gate
 now invokes each project in a separate bounded step, collects app-test hang diagnostics, and fails
 if either project is missing, red, or wedged. The app-service test build is explicitly x64/win-x64,
-and the app disables the Windows App SDK generated bootstrap initializer: FileID's custom
-`Program.Main` already owns bootstrap and shutdown, while the duplicate module initializer wedged a
-generic xUnit host as soon as it loaded the app assembly. The test DLL explicitly owns bootstrap in
-that host so DispatcherQueue-backed service tests receive the required WinRT class registration.
+and both the app and test assemblies disable the Windows App SDK generated bootstrap initializer:
+FileID's custom `Program.Main` already owns production bootstrap and shutdown, while the duplicate
+module initializer wedged the generic xUnit host as soon as it loaded the app assembly. The hosted
+no-bootstrap run completed 450/455 tests but the five `ModelSlot` constructors received
+`REGDB_E_CLASSNOTREG`; a registration-free self-contained run also completed 450/455 but received
+`CLASS_E_CLASSNOTAVAILABLE`. `ModelSlot` therefore maps only those two dispatcher-capture HRESULTs
+to its existing null-dispatcher fallback in non-XAML hosts and preserves every other COM failure.
 Workflow YAML, action-pin policy, binary-privacy regressions, and diff hygiene pass locally; hosted
 Windows x64 execution remains the authoritative platform validation.
 

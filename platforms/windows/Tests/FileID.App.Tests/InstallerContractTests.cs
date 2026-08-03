@@ -161,10 +161,10 @@ public sealed class InstallerContractTests
 
         Assert.Equal("1.7.250606001", appSdkVersion);
         Assert.Contains("<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>", appProject, StringComparison.Ordinal);
-        Assert.Contains("<WindowsPackageType>None</WindowsPackageType>", testProject, StringComparison.Ordinal);
-        Assert.Contains("<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>", testProject, StringComparison.Ordinal);
         Assert.Contains("<WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>", testProject, StringComparison.Ordinal);
-        Assert.Contains("<WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsPackageType>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsAppSDKSelfContained>", testProject, StringComparison.Ordinal);
+        Assert.DoesNotContain("<WindowsAppSdkDeploymentManagerInitialize>", testProject, StringComparison.Ordinal);
         Assert.Contains("$WinAppRuntimeVersion = \"1.7.250606001\"", publishScript, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Count(publishScript,
             "^\\$WinAppRuntime(?:X64|Arm64)Sha256 = \"[0-9a-f]{64}\"\\r?$",
