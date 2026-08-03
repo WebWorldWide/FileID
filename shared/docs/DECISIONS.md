@@ -4851,3 +4851,13 @@ That combination identifies the upstream asynchronous CLI-probe race seen on loa
 the same workflow and SDK passed earlier the same day. Retrying every failure was rejected because
 it could mask a real format diff, while relying only on the ambient PATH was rejected because the
 child probe performs its own host lookup. All other exit codes and messages remain hard failures.
+
+## 2026-08-03 — The Windows custom entry point exclusively owns App SDK bootstrap
+
+The WinUI app disables `WindowsAppSdkBootstrapInitialize` because its custom `Program.Main` already
+calls `Bootstrap.TryInitialize` before XAML and `Bootstrap.Shutdown` on exit. Leaving the generated
+module initializer enabled duplicated ownership and caused a generic xUnit host to wedge when its
+first test loaded the app assembly. Removing the explicit entry point was rejected because it also
+owns the pre-XAML runtime error surface and lifecycle ordering; skipping the app-service suite was
+rejected because those contracts must execute in CI. Project tests preserve both sides of the
+invariant, and the published-app startup smoke verifies the production bootstrap path.
