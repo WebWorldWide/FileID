@@ -156,6 +156,7 @@ struct LibraryView: View {
         // Reloading on any terminal event guarantees the grid ends complete.
         .onChange(of: engine.lastTerminalEventAt) { _, _ in
             store.notifyChanged()
+            refreshOpenPreview()
             reload()
             refreshBulkState()
         }
@@ -305,7 +306,9 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("\(p.processed) / \(p.total)  ·  \(p.discovered) found")
+                Text(p.total > 0
+                     ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
+                     : "\(p.processed) processed  ·  \(p.discovered) found")
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -749,6 +752,13 @@ struct LibraryView: View {
                   full.contains(where: { $0.id == id }) else { return }
             previewSiblings = full
         }
+    }
+
+    private func refreshOpenPreview() {
+        guard let id = previewSelectedID,
+              let updated = store.files(forFileIDs: [id]).first,
+              let index = previewSiblings.firstIndex(where: { $0.id == id }) else { return }
+        previewSiblings[index] = updated
     }
 
     private func reload() {
@@ -1363,12 +1373,11 @@ private struct FilePreviewSheet: View {
             if tagFieldFocused { return .ignored }
             step(1); return .handled
         }
-        .task(id: file.id) {
+        .task(id: "\(file.id):\(file.vlmAnalyzedAt?.timeIntervalSince1970 ?? 0)") {
             // Generate a larger preview for the sheet (640px). Keyed on
-            // file.id so it re-fires on sibling arrow nav — the sheet keeps
-            // identity across `.sheet(item:)` value changes, so a plain .task
-            // would load only the first file. Clear first so the spinner shows
-            // and the prior file's poster never bleeds into the new image.
+            // file id and analysis timestamp so it re-fires on sibling navigation
+            // and after Deep Analyze updates the current row. Clear first so the
+            // spinner shows and the prior preview never bleeds into the new state.
             preview = nil
             tags = []
             // Read DB tags off the main actor (detached read doesn't inherit
@@ -1451,15 +1460,15 @@ private struct FinderTagsEditor: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    TextField("Add tag…", text: $draft, onCommit: addDraft)
+                    TextField("Add tag…", text: $draft)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
                         .focused(isFocused)
-                    Button(action: addDraft) {
-                        Image(systemName: "plus.circle.fill")
-                            .foregroundStyle(Theme.gold)
-                    }
-                    .buttonStyle(.plain)
+                    Button("Apply tag", systemImage: "checkmark", action: addDraft)
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.gold)
+                        .foregroundStyle(.black)
+                        .keyboardShortcut(.defaultAction)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if let e = error {

@@ -7,6 +7,118 @@
 
 ---
 
+## 2026-08-02 — Treat extracted document text as bounded, untrusted model data
+
+macOS Deep Analyze combines a bounded native raster with bounded persisted/extracted document text,
+but the text is JSON-quoted and explicitly framed as untrusted data rather than instructions. If a
+preview cannot be rendered, the result is forced through text-only grounding that strips unsupported
+visual claims and derives names/tags only from source words. Prompting without a trust boundary was
+rejected because a document can contain instruction-like prose; dropping unrenderable documents was
+rejected because Office/PDF text still contains useful content. Scan-time document tags use the
+dependency-free RAKE-style extractor already shipped by the Rust engine, capped at eight with
+deterministic score/label ordering.
+
+## 2026-08-02 — Verify the app inside the finished DMG from non-FileProvider staging
+
+macOS release staging lives under `/tmp`, not the Desktop-hosted repository, because FileProvider can
+reintroduce Finder metadata after signing and make an otherwise valid app fail strict code-signature
+verification. The packagers clear/re-sign or narrowly remove staging metadata as appropriate, verify
+the staged app, validate the image checksum, mount the final DMG, and verify the app inside it. The
+bundle carries only colocated `mlx.metallib`: the pinned MLX loader tries that exact file first, so a
+second identical `default.metallib` added 96 MB without providing fallback value. Verifying only the
+pre-image source app and shipping both names were rejected as weaker and wasteful.
+
+## 2026-08-02 — The TUI starts isolated and keeps mutations explicit elsewhere
+
+A bare `fileid-tui` opens a persistent scratch library rather than guessing the native app's live
+database. Opening a desktop/CLI library requires `--db` or `FILEID_DB`, and the explicit path is
+forwarded to engine scans. Deep Analyze results are reviewable in the TUI, but duplicate deletion,
+restructure apply, people merges, and filename apply remain in the CLI/desktop confirmation flows.
+Implicitly sharing a production library and binding mutations to navigation keys were rejected
+because terminal exploration should not acquire silent write authority.
+
+## 2026-08-02 — Qwen3-VL 8B is the 16 GB recommendation; 4B remains the 8 GB tier
+
+The Apache-2.0 `lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit` revision
+`a0afc48efd9308fb14b4d58bbd49d382f7d4f845` is the default recommendation on 16 GB Macs. A fixed
+six-image copied-Adlon comparison measured 4B at 30.92 s / 4.8 GiB peak footprint and 8B at 47.49 s /
+7.2 GiB; 8B was generally more concise and grounded. Qwen3-VL 4B remains the 8 GB recommendation
+because it preserves the same deterministic grounding guards with substantially lower memory and
+latency. Mistral-Small-3.2 remains available at 30 GB or more but was not made the ordinary default:
+its much larger footprint would reduce availability without evidence of a better quality/performance
+trade on this hardware. The 8B pin adds no new package dependency or restricted license terms.
+
+## 2026-08-02 — Four static-shape RAM++ workers are the measured macOS optimum
+
+The shipped RAM++ Core ML session declares its static tensor shapes and uses four bounded workers.
+On the copied Adlon benchmark this reduced runtime from 27.73 s to 22.59 s while preserving all 222
+tags and scores exactly. More workers were rejected because they increased memory pressure without a
+stable throughput gain; changing thresholds was rejected because the goal was execution performance,
+not an unlabelled quality retune.
+
+## 2026-08-02 — Process-level engine tests never share the live library
+
+Any test that spawns `FileIDEngine` supplies an explicit isolated database path. Letting the child
+fall back to the production Application Support database was rejected after the scan-cancellation
+test inserted 334 fake-JPEG failure rows and eight temporary scan sessions into the user's library.
+The engine retains its production default; the environment override is opt-in and process-local.
+
+## 2026-08-02 — Restructure operates inside the active scanned library root
+
+The Restructure root is both the source scope and the destination hierarchy root, matching the Rust
+contract and Windows UI. macOS now follows the folder selected in the sidebar instead of presenting
+an independent destination picker that could select an empty unrelated directory and correctly but
+confusingly produce a zero-move plan. Moving a scanned library into a separate root is a different
+workflow and must not be implied by this control.
+
+## 2026-08-02 — Display tags are provenance-aware but visually unique
+
+Tag rows retain their `user`, `vlm`, and `auto` provenance in SQLite, but Library cards and previews
+render each case-insensitive label once in user→VLM→auto priority order. Deleting the lower-priority
+database rows was rejected because provenance remains useful for re-analysis and future policy;
+showing duplicates such as `boy` and `woman` was rejected because it adds no user information.
+
+## 2026-08-02 — Decode bounded full-source pixels, never embedded previews
+
+macOS scan tagging, face extraction, and Deep Analyze share one ImageIO helper that always derives a
+bounded, orientation-correct thumbnail from the primary image. Allowing ImageIO to reuse an embedded
+thumbnail was rejected after Adlon JPEGs supplied 160x120 preview pixels for 3072x2304 sources,
+excluding 143 of 150 detected faces and starving both clustering and the VLM. Unbounded native-size
+decode was also rejected because multi-worker scans need a predictable memory ceiling. The bounded
+full-source path restored useful face detail without making source resolution the allocation size.
+
+## 2026-08-02 — Qwen3-VL 4B is the default on ordinary Macs
+
+The Apache-2.0 `lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit` revision is the default Deep Analyze
+model for 8–16 GB Macs: approximately 3.5 GB on disk and 5 GB resident. A fixed native Adlon A/B
+against Qwen2.5-VL 7B produced better image-grounded captions and names while using less memory; a
+representative rerun correctly described the makeup/face-paint scene and RAMS sweatshirt that the old
+result reduced to `ramsonmakeup`. Qwen2.5-VL 7B remains a proven alternative, and Mistral-Small-3.2
+remains the max-quality choice only at 30 GB or more. Gemma was not selected because it requires a
+separate opt-in license, and model terms must never be accepted on the user's behalf.
+
+## 2026-08-02 — Smart filenames are deterministic contracts, not best-effort prose
+
+Both MLX and llama.cpp now accept a VLM filename only when it contains 3–5 separate hyphen/underscore
+words, remains grounded in the image and trusted metadata, and avoids generic or concatenated output.
+Four-digit year tokens must match a trusted file/EXIF/OCR year. One stricter image-grounded retry is
+allowed; a second invalid answer yields no smart name. Prompt-only compliance was rejected because
+live Qwen output invented 2023 for a 2007 photo and later returned the single token `ramsonmakeup`.
+Silently sanitizing those answers was also rejected because formatting cannot repair unsupported
+content; declining a rename is safer than presenting a plausible invention.
+
+## 2026-08-02 — People constraints bind physical evidence and stable user intent
+
+Automatic merge candidates are suppressed when any member of one person shares a source file with a
+member of the other, because two detections in one photograph cannot be the same physical person.
+This constraint is checked before presenting suggestions, not left to reviewer vigilance. A user
+“Different people” verdict is stored against stable representative face anchors and resolved after
+re-clustering, rather than relying only on regenerated person IDs. Both native UIs keep the suggestion
+visible until the engine confirms the single-writer database mutation; an accepted command write is
+not treated as a successful verdict. Same-file similarity-only merges, optimistic UI success, and
+volatile person-pair suppression were rejected because they can hide a failed write or reintroduce a
+known identity error after clustering changes.
+
 ## 2026-08-02 — Reserve repeated smart names with source evidence
 
 Deep Analyze reserves every proposed name within a batch case-insensitively. The first proposal is

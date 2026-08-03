@@ -64,6 +64,7 @@ public struct TaggedFile: Sendable {
     public var loadMs: Double = 0
     public var visionMs: Double = 0
     public var clipMs: Double = 0
+    public var ramMs: Double = 0
     public var ocrMs: Double = 0
 
     // M3 — CLIP image embedding (raw float32 little-endian bytes). nil for
@@ -373,6 +374,7 @@ public actor DBWriter {
         let loadTimes = batchFiles.map(\.loadMs).filter { $0 > 0 }.sorted()
         let visionTimes = batchFiles.map(\.visionMs).filter { $0 > 0 }.sorted()
         let clipTimes = batchFiles.map(\.clipMs).filter { $0 > 0 }.sorted()
+        let ramTimes = batchFiles.map(\.ramMs).filter { $0 > 0 }.sorted()
         let ocrTimes = batchFiles.map(\.ocrMs).filter { $0 > 0 }.sorted()
         // Worker utilization: what fraction of the 14-worker × wall time was
         // actually spent doing per-file work. <50% = workers idle (we have
@@ -405,6 +407,8 @@ public actor DBWriter {
                 "visionP95Ms":   AnyCodable(percentile(visionTimes, 0.95)),
                 "clipP50Ms":     AnyCodable(percentile(clipTimes, 0.50)),
                 "clipP95Ms":     AnyCodable(percentile(clipTimes, 0.95)),
+                "ramP50Ms":      AnyCodable(percentile(ramTimes, 0.50)),
+                "ramP95Ms":      AnyCodable(percentile(ramTimes, 0.95)),
                 "ocrP50Ms":      AnyCodable(percentile(ocrTimes, 0.50)),
                 "ocrP95Ms":      AnyCodable(percentile(ocrTimes, 0.95)),
                 "imagesInBatch": AnyCodable(visionTimes.count)

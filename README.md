@@ -35,7 +35,7 @@
 
 ---
 
-Point FileID at a folder. It reads every file inside — images, video, PDFs, docs — and builds one searchable library that understands what's *in* them. Faces cluster into named cards. Duplicates group by perceptual hash. A local vision-language model writes captions and proposes filenames. Folder reorganization previews before anything moves on disk.
+Point FileID at a folder. It indexes images, video keyframes, audio and speech, PDFs, Office documents, presentations, and plain text into one searchable library that understands what is *in* them. Faces cluster into named cards. Duplicates group by content and perceptual similarity. Local models add tags, captions, and proposed filenames. Folder reorganization previews before anything moves on disk.
 
 > **No cloud. No telemetry. Ever.**
 > No analytics SDKs, no crash reporters, no update pings. The only network egress is a model download you explicitly ask for. CI scans every shipped binary against a 23-string deny-list as a release blocker.
@@ -91,10 +91,10 @@ Six tabs, identical across all three desktop apps:
 
 | Tab | What it gives you | Powered by |
 | :-- | :-- | :-- |
-| **Library** | FTS5 search over filenames + OCR, semantic search ("a dog at the beach"), auto-tagging, thumbnail grid + preview | RAM++ · CLIP ViT-B/32 · FTS5 · OCR |
-| **People** | Face clusters you name once — every later caption uses real names | YuNet detect · SFace embed |
-| **Cleanup** | Duplicate groups by perceptual hash; trashed files stay recoverable | dHash · pHash |
-| **Deep Analyze** | A local VLM writes a caption + smart filename per image, PDF, video keyframe, or doc | Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 |
+| **Library** | FTS5 search over filenames, OCR, speech, and document text; semantic search; auto-tagging; thumbnail grid + preview | RAM++ · CLIP ViT-B/32 · FTS5 · OCR/speech extraction |
+| **People** | Face clusters you name once — every later caption can use real names | YuNet or Apple Vision detect · SFace embed |
+| **Cleanup** | Exact and near-duplicate groups; trashed files stay recoverable | SHA-256 · dHash · pHash |
+| **Deep Analyze** | Local models write captions + smart filenames for images, video keyframes, PDFs, Office files, presentations, audio, and 3D models, with extracted-text fallback | Qwen3-VL 8B/4B · Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 · on-device speech/audio analysis |
 | **Restructure** | Folder reorganization with a Sankey flow diagram; apply as reversible shortcuts, then convert to real moves | Semantic clustering |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy | DirectML · CoreML · AVX2/NEON floor |
 
@@ -108,7 +108,7 @@ Six tabs, identical across all three desktop apps:
 
 ## Front-ends
 
-One engine, five clients — three native desktop GUIs and two terminal front-ends. **None use web tech**: each GUI is native to its OS.
+One library and IPC contract, five clients — three native desktop GUIs and two terminal front-ends. **None use web tech**: each GUI is native to its OS. macOS uses a Swift engine; Windows, Linux, the CLI, and the TUI use the shared Rust engine. Both implementations write the same versioned SQLite schema and mirror the same canonical IPC contract.
 
 | Front-end | Stack | Best for |
 | :-- | :-- | :-- |
@@ -124,28 +124,28 @@ macOS is the canonical visual + behavioral reference; the Windows and Linux apps
 
 ## Using the CLI and TUI
 
-`fileid` and `fileid-tui` share the engine crate and the **same library** as the desktop apps. Read/query and model-free paths run in-process; full-ML scans spawn `FileIDEngine` over the canonical IPC.
+`fileid` and `fileid-tui` share the Rust engine crate and the **same library format** as the desktop apps. Read/query and model-free paths run in-process; full-ML scans spawn `FileIDEngine` over the canonical IPC.
 
-**Build & install** — one command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin` (make sure that's on your `PATH`):
+Download the matching `FileID-tools-0.1.3-*` archive from the [v0.1.3 prerelease](https://github.com/WebWorldWide/FileID/releases/tag/v0.1.3), or build from source. This command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin`:
 
 ```bash
 bash scripts/build-tools.sh
 ```
 
-**Scan, then explore.** The model-free scan indexes files + text (filenames, OCR, document text) into a searchable library — the working flow on every platform:
+**Scan, then explore.** The model-free scan indexes filenames and directly readable plain-text/source formats into a searchable library. Use `scan --models` for OCR, binary-document extraction, tags, faces, and visual embeddings.
 
 ```bash
-fileid scan ~/Pictures --db ~/fileid-test.sqlite   # index files + text (FTS) — searchable now
+fileid --db ~/fileid-test.sqlite scan ~/Pictures   # index files + text (FTS) — searchable now
 
-fileid people                --db ~/fileid-test.sqlite
-fileid search "beach"        --db ~/fileid-test.sqlite
-fileid dedupe --similar      --db ~/fileid-test.sqlite
-fileid restructure --plan    --db ~/fileid-test.sqlite
+fileid --db ~/fileid-test.sqlite people
+fileid --db ~/fileid-test.sqlite search "beach"
+fileid --db ~/fileid-test.sqlite dedupe --similar
+fileid --db ~/fileid-test.sqlite restructure --plan
 ```
 
-> **Full ML scanning** (tags + faces + CLIP) via `--models` uses the native Rust engine on all three platforms. Install the two required models with `fileid models download mobileclip_s2 arcface`. `--all` also installs optional multi-GB Deep Analyze models and is not required for scanning. On **macOS**, CLI weights live under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML set.
+> **Full ML scanning** (tags + faces + CLIP) via `scan --models` uses the Rust engine on all three platforms. Install the two required slots with `fileid models download mobileclip_s2 arcface`. Those names are stable compatibility IDs: `mobileclip_s2` now installs the commercial-clean CLIP ViT-B/32 image encoder, while `arcface` installs YuNet + SFace—not the retired research models. `models download --all` also selects optional multi-GB models and is not required for scanning. On **macOS**, CLI/TUI weights live under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML/MLX set.
 
-On macOS, omit `--db` to browse your desktop app's library automatically. Add `--json` for machine-readable output or `--quiet` to silence progress.
+On macOS, the CLI finds an existing native-app library before falling back to the engine default. The TUI deliberately opens an isolated scratch library unless you pass `--db` or `$FILEID_DB`, so an exploratory terminal scan cannot silently replace a desktop library. Add `--json` for machine-readable CLI output or `--quiet` to silence progress.
 
 **Terminal dashboard:**
 
@@ -153,7 +153,7 @@ On macOS, omit `--db` to browse your desktop app's library automatically. Add `-
 fileid-tui --db ~/fileid-test.sqlite
 ```
 
-Keys: **s** scan a folder · **r** reload · **Tab** switch tabs · **/** search · **↑↓**/**jk** navigate · **q** quit. The TUI paints its own dark theme, so it stays readable on light terminals.
+Keys: **1–6** jump to a tab · **Tab/Shift-Tab** cycle tabs · **↑↓/jk** navigate · **g/G** first/last · **/** search · **s** scan a folder · **r** reload · **D** install scan models · **?** help · **q/Esc** close or quit · **Ctrl-C** quit anywhere. The TUI paints its own dark theme, so it stays readable on light terminals. Its Deep Analyze screen is a read-only companion for results created by a desktop VLM run; it does not claim to run VLM review itself.
 
 ### Safety
 
@@ -174,9 +174,10 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 | Platform | Format | Notes |
 | :-- | :-- | :-- |
-| **Windows** | `FileIDSetup.exe` | Burn bundle embedding per-arch **.msi** (x64 + ARM64); auto-picks at install. Build with `publish-bundle.ps1`. |
-| **Linux** | Flatpak · AppImage · Nix flake · AUR `PKGBUILD` | Native clean-sandbox/ARM64 validation remains a release gate in `SHIP.md`. |
-| **macOS** | `FileID.app` (Apple Silicon) | Build with `./build.sh -mac`; no published bundle yet. |
+| **Windows app** | `FileID-0.1.3-UNSIGNED-Setup.exe` · x64/ARM64 `.msi` | The Burn setup bundle chooses the native MSI; all are unsigned prerelease builds. |
+| **macOS app** | `FileID-0.1.3-UNSIGNED-macOS.dmg` | Apple Silicon app bundle in an unsigned prerelease disk image. |
+| **CLI + TUI** | `FileID-tools-0.1.3-*` | x64/ARM64 archives for Windows, macOS, and Linux; Windows archives are explicitly marked unsigned. |
+| **Linux app** | Flatpak · AppImage · Nix flake · AUR `PKGBUILD` recipes | Build from source for now; clean-sandbox and distro lifecycle validation remain release gates in `SHIP.md`. |
 
 ---
 
@@ -194,7 +195,7 @@ Each desktop app ships **two processes** that talk newline-delimited JSON over s
 └─────────────────────────┘        └──────────────────────────────┘
 ```
 
-The split buys **crash isolation** — a panic in the ML pipeline restarts the engine, not the UI. The CLI/TUI link the Rust engine library for local operations and spawn the engine for full-ML scans.
+The split buys **crash isolation** — a failed ML worker can restart without taking down the UI. The CLI/TUI link the Rust engine library for local operations and spawn the engine for full-ML scans.
 
 The IPC contract lives at [`shared/ipc-schema/ipc.schema.json`](shared/ipc-schema/), mirrored by hand-maintained Swift, Rust, and C# DTOs that per-language schema-conformance suites hold to the canonical schema. **Schema drift is a build break.**
 
@@ -248,7 +249,3 @@ Per-front-end conventions: [Windows](platforms/windows/CLAUDE.md) · [macOS](pla
 Default model weights are commercially usable and contain no non-commercial-only set; most are Apache-2.0/MIT, while Gemma is governed by separately accepted Gemma Terms. FileID downloads weights at runtime and **never redistributes them**; every weight remains governed by its upstream license or terms. See [`shared/docs/MODELS.md`](shared/docs/MODELS.md) for the canonical registry.
 
 ---
-
-<p align="center">
-  <sub>Made with <a href="https://claude.com/claude-code">Claude</a>.</sub>
-</p>

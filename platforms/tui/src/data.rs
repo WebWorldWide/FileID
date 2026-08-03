@@ -1,7 +1,7 @@
 //! DB read layer + a background loader that streams progress events.
 //!
-//! Every read goes through `fileid_engine::db::open_read` — the SAME read
-//! surface the CLI uses (`platforms/cli/src/*.rs`) — so there is no contract
+//! Every read goes through `fileid_engine::db::open_read`, the same read
+//! surface the CLI uses (`platforms/cli/src/*.rs`), so there is no contract
 //! drift: same schema, same column names, same FileKind / restructure logic.
 //!
 //! The loader runs on a worker thread and pushes [`LoadMsg`] values back to the
@@ -52,6 +52,15 @@ pub struct PersonRow {
 }
 
 #[derive(Clone)]
+pub struct AnalyzeRow {
+    pub path: String,
+    pub description: String,
+    pub proposed_name: Option<String>,
+    pub model: Option<String>,
+    pub analyzed_at: Option<f64>,
+}
+
+#[derive(Clone)]
 pub struct DupGroup {
     pub size: i64,
     pub copies: i64,
@@ -59,8 +68,7 @@ pub struct DupGroup {
 }
 
 /// The result of the (potentially slow) live full-file duplicate verification,
-/// delivered via [`LoadMsg::Dupes`] AFTER the snapshot has already painted
-/// (REGRESSION 1). Mirrors the `dupes*` fields of [`Snapshot`] one-for-one.
+/// delivered via [`LoadMsg::Dupes`] after the snapshot has already painted.
 #[derive(Clone, Default)]
 pub struct DupeReport {
     pub dupes: Vec<DupGroup>,
@@ -85,6 +93,8 @@ pub struct Snapshot {
     pub files: Vec<FileRow>,
     pub files_truncated: bool,
     pub people: Vec<PersonRow>,
+    pub analyses: Vec<AnalyzeRow>,
+    pub analyses_truncated: bool,
     pub dupes: Vec<DupGroup>,
     pub dupes_truncated: bool,
     pub dupe_candidate_count: i64,
@@ -98,6 +108,7 @@ pub struct Snapshot {
     pub snippets: HashMap<i64, String>,
     pub total_files: i64,
     pub total_tags: i64,
+    pub total_analyses: i64,
 }
 
 /// Messages streamed from the loader thread to the UI thread.
@@ -119,7 +130,7 @@ pub enum LoadMsg {
     Done(Box<Snapshot>),
     /// The deferred duplicate verification result — arrives AFTER `Done` so
     /// the Library/People/Restructure tabs paint immediately instead of
-    /// waiting out an up-to-64-GiB live full-file hash pass. (audit 2026-07-14)
+    /// waiting out an up-to-64-GiB live full-file hash pass.
     Dupes(Box<DupeReport>),
     Error(String),
 }
@@ -163,9 +174,10 @@ pub fn spawn_load(db: PathBuf, query: String, tx: Sender<LoadMsg>, generation: u
                     &tx,
                     generation,
                     LoadMsg::Status(format!(
-                        "Loaded {} files · {} people · {}",
+                        "Loaded {} files · {} people · {} analyzed · {}",
                         file_count,
                         snap.people.len(),
+                        snap.total_analyses,
                         plan_count
                     )),
                 );
@@ -219,6 +231,13 @@ pub(crate) fn load(
     let _ = send_versioned(
         tx,
         generation,
+        LoadMsg::Status("Reading Deep Analyze results…".into()),
+    );
+    let (analyses, analyses_truncated, total_analyses) = load_analyses(&conn)?;
+
+    let _ = send_versioned(
+        tx,
+        generation,
         LoadMsg::Status("Computing restructure plan…".into()),
     );
     let (plan, plan_truncated, plan_candidate_count) = compute_plan(&conn)?;
@@ -226,13 +245,14 @@ pub(crate) fn load(
     // Duplicate verification is DEFERRED to run_deferred_dupes / LoadMsg::Dupes:
     // it live-reads up to 64 GiB off disk, and gating the whole snapshot's
     // first paint behind it blanked every tab for minutes on a real corpus.
-    // (audit 2026-07-14)
     Ok(Snapshot {
         db_exists: true,
         query,
         files,
         files_truncated,
         people,
+        analyses,
+        analyses_truncated,
         dupes: Vec::new(),
         dupes_truncated: false,
         dupe_candidate_count: 0,
@@ -244,6 +264,7 @@ pub(crate) fn load(
         snippets,
         total_files,
         total_tags,
+        total_analyses,
     })
 }
 
@@ -493,6 +514,36 @@ fn load_people(conn: &rusqlite::Connection) -> Result<Vec<PersonRow>> {
     Ok(rows)
 }
 
+fn load_analyses(conn: &rusqlite::Connection) -> Result<(Vec<AnalyzeRow>, bool, i64)> {
+    let filter = "failed = 0 AND (NULLIF(TRIM(vlm_description), '') IS NOT NULL OR NULLIF(TRIM(vlm_proposed_name), '') IS NOT NULL)";
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM files WHERE {filter}"),
+        [],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, path_text, COALESCE(vlm_description, ''), \
+                NULLIF(TRIM(vlm_proposed_name), ''), NULLIF(TRIM(vlm_model), ''), \
+                vlm_analyzed_at \
+         FROM files WHERE {filter} \
+         ORDER BY vlm_analyzed_at DESC, id DESC LIMIT ?1"
+    ))?;
+    let mut rows = stmt
+        .query_map(params![(ROW_CAP + 1) as i64], |row| {
+            Ok(AnalyzeRow {
+                path: row.get(1)?,
+                description: row.get::<_, String>(2)?.trim().to_string(),
+                proposed_name: row.get(3)?,
+                model: row.get(4)?,
+                analyzed_at: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let truncated = rows.len() > ROW_CAP;
+    rows.truncate(ROW_CAP);
+    Ok((rows, truncated, total))
+}
+
 fn display_name(
     name: Option<String>,
     first: Option<String>,
@@ -696,7 +747,18 @@ fn common_ancestor<'a>(paths: impl Iterator<Item = &'a Path>) -> PathBuf {
 
 /// Trim a long absolute path for one-line display: keep the last few segments.
 pub fn short(path: &str) -> String {
-    let collapsed = crate::context::collapse_home(path);
+    let collapsed: String = crate::context::collapse_home(path)
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '\n' | '\r' | '\t') {
+                ' '
+            } else if ch.is_control() {
+                '\u{fffd}'
+            } else {
+                ch
+            }
+        })
+        .collect();
     const MAX: usize = 64;
     if collapsed.chars().count() <= MAX {
         return collapsed;
@@ -801,6 +863,35 @@ mod tests {
         assert!(!truncated);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].id, target);
+    }
+
+    #[test]
+    fn deep_analyze_results_are_loaded_and_failed_rows_are_hidden() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        fileid_engine::db::migrations::apply(&conn).unwrap();
+        let active = insert_file(&conn, "/library/photo.jpg", 2.0);
+        let failed = insert_file(&conn, "/library/failed.jpg", 1.0);
+        conn.execute(
+            "UPDATE files SET vlm_description = 'A quiet lake', \
+                              vlm_proposed_name = 'quiet-lake.jpg', \
+                              vlm_model = 'qwen', vlm_analyzed_at = 123 \
+             WHERE id = ?1",
+            params![active],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE files SET failed = 1, vlm_description = 'must stay hidden' WHERE id = ?1",
+            params![failed],
+        )
+        .unwrap();
+
+        let (rows, truncated, total) = load_analyses(&conn).unwrap();
+        assert!(!truncated);
+        assert_eq!(total, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "/library/photo.jpg");
+        assert_eq!(rows[0].description, "A quiet lake");
+        assert_eq!(rows[0].proposed_name.as_deref(), Some("quiet-lake.jpg"));
     }
 
     #[test]
@@ -1001,7 +1092,7 @@ mod tests {
     }
     /// The first paint must not wait on duplicate verification: load() returns
     /// a pending snapshot with no dupes, and the deferred pass delivers them
-    /// via LoadMsg::Dupes afterward. (audit 2026-07-14)
+    /// via LoadMsg::Dupes afterward.
     #[test]
     fn snapshot_paints_before_deferred_duplicate_verification() {
         let dir = temp_dir("deferred-dupes");

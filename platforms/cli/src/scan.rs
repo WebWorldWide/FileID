@@ -25,7 +25,9 @@ use fileid_engine::pipeline::discovery::FileKind;
 use rusqlite::{params, OptionalExtension as _};
 use walkdir::WalkDir;
 
-use crate::context::{canonical_path_text, print_json, stable_path_hash, Ctx};
+use crate::context::{
+    canonical_path_text, display_path, print_json, stable_path_hash, terminal_text, Ctx,
+};
 
 const TEXT_CAP_BYTES: u64 = 4 * 1024 * 1024;
 const DB_BATCH_SIZE: usize = 500;
@@ -544,7 +546,10 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         } else {
             println!("{}", ctx.bold("Scan complete."));
         }
-        println!("  Root:         {}", root_abs.display());
+        println!(
+            "  Root:         {}",
+            display_path(root_abs.to_string_lossy().as_ref())
+        );
         println!(
             "  Indexed:      {indexed}  {}",
             ctx.dim(&format!("({discovered} found, {skipped} unchanged)"))
@@ -557,7 +562,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
         if failed > 0 {
             println!("  Failed:       {failed}");
             for warning in &warnings {
-                println!("    {warning}");
+                println!("    {}", terminal_text(warning));
             }
         }
         if indexed > 0 {

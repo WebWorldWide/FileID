@@ -14,6 +14,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     // round-trips the "analyzed" state (skipExisting matches, badge lights).
     case qwen2VL7B       = "qwen2_5_vl_7b"
     case qwen3VL4B       = "qwen3_vl_4b"
+    case qwen3VL8B       = "qwen3_vl_8b"
     case gemma3_4B       = "gemma_3_4b"
     case gemma3_12B      = "gemma_3_12b"
     case mistralSmall32  = "mistral_small_3_2"
@@ -23,6 +24,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B:     return "Qwen2.5-VL 7B (4-bit)"
         case .qwen3VL4B:     return "Qwen3-VL 4B (4-bit)"
+        case .qwen3VL8B:     return "Qwen3-VL 8B (4-bit)"
         case .gemma3_4B:     return "Gemma 3 4B (QAT 4-bit)"
         case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
         case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
@@ -32,8 +34,9 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
 
     public var subtitle: String {
         switch self {
-        case .qwen2VL7B:     return "Recommended. Apache-2.0; strong OCR + scene understanding."
-        case .qwen3VL4B:     return "Newer architecture. Better OCR + reasoning; lighter than 7B."
+        case .qwen2VL7B:     return "Proven Apache-2.0 model with strong OCR + scene understanding."
+        case .qwen3VL4B:     return "Recommended for 8 GB Macs. Strong grounding with a light memory footprint."
+        case .qwen3VL8B:     return "Best quality for 16 GB Macs. Stronger detail, OCR, and grounded naming."
         case .gemma3_4B:     return "Google's open model. Strong on grounded VQA. Lightest pick."
         case .gemma3_12B:    return "High quality. Heavy: ~9 GB resident, ~3× slower."
         case .mistralSmall32: return "Max quality. Apache-2.0; ~14 GB, slowest. 32 GB Macs."
@@ -45,6 +48,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B:     return "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
         case .qwen3VL4B:     return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
+        case .qwen3VL8B:     return "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit"
         case .gemma3_4B:     return "mlx-community/gemma-3-4b-it-qat-4bit"
         case .gemma3_12B:    return "mlx-community/gemma-3-12b-it-qat-4bit"
         case .mistralSmall32: return "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit"
@@ -56,6 +60,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B:     return 4_300_000_000
         case .qwen3VL4B:     return 3_500_000_000
+        case .qwen3VL8B:     return 5_776_636_403
         case .gemma3_4B:     return 3_300_000_000
         case .gemma3_12B:    return 7_500_000_000
         case .mistralSmall32: return 13_500_000_000
@@ -67,6 +72,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B:     return 7.0
         case .qwen3VL4B:     return 5.0
+        case .qwen3VL8B:     return 8.5
         case .gemma3_4B:     return 4.5
         case .gemma3_12B:    return 9.0
         case .mistralSmall32: return 16.0
@@ -78,7 +84,8 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     public var secondsPerImage: Double {
         switch self {
         case .qwen2VL7B:     return 2.5
-        case .qwen3VL4B:     return 2.0
+        case .qwen3VL4B:     return 5.0
+        case .qwen3VL8B:     return 7.0
         case .gemma3_4B:     return 1.7
         case .gemma3_12B:    return 5.0
         case .mistralSmall32: return 6.0
@@ -88,14 +95,14 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
 
     public var licensePolicyKey: String {
         switch self {
-        case .qwen2VL7B, .qwen3VL4B, .mistralSmall32: return "Apache-2.0"
+        case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .mistralSmall32: return "Apache-2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
         }
     }
 
     public var licenseName: String {
         switch self {
-        case .qwen2VL7B, .qwen3VL4B, .mistralSmall32: return "Apache License 2.0"
+        case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .mistralSmall32: return "Apache License 2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
         }
     }
@@ -107,9 +114,9 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
 
     /// Top three picks for a given RAM tier, ranked best-first.
     public static func recommendedFor(ramGB: Double) -> [AIModelKind] {
-        if ramGB >= 30       { return [.mistralSmall32, .gemma3_12B, .qwen2VL7B] }
-        else if ramGB >= 16  { return [.qwen2VL7B, .qwen3VL4B, .gemma3_4B] }
-        else                 { return [.gemma3_4B, .qwen3VL4B, .paligemma3B] }
+        if ramGB >= 30       { return [.mistralSmall32, .qwen3VL8B, .qwen3VL4B] }
+        else if ramGB >= 16  { return [.qwen3VL8B, .qwen3VL4B, .qwen2VL7B] }
+        else                 { return [.qwen3VL4B, .gemma3_4B, .paligemma3B] }
     }
 
     public func fits(ramGB: Double) -> Bool {

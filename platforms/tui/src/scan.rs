@@ -1,4 +1,4 @@
-//! Engine-spawn scan driver (FIX 2).
+//! Engine-spawn scan driver.
 //!
 //! `startScan` runs the engine's FULL ML pipeline (image tags, CLIP embeddings,
 //! face detect/embed, perceptual + content hashes, doc text). It owns its own
@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use fileid_engine::ipc::{
-    CommandPayload, EventPayload, IpcCommand, IpcEvent, ScanPhase, StartScanPayload,
+    CommandPayload, Empty, EventPayload, IpcCommand, IpcEvent, ScanPhase, StartScanPayload,
 };
 use fileid_engine::models::registry::{self, LookupResult};
 
@@ -147,7 +147,7 @@ fn run_scan(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Scratch mode (FIX 1): hand the engine its data home via the SAME env var
+    // In scratch mode, hand the engine the same data home the TUI resolved.
     // its `paths::root()` honors, so the scan writes `<home>/FileID/fileid.sqlite`
     // — exactly the scratch library the TUI opened and reloads. `prepare_scratch_dir`
     // is best-effort layout setup (see its doc).
@@ -176,14 +176,9 @@ fn run_scan(
             excluded_paths: None,
         }),
     };
-    let line = serde_json::to_string(&cmd).context("serialize startScan command")?;
-    stdin
-        .write_all(line.as_bytes())
-        .and_then(|()| stdin.write_all(b"\n"))
-        .and_then(|()| stdin.flush())
-        .context("sending startScan to engine")?;
+    send_command(&mut stdin, &cmd).context("sending startScan to engine")?;
 
-    let outcome = stream_events(tx, stdout);
+    let outcome = stream_events(tx, stdout, &mut stdin);
 
     // EOF on stdin → the engine's parent-EOF watchdog exits; then reap it so we
     // don't leave a zombie. Bounded so a misbehaving engine can't wedge us.
@@ -199,11 +194,17 @@ fn run_scan(
             processed,
             failed,
             seconds,
+            people,
+            faces,
         } => Ok(ScanSummary {
             message: if failed > 0 {
-                format!("Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s")
+                format!(
+                    "Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s · {people} people from {faces} faces"
+                )
             } else {
-                format!("Scan complete: {processed}/{total} files in {seconds:.1}s")
+                format!(
+                    "Scan complete: {processed}/{total} files in {seconds:.1}s · {people} people from {faces} faces"
+                )
             },
             failed,
         }),
@@ -218,6 +219,9 @@ fn run_scan(
             // install guidance, distinct from the model download (D).
             if kind == "runtime_not_installed" {
                 anyhow::bail!("{}", runtime_missing_message())
+            }
+            if kind.starts_with("face_clustering") {
+                anyhow::bail!("scan completed, but face grouping failed: {message}")
             }
             anyhow::bail!("engine scan failed [{kind}]: {message}")
         }
@@ -239,6 +243,8 @@ enum ScanOutcome {
         processed: u64,
         failed: u64,
         seconds: f64,
+        people: u32,
+        faces: u64,
     },
     Error {
         kind: String,
@@ -247,10 +253,31 @@ enum ScanOutcome {
     Aborted,
 }
 
-/// Read the engine's newline-JSON event stream, pushing a live status line per
-/// progress event and returning the terminal outcome.
-fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutcome {
+#[derive(Clone, Copy)]
+struct ScanStats {
+    total: u64,
+    processed: u64,
+    failed: u64,
+    seconds: f64,
+}
+
+fn send_command<W: Write>(writer: &mut W, command: &IpcCommand) -> Result<()> {
+    let line = serde_json::to_string(command).context("serializing engine command")?;
+    writer
+        .write_all(line.as_bytes())
+        .and_then(|()| writer.write_all(b"\n"))
+        .and_then(|()| writer.flush())
+        .context("writing engine command")
+}
+
+/// Read engine events, stream progress, and cluster faces before completing.
+fn stream_events<R: std::io::Read, W: Write>(
+    tx: &Sender<LoadMsg>,
+    stdout: R,
+    stdin: &mut W,
+) -> ScanOutcome {
     let reader = BufReader::new(stdout);
+    let mut scan: Option<ScanStats> = None;
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
@@ -303,11 +330,36 @@ fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutco
             }
             EventPayload::ScanComplete(w) => {
                 let c = w.inner;
-                return ScanOutcome::Complete {
+                scan = Some(ScanStats {
                     total: c.total_files,
                     processed: c.processed_files,
                     failed: c.failed_files,
                     seconds: c.total_seconds,
+                });
+                let _ = tx.send(LoadMsg::Status("Grouping detected faces…".to_string()));
+                let command = IpcCommand {
+                    id: "fileid-tui-face-clustering".to_string(),
+                    payload: CommandPayload::RunFaceClustering(Empty {}),
+                };
+                if let Err(error) = send_command(stdin, &command) {
+                    return ScanOutcome::Error {
+                        kind: "face_clustering_start_failed".to_string(),
+                        message: error.to_string(),
+                    };
+                }
+            }
+            EventPayload::FaceClusteringComplete(w) => {
+                let Some(scan) = scan else {
+                    continue;
+                };
+                let result = w.inner;
+                return ScanOutcome::Complete {
+                    total: scan.total,
+                    processed: scan.processed,
+                    failed: scan.failed,
+                    seconds: scan.seconds,
+                    people: result.person_count,
+                    faces: result.face_count,
                 };
             }
             EventPayload::Error(w) => {
@@ -320,7 +372,13 @@ fn stream_events<R: std::io::Read>(tx: &Sender<LoadMsg>, stdout: R) -> ScanOutco
             _ => {}
         }
     }
-    ScanOutcome::Aborted
+    match scan {
+        Some(_) => ScanOutcome::Error {
+            kind: "face_clustering_aborted".to_string(),
+            message: "engine exited before face clustering completed".to_string(),
+        },
+        None => ScanOutcome::Aborted,
+    }
 }
 
 /// Wait for the engine to exit, but don't hang forever if it ignores EOF.
@@ -594,7 +652,7 @@ fn engine_storage_env<'a>(db: &'a Path, data_home: Option<&'a Path>) -> (&'stati
     }
 }
 
-/// Best-effort scratch-state setup before a scratch-mode scan (FIX 1). Ensures
+/// Best-effort scratch-state setup before a scratch-mode scan. Ensures
 /// the engine's scratch root (`<data_home>/FileID`) exists, and on Linux/Windows
 /// — where the engine resolves its model dir from that same root — links the
 /// REAL model directory in so a scratch scan can still find weights. Everything
@@ -632,6 +690,7 @@ fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fileid_engine::ipc::{FaceClusteringResult, ScanComplete, Wrap};
 
     #[test]
     fn engine_exe_name_matches_platform() {
@@ -641,6 +700,46 @@ mod tests {
         } else {
             assert_eq!(name, "FileIDEngine");
         }
+    }
+
+    #[test]
+    fn scan_completion_triggers_face_clustering_before_success() {
+        let events = [
+            IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ScanComplete {
+                session_id: "test".into(),
+                total_files: 5,
+                processed_files: 5,
+                failed_files: 0,
+                total_seconds: 1.2,
+            }))),
+            IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(
+                FaceClusteringResult {
+                    person_count: 2,
+                    face_count: 7,
+                    unmatched_faces: 1,
+                    duration_seconds: 0.3,
+                },
+            ))),
+        ]
+        .into_iter()
+        .map(|event| serde_json::to_string(&event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let (tx, _rx) = std::sync::mpsc::sync_channel(8);
+        let mut commands = Vec::new();
+
+        let outcome = stream_events(&tx, events.as_bytes(), &mut commands);
+        match outcome {
+            ScanOutcome::Complete { people, faces, .. } => {
+                assert_eq!((people, faces), (2, 7));
+            }
+            _ => panic!("scan must wait for face clustering"),
+        }
+        let command: IpcCommand = serde_json::from_slice(&commands).unwrap();
+        assert!(matches!(
+            command.payload,
+            CommandPayload::RunFaceClustering(_)
+        ));
     }
 
     #[test]
@@ -668,7 +767,7 @@ mod tests {
         dir
     }
 
-    /// FIX 1: the gate must report missing when the ENGINE model root lacks the
+    /// The gate must report missing when the engine model root lacks the
     /// sentinels — even if some other dir (the macOS app dir) has them. Resolving
     /// against an explicit empty root proves the check reads the right place, and
     /// flips to "installed" the moment the revision-keyed sentinels appear there.
@@ -708,7 +807,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// FIX 2: the `models_not_installed` message is TUI-appropriate — press D, the
+    /// The `models_not_installed` message is TUI-appropriate — press D, the
     /// real ~370 MB size for the two gated models, their kinds, and NONE of the
     /// desktop-app "Welcome screen" wording.
     #[test]

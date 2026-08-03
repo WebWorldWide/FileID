@@ -22,11 +22,8 @@ public enum DeepAnalyzeScope: Sendable {
 
 public enum DeepAnalyzeRunner {
 
-    /// Resolve scope → ordered list of (id, path) pairs. Targets images,
-    /// videos, and PDFs — for videos we extract a keyframe; for PDFs we
-    /// render the first page; for images we feed the file directly. The
-    /// VLM captions all three. WholeLibrary skips files with a successful
-    /// full pass by the requested model when `skipExisting=true`.
+    /// Resolve the requested scope to supported, non-failed files in scan order.
+    /// `skipExisting` keys off a completed full pass by the requested model.
     public static func resolveTargets(
         database: Database,
         scope: DeepAnalyzeScope,
@@ -331,24 +328,38 @@ public enum DeepAnalyzeRunner {
             }
 
             let url = URL(fileURLWithPath: target.path)
-            // Audio is named from EMBEDDED metadata / on-device transcription (no VLM).
-            // 3D models render via the OS QuickLook 3D generator → the VLM (visual
-            // understanding), falling back to their embedded object/material names if the
-            // render or inference fails. Everything else (image/video/pdf) takes the VLM
-            // path. Mirrors the Windows engine (analyze_metadata_named_file + the .obj
-            // software rasterizer in rasterize_for_vlm).
+            // Audio uses on-device metadata/speech/sound analysis. Other supported files
+            // use a bounded raster and, for documents, bounded extracted text.
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
             var result: DeepAnalyze.AnalysisResult
+            var requiresGeneratedFilenameMinimum = false
             if kind == .audio {
                 result = await DeepAnalyze.shared.runCancellableAnalysis {
                     await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                 }
             } else {
+                requiresGeneratedFilenameMinimum = true
+                let documentText: String?
+                if kind == .doc || kind == .pdf {
+                    let persistedText = try? await fetchDocumentText(
+                        database: database,
+                        fileID: target.id
+                    )
+                    if let persistedText {
+                        documentText = persistedText
+                    } else {
+                        documentText = await DocText.extractForDeepAnalyze(path: target.path)
+                    }
+                } else {
+                    documentText = nil
+                }
                 // Pull face cluster names (if any) to inject into the prompt.
                 let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
                 result = await DeepAnalyze.shared.runCancellableAnalysis {
                     await DeepAnalyze.shared.analyze(
                         imageURL: url,
+                        mediaKind: kind,
+                        documentText: documentText,
                         faceNames: faceNames,
                         onToken: onToken
                     )
@@ -356,6 +367,7 @@ public enum DeepAnalyzeRunner {
                 // A 3D model the OS couldn't render (no QuickLook generator) or the VLM
                 // couldn't caption → its embedded-name metadata, so it still gets a name.
                 if kind == .model, Self.isAnalysisFailure(result.description) {
+                    requiresGeneratedFilenameMinimum = false
                     result = await DeepAnalyze.shared.runCancellableAnalysis {
                         await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                     }
@@ -365,14 +377,24 @@ public enum DeepAnalyzeRunner {
                 cancelled = true
                 break
             }
-            let isFailure = Self.isAnalysisFailure(result.description)
+            let isFailure = Self.isAnalysisFailure(result)
             if isFailure {
                 failed += 1
             } else {
                 let proposedName: String?
                 if proposeRenames && !tagsOnly {
+                    let trustedYears = (try? await Self.trustedYears(
+                        database: database, fileID: target.id
+                    )) ?? []
+                    let groundedName = Self.removingUntrustedYearTokens(
+                        from: result.proposedName,
+                        trustedYears: trustedYears
+                    )
+                    let meetsMinimum = !requiresGeneratedFilenameMinimum
+                        || DeepAnalyze.hasMinimumGeneratedFilenameWords(groundedName)
+                    let acceptedName = meetsMinimum ? groundedName : nil
                     proposedName = Self.reserveProposedName(
-                        result.proposedName,
+                        acceptedName,
                         sourcePath: target.path,
                         reserved: &reservedProposedNames
                     )
@@ -425,6 +447,17 @@ public enum DeepAnalyzeRunner {
             || description == "Model not loaded."
     }
 
+    static func isAnalysisFailure(_ result: DeepAnalyze.AnalysisResult) -> Bool {
+        if isAnalysisFailure(result.description) { return true }
+        let hasDescription = !result.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasName = !(result.proposedName ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasTag = result.tags.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return !hasDescription && !hasName && !hasTag
+    }
+
     static func reserveProposedName(
         _ proposedName: String?,
         sourcePath: String,
@@ -446,6 +479,75 @@ public enum DeepAnalyzeRunner {
             if reserved.insert(candidate.lowercased()).inserted { return candidate }
             ordinal += 1
         }
+    }
+
+    static func removingUntrustedYearTokens(
+        from proposedName: String?,
+        trustedYears: Set<Int>
+    ) -> String? {
+        guard let proposedName, !proposedName.isEmpty else { return proposedName }
+        var pieces: [(separator: Character?, token: String)] = []
+        var token = ""
+        var separator: Character?
+        for character in proposedName {
+            if character == "-" || character == "_" {
+                if !token.isEmpty {
+                    pieces.append((separator, token))
+                    token = ""
+                }
+                separator = character
+            } else {
+                token.append(character)
+            }
+        }
+        if !token.isEmpty { pieces.append((separator, token)) }
+
+        var result = ""
+        for piece in pieces {
+            let year = plausibleYear(piece.token)
+            guard year == nil || trustedYears.contains(year!) else { continue }
+            if !result.isEmpty { result.append(piece.separator ?? "-") }
+            result.append(piece.token)
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    static func trustedYears(in text: String) -> Set<Int> {
+        Set(text.components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .compactMap(plausibleYear))
+    }
+
+    static func trustedYears(database: Database, fileID: Int64) async throws -> Set<Int> {
+        try await database.pool.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT created_at, ocr_text FROM files WHERE id = ?
+                """, arguments: [fileID]) else { return [] }
+
+            var years = Self.trustedYears(in: (row["ocr_text"] as String?) ?? "")
+            if let createdAt: Double = row["created_at"], createdAt.isFinite {
+                let year = Calendar(identifier: .gregorian)
+                    .component(.year, from: Date(timeIntervalSince1970: createdAt))
+                if (1900..<2100).contains(year) { years.insert(year) }
+            }
+            let tags = try String.fetchAll(db, sql: """
+                SELECT tag FROM tags
+                WHERE file_id = ? AND source IN ('auto', 'user') AND tag LIKE 'Year\\_%' ESCAPE '\\'
+                """, arguments: [fileID])
+            for tag in tags {
+                if let year = Int(tag.dropFirst(5)), (1900..<2100).contains(year) {
+                    years.insert(year)
+                }
+            }
+            return years
+        }
+    }
+
+    private static func plausibleYear(_ token: String) -> Int? {
+        guard token.utf8.count == 4,
+              token.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let year = Int(token),
+              (1900..<2100).contains(year) else { return nil }
+        return year
     }
 
     static func persist(
@@ -546,6 +648,16 @@ public enum DeepAnalyzeRunner {
                 if !formatted.isEmpty { names.append(formatted) }
             }
             return names
+        }
+    }
+
+    private static func fetchDocumentText(database: Database, fileID: Int64) async throws -> String? {
+        try await database.pool.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT text FROM doc_text WHERE file_id = ?",
+                arguments: [fileID]
+            )
         }
     }
 

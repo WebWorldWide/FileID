@@ -319,4 +319,12 @@ public actor ScanCoordinator {
             availableMB: Hardware.availableMemoryMB()
         )
     }
+
+    public func periodicSnapshot() -> ScanProgress? {
+        guard let phase = current?.phase,
+              phase == .discovering || phase == .tagging || phase == .postScan else {
+            return nil
+        }
+        return snapshot()
+    }
 }

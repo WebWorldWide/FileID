@@ -17,8 +17,112 @@ import GRDB
 private typealias Database = FileIDEngine.Database
 import FileIDShared
 
+@Suite("Qwen3-VL weight adapter")
+struct Qwen3VLWeightAdapterTests {
+    @Test("already-normalized lm_head keys survive the pinned MLX sanitizer")
+    func normalizedLMHeadKey() {
+        #expect(
+            Qwen3VLWeightAdapter.keyForPinnedRuntime("language_model.lm_head.weight")
+                == "lm_head.weight"
+        )
+        #expect(
+            Qwen3VLWeightAdapter.wrappedKey("language_model.lm_head.weight")
+                == "model.language_model.lm_head.weight"
+        )
+    }
+
+    @Test("unrelated model keys remain unchanged")
+    func unrelatedKey() {
+        let key = "language_model.model.layers.0.self_attn.q_proj.weight"
+        #expect(Qwen3VLWeightAdapter.keyForPinnedRuntime(key) == key)
+    }
+}
+
 @Suite("Deep Analyze pure-logic fixes (C3-DA)")
 struct DeepAnalyzePureLogicTests {
+
+    @Test("filename prompt forbids inferred dates")
+    func filenamePromptForbidsInferredDates() {
+        let prompt = DeepAnalyze.analysisSystemPrompt(faceNames: ["Adam"])
+        #expect(prompt.contains("visibly legible"))
+        #expect(prompt.contains("never infer or invent a year"))
+        #expect(prompt.contains("never concatenate words"))
+        #expect(prompt.contains("only when it is clearly legible"))
+        #expect(prompt.contains("Never infer a person's identity or name"))
+        #expect(prompt.contains("Known people in this photo: Adam"))
+        #expect(!prompt.contains("Self.filenameDateRule"))
+        #expect(DeepAnalyze.filenameRetryPrompt.contains("Use only facts stated"))
+    }
+
+    @Test("malformed generated filenames are repaired or rejected")
+    func malformedGeneratedFilenamesAreRejected() {
+        #expect(!DeepAnalyze.isAcceptableProposedName("ramsonmakeup"))
+        #expect(!DeepAnalyze.isAcceptableProposedName("family-photo-at-park"))
+        #expect(DeepAnalyze.isAcceptableProposedName("boy-getting-face-paint"))
+        #expect(DeepAnalyze.filenameOnlyCandidate(
+            "FILENAME: boy-getting-face-paint\nNo extension."
+        ) == "boy-getting-face-paint")
+        #expect(DeepAnalyze.filenameOnlyCandidate("ramsonmakeup") == nil)
+    }
+
+    @Test("empty metadata-only results never establish model completion")
+    func emptyMetadataResultIsFailure() {
+        #expect(DeepAnalyzeRunner.isAnalysisFailure(
+            DeepAnalyze.AnalysisResult(description: "", proposedName: nil, tags: [])
+        ))
+        #expect(!DeepAnalyzeRunner.isAnalysisFailure(
+            DeepAnalyze.AnalysisResult(description: "", proposedName: "Rain", tags: [])
+        ))
+        #expect(!DeepAnalyzeRunner.isAnalysisFailure(
+            DeepAnalyze.AnalysisResult(description: "", proposedName: nil, tags: ["BrushedSteel"])
+        ))
+    }
+
+    @Test("unsupported identity claims and filename names are removed")
+    func ungroundedIdentityClaimsAreRemoved() {
+        let grounded = DeepAnalyze.removingUngroundedIdentityClaims(
+            from: "Two boys, identified as Jacob and Mason, sit by a window.",
+            faceNames: []
+        )
+        #expect(grounded.description == "Two boys sit by a window.")
+        #expect(grounded.rejectedTokens == ["jacob", "mason"])
+        #expect(DeepAnalyze.removingRejectedIdentityTokens(
+            from: "jacob-mason-window-smile",
+            rejectedTokens: grounded.rejectedTokens
+        ) == nil)
+    }
+
+    @Test("known face names remain available to the model")
+    func knownIdentityClaimsRemain() {
+        let description = "Two boys, identified as Jacob and Mason, sit by a window."
+        let grounded = DeepAnalyze.removingUngroundedIdentityClaims(
+            from: description,
+            faceNames: ["Jacob", "Mason"]
+        )
+        #expect(grounded.description == description)
+        #expect(grounded.rejectedTokens.isEmpty)
+    }
+
+    @Test("proposed filenames retain only trusted metadata or OCR years")
+    func proposedFilenameYearsAreGrounded() {
+        #expect(DeepAnalyzeRunner.removingUntrustedYearTokens(
+            from: "family-holiday-photo-2023", trustedYears: [2007]
+        ) == "family-holiday-photo")
+        #expect(DeepAnalyzeRunner.removingUntrustedYearTokens(
+            from: "family-holiday-2007", trustedYears: [2007]
+        ) == "family-holiday-2007")
+        #expect(DeepAnalyzeRunner.removingUntrustedYearTokens(
+            from: "2023_family-holiday_2007", trustedYears: [2007]
+        ) == "family-holiday_2007")
+        #expect(DeepAnalyzeRunner.removingUntrustedYearTokens(
+            from: "2023", trustedYears: []
+        ) == nil)
+        #expect(DeepAnalyzeRunner.trustedYears(
+            in: "Invoice 2024; reference 1234; copyright 1899"
+        ) == [2024])
+        #expect(!DeepAnalyze.hasMinimumGeneratedFilenameWords("family-holiday"))
+        #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("adam-family-holiday"))
+    }
 
     // F-C3-022 — a negated verdict must parse as DIFFERENT, never an
     // affirmative SAME at the defaulted 0.80 (> 0.75 auto-merge threshold).
@@ -550,4 +654,3 @@ struct DeepAnalyzeRunnerTests {
         return c
     }
 }
-

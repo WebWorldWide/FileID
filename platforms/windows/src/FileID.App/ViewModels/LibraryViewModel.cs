@@ -892,9 +892,12 @@ internal sealed class FileTile : INotifyPropertyChanged
     {
         var rawTags = r.Tags ?? (System.Collections.Generic.IReadOnlyList<string>)System.Array.Empty<string>();
         var formattedTags = new System.Collections.Generic.List<string>(rawTags.Count);
+        var seenTags = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
         foreach (var t in rawTags)
         {
-            formattedTags.Add(FileID.Theme.Controls.TagChip.FormatTag(t));
+            var trimmed = t.Trim();
+            if (trimmed.Length > 0 && seenTags.Add(trimmed))
+                formattedTags.Add(FileID.Theme.Controls.TagChip.FormatTag(trimmed));
         }
         var tags = (System.Collections.Generic.IReadOnlyList<string>)formattedTags;
 

@@ -174,6 +174,7 @@ public final class RamPlusService: @unchecked Sendable {
             // regression. NeuralNetwork loads in ~9 s and is equal-or-faster.
             let coremlOpts = ORTCoreMLExecutionProviderOptions()
             coremlOpts.enableOnSubgraphs = true
+            coremlOpts.onlyAllowStaticInputShapes = true
             try opts.appendCoreMLExecutionProvider(with: coremlOpts)
             let ortSession = try ORTSession(env: ortEnv, modelPath: Self.onnxURL.path, sessionOptions: opts)
             guard let firstInput = try ortSession.inputNames().first else {

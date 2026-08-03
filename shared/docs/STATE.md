@@ -8,6 +8,145 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — Final production artifact and real-data acceptance
+
+The final macOS strict build passes 381 tests across 73 suites with complete concurrency checking
+and warnings as errors. The Windows/shared Rust engine passes 684 normal tests plus both explicit
+million-file scale tests; CLI passes 65 unit tests, 14 smoke tests, and both scale tests; TUI passes
+111 normal tests and its million-row test. Strict Clippy, formatting, `git diff --check`, all four
+offline lockfile audits, and the existing non-security policy and packaging gates pass.
+
+The versioned `FileID-v0.1.3.dmg` was rebuilt from release binaries and is checksum-valid. The app
+and nested engine verify from a read-only mounted DMG, and launching that mounted app starts both
+`FileID` and its bundled `FileIDEngine` with the single colocated `mlx.metallib`. The release wrapper
+is executable again. The artifact remains deliberately ad-hoc signed and unnotarized because no
+Developer ID Application identity or notarization profile is installed; it is suitable only for a
+clearly labeled unsigned prerelease.
+
+A fresh read-only Adlon acceptance folder contained 15 DOCX, nine HTML, and one PPTX source file.
+All 16 supported Office documents scanned successfully, persisted extracted document text and text
+embeddings, and representative DOCX/PPTX files completed packaged Qwen3-VL 8B Deep Analyze with
+descriptions, grounded proposed names, and VLM tags. The exact source metadata fingerprint remained
+`4f1bdb2a5d40ad8fc8667faa0fdf3dbe2177817ef294127769999ddc16631bb8`; no Restructure apply or other
+source mutation was issued. The separate security review was skipped at the owner's direction and
+is not claimed by this entry.
+
+## 2026-08-02 — Production polish: all-file macOS analysis, terminal UX, and release packaging
+
+macOS scan tagging now derives up to eight deterministic RAKE-style keywords from bounded PDF and
+document text, matching the Rust engine's limits and deterministic tie ordering. Deep Analyze uses
+persisted or freshly extracted bounded text for PDFs, Word, PowerPoint, Excel, and plain documents;
+combines it with a bounded native preview when available; quotes file text as untrusted JSON data;
+and falls back to grounded text-only descriptions, names, and tags without inventing visual claims.
+MTS/M2TS route through video keyframes. Audio and 3D files remain first-class targets, and an empty
+metadata-only result can no longer establish full-analysis completion.
+
+The macOS security follow-up contains OBJ material references to regular files beneath the model
+directory, redacts database-open paths from user-facing IPC, aligns Deep Analyze counts with every
+engine-supported kind, bounds SoundAnalysis by wall-clock time, cancels timed-out Quick Look work,
+and removes the unreliable claim that Finder's Undo owns FileID trash operations. Corrupt PDF and
+presentation inputs remain retryable. Focused traversal, timeout, completion, counting, prompt-
+injection, extraction, and file-matrix regressions accompany the changes.
+
+The CLI rejects ambiguous or previously ignored flags, bounds query result counts, deduplicates
+model selections, sanitizes terminal control characters, and waits for authoritative face
+clustering after a full scan. The TUI now keeps all six tabs reachable at 80 columns, meets the 4.5:1
+normal-text contrast floor for muted labels, adds page navigation and truly modal help, displays
+persisted Deep Analyze results read-only, uses an isolated scratch library by default, and also
+waits for face clustering before reload. Both platform READMEs and the root README now document the
+actual release artifacts, database precedence, compatibility model IDs, key map, safety gates, and
+Swift/Rust engine split.
+
+Release packaging now ships only the colocated `mlx.metallib` that MLX loads first instead of a
+duplicate 96 MB copy. Both unsigned and production scripts stage outside Desktop/FileProvider,
+verify the app seal before imaging, validate the DMG checksum, mount the completed image, and verify
+the app inside it. The ad-hoc v0.1.3 dry run passed; its mounted app copied to `/tmp` launched both
+FileID and FileIDEngine. The local test copy was moved recoverably to Trash. This does not claim
+Developer ID signing or notarization; no such identity/profile is configured.
+
+Final local evidence: strict Swift concurrency/warnings-as-errors passes 376 tests in 73 suites;
+the shared Rust engine passes strict Clippy plus 683 library tests and two manifest tests (two
+explicit scale tests ignored in the normal run); CLI passes 65 unit + 14 smoke tests and both
+explicit scale suites; TUI passes 111 normal tests and its million-row suite; all four shipped
+lockfiles resolve patched `event-listener` 5.4.2. Rust formatting, `git diff --check`, binary privacy,
+shell syntax, DMG checksum/signature/launch, model-license, supply-chain, workflow-pin/permission,
+and current-document gates pass. .NET and native Linux GTK builds remain hosted/native-platform
+gates because those SDKs are not installed on this Mac. Adlon stayed read-only throughout; its live
+library remains visible at 180 healthy rows out of 181 indexed files.
+
+## 2026-08-02 — macOS UI, tagging, and Qwen3-VL 8B quality follow-up
+
+Cleanup is pinned to the top of its tab in the production app. The five-stage sidebar track now uses
+one geometry model for both dots and line segments, so its animated fill ends exactly at each dot
+center without overshoot; regression tests cover all five endpoints. File-preview tagging exposes a
+visible gold **Apply tag** button, disables it for blank input, and maps Return to the same action.
+
+RAM++ now advertises the static Core ML input shapes used by the shipped model. Four bounded workers
+remain the measured optimum: the copied-Adlon benchmark improved from 27.73 s to 22.59 s, and every
+one of the 222 emitted tags and scores remained identical. Higher concurrency was rejected because
+it increased memory pressure without improving the stable four-worker result.
+
+The Apache-2.0 `lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit` revision
+`a0afc48efd9308fb14b4d58bbd49d382f7d4f845` is now the 16 GB recommendation; its exact download is
+5,776,636,403 bytes. Across six copied Adlon images, 4B completed in 30.92 s at a 4.8 GiB peak
+footprint and 8B completed in 47.49 s at 7.2 GiB. The 8B answers were generally more concise and
+grounded, while 4B remains the right 8 GB choice. Deterministic generation and output repair remove
+unsupported identities and uncertain OCR; the final guard case produced the factual caption “Two
+boys sit side by side on a bench inside a building with large windows, smiling at the camera.” and
+filename `boys-sitting-bench-windows`, with no invented name.
+
+The final strict Swift run passes 354 tests in 70 suites with complete concurrency and warnings as
+errors. The production 0.1.3 bundle rebuild passes with `mlx.metallib`, and live screenshots confirm
+the Cleanup alignment and active-dot endpoint. The user database remains healthy: 181 files, 180
+tagged files, 1,484 automatic tags, zero face-verification rows, and `PRAGMA quick_check = ok`. Every
+indexed Adlon path remains present with its cataloged size and modification time unchanged; all
+mutation-capable benchmarks ran only against explicit local copies.
+
+## 2026-08-02 — Native macOS parity hardening and Adlon acceptance
+
+The latest GitHub state was fetched before work began; `origin/main` remained at `f96a6e1`, with no
+newer Windows changes to integrate. macOS now uses one bounded full-source ImageIO decode for scan
+tagging, face crops, and Deep Analyze instead of accepting low-resolution embedded JPEG previews.
+Discovery reports useful early progress, completed scans stop emitting terminal progress, and both
+ordinary and disk-backed Restructure planners omit case-insensitive source-equals-destination no-ops.
+
+The native Adlon pass detected 226 faces, retained and SFace-embedded 174, assigned 171, and produced
+29 visible people. Representative cards display real face crops. Merge suggestions reject clusters
+whose members co-occur in one file, and “Different people” verdicts persist through re-clustering by
+stable face anchors. macOS now matches Windows by resolving the suggestion only after the engine
+confirms that write; stale anchors and engine failures remain visible with their returned error. The
+two verdict rows created by accidental UI clicks during validation were identified and removed; the
+final `face_verifications` count is zero and SQLite `quick_check` is `ok`.
+
+Deep Analyze now defaults 8–16 GB Macs to the Apache-2.0 Qwen3-VL 4B MLX quant after a native Adlon
+A/B showed stronger grounding than Qwen2.5-VL 7B with a smaller memory footprint. Both the Swift MLX
+and Rust llama.cpp paths enforce trusted-year grounding and a 3–5-word filename contract, retry once
+with a stricter image-grounded prompt, then decline to invent a name. A live Qwen3 rerun of
+`PC230007.JPG` persisted a factual makeup/face-paint caption and
+`makeup-artist-boy-ram-sweatshirt`; the Library preview refreshes immediately after terminal analysis.
+The live preview now case-insensitively deduplicates VLM and RAM++ labels while preserving their
+separate database provenance; the matching Windows presentation source applies the same rule.
+
+Restructure produced a read-only 27-action Adlon plan (16 tidying, 11 reorganizing, zero staying-put
+no-ops). macOS now binds that plan to the active scanned folder, matching Windows and the engine
+contract, rather than offering an unrelated destination picker. Apply was not invoked. The exact
+corpus path/size/mtime fingerprint remained
+`e1e52c67d0d93e45704284aa17868fab9bd3885c84b2e9207adc5c79ac44e58f`, so no Adlon file was renamed,
+moved, resized, or retimestamped.
+
+The process-spawning cancellation test is now database-isolated. Before that guard, local test runs
+had inserted 334 temporary corrupt-JPEG rows and eight `FileIDCancelTest-*` sessions into the live
+catalog. A SQLite backup was taken, only those exact test artifacts were removed, and the restored
+library contains 181 Adlon rows (180 healthy, one explicitly corrupt) with `quick_check = ok`.
+
+Native verification passes the strict macOS suite (348 tests, 68 suites), production build and
+launch, Windows Rust format and strict Clippy, both complete engine test targets (670 and 682 tests;
+only explicit performance benchmarks ignored), and `git diff --check`. The small WinUI tag-parity
+mirror could not be compiled on this Mac because the .NET SDK is unavailable; its source regression
+is ready for the normal Windows/hosted gate. Signing/notarization,
+clean-machine installation, Windows GPU runtime, and ARM64/other-hardware matrices remain external
+gates and are not inferred from this Mac.
+
 ## 2026-08-02 — Identity-safe People reduction and final real-data quality pass
 
 People no longer hides any active cluster by size on Windows, macOS, or Linux. The full 164,518-file

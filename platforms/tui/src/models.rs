@@ -1,4 +1,4 @@
-//! AI-model download driver (the Settings `D` key, FEATURE 3).
+//! AI-model download driver for the global `D` shortcut.
 //!
 //! Runs the FileID CLI's `models download --all --yes --porcelain-progress` on a
 //! worker thread and parses its output into a live install gauge + status line,

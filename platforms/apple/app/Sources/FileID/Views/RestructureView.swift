@@ -24,6 +24,7 @@ import FileIDShared
 struct RestructureView: View {
     let store: ReadStore
     let engine: EngineClient
+    let selectedRoot: URL?
 
     @State private var libraryRoot: URL?
     @State private var proposals: [Proposal] = []
@@ -37,7 +38,6 @@ struct RestructureView: View {
     @State private var loading = false
     @State private var status: String?
     @State private var statusIsError = false
-    @State private var showingPicker = false
     @State private var staysPutExpanded: Bool = false
     @State private var confirmApply: Bool = false
     /// Single-flight guard for the apply / convert paths. A real move is
@@ -314,31 +314,15 @@ struct RestructureView: View {
         .sheet(item: $drillDown) { scope in
             drillDownSheet(scope)
         }
-        .fileImporter(isPresented: $showingPicker,
-                       allowedContentTypes: [.folder],
-                       allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    libraryRoot = url
-                    requestPlan()
-                }
-            case .failure: break
-            }
-        }
-        .task {
-            // Auto-default the destination root to the most recently scanned
-            // folder so proposals load immediately. User can still override
-            // via "Change destination…" but the upfront blocker is gone —
-            // they see what the assistant proposes the moment they open
-            // the tab.
-            if libraryRoot == nil, let session = store.recentSessions(limit: 1).first {
-                let url = URL(fileURLWithPath: session.rootPath)
-                if FileManager.default.fileExists(atPath: url.path) {
-                    libraryRoot = url
-                    requestPlan()
-                }
-            }
+        .task(id: selectedRoot?.standardizedFileURL.path) {
+            guard libraryRoot?.standardizedFileURL.path
+                    != selectedRoot?.standardizedFileURL.path else { return }
+            libraryRoot = selectedRoot
+            proposals = []
+            groups = []
+            selectedIDs = []
+            summary = .empty
+            if selectedRoot != nil { requestPlan() }
         }
         // Re-request a plan only on Deep Analyze terminal events
         // (`.deepAnalyzeComplete`). The previous per-file 3-s throttle
@@ -729,20 +713,13 @@ struct RestructureView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
-                Button {
-                    showingPicker = true
-                } label: {
-                    Label(libraryRoot == nil ? "Pick destination root…" : "Change destination…",
-                          systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
             }
             if let root = libraryRoot {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.fill")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Destination: \(root.path)")
+                    Text("Library root: \(root.path)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
@@ -868,8 +845,8 @@ struct RestructureView: View {
         if libraryRoot == nil {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
-                title: "Pick a destination root",
-                message: "Choose where the proposed folder hierarchy should live. Nothing moves until you review the proposed structure and choose Apply — then the selected files are moved on disk."
+                title: "Pick a folder to scan",
+                message: "Choose a library folder in the sidebar and scan it first. Restructure proposes a cleaner hierarchy inside that same root, and nothing moves until you review and apply it."
             )
         } else if loading {
             // Computing state lives on a clipped LavaLamp surface so

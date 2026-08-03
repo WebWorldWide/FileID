@@ -1031,14 +1031,18 @@ public sealed partial class FilePreviewSheet : UserControl
                     using var cmd = conn.CreateCommand();
                     cmd.CommandText = """
                         SELECT tag FROM tags
-                        WHERE file_id = $id AND source IN ('auto','user')
-                        ORDER BY source DESC, rowid
+                        WHERE file_id = $id AND source IN ('auto','user','vlm')
+                        ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,
+                                 score DESC,
+                                 rowid
                         """;
                     cmd.Parameters.AddWithValue("$id", fileId);
                     using var rdr = cmd.ExecuteReader();
+                    var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
                     while (rdr.Read())
                     {
-                        list.Add(rdr.GetString(0));
+                        var tag = rdr.GetString(0).Trim();
+                        if (tag.Length > 0 && seen.Add(tag)) list.Add(tag);
                     }
                 }
                 catch { /* DB unavailable; return empty list */ }

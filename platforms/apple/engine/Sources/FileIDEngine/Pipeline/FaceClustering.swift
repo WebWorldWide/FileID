@@ -2064,13 +2064,7 @@ public enum FaceClustering {
             return nil
         }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        let opts: [CFString: Any] = [
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 2048
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary)
+        return decodeBoundedImage(src, maxPixelSize: 2048)
     }
 
 }
