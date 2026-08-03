@@ -138,6 +138,8 @@ jobs:
         run: >
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj
           -c Debug
+          -p:Platform=x64
+          -p:RuntimeIdentifier=win-x64
           --verbosity minimal
           --blame-hang-timeout 5m
           --blame-hang-dump-type mini
