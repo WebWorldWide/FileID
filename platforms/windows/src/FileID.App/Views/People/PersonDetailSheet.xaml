@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
     PersonDetailSheet — modal showing every face in a cluster + a
     structured-name editor (title / first / middle / last / suffix).
@@ -46,9 +46,9 @@
                 <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
             <TextBox Grid.Row="0" Grid.Column="0" x:Name="TitleBox"  Header="Title"   PlaceholderText="Dr." />
-            <TextBox Grid.Row="0" Grid.Column="1" x:Name="FirstBox"  Header="First"   />
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="FirstBox"  Header="First name" PlaceholderText="First or full name" />
             <TextBox Grid.Row="0" Grid.Column="2" x:Name="MiddleBox" Header="Middle"  />
-            <TextBox Grid.Row="0" Grid.Column="3" x:Name="LastBox"   Header="Last"    />
+            <TextBox Grid.Row="0" Grid.Column="3" x:Name="LastBox"   Header="Last name" />
             <TextBox Grid.Row="0" Grid.Column="4" x:Name="SuffixBox" Header="Suffix"  PlaceholderText="Jr." />
         </Grid>
 

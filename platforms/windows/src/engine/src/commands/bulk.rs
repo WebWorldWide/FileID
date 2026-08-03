@@ -1525,14 +1525,17 @@ pub(crate) async fn handle_rename_person(
             .filter(|s| !s.trim().is_empty());
         let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
         let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
-        let display = match (first, last) {
-            (Some(f), Some(l)) => Some(format!("{f} {l}")),
-            (Some(f), None) => Some(f.to_string()),
-            (None, Some(l)) => Some(l.to_string()),
-            _ => None,
+        let parts: Vec<&str> = [title, first, middle, last, suffix]
+            .into_iter()
+            .flatten()
+            .collect();
+        let display = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
         };
         let affected = tx.execute(
-            "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name) WHERE id=?7",
+            "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=?6 WHERE id=?7",
             rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
         )?;
         if affected == 0 {
@@ -2963,5 +2966,20 @@ mod tests {
         let contents = std::fs::read_to_string(dir.join("rename_recover.ndjson")).unwrap();
         assert_eq!(contents.lines().filter(|l| !l.is_empty()).count(), 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_person_display_name_combines_parts() {
+        let parts: Vec<&str> = [Some("Dr."), Some("Jane"), None, Some("Doe"), None]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(parts.join(" "), "Dr. Jane Doe");
+
+        let single: Vec<&str> = [None, Some("Grandma"), None, None, None]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(single.join(" "), "Grandma");
     }
 }

@@ -1,4 +1,4 @@
-﻿// PeopleView code-behind. Cluster cards are draggable + drop targets;
+// PeopleView code-behind. Cluster cards are draggable + drop targets;
 // dropping cluster A onto cluster B emits engine `mergeClusters` IPC
 // (A's face_prints reassigned to B's person_id, A's person row deleted).
 
@@ -604,36 +604,19 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnClusterTapped), async () =>
     {
-        if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
+        if (sender is not FrameworkElement el) return;
+        PersonCluster? pc = el.DataContext as PersonCluster;
+        if (pc is null && el.Tag is int or long)
+        {
+            long cid = Convert.ToInt64(el.Tag);
+            pc = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
+        }
+        if (pc is null) return;
         if (XamlRoot is null || _detailOpen) return;
         _detailOpen = true;
-        try { await ShowPersonDetailAsync(pc); }
+        try { await OpenDetailSheetAsync(pc); }
         finally { _detailOpen = false; }
     });
-
-    private async Task ShowPersonDetailAsync(PersonCluster pc)
-    {
-        var sheet = new PersonDetailSheet();
-        sheet.SetPerson(pc.ClusterId, pc.DisplayName);
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Person details",
-            Content = sheet,
-            PrimaryButtonText = "Save",
-            CloseButtonText = "Close",
-            DefaultButton = ContentDialogButton.Primary,
-        };
-        dialog.PrimaryButtonClick += async (_, args2) =>
-        {
-            var deferral = args2.GetDeferral();
-            var ok = await sheet.CommitAsync();
-            if (!ok) args2.Cancel = true;
-            deferral.Complete();
-        };
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
-        await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
-    }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
         => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>

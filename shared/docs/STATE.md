@@ -8,6 +8,10 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — Person detail sheet card tap and display name formatting fixes
+
+Fixed People tab cluster card tap gesture (`OnClusterTapped` in `PeopleView.xaml.cs`) to check both `el.DataContext` and `el.Tag` (`ClusterId`) so opening the **Person details** sheet succeeds reliably even when compiled bindings haven't populated `DataContext` on recycled grid elements. Unified dialog opening into a single thread-safe method. Updated Rust engine `handle_rename_person` (`bulk.rs`) to construct display names from all non-empty name parts (`title`, `first_name`, `middle_name`, `last_name`, `suffix`), ensuring person renaming succeeds regardless of which fields are entered. Added `rename_person_display_name_combines_parts` unit test to `bulk.rs`.
+
 ## 2026-08-03 — Windows CI test gate and format-runner hardening
 
 The Windows x64 app job exposed two release-gate defects while validating the macOS release
