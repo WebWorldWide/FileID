@@ -123,24 +123,26 @@ jobs:
           -m
         shell: pwsh
 
-      - name: Run all test projects
-        # V15.3: was IpcSchema-only with continue-on-error. Now runs every
-        # discoverable test project in Tests/, fails on red. Tests run on
-        # x64 only — ARM64 cross-building tests is rarely useful here.
-        # `dotnet test` triggers its own restore for the Tests/ projects;
-        # safe to run here because the x64 build is already complete.
+      - name: Test — IPC schema (x64 only)
         if: matrix.arch == 'x64'
         shell: pwsh
-        run: |
-          if (Test-Path Tests) {
-            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No Tests/ directory; skipping."
-          }
         working-directory: platforms/windows/Tests
+        timeout-minutes: 10
+        run: dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal
+
+      - name: Test — app services (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: platforms/windows/Tests
+        timeout-minutes: 20
+        run: >
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj
+          -c Debug
+          -p:Platform=x64
+          -p:RuntimeIdentifier=win-x64
+          --verbosity minimal
+          --blame-hang-timeout 5m
+          --blame-hang-dump-type mini
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
       # caused `dotnet format FileID.sln`'s solution-level restore to
@@ -150,7 +152,23 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
+        shell: pwsh
+        run: |
+          $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+          $env:DOTNET_HOST_PATH = $dotnet
+          $env:DOTNET_ROOT = Split-Path -Parent $dotnet
+
+          $formatOutput = & $dotnet format FileID.sln --verify-no-changes 2>&1
+          $formatExit = $LASTEXITCODE
+          $formatOutput | ForEach-Object { Write-Host $_ }
+
+          if ($formatExit -eq 4 -and (($formatOutput | Out-String) -like '*Unable to locate dotnet CLI*')) {
+            Write-Warning 'dotnet format hit its upstream CLI-probe race; retrying once.'
+            & $dotnet format FileID.sln --verify-no-changes
+            exit $LASTEXITCODE
+          }
+
+          exit $formatExit
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'

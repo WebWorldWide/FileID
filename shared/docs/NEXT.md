@@ -1,21 +1,28 @@
 # NEXT — resume here
 
-## STATUS 2026-08-03 — Deep Analyze-safe release packaging complete; hosted refresh in progress
+## STATUS 2026-08-03 — v0.1.4 macOS parity release candidate ready for hosted refresh
 
-The macOS parity/polish implementation is complete and locally green. Preserve the 381-test strict
+The macOS parity/polish implementation is complete and locally green. Preserve the 385-test strict
 Swift result, the complete Rust/CLI/TUI normal and million-file scale results, and the read-only
-Adlon Office-document acceptance. The macOS assembler now fails closed without `mlx.metallib`, both
-DMG paths verify that library inside a read-only mount, and a clean-cache local build reproduced the
-expected Metal library byte for byte. The corrected DMG launches its isolated engine without the
+Adlon Office-document acceptance. The sidebar now keeps discovery counts, estimating state, and the
+rolling engine ETA visible across every scan stage. The engine embeds background-agent metadata and
+sets a prohibited activation policy, so it remains background-only even while ML frameworks prewarm.
+The assembled release helper contains `__TEXT,__info_plist`; the app remains the sole foreground
+Dock application.
+
+The macOS assembler still fails closed without `mlx.metallib`, both DMG paths verify that library
+inside a read-only mount, and a clean-cache local build reproduced the expected Metal library byte
+for byte. The corrected release bundle launches its isolated engine without the
 `deep_analyze_unavailable` capability warning. Adlon's acceptance fingerprint is unchanged, and
 Restructure Apply was never invoked against the drive.
 
-Do not publish or restore the earlier `FileID-macOS-unsigned-253` artifact; it is checksum-valid but
-missing `mlx.metallib`. Replace it only with a workflow-dispatched artifact built after this fix and
-verify the library inside the downloaded DMG before release upload. Beyond that hosted refresh, the
-remaining evidence requires credentials or hardware unavailable on this Mac:
+Publish only a fresh v0.1.4 workflow artifact built from the tagged merge and verify the embedded
+helper plist plus `mlx.metallib` inside the downloaded DMG before release upload. Never restore the
+earlier `FileID-macOS-unsigned-253` artifact; it is checksum-valid but missing `mlx.metallib`.
+Beyond that hosted refresh, the remaining evidence requires credentials or hardware unavailable on
+this Mac:
 
-1. Keep the v0.1.3 artifact labeled **unsigned prerelease** until Apple Developer ID notarization
+1. Keep the v0.1.4 artifact labeled **unsigned prerelease** until Apple Developer ID notarization
    and a protected Windows signing provider are configured.
 2. Require hosted CI for WinUI/.NET and native Linux packaging, then run clean-machine lifecycle,
    accessibility, Windows ARM64, AMD/Intel/QNN, and native Linux matrices on their target systems.

@@ -8,6 +8,47 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-03 — Windows CI test gate and format-runner hardening
+
+The Windows x64 app job exposed two release-gate defects while validating the macOS release
+candidate. `dotnet format` hit the upstream .NET 8 CLI-probe race after restore, Debug/Release
+builds, and publish had otherwise succeeded. The format step now resolves the absolute
+host, pins the host environment used by child processes, and retries once only for the race's exact
+exit-code-and-message signature; genuine formatting failures still fail immediately.
+
+The same inspection found that the test step changed into `platforms/windows/Tests` and then checked
+for another relative `Tests` directory, causing both tracked xUnit projects to be skipped. The gate
+now invokes each project in a separate bounded step, collects app-test hang diagnostics, and fails
+if either project is missing, red, or wedged. The app-service test build is explicitly x64/win-x64,
+and both the app and test assemblies disable the Windows App SDK generated bootstrap initializer:
+FileID's custom `Program.Main` already owns production bootstrap and shutdown, while the duplicate
+module initializer wedged the generic xUnit host as soon as it loaded the app assembly. The hosted
+no-bootstrap run completed 450/455 tests but the five `ModelSlot` constructors received
+`REGDB_E_CLASSNOTREG`; a registration-free self-contained run also completed 450/455 but received
+`CLASS_E_CLASSNOTAVAILABLE`. `ModelSlot` therefore maps only those two dispatcher-capture HRESULTs
+to its existing null-dispatcher fallback in non-XAML hosts and preserves every other COM failure.
+Workflow YAML, action-pin policy, binary-privacy regressions, and diff hygiene pass locally; hosted
+Windows x64 execution remains the authoritative platform validation.
+
+## 2026-08-03 — macOS scan ETA and background-only engine release candidate
+
+The macOS sidebar now keeps scan timing visible through discovery, tagging, and post-scan work. It
+reports the live discovered-file count while the total is open-ended, changes to an explicit
+estimating state when work is measurable but throughput is not yet stable, and then presents the
+engine's rolling ETA. Four focused presentation tests cover counting, estimating, active ETA, and
+post-scan ETA behavior.
+
+`FileIDEngine` now embeds a dedicated `com.fileid.app.engine` Info.plist with `LSUIElement` and also
+sets AppKit's activation policy to `.prohibited` before model initialization. This prevents AppKit,
+ML, and document frameworks from promoting the child engine into a separate Dock application.
+Local assembly and hosted macOS packaging fail if the helper metadata is absent. Runtime inspection
+confirmed that FileID remains foreground while its engine remains background-only during model
+prewarm, and the assembled release helper contains the expected `__TEXT,__info_plist` section.
+
+The strict Swift validation passes 385 tests across 74 suites. Debug and release build-and-launch
+paths pass, including release bundle assembly with the required `mlx.metallib`.
+This is the unsigned v0.1.4 prerelease candidate; no Developer ID signing or notarization is claimed.
+
 ## 2026-08-03 — macOS release packaging now fails closed on Deep Analyze
 
 Post-merge inspection found that the workflow-dispatched macOS artifact omitted the 96 MB

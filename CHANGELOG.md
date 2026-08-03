@@ -6,6 +6,17 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-08-03
+
+### Fixed
+
+- **macOS scan timing stays visible from start to finish.** The sidebar now reports the live file
+  count while discovery is open-ended, shows an explicit estimating state once the total is known,
+  and presents the rolling engine ETA as soon as throughput stabilizes.
+- **The macOS engine no longer becomes a second Dock application.** Its Mach-O carries a dedicated
+  background-agent identity and the process explicitly prohibits foreground activation before ML
+  frameworks initialize. Local assembly and hosted CI fail if that metadata is missing.
+
 ## [0.1.3] - 2026-08-02
 
 ### Added
@@ -325,6 +336,7 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/WebWorldWide/FileID/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...v0.1.2

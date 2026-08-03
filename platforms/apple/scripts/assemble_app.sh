@@ -37,6 +37,16 @@ cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
 cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
 chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
 
+/usr/bin/otool -l "$CONTENTS/MacOS/FileIDEngine" \
+    | /usr/bin/grep -F '__info_plist' >/dev/null \
+    || { echo "❌ FileIDEngine is missing its embedded background-agent metadata"; exit 1; }
+/usr/bin/strings "$CONTENTS/MacOS/FileIDEngine" \
+    | /usr/bin/grep -F 'com.fileid.app.engine' >/dev/null \
+    || { echo "❌ FileIDEngine is missing its helper bundle identity"; exit 1; }
+/usr/bin/strings "$CONTENTS/MacOS/FileIDEngine" \
+    | /usr/bin/awk '/<key>LSUIElement<\/key>/ { if (getline > 0 && $0 ~ /<true\/>/) found=1 } END { exit found ? 0 : 1 }' \
+    || { echo "❌ FileIDEngine is not marked as a background agent"; exit 1; }
+
 cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
 
 cat > "$CONTENTS/Info.plist" <<PLIST

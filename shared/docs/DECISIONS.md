@@ -4828,3 +4828,62 @@ rebuilds. Hosted packaging installs the separate Xcode Metal Toolchain first. Bu
 both mounted-DMG verification paths now fail closed when the colocated library is absent. A warning
 was rejected because checksum and code-signature success prove artifact integrity, not feature
 completeness; a release artifact that cannot perform Deep Analyze is invalid.
+
+## 2026-08-03 — The macOS engine is both metadata-hidden and activation-prohibited
+
+`FileIDEngine` is a child executable inside the main app's `Contents/MacOS`, not its own nested app
+bundle. A naked Mach-O at that location gives Launch Services no background-agent identity, and
+loading AppKit-backed ML or document frameworks can therefore register or promote it as a second
+Dock application. The engine now embeds a minimal Info.plist in `__TEXT,__info_plist` with the
+dedicated bundle identifier `com.fileid.app.engine` and `LSUIElement=true`, while startup explicitly
+sets `NSApplication` activation policy to `.prohibited` before any model initialization.
+
+Both layers are intentional. Embedded metadata makes the helper's role unambiguous to Launch
+Services, while the activation policy is the runtime invariant even if a linked framework touches
+AppKit. Assembly and hosted packaging verify that the embedded section, identifier, and agent key
+survive the release build; packaging must fail rather than ship a helper that can occupy the Dock.
+
+## 2026-08-03 — Retry only dotnet-format's exact hosted-runner race
+
+The Windows format gate resolves the absolute .NET host, pins `DOTNET_HOST_PATH` and `DOTNET_ROOT`,
+and retries once only when `dotnet format` returns exit code 4 with `Unable to locate dotnet CLI`.
+That combination identifies the upstream asynchronous CLI-probe race seen on loaded hosted runners;
+the same workflow and SDK passed earlier the same day. Retrying every failure was rejected because
+it could mask a real format diff, while relying only on the ambient PATH was rejected because the
+child probe performs its own host lookup. All other exit codes and messages remain hard failures.
+
+## 2026-08-03 — The Windows custom entry point exclusively owns App SDK bootstrap
+
+The WinUI app disables `WindowsAppSdkBootstrapInitialize` because its custom `Program.Main` already
+calls `Bootstrap.TryInitialize` before XAML and `Bootstrap.Shutdown` on exit. Leaving the generated
+module initializer enabled duplicated ownership and caused a generic xUnit host to wedge when its
+first test loaded the app assembly. Removing the explicit entry point was rejected because it also
+owns the pre-XAML runtime error surface and lifecycle ordering; skipping the app-service suite was
+rejected because those contracts must execute in CI. Project tests preserve both sides of the
+invariant, and the published-app startup smoke verifies the production bootstrap path.
+
+## 2026-08-03 — The Windows test DLL bootstraps its generic host
+
+`FileID.App.Tests` explicitly enables `WindowsAppSdkBootstrapInitialize` even though the production
+app disables it. The xUnit process is a generic host and never calls FileID's `Program.Main`, so it
+must establish the Windows App SDK package graph before DispatcherQueue-backed services are tested.
+Leaving the test host uninitialized was rejected after the bounded suite completed 450 tests but
+failed all five `ModelSlot` tests with `REGDB_E_CLASSNOTREG`; excluding those tests would hide real
+progress-binding behavior. Separate contract assertions preserve the production-false/test-true
+bootstrap split.
+
+## 2026-08-03 — The Windows test host stays unbootstrapped and ModelSlot narrows its fallback
+
+This supersedes the preceding test-host bootstrap decision after hosted execution disproved it.
+`FileID.App.Tests` explicitly disables `WindowsAppSdkBootstrapInitialize`, matching the app project
+but for a different reason: the generic xUnit host never calls FileID's `Program.Main`, and enabling
+the generated initializer wedged the hosted runner while it waited on runtime-resolution UI. A
+no-bootstrap run completed 450/455 tests, with only the five `ModelSlot` constructors failing on
+`REGDB_E_CLASSNOTREG`. Registration-free self-contained deployment removed the wedge but produced
+the same 450/455 result with `CLASS_E_CLASSNOTAVAILABLE`, so those properties do not solve dispatcher
+activation in this host and are not retained.
+
+`ModelSlot` still captures a real dispatcher in the production UI. Its capture helper returns null
+only for those two expected registration/class-factory HRESULTs, allowing the existing synchronous
+notification path to test non-XAML state binding; all other COM failures propagate. Skipping the
+five progress-binding tests was rejected because their state-transition contracts remain valuable.

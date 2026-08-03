@@ -70,6 +70,15 @@ jobs:
       - name: Build engine (release)
         run: swift build -c release --product FileIDEngine
 
+      - name: Verify engine stays out of the Dock
+        run: |
+          set -euo pipefail
+          otool -l .build/release/FileIDEngine | grep -F '__info_plist' >/dev/null
+          strings .build/release/FileIDEngine > "$RUNNER_TEMP/fileid-engine-strings.txt"
+          grep -F 'com.fileid.app.engine' "$RUNNER_TEMP/fileid-engine-strings.txt" >/dev/null
+          awk '/<key>LSUIElement<\/key>/ { if (getline > 0 && $0 ~ /<true\/>/) found=1 } END { exit found ? 0 : 1 }' \
+            "$RUNNER_TEMP/fileid-engine-strings.txt"
+
       - name: Build app (release)
         run: swift build -c release --product FileID
 
