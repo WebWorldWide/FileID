@@ -89,6 +89,55 @@ struct BulkMutationTests {
         #expect(FileIDEngineMain.orderedUniqueFileIDs([3, 1, 3, 2, 1]) == [3, 1, 2])
     }
 
+    @Test("Different-people verdict persists stable face anchors")
+    func markPersonsDifferentPersistsStableAnchors() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDDifferentPeople-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let db = try makeDB(root)
+        try await db.pool.write { sql in
+            try sql.execute(sql: """
+                INSERT INTO files
+                    (id, path_text, path_hash, size_bytes, scanned_at, kind, extension)
+                VALUES (1, '/a.jpg', 1, 1, 0, 'image', 'jpg'),
+                       (2, '/b.jpg', 2, 1, 0, 'image', 'jpg')
+                """)
+            try sql.execute(sql: """
+                INSERT INTO persons (id, representative_face_id, file_count, created_at)
+                VALUES (10, 101, 1, 0), (20, 202, 1, 0)
+                """)
+            try sql.execute(
+                sql: "INSERT INTO face_prints (id, file_id, person_id, print_data, bbox) VALUES (?, ?, ?, ?, ?)",
+                arguments: [101, 1, 10, Data(), "0,0,0.2,0.2"])
+            try sql.execute(
+                sql: "INSERT INTO face_prints (id, file_id, person_id, print_data, bbox) VALUES (?, ?, ?, ?, ?)",
+                arguments: [202, 2, 20, Data(), "0.5,0.5,0.2,0.2"])
+        }
+
+        let result = await FileIDEngineMain.markPersonsDifferent(
+            database: db,
+            sourcePersonID: 20,
+            destinationPersonID: 10,
+            sourceAnchorFaceID: 202,
+            destinationAnchorFaceID: 101
+        )
+        #expect(result.succeeded == 1)
+        let row = try db.pool.read { sql in
+            try Row.fetchOne(sql, sql: """
+                SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b
+                FROM face_verifications
+                """)
+        }
+        let verdict = try #require(row)
+        #expect((verdict["person_a"] as Int64?) == 10)
+        #expect((verdict["person_b"] as Int64?) == 20)
+        #expect((verdict["face_a"] as Int64?) == 101)
+        #expect((verdict["face_b"] as Int64?) == 202)
+        #expect((verdict["file_a"] as Int64?) == 1)
+        #expect((verdict["bbox_b"] as String?) == "0.5,0.5,0.2,0.2")
+    }
+
     @Test("Path prefetch crosses SQLite parameter chunks without omissions")
     func pathPrefetchChunks() async throws {
         let root = FileManager.default.temporaryDirectory

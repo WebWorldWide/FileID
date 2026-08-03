@@ -49,6 +49,41 @@ fn json(out: &Output) -> serde_json::Value {
     serde_json::from_str(&stdout(out)).expect("parse json stdout")
 }
 
+#[test]
+fn models_download_without_a_selection_is_a_failure() {
+    let out = run(&["--json", "models", "download"]);
+    assert!(!out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "failure must not emit a success payload"
+    );
+    let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(error["level"], "error");
+    assert!(error["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("no models selected")));
+}
+
+#[test]
+fn duplicate_model_names_are_planned_once() {
+    let models = unique_dir("duplicate-model-selection").join("Models");
+    let out = Command::new(bin())
+        .args([
+            "--json",
+            "models",
+            "download",
+            "arcface",
+            "arcface",
+            "--dry-run",
+        ])
+        .env("FILEID_MODELS_DIR", &models)
+        .output()
+        .expect("spawn duplicate model dry-run");
+    assert!(out.status.success());
+    let body = json(&out);
+    assert_eq!(body["models"].as_array().map(Vec::len), Some(1));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn runtime_install_json_abort_and_no_source_are_machine_safe() {
@@ -1041,7 +1076,7 @@ fn macos_default_resolves_swift_app_library() {
     let _ = std::fs::remove_dir_all(&corpus);
 }
 
-/// FIX 4 — a bare `fileid` (no subcommand) prints the friendly getting-started
+/// A bare `fileid` (no subcommand) prints the friendly getting-started
 /// intro to stdout and exits 0, instead of clap's terse usage error. It must
 /// touch no library (it returns before resolving a DB), and `--help` /
 /// `--version` must still work. Fully isolated: no `--db`, no env, no writes.
@@ -1105,7 +1140,7 @@ fn no_subcommand_prints_friendly_intro() {
 /// A scan that hits an unreadable file must still commit everything readable
 /// and exit with the dedicated partial code (3) — not success (the pre-audit
 /// silent-success bug) and not hard failure (which wrappers read as "results
-/// unusable"). (audit 2026-07-14)
+/// unusable").
 #[test]
 fn partial_scan_commits_results_and_exits_with_code_3() {
     // Root can read 0o000 files, which would turn the partial scan clean.

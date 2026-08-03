@@ -216,20 +216,35 @@ pub async fn analyze_file(
             anyhow::bail!("cancelled");
         }
         let req = CaptionRequest {
-            gguf_path: gguf,
-            mmproj_path: mmproj,
-            image_path: rasterized,
+            gguf_path: gguf.clone(),
+            mmproj_path: mmproj.clone(),
+            image_path: rasterized.clone(),
             prompt: vlm::rename_prompt_with_faces(face_names),
             max_tokens: 30,
             greedy: true,
         };
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
-        proposed_name = Some(apply_person_prefix(&sanitize_proposed_name(&result.text), face_names));
+        let mut candidate = generated_filename_candidate(&result.text);
+        if candidate.is_none() {
+            let retry = CaptionRequest {
+                gguf_path: gguf,
+                mmproj_path: mmproj,
+                image_path: rasterized,
+                prompt: vlm::RENAME_RETRY_PROMPT.to_string(),
+                max_tokens: 30,
+                greedy: true,
+            };
+            candidate = generated_filename_candidate(
+                &vlm::caption(runner, &retry, cancel.clone(), |_| {}).await?.text,
+            );
+        }
+        proposed_name = candidate.map(|name| apply_person_prefix(&name, face_names));
     }
 
     // Persist caption + proposed name (v3 `files` columns) + VLM tags.
     {
         let conn = db.lock();
+        proposed_name = vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
         persist_vlm_results(
             &conn,
             file_id,
@@ -490,7 +505,7 @@ async fn analyze_metadata_named_file(
     } else {
         None
     };
-    let proposed_name = if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    let mut proposed_name = if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
         proposed_name
     } else {
         None
@@ -506,6 +521,7 @@ async fn analyze_metadata_named_file(
 
     {
         let conn = db.lock();
+        proposed_name = vetted_proposed_name(&conn, file_id, proposed_name)?;
         persist_vlm_results(
             &conn,
             file_id,
@@ -1002,16 +1018,27 @@ pub(crate) async fn analyze_file_via_server(
             anyhow::bail!("cancelled");
         }
         let ren_prompt = vlm::rename_prompt_with_faces(face_names);
-        proposed_name = Some(apply_person_prefix(
-            &sanitize_proposed_name(
-                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
-            ),
-            face_names,
-        ));
+        let mut candidate = generated_filename_candidate(
+            &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
+        );
+        if candidate.is_none() {
+            candidate = generated_filename_candidate(
+                &complete_cancellable(
+                    server,
+                    &rasterized,
+                    vlm::RENAME_RETRY_PROMPT,
+                    30,
+                    &cancel,
+                )
+                .await?,
+            );
+        }
+        proposed_name = candidate.map(|name| apply_person_prefix(&name, face_names));
     }
 
     {
         let conn = db.lock();
+        proposed_name = vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
         persist_vlm_results(
             &conn,
             file_id,
@@ -1183,6 +1210,135 @@ pub(crate) fn sanitize_proposed_name(raw: &str) -> String {
     } else {
         out
     }
+}
+
+fn generated_filename_candidate(raw: &str) -> Option<String> {
+    let mut line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
+    if let Some((label, value)) = line.split_once(':') {
+        if label.trim().eq_ignore_ascii_case("filename") {
+            line = value.trim();
+        }
+    }
+    let candidate = sanitize_proposed_name(line);
+    is_acceptable_proposed_name(&candidate).then_some(candidate)
+}
+
+fn is_acceptable_proposed_name(name: &str) -> bool {
+    let words: Vec<&str> = name.split(['-', '_']).collect();
+    if !(3..=5).contains(&words.len())
+        || words.iter().any(|word| {
+            word.len() < 2 || !word.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+    {
+        return false;
+    }
+    !words.iter().any(|word| {
+        matches!(
+            word.to_ascii_lowercase().as_str(),
+            "filename" | "image" | "photo" | "picture" | "untitled"
+        )
+    })
+}
+
+fn vetted_proposed_name(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    proposed_name: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let Some(proposed_name) = proposed_name else {
+        return Ok(None);
+    };
+    let mut trusted_years = std::collections::HashSet::new();
+    let (created_at, ocr_text): (Option<f64>, Option<String>) = conn.query_row(
+        "SELECT files.created_at, ocr_text.text \
+         FROM files LEFT JOIN ocr_text ON ocr_text.file_id=files.id \
+         WHERE files.id=?1",
+        [file_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let Some(created_at) = created_at.filter(|value| value.is_finite()) {
+        use chrono::{Datelike, Local, TimeZone};
+        let seconds = created_at.floor() as i64;
+        let nanos = ((created_at - seconds as f64) * 1_000_000_000.0) as u32;
+        if let chrono::LocalResult::Single(date) | chrono::LocalResult::Ambiguous(date, _) =
+            Local.timestamp_opt(seconds, nanos)
+        {
+            let year = date.year();
+            if (1900..2100).contains(&year) {
+                trusted_years.insert(year);
+            }
+        }
+    }
+    if let Some(ocr_text) = ocr_text {
+        trusted_years.extend(trusted_years_in_text(&ocr_text));
+    }
+    let mut statement = conn.prepare(
+        "SELECT tag FROM tags WHERE file_id=?1 AND source IN ('auto','user') AND tag LIKE 'Year\\_%' ESCAPE '\\'",
+    )?;
+    for tag in statement.query_map([file_id], |row| row.get::<_, String>(0))? {
+        if let Some(year) = tag?.strip_prefix("Year_").and_then(plausible_year) {
+            trusted_years.insert(year);
+        }
+    }
+    Ok(remove_untrusted_year_tokens(&proposed_name, &trusted_years))
+}
+
+fn vetted_generated_proposed_name(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    proposed_name: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    Ok(vetted_proposed_name(conn, file_id, proposed_name)?
+        .filter(|name| has_minimum_generated_filename_words(name)))
+}
+
+fn has_minimum_generated_filename_words(name: &str) -> bool {
+    name.split(['-', '_']).filter(|word| !word.is_empty()).count() >= 3
+}
+
+fn trusted_years_in_text(text: &str) -> std::collections::HashSet<i32> {
+    text.split(|character: char| !character.is_ascii_digit())
+        .filter_map(plausible_year)
+        .collect()
+}
+
+fn remove_untrusted_year_tokens(
+    proposed_name: &str,
+    trusted_years: &std::collections::HashSet<i32>,
+) -> Option<String> {
+    let mut result = String::new();
+    let mut token = String::new();
+    let mut separator = None;
+    let mut append = |token: &mut String, separator: Option<char>| {
+        if token.is_empty() {
+            return;
+        }
+        let keep = plausible_year(token).is_none_or(|year| trusted_years.contains(&year));
+        if keep {
+            if !result.is_empty() {
+                result.push(separator.unwrap_or('-'));
+            }
+            result.push_str(token);
+        }
+        token.clear();
+    };
+    for character in proposed_name.chars() {
+        if matches!(character, '-' | '_') {
+            append(&mut token, separator);
+            separator = Some(character);
+        } else {
+            token.push(character);
+        }
+    }
+    append(&mut token, separator);
+    (!result.is_empty()).then_some(result)
+}
+
+fn plausible_year(token: &str) -> Option<i32> {
+    if token.len() != 4 || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok().filter(|year| (1900..2100).contains(year))
 }
 
 /// Generic, low-information tokens VLMs sometimes emit despite the prompt.
@@ -1587,6 +1743,67 @@ mod tests {
     fn sanitize_empty_falls_back() {
         assert_eq!(sanitize_proposed_name(""), "untitled");
         assert_eq!(sanitize_proposed_name("!!!"), "untitled");
+    }
+
+    #[test]
+    fn malformed_generated_filenames_are_repaired_or_rejected() {
+        assert!(!is_acceptable_proposed_name("ramsonmakeup"));
+        assert!(!is_acceptable_proposed_name("family-photo-at-park"));
+        assert!(is_acceptable_proposed_name("boy-getting-face-paint"));
+        assert_eq!(
+            generated_filename_candidate("FILENAME: boy-getting-face-paint\nNo extension.")
+                .as_deref(),
+            Some("boy-getting-face-paint")
+        );
+        assert_eq!(generated_filename_candidate("ramsonmakeup"), None);
+    }
+
+    #[test]
+    fn proposed_filename_years_must_be_trusted() {
+        let trusted = std::collections::HashSet::from([2007]);
+        assert_eq!(
+            remove_untrusted_year_tokens("family-holiday-photo-2023", &trusted).as_deref(),
+            Some("family-holiday-photo")
+        );
+        assert_eq!(
+            remove_untrusted_year_tokens("family-holiday-2007", &trusted).as_deref(),
+            Some("family-holiday-2007")
+        );
+        assert_eq!(
+            remove_untrusted_year_tokens("2023_family-holiday_2007", &trusted).as_deref(),
+            Some("family-holiday_2007")
+        );
+        assert_eq!(
+            remove_untrusted_year_tokens("2023", &std::collections::HashSet::default()),
+            None
+        );
+        assert_eq!(
+            trusted_years_in_text("Invoice 2024; reference 1234; copyright 1899"),
+            std::collections::HashSet::from([2024])
+        );
+        assert!(!has_minimum_generated_filename_words("family-holiday"));
+        assert!(has_minimum_generated_filename_words(
+            "adam-family-holiday"
+        ));
+    }
+
+    #[test]
+    fn proposed_filename_years_read_ocr_text_table() {
+        let (conn, file_id) = persistence_db();
+        conn.execute(
+            "INSERT INTO ocr_text (file_id, text) VALUES (?1, 'Invoice issued in 2024')",
+            [file_id],
+        )
+        .unwrap();
+
+        let vetted = vetted_proposed_name(
+            &conn,
+            file_id,
+            Some("invoice-review-2024-2023".into()),
+        )
+        .unwrap();
+
+        assert_eq!(vetted.as_deref(), Some("invoice-review-2024"));
     }
 
     #[test]

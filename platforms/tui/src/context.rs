@@ -138,6 +138,20 @@ pub fn collapse_home(p: &str) -> String {
     p.to_string()
 }
 
+pub fn terminal_text(s: &str) -> String {
+    s.chars()
+        .map(|ch| {
+            if matches!(ch, '\n' | '\r' | '\t') {
+                ' '
+            } else if ch.is_control() {
+                '\u{fffd}'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
 /// What `parse_args` decided the process should do.
 pub enum Invocation {
     /// Launch the TUI against this optional `--db` override.
@@ -160,11 +174,24 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
                 return Invocation::Print(format!("fileid-tui {}", env!("CARGO_PKG_VERSION")))
             }
             "--db" => match it.next() {
+                Some(v) if v.is_empty() => {
+                    return Invocation::Error("--db requires a non-empty PATH".into())
+                }
+                Some(_) if db.is_some() => {
+                    return Invocation::Error("--db may only be specified once".into())
+                }
                 Some(v) => db = Some(PathBuf::from(v)),
                 None => return Invocation::Error("--db requires a PATH argument".into()),
             },
             other if other.starts_with("--db=") => {
-                db = Some(PathBuf::from(&other["--db=".len()..]));
+                let value = &other["--db=".len()..];
+                if value.is_empty() {
+                    return Invocation::Error("--db requires a non-empty PATH".into());
+                }
+                if db.is_some() {
+                    return Invocation::Error("--db may only be specified once".into());
+                }
+                db = Some(PathBuf::from(value));
             }
             other => {
                 return Invocation::Error(format!("unexpected argument: {other}"));
@@ -180,7 +207,7 @@ fn help_text() -> String {
          \n\
          USAGE:\n    fileid-tui [--db <PATH>]\n\
          \n\
-         By default the TUI opens an EMPTY scratch library; press s to scan a\n\
+         By default the TUI opens an empty scratch library; press s to scan a\n\
          folder and its files accumulate there. Pass --db to open an existing\n\
          library instead (e.g. your desktop app's).\n\
          \n\
@@ -193,9 +220,11 @@ fn help_text() -> String {
          \n\
          KEYS (in-app):\n    \
          Tab / Shift-Tab   switch tab        1-6   jump to tab\n    \
-         Up/Down or j/k    move selection    s     scan a folder (engine)\n    \
+         Up/Down or j/k    move selection    PgUp/PgDn  move ten rows\n    \
+         Home/End or g/G   first/last row    s     scan a folder (engine)\n    \
          /                 search (Library)  r     reload from DB\n    \
-         ?                 toggle help       q     quit\n",
+         ?                 toggle help       q     quit\n    \
+         Ctrl-C            quit from anywhere\n",
         ver = env!("CARGO_PKG_VERSION")
     )
 }
@@ -250,7 +279,7 @@ mod tests {
         assert_eq!(got.engine_data_home, Some(PathBuf::from("/scratch")));
     }
 
-    /// FIX 1 — with no `--db`/env, the default is a SCRATCH library (the TUI
+    /// With no `--db`/env, the default is a scratch library (the TUI
     /// opens EMPTY), and the engine is pointed at the same base so a scan writes
     /// the exact file the TUI reads: `<base>/FileID/fileid.sqlite`.
     #[test]
@@ -286,5 +315,17 @@ mod tests {
             parse_args(["--db".to_string()]),
             Invocation::Error(_)
         ));
+        assert!(matches!(
+            parse_args(["--db=".to_string()]),
+            Invocation::Error(_)
+        ));
+        assert!(matches!(
+            parse_args(["--db=/a.sqlite".to_string(), "--db=/b.sqlite".to_string()]),
+            Invocation::Error(_)
+        ));
+        let Invocation::Error(message) = parse_args(["--bad\x1b[2J".to_string()]) else {
+            panic!("expected Error");
+        };
+        assert_eq!(terminal_text(&message), "unexpected argument: --bad�[2J");
     }
 }

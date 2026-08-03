@@ -9,6 +9,7 @@
 // renderer→VLM — needs a new model, a future MODELS.md decision.)
 import Foundation
 import AVFoundation
+import Darwin
 import Speech
 import SoundAnalysis
 import FileIDShared
@@ -111,8 +112,8 @@ enum DeepAnalyzeNaming {
             }
         }
         if let mtl = mtllib, !mtl.isEmpty {
-            let mtlURL = url.deletingLastPathComponent().appendingPathComponent(mtl)
-            if let content = boundedText(mtlURL) {
+            if let mtlURL = safeMaterialLibraryURL(objURL: url, reference: mtl),
+               let content = boundedRegularText(mtlURL) {
                 for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
                     let t = line.trimmingCharacters(in: .whitespaces)
                     if t.hasPrefix("newmtl ") { pushUnique(&materials, String(t.dropFirst(7))) }
@@ -122,6 +123,34 @@ enum DeepAnalyzeNaming {
         return (objects, materials)
     }
 
+    static func safeMaterialLibraryURL(objURL: URL, reference: String) -> URL? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains("\0"),
+              !trimmed.hasPrefix("/"),
+              !trimmed.hasPrefix("\\"),
+              trimmed.range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) == nil else {
+            return nil
+        }
+        let components = trimmed.split(whereSeparator: { $0 == "/" || $0 == "\\" })
+        guard !components.contains("..") else { return nil }
+
+        let parent = objURL.deletingLastPathComponent()
+            .standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = parent.appendingPathComponent(trimmed).standardizedFileURL
+        let parentPrefix = parent.path.hasSuffix("/") ? parent.path : parent.path + "/"
+        guard candidate.path.hasPrefix(parentPrefix),
+              candidate.resolvingSymlinksInPath().path == candidate.path else { return nil }
+
+        var info = stat()
+        let status: Int32 = candidate.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return lstat(path, &info)
+        }
+        guard status == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return candidate
+    }
+
     /// Read at most 8 MiB of a UTF-8 text file (a truncated tail just drops the last
     /// partial line). nil on open/decode failure.
     private static func boundedText(_ url: URL) -> String? {
@@ -129,6 +158,21 @@ enum DeepAnalyzeNaming {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let data = (try? handle.read(upToCount: maxBytes)) ?? Data()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func boundedRegularText(_ url: URL) -> String? {
+        let descriptor: Int32 = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              let data = try? handle.read(upToCount: 8 * 1024 * 1024) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -309,11 +353,19 @@ enum DeepAnalyzeNaming {
 
     /// Run SoundAnalysis' built-in classifier over the file and return the highest-
     /// confidence class identifier seen across the clip (≥ a minimum confidence), or nil.
-    private static func dominantSoundIdentifier(url: URL) async -> String? {
+    static func dominantSoundIdentifier(
+        url: URL,
+        timeoutSeconds: TimeInterval = 30
+    ) async -> String? {
         let state = SoundAnalysisState()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 guard state.install(continuation) else { return }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + max(0, timeoutSeconds)
+                ) {
+                    state.cancel()
+                }
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let analyzer = try? SNAudioFileAnalyzer(url: url),
                           let request = try? SNClassifySoundRequest(classifierIdentifier: .version1),

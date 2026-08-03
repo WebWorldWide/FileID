@@ -465,9 +465,8 @@ public final class Database: @unchecked Sendable {
         // resolve and the anti-merge guard silently no-ops. Add (file_id, bbox) keys
         // (a face at a given file+bbox is the same face across re-scans) + backfill
         // from face_a/face_b where they still resolve. Byte-equivalent to the Windows
-        // v17_face_verification_stable_keys migration. macOS has no verdict WRITE path
-        // (markPersonsDifferent is not_implemented here) — this is for cross-platform
-        // schema parity + so the apply side (FaceClustering) resolves churn-stably.
+        // v17_face_verification_stable_keys migration; both the macOS write path and
+        // FaceClustering resolve these anchors across face-print id churn.
         m.registerMigration("v17_face_verification_stable_keys") { db in
             try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN file_a INTEGER")
             try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT")

@@ -80,6 +80,9 @@ struct ScanCancellationTests {
 
         let proc = Process()
         proc.executableURL = binary
+        proc.environment = ProcessInfo.processInfo.environment.merging([
+            "FILEID_DATABASE_PATH": root.appendingPathComponent("fileid.sqlite").path
+        ]) { _, isolated in isolated }
         let stdin = Pipe(), wire = Pipe(), stdout = Pipe()
         proc.standardInput = stdin
         proc.standardError = wire
@@ -220,6 +223,17 @@ struct ScanCancellationTests {
         #expect(await coord.reserveRestructure() == nil)
         if let first { await coord.finishRestructure(token: first) }
         #expect(await coord.reserveRestructure() != nil)
+    }
+
+    @Test("periodic progress stops after a terminal scan phase")
+    func periodicProgressStopsAtTerminalPhase() async {
+        let coord = ScanCoordinator()
+        _ = await coord.startSession(rootDisplayPath: "/tmp/library", epoch: 0)
+        #expect(await coord.periodicSnapshot() != nil)
+
+        await coord.setPhase(.completed)
+        #expect(await coord.periodicSnapshot() == nil)
+        #expect(await coord.snapshot()?.phase == .completed)
     }
 
 }

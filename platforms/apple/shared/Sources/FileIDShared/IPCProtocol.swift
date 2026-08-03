@@ -100,8 +100,8 @@ public struct IPCCommand: Codable, Sendable {
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
         /// Record a user "different people" verdict for a suggested pair so
         /// findMergeSuggestions stops re-suggesting it. Keyed on stable
-        /// anchor face ids so it survives re-clustering. Windows-originated;
-        /// the mac engine returns the structured not-implemented pointer.
+        /// anchor face ids so it survives re-clustering. Both native engines
+        /// persist it through their single-writer connection.
         case markPersonsDifferent(sourcePersonID: Int64, destinationPersonID: Int64, sourceAnchorFaceID: Int64, destinationAnchorFaceID: Int64)
         /// Truncate all learned library state (tags, faces, captions,
         /// embeddings) in-process on the engine's writer connection — no file

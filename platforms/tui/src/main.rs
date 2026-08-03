@@ -6,8 +6,8 @@
 //! rule cascade (`pipeline::restructure::classify`) IN-PROCESS, so the
 //! DB/IPC contract can never drift. Reads are live; the `s` key drives a real
 //! full-pipeline scan by spawning the `FileIDEngine` binary and speaking the
-//! engine's own `ipc` types over stdio (see `scan.rs`). Face clustering remains
-//! a documented follow-on (see README).
+//! engine's own `ipc` types over stdio, then runs face clustering before the
+//! library reload (see `scan.rs`).
 //!
 //! Cross-OS despite living under `platforms/`: builds + runs identically on
 //! macOS, Linux, and Windows.
@@ -34,7 +34,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use app::App;
-use context::{Ctx, Invocation};
+use context::{terminal_text, Ctx, Invocation};
 use data::LoadMsg;
 
 /// Point the engine at its OWN writable models dir for this process and any
@@ -57,7 +57,7 @@ fn ensure_engine_models_dir() {
 }
 
 fn main() -> ExitCode {
-    // FIX 1: pin the engine's OWN models dir BEFORE any worker thread spawns
+    // Pin the engine model directory before any worker thread spawns
     // (`set_var` must not race a concurrent env read on another thread, so this
     // has to run while the process is still single-threaded — before
     // `data::spawn_load` / `scan::spawn_scan`). Without it, on macOS the model
@@ -75,14 +75,14 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Invocation::Error(msg) => {
-            eprintln!("error: {msg}");
+            eprintln!("error: {}", terminal_text(&msg));
             eprintln!("try `fileid-tui --help`");
             ExitCode::from(2)
         }
         Invocation::Run { db } => match run(db) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {}", terminal_text(&format!("{e:#}")));
                 ExitCode::FAILURE
             }
         },

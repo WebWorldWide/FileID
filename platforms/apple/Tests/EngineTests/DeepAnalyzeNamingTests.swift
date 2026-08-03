@@ -43,6 +43,22 @@ struct DeepAnalyzeNamingTests {
         #expect(DeepAnalyzeNaming.nameFromSoundLabel("") == nil)
     }
 
+    @Test("sound analysis obeys its wall-clock deadline")
+    func soundAnalysisDeadline() async throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileID-Sound-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data(repeating: 0, count: 512).write(to: file)
+        let clock = ContinuousClock()
+        let started = clock.now
+        let label = await DeepAnalyzeNaming.dominantSoundIdentifier(
+            url: file,
+            timeoutSeconds: 0
+        )
+        #expect(label == nil)
+        #expect(started.duration(to: clock.now) < .seconds(1))
+    }
+
     @Test("buildObjName: meaningful object, else material, else nil")
     func objName() {
         #expect(DeepAnalyzeNaming.buildObjName(objects: ["default", "Spaceship"], materials: [])
@@ -83,6 +99,57 @@ struct DeepAnalyzeNamingTests {
         #expect(materials.contains("Cockpit"))
         #expect(materials.filter { $0 == "Hull" }.count == 1) // usemtl Hull deduped
         #expect(DeepAnalyzeNaming.buildObjName(objects: objects, materials: materials) == "Spaceship")
+    }
+
+    @Test("OBJ material libraries stay inside the model folder and must be regular files")
+    func materialLibraryContainment() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDObjSafety-\(UUID().uuidString)", isDirectory: true)
+        let models = root.appendingPathComponent("models", isDirectory: true)
+        try FileManager.default.createDirectory(at: models, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outside = root.appendingPathComponent("outside.mtl")
+        try "newmtl OutsideSecret\n".write(to: outside, atomically: true, encoding: .utf8)
+
+        let traversal = models.appendingPathComponent("traversal.obj")
+        try "mtllib ../outside.mtl\no SafeObject\n"
+            .write(to: traversal, atomically: true, encoding: .utf8)
+        let traversalNames = DeepAnalyzeNaming.parseObjNames(url: traversal)
+        #expect(traversalNames.objects == ["SafeObject"])
+        #expect(!traversalNames.materials.contains("OutsideSecret"))
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: "../outside.mtl"
+        ) == nil)
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: outside.path
+        ) == nil)
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: #"C:\outside.mtl"#
+        ) == nil)
+
+        let symlink = models.appendingPathComponent("linked.mtl")
+        try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: outside)
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: "linked.mtl"
+        ) == nil)
+
+        let directory = models.appendingPathComponent("folder.mtl", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: "folder.mtl"
+        ) == nil)
+
+        let valid = models.appendingPathComponent("valid.mtl")
+        try "newmtl BrushedSteel\n".write(to: valid, atomically: true, encoding: .utf8)
+        #expect(DeepAnalyzeNaming.safeMaterialLibraryURL(
+            objURL: traversal,
+            reference: "valid.mtl"
+        ) == valid.standardizedFileURL)
     }
 
     @Test("FileTypes classifies .obj as model and .mp3 as audio (scanned, not dropped)")

@@ -11,6 +11,7 @@
 //! Network egress: huggingface.co only (the pinned manifest URLs), triggered by
 //! this user-initiated command — the project's single allowed network call.
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,7 +21,7 @@ use anyhow::{Context as _, Result};
 use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-use crate::context::{human_size, print_json, truncate, Ctx};
+use crate::context::{display_path, human_size, print_json, terminal_text, truncate, Ctx};
 
 /// One curated, cross-platform, commercial-clean model the engine uses. `kind`
 /// is the registry key passed to `lookup_full`; `license` + `category` are the
@@ -518,7 +519,10 @@ pub fn list(ctx: &Ctx) -> Result<()> {
         tail,
     );
     if let Some(dir) = models_dir {
-        println!("  Models dir: {}", dir.display());
+        println!(
+            "  Models dir: {}",
+            display_path(dir.to_string_lossy().as_ref())
+        );
     }
     if !missing.is_empty() {
         let req_missing: Vec<&str> = missing
@@ -563,26 +567,16 @@ pub fn download(
     let selected: Vec<&'static Catalog> = if all {
         CATALOG.iter().collect()
     } else if names.is_empty() {
-        if ctx.json {
-            print_json(&serde_json::json!({
-                "command": "models",
-                "action": "download",
-                "error": "no_selection",
-                "message": "name one or more models, or pass --all",
-            }));
-            return Ok(());
-        }
-        println!("{}", ctx.bold("Nothing selected."));
-        println!("  Name one or more models, or pass --all to fetch the whole set.");
-        println!("    fileid models download arcface mobileclip_s2");
-        println!("    fileid models download --all --dry-run   (preview sizes first)");
-        println!("  {}", ctx.dim("See `fileid models list` for names."));
-        return Ok(());
+        anyhow::bail!(
+            "no models selected; name one or more models, or pass --all (see `fileid models list`)"
+        );
     } else {
         let mut out = Vec::with_capacity(names.len());
+        let mut seen = HashSet::with_capacity(names.len());
         for n in names {
             match CATALOG.iter().find(|c| c.name == n || c.kind == n) {
-                Some(c) => out.push(c),
+                Some(c) if seen.insert(c.kind) => out.push(c),
+                Some(_) => {}
                 None => anyhow::bail!(
                     "unknown model '{n}' — run `fileid models list` to see the available names"
                 ),
@@ -738,7 +732,7 @@ pub fn download(
             ctx.bold("Installed"),
             installed_now.len(),
             fileid_engine::paths::models_dir()
-                .map(|p| p.display().to_string())
+                .map(|p| display_path(p.to_string_lossy().as_ref()))
                 .unwrap_or_else(|_| "the engine models dir".into()),
         );
         println!(
@@ -885,7 +879,9 @@ impl ProgressUi {
     /// the bar from dangling. (`main` also prints the error to stderr + exits 1.)
     fn abort(&self, e: &anyhow::Error) {
         match self.mode {
-            ProgressMode::Porcelain => emit_stdout(&format!("error: {e:#}")),
+            ProgressMode::Porcelain => {
+                emit_stdout(&format!("error: {}", terminal_text(&format!("{e:#}"))))
+            }
             ProgressMode::Bar => clear_bar_line(),
             _ => {}
         }

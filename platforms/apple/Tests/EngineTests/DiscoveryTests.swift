@@ -11,6 +11,23 @@ private typealias Database = FileIDEngine.Database
 @Suite("Discovery")
 struct DiscoveryTests {
 
+    private final class ProgressCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Int] = []
+
+        func record(_ value: Int) {
+            lock.lock()
+            values.append(value)
+            lock.unlock()
+        }
+
+        func snapshot() -> [Int] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
+
     @Test("Walks a small tree and returns sorted, filtered files")
     func smallTree() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -57,6 +74,27 @@ struct DiscoveryTests {
         #expect(byExt["png"] == .image)
         #expect(byExt["pdf"] == .pdf)
         #expect(byExt["mp4"] == .video)
+    }
+
+    @Test("Streaming discovery publishes small-library progress before completion")
+    func streamingPublishesEarlyProgress() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDDiscoveryProgress-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        for index in 0..<20 {
+            try Data("image".utf8).write(to: tmp.appendingPathComponent("\(index).jpg"))
+        }
+
+        let capture = ProgressCapture()
+        let total = await Discovery().walkStreaming(
+            root: tmp,
+            progress: { capture.record($0) }
+        ) { _ in }
+
+        #expect(total == 20)
+        #expect(capture.snapshot() == [1, 17])
     }
 
     @Test("Skips files larger than the size cap")

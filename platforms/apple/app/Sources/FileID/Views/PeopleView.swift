@@ -32,6 +32,7 @@ struct PeopleView: View {
     @State private var suggestions: [ClusterSuggestions.Candidate] = []
     @State private var suggestionsLoading: Bool = false
     @State private var mergeInFlight: Bool = false
+    @State private var pendingDifferentCandidateID: String?
 
     /// Single sheet driver. Three stacked .sheet modifiers wedged the
     /// view graph on macOS 26 (blanked the sidebar on tab transition).
@@ -67,6 +68,15 @@ struct PeopleView: View {
         .onAppear { reload() }
         .onChange(of: store.version) { _, _ in throttledReload() }
         .onChange(of: engine.lastFaceClustering?.personCount) { _, _ in reload() }
+        .onChange(of: engine.bulkActionResultSignal) { _, _ in
+            handleBulkActionResult()
+        }
+        .onChange(of: engine.engineResetSignal) { _, _ in
+            guard pendingDifferentCandidateID != nil else { return }
+            pendingDifferentCandidateID = nil
+            mergeInFlight = false
+            mergeStatus = "Couldn't save that verdict because the engine restarted."
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -118,6 +128,21 @@ struct PeopleView: View {
                             reload()
                         }
                     },
+                    onReject: { candidate in
+                        guard !mergeInFlight else { return }
+                        guard engine.markPersonsDifferent(
+                            sourcePersonID: candidate.personA,
+                            destinationPersonID: candidate.personB,
+                            sourceAnchorFaceID: candidate.anchorFaceA,
+                            destinationAnchorFaceID: candidate.anchorFaceB
+                        ) else {
+                            mergeStatus = "Couldn't save that verdict while the engine is restarting."
+                            return
+                        }
+                        pendingDifferentCandidateID = candidate.id
+                        mergeInFlight = true
+                        mergeStatus = "Saving different-people verdict…"
+                    },
                     onDismiss: { activeSheet = nil }
                 )
             case .mergeTargetPicker:
@@ -151,6 +176,22 @@ struct PeopleView: View {
                     onCancel: { activeSheet = nil }
                 )
             }
+        }
+    }
+
+    private func handleBulkActionResult() {
+        guard let candidateID = pendingDifferentCandidateID,
+              let result = engine.bulkActionResult,
+              result.action == "markPersonsDifferent" else { return }
+        pendingDifferentCandidateID = nil
+        mergeInFlight = false
+        if result.failed == 0, result.succeeded > 0 {
+            suggestions.removeAll { $0.id == candidateID }
+            mergeStatus = "Marked those clusters as different people."
+        } else {
+            let detail = result.messages.compactMap(\.message).first
+                ?? "the engine did not confirm the verdict."
+            mergeStatus = "Couldn't save: \(detail)"
         }
     }
 
@@ -799,7 +840,7 @@ private struct PersonCard: View {
     }
 
     /// Crop an NSImage to a Vision normalized "x,y,w,h" bbox, padded 20%.
-    static func cropFace(in img: NSImage, bbox: String) -> NSImage? {
+    fileprivate static func cropFace(in img: NSImage, bbox: String) -> NSImage? {
         // Format-tolerant (FaceBBox): macOS CSV-normalized OR a Windows-scanned
         // library's JSON pixel bbox → normalized bottom-left. Pixel dims (not the
         // points `img.size`) are needed to normalize the Windows pixel form.
@@ -1297,6 +1338,7 @@ private struct SuggestedMergesSheet: View {
     let store: ReadStore
     let inFlight: Bool
     let onAccept: (ClusterSuggestions.Candidate) -> Void
+    let onReject: (ClusterSuggestions.Candidate) -> Void
     let onDismiss: () -> Void
 
     var body: some View {
@@ -1349,7 +1391,7 @@ private struct SuggestedMergesSheet: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 560, minHeight: 420)
+        .frame(minWidth: 720, minHeight: 440)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
     }
@@ -1370,10 +1412,15 @@ private struct SuggestedMergesSheet: View {
                     Text("Similarity \(cand.similarity, format: .number.precision(.fractionLength(2)))")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
-                    Button("Merge") { onAccept(cand) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.gold)
-                        .disabled(inFlight)
+                    HStack(spacing: 6) {
+                        Button("Different people") { onReject(cand) }
+                            .buttonStyle(.bordered)
+                            .disabled(inFlight)
+                        Button("Merge") { onAccept(cand) }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.gold)
+                            .disabled(inFlight)
+                    }
                 }
             }
             .padding(10)
@@ -1386,22 +1433,58 @@ private struct SuggestedMergesSheet: View {
 
     @ViewBuilder
     private func miniCard(_ p: ReadStore.PersonRow) -> some View {
+        SuggestedPersonMiniCard(person: p)
+    }
+
+}
+
+private struct SuggestedPersonMiniCard: View {
+    let person: ReadStore.PersonRow
+    @State private var thumbnail: NSImage?
+
+    var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "person.crop.circle")
-                .font(.title2)
-                .foregroundStyle(Theme.gold)
+            ZStack {
+                Circle().fill(.black.opacity(0.35))
+                if let thumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "person.crop.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Theme.gold.opacity(0.5))
+                }
+            }
+            .frame(width: 64, height: 64)
+            .clipShape(Circle())
             VStack(alignment: .leading, spacing: 1) {
-                Text(p.displayName)
+                Text(person.displayName)
                     .font(.callout.bold())
                     .lineLimit(1)
-                Text("\(p.fileCount) photo\(p.fileCount == 1 ? "" : "s")")
+                Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s")")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(width: 170, alignment: .leading)
+        .frame(width: 180, alignment: .leading)
+        .task(id: person.id) { await loadThumbnail() }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(person.displayName), \(person.fileCount) photos")
     }
 
+    private func loadThumbnail() async {
+        guard let path = person.representativePath,
+              let full = await ThumbnailService.shared.thumbnail(
+                for: URL(fileURLWithPath: path), size: 240
+              ) else { return }
+        if let bbox = person.representativeBBox,
+           let crop = PersonCard.cropFace(in: full, bbox: bbox) {
+            thumbnail = crop
+        } else {
+            thumbnail = full
+        }
+    }
 }
 
 // MARK: - Merge target picker

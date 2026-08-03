@@ -1,5 +1,68 @@
 # NEXT — resume here
 
+## STATUS 2026-08-03 — Production candidate complete; publication and credential gates remain
+
+The macOS parity/polish implementation is complete and locally green. Preserve the 381-test strict
+Swift result, the complete Rust/CLI/TUI normal and million-file scale results, and the read-only
+Adlon Office-document acceptance. The final versioned DMG verifies, mounts read-only, and launches
+both the app and bundled engine. Adlon's acceptance fingerprint is unchanged, and Restructure Apply
+was never invoked against the drive.
+
+The next maintainer should not reopen this implementation pass unless CI exposes a regression. The
+remaining work is release operations or evidence that requires credentials/hardware unavailable on
+this Mac:
+
+1. Keep the v0.1.3 artifact labeled **unsigned prerelease** until Apple Developer ID notarization
+   and a protected Windows signing provider are configured.
+2. Require hosted CI for WinUI/.NET and native Linux packaging, then run clean-machine lifecycle,
+   accessibility, Windows ARM64, AMD/Intel/QNN, and native Linux matrices on their target systems.
+3. Preserve Qwen3-VL 8B as the 16 GB quality recommendation and Qwen3-VL 4B for 8 GB Macs unless a
+   commercially clean candidate wins a fixed real-data quality and memory comparison.
+4. Keep Adlon read-only for future acceptance runs; generate and review Restructure plans without
+   applying them unless the owner explicitly authorizes a mutation test on a disposable copy.
+
+The owner directed that the separate security review be skipped for this pass. Do not represent it
+as completed. Existing product privacy and commercial-license behavior remains unchanged.
+
+## STATUS 2026-08-02 — Native macOS quality follow-up is green; only external release gates remain
+
+The `agent/macos-parity-hardening` pass started from fetched `origin/main` at `f96a6e1`; GitHub had no
+newer Windows changes. Native Apple-Silicon verification now covers the production app, the full
+strict 376-test Swift suite, and a read-only Adlon workflow through Scan, People, Deep Analyze, and
+Restructure. The exact external-drive metadata fingerprint is unchanged, SQLite is healthy, and no
+Restructure apply or physical rename was performed.
+
+The final catalog is clean: 181 Adlon rows (180 healthy, one corrupt) remain after backing up and
+removing 334 fake-JPEG rows plus eight scan sessions left by the old process-level cancellation test.
+That test now supplies an isolated database path. Restructure follows the active sidebar root, and
+Library tag chips deduplicate equal VLM/RAM++ labels without deleting provenance.
+Cleanup is top-aligned, the five-stage progress line ends at every dot center, and file-preview
+tagging exposes a gold Apply button plus the Return default action. RAM++ retains four bounded
+workers after a copied-Adlon benchmark improved from 27.73 s to 22.59 s with identical outputs.
+
+Preserve these acceptance results:
+
+1. **People:** 226 detected, 174 eligible/embedded, 171 assigned, 29 visible people; representative
+   crops are real faces, same-file pairs cannot be merge suggestions, and stable different-person
+   anchors survive re-clustering. Keep the Windows-parity rule that the UI waits for the engine's
+   successful database reply before removing a rejected merge suggestion.
+2. **Deep Analyze:** Qwen3-VL 4B is the Apache-2.0 recommendation for 8 GB Macs and Qwen3-VL 8B for
+   16 GB Macs. A six-image copied-Adlon run measured 30.92 s / 4.8 GiB for 4B and 47.49 s / 7.2 GiB
+   for 8B; 8B was generally more concise and grounded. Keep deterministic decoding, the trusted-year
+   and supported-identity guards, 3–5-word filename gate, terminal preview refresh, and ordered
+   case-insensitive display-tag deduplication.
+3. **Restructure:** the Adlon read-only plan contains 27 actionable rows (16 tidying, 11 reorganizing)
+   and zero source-equals-destination entries. The active scanned folder is the plan root. Continue
+   to require explicit user review before Apply.
+
+Remaining work requires evidence this Mac cannot supply: Developer ID signing/notarization and a
+clean-machine install/upgrade/uninstall pass; hosted CI; Windows DirectML/CUDA runtime validation on
+the owner hardware; WinUI compilation of the final tag-presentation mirror; and ARM64, AMD, Intel,
+QNN, and native Linux packaging matrices. Do not weaken
+privacy, license, or egress gates to close them. Future model changes need the same commercially clean
+license review and a fixed real-data A/B; Mistral-Small-3.2 remains the max-quality option only on Macs
+with at least 30 GB RAM.
+
 ## STATUS 2026-08-02 — No hidden faces; safe reduction floor and release candidate
 
 The final Adlon evidence supports 2,215 active clusters, not a cosmetically smaller hidden grid.
@@ -56,13 +119,15 @@ Resume in this order:
 3. **Preserve the real-data acceptance discipline.** Use isolated state, hash the colocated runtime,
    require authoritative completion events, and keep the Adlon corpus read-only.
 
-## Current macOS gate — live app and hardware validation
+## Historical macOS gate — superseded by the native 2026-08-02 evidence above
 
-Xcode 26.6 now passes the complete strict suite: 336 tests in 68 suites with
+This was the remaining checklist before the parity-hardening pass. It is retained for context; the
+current status and remaining external gates are recorded at the top of this file. Xcode 26.6 had
+passed the then-current strict suite: 336 tests in 68 suites with
 `swift test --no-parallel -Xswiftc -strict-concurrency=complete -Xswiftc
 -warnings-as-errors`. `bash run.sh --no-wipe` also assembles and launches the
 production app and child engine, including the cached MLX Metal library. The
-remaining validation is intentionally runtime-only:
+historical validation checklist was:
 
 1. Assemble with `cd platforms/apple && bash run.sh --no-wipe`; do this with
    no existing FileID instance running because the script stops stale app and

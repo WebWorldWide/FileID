@@ -38,11 +38,9 @@ cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
 cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
 chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
 
-# MLX loads its GPU kernels from a metallib colocated with the engine
-# binary; both names because MLX tries default.metallib then mlx.metallib.
+# MLX first loads a colocated mlx.metallib beside the engine binary.
 if [ -f "$METALLIB_CACHE" ]; then
     cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/default.metallib"
 else
     echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
     echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
