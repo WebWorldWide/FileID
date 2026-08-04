@@ -1,4 +1,4 @@
-// AppSettings — durable user preferences.
+﻿// AppSettings — durable user preferences.
 //
 // Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
 // writes via temp-file + File.Move so a crash mid-save doesn't corrupt
