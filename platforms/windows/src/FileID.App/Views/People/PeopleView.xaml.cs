@@ -917,6 +917,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
                 return;
             }
+            try
+            {
+                var s = AppViewModel.Instance.Settings;
+                s.PeopleHideUnknown = true;
+                s.Save();
+            }
+            catch (Exception ex) { DebugLog.Warn("BulkMarkUnknown setting save threw: " + ex.Message); }
             ViewModel.IsSelectMode = false;
             _selectedClusterIds.Clear();
             BulkActionBar.Visibility = Visibility.Collapsed;

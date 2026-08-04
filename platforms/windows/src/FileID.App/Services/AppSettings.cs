@@ -1,4 +1,4 @@
-﻿// AppSettings — durable user preferences.
+// AppSettings — durable user preferences.
 //
 // Persisted as JSON at %LOCALAPPDATA%\FileID\app-settings.json. Atomic
 // writes via temp-file + File.Move so a crash mid-save doesn't corrupt
@@ -60,7 +60,7 @@ internal sealed class AppSettings
     public string LibraryKindFilter { get; set; } = "all";
 
     /// <summary>Hide marked-as-unknown clusters in People (matches macOS PeopleView toggle).</summary>
-    public bool PeopleHideUnknown { get; set; } = false;
+    public bool PeopleHideUnknown { get; set; } = true;
 
     /// <summary>
     /// Manual GPU execution provider override. Null = auto-detect (engine

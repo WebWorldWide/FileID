@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using FileID.Services;
 using Xunit;
 
@@ -41,7 +41,7 @@ public class AppSettingsTests
         Assert.True(s.CleanupAutoTagKept);
         Assert.False(s.RestructureTreeMode);
         Assert.Equal("all", s.LibraryKindFilter);
-        Assert.False(s.PeopleHideUnknown);
+        Assert.True(s.PeopleHideUnknown);
         Assert.Null(s.GpuExecutionProviderOverride);
         Assert.False(s.WelcomeSheetSeen);
         Assert.False(s.DisableAutoInstallCuda);
