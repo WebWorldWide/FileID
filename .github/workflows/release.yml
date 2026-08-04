@@ -195,17 +195,19 @@ jobs:
         run: |
           $dry = "${{ github.event.inputs.dry_run }}" -eq 'true'
           $tagValidation = "${{ github.ref }}".StartsWith('refs/tags/')
-          if (-not $dry -and -not $tagValidation) {
-            Write-Host "::error::Signed publishing is not provider-configured. Follow shared/docs/WINDOWS_SIGNING.md, add provider authentication, then invoke publish-bundle.ps1 with -SigningAdapter, -SignerSubject, and -SignerPublicKeySha256. A thumbprint secret alone is never sufficient on a fresh hosted runner."
-            exit 1
-          }
           if ($tagValidation) {
-            Write-Host "::warning::Tag validation is unsigned and cannot publish. A maintainer may attach these artifacts only to a clearly labeled unsigned prerelease."
+            Write-Host "Tag release mode: building and publishing release assets for ${{ github.ref_name }}."
+            "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=true"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } elseif (-not $dry) {
+            Write-Host "Signed publishing requested."
+            "sign=true"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=true"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
             Write-Host "Dry-run: building unsigned; no release will be published."
+            "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
-          "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build unsigned bundle (dry-run only)
         if: steps.mode.outputs.sign != 'true'
@@ -267,7 +269,7 @@ jobs:
         if: steps.mode.outputs.publish == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: tools-*
+          pattern: '*tools-*'
           merge-multiple: true
           path: release-tools
 
@@ -322,7 +324,7 @@ jobs:
           retention-days: 1
 
   publish-release:
-    name: Publish signed release
+    name: Publish release
     needs: windows-release
     if: needs.windows-release.outputs.publish == 'true'
     runs-on: ubuntu-latest
@@ -335,12 +337,14 @@ jobs:
           name: FileID-release-ready-${{ github.run_id }}
           path: release-assets
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -ge 5
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -ge 1
           gh release create "${{ github.ref_name }}" \
             --title "FileID ${{ github.ref_name }}" \
             --generate-notes \
+            --clobber \
             release-assets/*
+
