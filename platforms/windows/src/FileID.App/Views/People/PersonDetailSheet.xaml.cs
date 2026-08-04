@@ -1,4 +1,4 @@
-﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
+// PersonDetailSheet code-behind. Loads every face for a cluster + its
 // JPEG crop, populates the structured-name editor, and on commit fires
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).
@@ -47,15 +47,13 @@ public sealed partial class PersonDetailSheet : UserControl
         FaceGrid.ElementPrepared += OnFaceGridElementPrepared;
         FaceGrid.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
-                          xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
-                          xmlns:p='using:FileID.Views.People'
-                          x:DataType='p:PersonDetailSheet+FaceTile'>
+                          xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
               <Border CornerRadius='8'
                       Background='{ThemeResource SubtleFillColorTertiaryBrush}'
-                      AutomationProperties.Name='{x:Bind FaceLabel}'
+                      AutomationProperties.Name='{Binding FaceLabel}'
                       Width='104' Height='104'
                       ToolTipService.ToolTip='Right-click to remove, split, or move this face'>
-                <Image Source='{x:Bind ImageUri, Mode=OneTime}' Stretch='UniformToFill' />
+                <Image Source='{Binding ImageUri}' Stretch='UniformToFill' />
               </Border>
             </DataTemplate>
             """);
