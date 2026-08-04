@@ -57,17 +57,28 @@
             <TextBox Grid.Row="0" Grid.Column="4" x:Name="SuffixBox" Header="Suffix"  PlaceholderText="Jr." />
         </Grid>
 
-        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
-            <ItemsRepeater x:Name="FaceGrid">
-                <ItemsRepeater.Layout>
-                    <UniformGridLayout MinItemWidth="100"
-                                       MinItemHeight="100"
-                                       MinRowSpacing="8"
-                                       MinColumnSpacing="8"
-                                       ItemsStretch="Uniform" />
-                </ItemsRepeater.Layout>
-            </ItemsRepeater>
-        </ScrollViewer>
+        <Grid Grid.Row="2">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0"
+                       Text="Right-click any face crop to remove it from this person, split it into a new cluster, or move it to another person."
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Margin="0,0,0,6" />
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+                <ItemsRepeater x:Name="FaceGrid">
+                    <ItemsRepeater.Layout>
+                        <UniformGridLayout MinItemWidth="108"
+                                           MinItemHeight="108"
+                                           MinRowSpacing="8"
+                                           MinColumnSpacing="8"
+                                           ItemsStretch="Uniform" />
+                    </ItemsRepeater.Layout>
+                </ItemsRepeater>
+            </ScrollViewer>
+        </Grid>
 
         <TextBlock Grid.Row="3"
                    x:Name="StatusText"
