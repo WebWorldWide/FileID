@@ -1,4 +1,4 @@
-// SuggestedMergesSheet code-behind. Binds EngineClient's
+﻿// SuggestedMergesSheet code-behind. Binds EngineClient's
 // LastMergeSuggestions to an ItemsRepeater via a DataTemplate over
 // MergeSuggestionVm (see PeopleViewModel). Each row shows side-by-side anchor
 // face JPEGs + similarity % + action buttons. Merge fires mergeClusters IPC;

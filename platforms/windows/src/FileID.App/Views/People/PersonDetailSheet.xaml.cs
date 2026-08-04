@@ -1,4 +1,4 @@
-// PersonDetailSheet code-behind. Loads every face for a cluster + its
+﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
 // JPEG crop, populates the structured-name editor, and on commit fires
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).

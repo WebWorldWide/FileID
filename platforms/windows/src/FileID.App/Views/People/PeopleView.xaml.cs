@@ -1,4 +1,4 @@
-// PeopleView code-behind. Cluster cards are draggable + drop targets;
+﻿// PeopleView code-behind. Cluster cards are draggable + drop targets;
 // dropping cluster A onto cluster B emits engine `mergeClusters` IPC
 // (A's face_prints reassigned to B's person_id, A's person row deleted).
 
