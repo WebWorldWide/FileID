@@ -44,6 +44,7 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         InitializeComponent();
         FaceGrid.ItemsSource = _faces;
+        FaceGrid.ElementPrepared += OnFaceGridElementPrepared;
         FaceGrid.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
                           xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
@@ -52,11 +53,178 @@ public sealed partial class PersonDetailSheet : UserControl
               <Border CornerRadius='8'
                       Background='{ThemeResource SubtleFillColorTertiaryBrush}'
                       AutomationProperties.Name='{x:Bind FaceLabel}'
-                      Width='100' Height='100'>
+                      Width='104' Height='104'
+                      ToolTipService.ToolTip='Right-click to remove, split, or move this face'>
                 <Image Source='{x:Bind ImageUri, Mode=OneTime}' Stretch='UniformToFill' />
               </Border>
             </DataTemplate>
             """);
+    }
+
+    private void OnFaceGridElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is FrameworkElement el && el.DataContext is FaceTile tile)
+        {
+            var flyout = new MenuFlyout();
+
+            var removeItem = new MenuFlyoutItem { Text = "Remove from this person", Tag = tile.FaceId };
+            removeItem.Click += async (s, e) => await RemoveFaceFromPersonAsync(tile.FaceId);
+            flyout.Items.Add(removeItem);
+
+            var splitItem = new MenuFlyoutItem { Text = "Split into new person", Tag = tile.FaceId };
+            splitItem.Click += async (s, e) => await SplitFaceToNewPersonAsync(tile.FaceId);
+            flyout.Items.Add(splitItem);
+
+            var moveItem = new MenuFlyoutItem { Text = "Move to another person...", Tag = tile.FaceId };
+            moveItem.Click += async (s, e) => await MoveFaceToPersonAsync(tile.FaceId);
+            flyout.Items.Add(moveItem);
+
+            el.ContextFlyout = flyout;
+        }
+    }
+
+    private async Task RemoveFaceFromPersonAsync(long faceId)
+    {
+        await Task.Run(() =>
+        {
+            var connStr = new SqliteConnectionStringBuilder
+            {
+                DataSource = AppPaths.DbPath,
+                Mode = SqliteOpenMode.ReadWrite,
+            }.ToString();
+            using var conn = new SqliteConnection(connStr);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "UPDATE face_prints SET person_id = NULL WHERE id = @faceId";
+            cmd.Parameters.AddWithValue("@faceId", faceId);
+            cmd.ExecuteNonQuery();
+        });
+
+        var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
+        if (tile != null) _faces.Remove(tile);
+        StatusText.Text = $"Removed Face #{faceId} from this person.";
+    }
+
+    private async Task SplitFaceToNewPersonAsync(long faceId)
+    {
+        long newPersonId = 0;
+        await Task.Run(() =>
+        {
+            var connStr = new SqliteConnectionStringBuilder
+            {
+                DataSource = AppPaths.DbPath,
+                Mode = SqliteOpenMode.ReadWrite,
+            }.ToString();
+            using var conn = new SqliteConnection(connStr);
+            conn.Open();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, datetime('now')); SELECT last_insert_rowid();";
+                newPersonId = Convert.ToInt64(cmd.ExecuteScalar());
+            }
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "UPDATE face_prints SET person_id = @newPid WHERE id = @faceId";
+                cmd.Parameters.AddWithValue("@newPid", newPersonId);
+                cmd.Parameters.AddWithValue("@faceId", faceId);
+                cmd.ExecuteNonQuery();
+            }
+        });
+
+        var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
+        if (tile != null) _faces.Remove(tile);
+        StatusText.Text = $"Split Face #{faceId} into new Person #{newPersonId}.";
+    }
+
+    private sealed class PersonPickerItem
+    {
+        public required long PersonId { get; init; }
+        public required string DisplayName { get; init; }
+        public override string ToString() => DisplayName;
+    }
+
+    private async Task MoveFaceToPersonAsync(long faceId)
+    {
+        long currentPersonId = _personId;
+        var personsList = await Task.Run(() =>
+        {
+            var list = new List<PersonPickerItem>();
+            var connStr = new SqliteConnectionStringBuilder
+            {
+                DataSource = AppPaths.DbPath,
+                Mode = SqliteOpenMode.ReadOnly,
+            }.ToString();
+            using var conn = new SqliteConnection(connStr);
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT p.id, COALESCE(NULLIF(TRIM(COALESCE(p.title, '') || ' ' || COALESCE(p.first_name, '') || ' ' || COALESCE(p.middle_name, '') || ' ' || COALESCE(p.last_name, '') || ' ' || COALESCE(p.suffix, '')), ''), NULLIF(TRIM(p.name), ''), 'Person ' || p.id) FROM persons p WHERE p.id != @currentId ORDER BY p.id DESC LIMIT 200";
+            cmd.Parameters.AddWithValue("@currentId", currentPersonId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                list.Add(new PersonPickerItem
+                {
+                    PersonId = r.GetInt64(0),
+                    DisplayName = r.GetString(1)
+                });
+            }
+            return list;
+        });
+
+        if (personsList.Count == 0)
+        {
+            StatusText.Text = "No other persons available to move face to.";
+            return;
+        }
+
+        var comboBox = new ComboBox
+        {
+            ItemsSource = personsList,
+            SelectedIndex = 0,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"Move Face #{faceId}",
+            Content = new StackPanel
+            {
+                Spacing = 12,
+                Children =
+                {
+                    new TextBlock { Text = "Select the target person for this face crop:" },
+                    comboBox
+                }
+            },
+            PrimaryButtonText = "Move",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result == ContentDialogResult.Primary && comboBox.SelectedItem is PersonPickerItem selected)
+        {
+            await Task.Run(() =>
+            {
+                var connStr = new SqliteConnectionStringBuilder
+                {
+                    DataSource = AppPaths.DbPath,
+                    Mode = SqliteOpenMode.ReadWrite,
+                }.ToString();
+                using var conn = new SqliteConnection(connStr);
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE face_prints SET person_id = @targetId WHERE id = @faceId";
+                cmd.Parameters.AddWithValue("@targetId", selected.PersonId);
+                cmd.Parameters.AddWithValue("@faceId", faceId);
+                cmd.ExecuteNonQuery();
+            });
+
+            var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
+            if (tile != null) _faces.Remove(tile);
+            StatusText.Text = $"Moved Face #{faceId} to {selected.DisplayName}.";
+        }
     }
 
     private sealed class LoadResult
