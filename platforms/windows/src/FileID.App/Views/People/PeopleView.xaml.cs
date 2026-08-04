@@ -429,6 +429,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Done",
             DefaultButton = ContentDialogButton.Close,
         };
+        _ = sheet.InitializeAsync();
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }

@@ -1,4 +1,4 @@
-﻿// SuggestedMergesSheet code-behind. Binds EngineClient's
+// SuggestedMergesSheet code-behind. Binds EngineClient's
 // LastMergeSuggestions to an ItemsRepeater via a DataTemplate over
 // MergeSuggestionVm (see PeopleViewModel). Each row shows side-by-side anchor
 // face JPEGs + similarity % + action buttons. Merge fires mergeClusters IPC;
@@ -35,38 +35,35 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += OnUnloaded;
-        Loaded += async (_, _) => await Services.DebugLog.SafeRunAsync("SuggestedMergesSheet.Loaded", async () =>
-        {
-            // Trigger a fresh suggestion fetch whenever the sheet opens, and
-            // bound-wait the engine's reply so the sheet doesn't sit forever on
-            // the placeholder when clustering is still running. On success the
-            // MergeSuggestionsEvent already drives Render() via the
-            // LastMergeSuggestions PropertyChanged subscription — nothing extra
-            // to do here.
-            HeaderText.Text = "Looking for similar clusters…";
-            SetBusy(true, "Comparing face clusters…");
-            try
-            {
-                await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
-                // Render() runs off the LastMergeSuggestions subscription and
-                // clears the busy state itself, but clear it here too: if the
-                // reply was value-identical to a previous one, PropertyChanged
-                // may not re-fire and the ring would spin forever.
-                SetBusy(false);
-            }
-            catch (TimeoutException)
-            {
-                SetBusy(false);
-                HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
-            }
-            catch (Exception ex)
-            {
-                SetBusy(false);
-                Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
-                HeaderText.Text = "Couldn't fetch suggestions — see logs.";
-            }
-        });
     }
+
+    public async Task InitializeAsync()
+        => await Services.DebugLog.SafeRunAsync("SuggestedMergesSheet.InitializeAsync", async () =>
+    {
+        if (_unloaded) return;
+        if (EngineClient.Instance.LastMergeSuggestions is not null)
+        {
+            Render();
+        }
+        HeaderText.Text = "Looking for similar clusters…";
+        SetBusy(true, "Comparing face clusters…");
+        try
+        {
+            await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
+            SetBusy(false);
+            Render();
+        }
+        catch (TimeoutException)
+        {
+            SetBusy(false);
+            HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
+        }
+        catch (Exception ex)
+        {
+            SetBusy(false);
+            Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
+        }
+    });
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
