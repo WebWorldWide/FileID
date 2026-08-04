@@ -63,24 +63,30 @@ public sealed partial class PersonDetailSheet : UserControl
 
     private void OnFaceGridElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
     {
-        if (args.Element is FrameworkElement el && el.DataContext is FaceTile tile)
-        {
-            var flyout = new MenuFlyout();
+        // ItemsRepeater with x:Bind compiled templates does NOT set DataContext on
+        // the realized element — DataContext is always null here. Use the index to
+        // fetch the tile from the backing collection directly.
+        if (args.Element is not FrameworkElement el) return;
+        var tile = (args.Index >= 0 && args.Index < _faces.Count) ? _faces[args.Index] : null;
+        if (tile is null) return;
 
-            var removeItem = new MenuFlyoutItem { Text = "Remove from this person", Tag = tile.FaceId };
-            removeItem.Click += async (s, e) => await RemoveFaceFromPersonAsync(tile.FaceId);
-            flyout.Items.Add(removeItem);
+        el.DataContext = tile;
 
-            var splitItem = new MenuFlyoutItem { Text = "Split into new person", Tag = tile.FaceId };
-            splitItem.Click += async (s, e) => await SplitFaceToNewPersonAsync(tile.FaceId);
-            flyout.Items.Add(splitItem);
+        var flyout = new MenuFlyout();
 
-            var moveItem = new MenuFlyoutItem { Text = "Move to another person...", Tag = tile.FaceId };
-            moveItem.Click += async (s, e) => await MoveFaceToPersonAsync(tile.FaceId);
-            flyout.Items.Add(moveItem);
+        var removeItem = new MenuFlyoutItem { Text = "Remove from this person", Tag = tile.FaceId };
+        removeItem.Click += async (s, e) => await RemoveFaceFromPersonAsync(tile.FaceId);
+        flyout.Items.Add(removeItem);
 
-            el.ContextFlyout = flyout;
-        }
+        var splitItem = new MenuFlyoutItem { Text = "Split into new person", Tag = tile.FaceId };
+        splitItem.Click += async (s, e) => await SplitFaceToNewPersonAsync(tile.FaceId);
+        flyout.Items.Add(splitItem);
+
+        var moveItem = new MenuFlyoutItem { Text = "Move to another person...", Tag = tile.FaceId };
+        moveItem.Click += async (s, e) => await MoveFaceToPersonAsync(tile.FaceId);
+        flyout.Items.Add(moveItem);
+
+        el.ContextFlyout = flyout;
     }
 
     private async Task RemoveFaceFromPersonAsync(long faceId)
