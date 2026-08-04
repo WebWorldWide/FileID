@@ -602,8 +602,20 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // fire this twice.
     private bool _detailOpen;
 
+    private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+        await HandleClusterActivationAsync(sender);
+    }
+
     private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnClusterTapped), async () =>
+    {
+        e.Handled = true;
+        await HandleClusterActivationAsync(sender);
+    }
+
+    private async Task HandleClusterActivationAsync(object sender)
+        => await DebugLog.SafeRunAsync(nameof(HandleClusterActivationAsync), async () =>
     {
         if (sender is not FrameworkElement el) return;
         PersonCluster? pc = el.DataContext as PersonCluster;
