@@ -382,11 +382,36 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         || ViewModel.Clusters.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
+    private PersonCluster? ResolveCluster(object? sender, RoutedEventArgs? e = null)
+    {
+        FrameworkElement? cur = sender as FrameworkElement;
+        if (cur is null && e?.OriginalSource is FrameworkElement orig)
+        {
+            cur = orig;
+        }
+
+        while (cur is not null)
+        {
+            if (cur.DataContext is PersonCluster pc) return pc;
+            if (cur.Tag is int or long or string)
+            {
+                try
+                {
+                    long cid = Convert.ToInt64(cur.Tag);
+                    var found = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
+                    if (found is not null) return found;
+                }
+                catch { /* ignore non-numeric tag */ }
+            }
+            cur = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(cur) as FrameworkElement;
+        }
+        return null;
+    }
+
     private async void OnContextOpenDetails(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnContextOpenDetails), async () =>
     {
-        if (sender is not MenuFlyoutItem item || item.Tag is not int cid) return;
-        var cluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
+        var cluster = ResolveCluster(sender, e);
         if (cluster is null) return;
         await OpenDetailSheetAsync(cluster);
     });
@@ -617,13 +642,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private async Task HandleClusterActivationAsync(object sender)
         => await DebugLog.SafeRunAsync(nameof(HandleClusterActivationAsync), async () =>
     {
-        if (sender is not FrameworkElement el) return;
-        PersonCluster? pc = el.DataContext as PersonCluster;
-        if (pc is null && el.Tag is int or long)
-        {
-            long cid = Convert.ToInt64(el.Tag);
-            pc = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
-        }
+        PersonCluster? pc = ResolveCluster(sender);
         if (pc is null) return;
         if (XamlRoot is null || _detailOpen) return;
         _detailOpen = true;
