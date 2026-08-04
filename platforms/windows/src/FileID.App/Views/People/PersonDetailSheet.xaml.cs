@@ -104,10 +104,10 @@ public sealed partial class PersonDetailSheet : UserControl
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
 
-                // Pull structured name fields + is_unknown flag.
+                // Pull structured name fields + legacy name + is_unknown flag.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0) " +
+                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0), p.name " +
                                       "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
                                       "WHERE p.id = @id GROUP BY p.id";
                     cmd.Parameters.AddWithValue("@id", personId);
@@ -122,6 +122,11 @@ public sealed partial class PersonDetailSheet : UserControl
                         res.Suffix = r.IsDBNull(4) ? "" : r.GetString(4);
                         res.MemberCount = r.GetInt32(5);
                         res.IsUnknown = r.GetInt32(6) != 0;
+                        var rawName = r.IsDBNull(7) ? "" : r.GetString(7);
+                        if (string.IsNullOrWhiteSpace(res.First) && !string.IsNullOrWhiteSpace(rawName) && !rawName.StartsWith("Person ", StringComparison.OrdinalIgnoreCase))
+                        {
+                            res.First = rawName;
+                        }
                     }
                 }
 

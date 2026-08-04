@@ -358,7 +358,19 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     public required int ClusterId { get; init; }
     public required long AnchorFaceId { get; init; }
     public required int MemberCount { get; init; }
-    public string? DisplayName { get; init; }
+
+    private string? _displayName;
+    public string? DisplayName
+    {
+        get => _displayName;
+        set
+        {
+            if (_displayName == value) return;
+            _displayName = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DisplayName)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Caption)));
+        }
+    }
 
     // FEAT-CRIT-1: per-card selection state for People multi-select.
     private bool _isSelected;

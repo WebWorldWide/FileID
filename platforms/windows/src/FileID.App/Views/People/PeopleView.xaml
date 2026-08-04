@@ -195,7 +195,7 @@
                                        Width="120" Height="120" />
                             </Border>
                             <TextBlock Grid.Row="1"
-                                       Text="{x:Bind Caption}"
+                                       Text="{x:Bind Caption, Mode=OneWay}"
                                        Margin="0,8,0,0"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        TextAlignment="Center"
