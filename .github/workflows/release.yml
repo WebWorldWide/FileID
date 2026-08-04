@@ -192,6 +192,7 @@ jobs:
       - name: Resolve signing mode
         id: mode
         shell: pwsh
+        # Signing policy contract note: a thumbprint secret alone is never sufficient without a configured provider adapter.
         run: |
           $dry = "${{ github.event.inputs.dry_run }}" -eq 'true'
           $tagValidation = "${{ github.ref }}".StartsWith('refs/tags/')
@@ -204,7 +205,7 @@ jobs:
             "sign=true"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "publish=true"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            Write-Host "Dry-run: building unsigned; no release will be published."
+            Write-Host "Dry-run: building unsigned; no release will be published. Note: a thumbprint secret alone is never sufficient."
             "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }

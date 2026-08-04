@@ -161,6 +161,7 @@
                               DragLeave="OnClusterDragLeave"
                               Drop="OnClusterDrop"
                               KeyDown="OnClusterKeyDown"
+                              DoubleTapped="OnClusterDoubleTapped"
                               Tapped="OnClusterTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
