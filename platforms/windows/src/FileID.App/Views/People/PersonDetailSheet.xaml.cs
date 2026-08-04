@@ -1,4 +1,4 @@
-﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
+// PersonDetailSheet code-behind. Loads every face for a cluster + its
 // JPEG crop, populates the structured-name editor, and on commit fires
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).
@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using FileID.IpcSchema;
 using FileID.Services;
+using FileID.ViewModels;
 using Microsoft.Data.Sqlite;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -65,6 +66,7 @@ public sealed partial class PersonDetailSheet : UserControl
         public string Middle = "";
         public string Last = "";
         public string Suffix = "";
+        public bool IsUnknown;
         public int MemberCount;
         public bool Found;
         public List<FaceTile> Faces = new();
@@ -102,10 +104,10 @@ public sealed partial class PersonDetailSheet : UserControl
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
 
-                // Pull structured name fields.
+                // Pull structured name fields + is_unknown flag.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id) " +
+                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0) " +
                                       "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
                                       "WHERE p.id = @id GROUP BY p.id";
                     cmd.Parameters.AddWithValue("@id", personId);
@@ -119,17 +121,13 @@ public sealed partial class PersonDetailSheet : UserControl
                         res.Last = r.IsDBNull(3) ? "" : r.GetString(3);
                         res.Suffix = r.IsDBNull(4) ? "" : r.GetString(4);
                         res.MemberCount = r.GetInt32(5);
+                        res.IsUnknown = r.GetInt32(6) != 0;
                     }
                 }
 
                 // Pull every face id for this cluster + check for an on-disk JPEG.
                 using (var cmd = conn.CreateCommand())
                 {
-                    // Bounded on purpose: a chained cluster can hold tens of
-                    // thousands of faces (26,422 in the worst real case), and
-                    // decoding that many crops would wedge the UI. Highest-quality
-                    // first so the cap keeps the most legible faces. The count is
-                    // disclosed below — never silently truncate.
                     cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT " + FacePreviewCap.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     cmd.Parameters.AddWithValue("@id", personId);
                     using var r = cmd.ExecuteReader();
@@ -158,9 +156,6 @@ public sealed partial class PersonDetailSheet : UserControl
                 StatusText.Text = $"Couldn't load: {result.Error}";
                 return;
             }
-            // Guard against a stale load landing after the sheet was re-pointed at
-            // a different person — skip ALL UI writes (name boxes + face grid), not
-            // just the grid, so a slow prior load can't overwrite the new person.
             if (_personId != personId) return;
             if (result.Found)
             {
@@ -169,6 +164,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 MiddleBox.Text = result.Middle;
                 LastBox.Text = result.Last;
                 SuffixBox.Text = result.Suffix;
+                IsUnknownCheckBox.IsChecked = result.IsUnknown;
                 MemberCountText.Text = result.MemberCount > result.Faces.Count
                     ? $"{result.MemberCount} faces clustered — showing the {result.Faces.Count} clearest."
                     : $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
@@ -240,6 +236,28 @@ public sealed partial class PersonDetailSheet : UserControl
             {
                 StatusText.Text = "This person no longer exists — it may have been merged. Reopen People and try again.";
                 return false;
+            }
+
+            if (IsUnknownCheckBox.IsChecked == true)
+            {
+                var unkResult = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "markPersonsAsUnknown",
+                    () => ViewModels.EngineClient.Instance.MarkPersonsAsUnknownAsync(new[] { personId }),
+                    TimeSpan.FromSeconds(30));
+                if (unkResult.Failed > 0 || unkResult.Succeeded == 0)
+                {
+                    var first = unkResult.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                    StatusText.Text = string.IsNullOrWhiteSpace(first) ? "Marking as unknown failed." : $"Marking as unknown failed: {first}";
+                    return false;
+                }
+                try
+                {
+                    var s = AppViewModel.Instance.Settings;
+                    s.PeopleHideUnknown = true;
+                    s.Save();
+                }
+                catch { /* ignore */ }
+                return true;
             }
 
             // Await the engine's BulkActionResult instead of fire-and-forget:
