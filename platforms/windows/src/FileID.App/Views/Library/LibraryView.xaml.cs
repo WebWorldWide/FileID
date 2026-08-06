@@ -1069,6 +1069,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private async void OnTagSelectedClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnTagSelectedClicked), async () =>
     {
         var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
         if (ids.Length == 0) return;
@@ -1097,9 +1098,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // engine's now-updated rows; the identity-stable merge folds the new
         // tags onto the surviving tiles via MergeMutableFrom. (F-C5-004)
         if (committed) RequestLibraryRefresh(force: true);
-    }
+    });
 
     private async void OnRenameSelectedClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnRenameSelectedClicked), async () =>
     {
         var selected = ViewModel.SelectedItems.ToArray();
         if (selected.Length == 0) return;
@@ -1142,7 +1144,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             foreach (var t in selected) ViewModel.Items.Remove(t);
             RequestLibraryRefresh(force: true);
         }
-    }
+    });
 
     private async void OnTrashSelectedClicked(object sender, RoutedEventArgs e)
     {
@@ -1356,6 +1358,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // toolbar X button + Esc key handle close inline, matching macOS's
     // self-contained preview chrome — no separate dialog CloseButton.
     private async void OnTileDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnTileDoubleTapped), async () =>
     {
         if (sender is not FrameworkElement el || el.Tag is not string path) return;
         FileTile? tile = null;
@@ -1366,7 +1369,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
         if (tile is null) return;
         await OpenPreview(tile, tileIndex);
-    }
+    });
 
     // Shared preview-open path — used by double-tap and by keyboard Enter
     // (OnGridPreviewKeyDown). Opens the FilePreviewSheet modal for the given
@@ -1442,10 +1445,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // queryId. We bypass the search-bar UI and surface results directly
     // via the existing ViewModel.Items list.
     private async void OnContextFindSimilar(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnContextFindSimilar), async () =>
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;
         await ViewModel.FindSimilarAsync(fileId, System.Threading.CancellationToken.None);
-    }
+    });
 
     private void OnContextCopyPath(object sender, RoutedEventArgs e)
     {

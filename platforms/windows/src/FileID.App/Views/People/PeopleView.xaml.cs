@@ -598,13 +598,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     private async void OnClusterKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnClusterKeyDown), async () =>
     {
-        if (sender is not FrameworkElement { DataContext: PersonCluster cluster }) return;
+        if (sender is not FrameworkElement el) return;
         if (e.Key == Windows.System.VirtualKey.Enter)
         {
             e.Handled = true;
-            await OpenDetailSheetAsync(cluster);
+            await HandleClusterActivationAsync(sender);
         }
-        else if (e.Key == Windows.System.VirtualKey.Space && ViewModel.IsSelectMode)
+        else if (e.Key == Windows.System.VirtualKey.Space && ViewModel.IsSelectMode && el.DataContext is PersonCluster cluster)
         {
             cluster.IsSelected = !cluster.IsSelected;
             e.Handled = true;

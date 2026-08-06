@@ -247,8 +247,8 @@ public partial class App : Application
                 if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => window.Close()); }
                 return;
             }
-            AppViewModel.Instance.FolderPath = folderPath;
-            DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
+            window.DispatcherQueue.TryEnqueue(() => AppViewModel.Instance.FolderPath = folderPath);
+            DebugLog.Info($"[AUTO-SCAN] starting scan; path={PathRedactor.Redact(folderPath)}");
 
             var scanGeneration = EngineClient.Instance.SpawnGeneration;
             var faceResultAtStart = EngineClient.Instance.LastFaceClustering;
