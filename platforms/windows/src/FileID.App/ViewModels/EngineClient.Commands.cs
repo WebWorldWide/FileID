@@ -1,4 +1,4 @@
-﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
+// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
 // Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
 // stdout loop, event router) stays separate from the per-command surface.
 
@@ -902,8 +902,15 @@ internal sealed partial class EngineClient
             cts.CancelAfter(timeout);
             using var reg = cts.Token.Register(() =>
             {
-                tcs.TrySetException(new TimeoutException(
-                    $"Engine did not confirm '{actionPrefix}' within {timeout.TotalSeconds:0}s."));
+                if (ct.IsCancellationRequested)
+                {
+                    tcs.TrySetCanceled(ct);
+                }
+                else
+                {
+                    tcs.TrySetException(new TimeoutException(
+                        $"Engine did not confirm '{actionPrefix}' within {timeout.TotalSeconds:0}s."));
+                }
             });
             return await tcs.Task.ConfigureAwait(false);
         }
@@ -1663,7 +1670,7 @@ internal sealed partial class EngineClient
                 "restoreFromTrash",
                 () => SendUndoCommandWithChannelRetryAsync(
                     new RestoreFromTrashCommand(batchId)),
-                Timeout.InfiniteTimeSpan).ConfigureAwait(false);
+                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
             if (result.Failed > 0)
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;

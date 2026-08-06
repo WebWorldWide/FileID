@@ -1,4 +1,4 @@
-// PersonDetailSheet code-behind. Loads every face for a cluster + its
+﻿// PersonDetailSheet code-behind. Loads every face for a cluster + its
 // JPEG crop, populates the structured-name editor, and on commit fires
 // a renamePerson IPC (DB write only — sidecar tags inherit from the
 // per-file scan).
@@ -73,15 +73,15 @@ public sealed partial class PersonDetailSheet : UserControl
         var flyout = new MenuFlyout();
 
         var removeItem = new MenuFlyoutItem { Text = "Remove from this person", Tag = tile.FaceId };
-        removeItem.Click += async (s, e) => await RemoveFaceFromPersonAsync(tile.FaceId);
+        removeItem.Click += async (s, e) => await DebugLog.SafeRunAsync(nameof(RemoveFaceFromPersonAsync), async () => await RemoveFaceFromPersonAsync(tile.FaceId));
         flyout.Items.Add(removeItem);
 
         var splitItem = new MenuFlyoutItem { Text = "Split into new person", Tag = tile.FaceId };
-        splitItem.Click += async (s, e) => await SplitFaceToNewPersonAsync(tile.FaceId);
+        splitItem.Click += async (s, e) => await DebugLog.SafeRunAsync(nameof(SplitFaceToNewPersonAsync), async () => await SplitFaceToNewPersonAsync(tile.FaceId));
         flyout.Items.Add(splitItem);
 
         var moveItem = new MenuFlyoutItem { Text = "Move to another person...", Tag = tile.FaceId };
-        moveItem.Click += async (s, e) => await MoveFaceToPersonAsync(tile.FaceId);
+        moveItem.Click += async (s, e) => await DebugLog.SafeRunAsync(nameof(MoveFaceToPersonAsync), async () => await MoveFaceToPersonAsync(tile.FaceId, s as FrameworkElement));
         flyout.Items.Add(moveItem);
 
         el.ContextFlyout = flyout;
@@ -89,55 +89,73 @@ public sealed partial class PersonDetailSheet : UserControl
 
     private async Task RemoveFaceFromPersonAsync(long faceId)
     {
-        await Task.Run(() =>
+        try
         {
-            var connStr = new SqliteConnectionStringBuilder
+            await Task.Run(() =>
             {
-                DataSource = AppPaths.DbPath,
-                Mode = SqliteOpenMode.ReadWrite,
-            }.ToString();
-            using var conn = new SqliteConnection(connStr);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "UPDATE face_prints SET person_id = NULL WHERE id = @faceId";
-            cmd.Parameters.AddWithValue("@faceId", faceId);
-            cmd.ExecuteNonQuery();
-        });
+                var connStr = new SqliteConnectionStringBuilder
+                {
+                    DataSource = AppPaths.DbPath,
+                    Mode = SqliteOpenMode.ReadWrite,
+                    DefaultTimeout = 5
+                }.ToString();
+                using var conn = new SqliteConnection(connStr);
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "UPDATE face_prints SET person_id = NULL WHERE id = @faceId";
+                cmd.Parameters.AddWithValue("@faceId", faceId);
+                cmd.ExecuteNonQuery();
+            });
 
-        var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
-        if (tile != null) _faces.Remove(tile);
-        StatusText.Text = $"Removed Face #{faceId} from this person.";
+            var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
+            if (tile != null) _faces.Remove(tile);
+            StatusText.Text = $"Removed Face #{faceId} from this person.";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"RemoveFaceFromPersonAsync failed: {ex.Message}");
+            StatusText.Text = $"Failed to remove face: {ex.Message}";
+        }
     }
 
     private async Task SplitFaceToNewPersonAsync(long faceId)
     {
-        long newPersonId = 0;
-        await Task.Run(() =>
+        try
         {
-            var connStr = new SqliteConnectionStringBuilder
+            long newPersonId = 0;
+            await Task.Run(() =>
             {
-                DataSource = AppPaths.DbPath,
-                Mode = SqliteOpenMode.ReadWrite,
-            }.ToString();
-            using var conn = new SqliteConnection(connStr);
-            conn.Open();
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, datetime('now')); SELECT last_insert_rowid();";
-                newPersonId = Convert.ToInt64(cmd.ExecuteScalar());
-            }
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "UPDATE face_prints SET person_id = @newPid WHERE id = @faceId";
-                cmd.Parameters.AddWithValue("@newPid", newPersonId);
-                cmd.Parameters.AddWithValue("@faceId", faceId);
-                cmd.ExecuteNonQuery();
-            }
-        });
+                var connStr = new SqliteConnectionStringBuilder
+                {
+                    DataSource = AppPaths.DbPath,
+                    Mode = SqliteOpenMode.ReadWrite,
+                    DefaultTimeout = 5
+                }.ToString();
+                using var conn = new SqliteConnection(connStr);
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, datetime('now')); SELECT last_insert_rowid();";
+                    newPersonId = Convert.ToInt64(cmd.ExecuteScalar());
+                }
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "UPDATE face_prints SET person_id = @newPid WHERE id = @faceId";
+                    cmd.Parameters.AddWithValue("@newPid", newPersonId);
+                    cmd.Parameters.AddWithValue("@faceId", faceId);
+                    cmd.ExecuteNonQuery();
+                }
+            });
 
-        var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
-        if (tile != null) _faces.Remove(tile);
-        StatusText.Text = $"Split Face #{faceId} into new Person #{newPersonId}.";
+            var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
+            if (tile != null) _faces.Remove(tile);
+            StatusText.Text = $"Split Face #{faceId} into new Person #{newPersonId}.";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"SplitFaceToNewPersonAsync failed: {ex.Message}");
+            StatusText.Text = $"Failed to split face: {ex.Message}";
+        }
     }
 
     private sealed class PersonPickerItem
@@ -147,7 +165,7 @@ public sealed partial class PersonDetailSheet : UserControl
         public override string ToString() => DisplayName;
     }
 
-    private async Task MoveFaceToPersonAsync(long faceId)
+    private async Task MoveFaceToPersonAsync(long faceId, FrameworkElement? targetElement)
     {
         long currentPersonId = _personId;
         var personsList = await Task.Run(() =>
@@ -157,6 +175,7 @@ public sealed partial class PersonDetailSheet : UserControl
             {
                 DataSource = AppPaths.DbPath,
                 Mode = SqliteOpenMode.ReadOnly,
+                DefaultTimeout = 5
             }.ToString();
             using var conn = new SqliteConnection(connStr);
             conn.Open();
@@ -188,26 +207,51 @@ public sealed partial class PersonDetailSheet : UserControl
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
 
-        var dialog = new ContentDialog
+        var moveBtn = new Button
         {
-            XamlRoot = XamlRoot,
-            Title = $"Move Face #{faceId}",
-            Content = new StackPanel
-            {
-                Spacing = 12,
-                Children =
-                {
-                    new TextBlock { Text = "Select the target person for this face crop:" },
-                    comboBox
-                }
-            },
-            PrimaryButtonText = "Move",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary
+            Content = "Move",
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+            HorizontalAlignment = HorizontalAlignment.Right
         };
 
-        var result = await dialog.ShowAsync();
-        if (result == ContentDialogResult.Primary && comboBox.SelectedItem is PersonPickerItem selected)
+        var flyout = new Flyout
+        {
+            Content = new StackPanel
+            {
+                Width = 260,
+                Spacing = 10,
+                Children =
+                {
+                    new TextBlock { Text = $"Move Face #{faceId}", Style = (Style)Application.Current.Resources["SubtitleTextBlockStyle"] },
+                    new TextBlock { Text = "Select target person:", Style = (Style)Application.Current.Resources["BodyTextBlockStyle"] },
+                    comboBox,
+                    moveBtn
+                }
+            }
+        };
+
+        moveBtn.Click += async (_, _) =>
+        {
+            flyout.Hide();
+            if (comboBox.SelectedItem is PersonPickerItem selected)
+            {
+                await PerformMoveFaceAsync(faceId, selected);
+            }
+        };
+
+        if (targetElement != null)
+        {
+            flyout.ShowAt(targetElement);
+        }
+        else
+        {
+            flyout.ShowAt(this);
+        }
+    }
+
+    private async Task PerformMoveFaceAsync(long faceId, PersonPickerItem selected)
+    {
+        try
         {
             await Task.Run(() =>
             {
@@ -215,6 +259,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 {
                     DataSource = AppPaths.DbPath,
                     Mode = SqliteOpenMode.ReadWrite,
+                    DefaultTimeout = 5
                 }.ToString();
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
@@ -228,6 +273,11 @@ public sealed partial class PersonDetailSheet : UserControl
             var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
             if (tile != null) _faces.Remove(tile);
             StatusText.Text = $"Moved Face #{faceId} to {selected.DisplayName}.";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"PerformMoveFaceAsync failed: {ex.Message}");
+            StatusText.Text = $"Failed to move face: {ex.Message}";
         }
     }
 

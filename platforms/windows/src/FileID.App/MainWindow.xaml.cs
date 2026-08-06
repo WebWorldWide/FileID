@@ -448,11 +448,18 @@ public sealed partial class MainWindow : Window
         AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, args) =>
         {
             args.Handled = true;
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
-            if (result.Path is not null)
+            try
             {
-                AppViewModel.Instance.FolderPath = result.Path;
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+                var result = await FolderPickerService.PickFolderAsync(hwnd);
+                if (result.Path is not null)
+                {
+                    AppViewModel.Instance.FolderPath = result.Path;
+                }
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Warn($"Ctrl+O pick folder failed: {ex.Message}");
             }
         });
 
@@ -488,16 +495,23 @@ public sealed partial class MainWindow : Window
         // Ctrl+Z — undo last destructive action.
         AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
-            if (KeyboardFocusGuard.IsTextEditing(((FrameworkElement)Content).XamlRoot)
-                || !Services.UndoStack.Instance.CanUndo)
+            try
             {
-                return;
+                if (KeyboardFocusGuard.IsTextEditing(((FrameworkElement)Content).XamlRoot)
+                    || !Services.UndoStack.Instance.CanUndo)
+                {
+                    return;
+                }
+                args.Handled = true;
+                var label = await Services.UndoStack.Instance.UndoAsync();
+                if (!string.IsNullOrEmpty(label))
+                {
+                    Services.DebugLog.Info($"Undid: {label}");
+                }
             }
-            args.Handled = true;
-            var label = await Services.UndoStack.Instance.UndoAsync();
-            if (!string.IsNullOrEmpty(label))
+            catch (Exception ex)
             {
-                Services.DebugLog.Info($"Undid: {label}");
+                Services.DebugLog.Warn($"Ctrl+Z undo failed: {ex.Message}");
             }
         });
 
@@ -532,8 +546,10 @@ public sealed partial class MainWindow : Window
             var key = (VirtualKey)((int)VirtualKey.Number1 + i);
             AddAccelerator(key, VirtualKeyModifiers.Menu, (_, args) =>
             {
+                var targetTab = SidebarTab.All[idx];
+                if (!AppViewModel.Instance.HasFolder && targetTab.Id != "settings") return;
                 args.Handled = true;
-                AppViewModel.Instance.ActiveTab = SidebarTab.All[idx];
+                AppViewModel.Instance.ActiveTab = targetTab;
             });
         }
 
@@ -785,7 +801,7 @@ public sealed partial class MainWindow : Window
                 if (dontAsk.IsChecked == true)
                 {
                     settings.ConfirmCloseOnPendingChanges = false;
-                    settings.Save();
+                    try { settings.Save(); } catch (Exception ex) { DebugLog.Warn("Save settings failed in ConfirmClose: " + ex.Message); }
                 }
                 if (choice == ContentDialogResult.Primary)
                 {
