@@ -1,4 +1,4 @@
-// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
+﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
 // LibraryView.swift:902-1112 preview sheet:
 //   image  → BitmapImage at 1024 px (shell IThumbnailProvider chain).
 //   video  → MediaPlayerElement with transport controls (in-app playback;
