@@ -558,10 +558,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             args.Data.Properties[MergeFormatId] = (long)pc.ClusterId;
             args.Data.RequestedOperation = DataPackageOperation.Move;
         }
-        else if (sender is FrameworkElement el2 && el2.Tag is long pid)
+        else if (sender is FrameworkElement el2 && el2.Tag is int or long or string)
         {
-            args.Data.Properties[MergeFormatId] = pid;
-            args.Data.RequestedOperation = DataPackageOperation.Move;
+            try
+            {
+                args.Data.Properties[MergeFormatId] = Convert.ToInt64(el2.Tag);
+                args.Data.RequestedOperation = DataPackageOperation.Move;
+            }
+            catch { /* non-numeric tag */ }
         }
     });
 
@@ -662,9 +666,19 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (raw is not long sourceId) return;
 
         long destId;
-        if (g.Tag is long t) destId = t;
-        else if (g.DataContext is PersonCluster pc) destId = pc.ClusterId;
-        else return;
+        if (g.DataContext is PersonCluster pc)
+        {
+            destId = pc.ClusterId;
+        }
+        else if (g.Tag is int or long or string)
+        {
+            try { destId = Convert.ToInt64(g.Tag); }
+            catch { return; }
+        }
+        else
+        {
+            return;
+        }
 
         if (sourceId == destId) return; // no-op self-drop
 
@@ -859,6 +873,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             string? firstFailure = null;
             for (int i = 1; i < ids.Count; i++)
             {
+                if (_unloaded) break;
                 try
                 {
                     // Snapshot the source's face ids for revertMerge before they move.

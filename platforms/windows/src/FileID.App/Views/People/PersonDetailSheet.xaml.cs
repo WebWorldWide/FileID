@@ -133,18 +133,22 @@ public sealed partial class PersonDetailSheet : UserControl
                 }.ToString();
                 using var conn = new SqliteConnection(connStr);
                 conn.Open();
+                using var tx = conn.BeginTransaction();
                 using (var cmd = conn.CreateCommand())
                 {
+                    cmd.Transaction = tx;
                     cmd.CommandText = "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, datetime('now')); SELECT last_insert_rowid();";
                     newPersonId = Convert.ToInt64(cmd.ExecuteScalar());
                 }
                 using (var cmd = conn.CreateCommand())
                 {
+                    cmd.Transaction = tx;
                     cmd.CommandText = "UPDATE face_prints SET person_id = @newPid WHERE id = @faceId";
                     cmd.Parameters.AddWithValue("@newPid", newPersonId);
                     cmd.Parameters.AddWithValue("@faceId", faceId);
                     cmd.ExecuteNonQuery();
                 }
+                tx.Commit();
             });
 
             var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
