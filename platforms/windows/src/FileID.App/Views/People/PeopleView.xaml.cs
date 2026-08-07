@@ -801,6 +801,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         System.Collections.Generic.IEnumerable<PersonCluster> clusters,
         System.Collections.Generic.ISet<int> selectedIds)
     {
+        var activeIds = new System.Collections.Generic.HashSet<int>(clusters.Select(c => c.ClusterId));
+        selectedIds.IntersectWith(activeIds);
         foreach (var c in clusters)
         {
             bool want = selectedIds.Contains(c.ClusterId);

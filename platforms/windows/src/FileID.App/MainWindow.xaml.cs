@@ -805,6 +805,7 @@ public sealed partial class MainWindow : Window
                 }
                 if (choice == ContentDialogResult.Primary)
                 {
+                    await Task.Delay(100);
                     var sheet = new ContentDialog
                     {
                         XamlRoot = (Content as FrameworkElement)?.XamlRoot,

@@ -591,12 +591,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         if (prior != null)
         {
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
-            prior.Dispose();
         }
-        // Snapshot the token while `cts` is guaranteed alive. Reading
-        // `cts.Token` INSIDE the task could race a newer ScheduleRefresh that
-        // already disposed this cts, throwing ObjectDisposedException as an
-        // unobserved task exception (process-level crash under strict modes).
+        // Snapshot the token while `cts` is guaranteed alive.
         var token = cts.Token;
         _ = Task.Run(async () =>
         {
@@ -607,6 +603,10 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             catch (OperationCanceledException) { /* expected */ }
             catch (ObjectDisposedException) { /* cts disposed by a newer refresh */ }
+            finally
+            {
+                cts.Dispose();
+            }
         });
     }
 
@@ -623,7 +623,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         if (prior != null)
         {
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
-            prior.Dispose();
         }
     }
 

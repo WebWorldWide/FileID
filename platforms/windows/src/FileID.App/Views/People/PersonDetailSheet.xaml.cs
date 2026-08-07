@@ -45,6 +45,7 @@ public sealed partial class PersonDetailSheet : UserControl
         InitializeComponent();
         FaceGrid.ItemsSource = _faces;
         FaceGrid.ElementPrepared += OnFaceGridElementPrepared;
+        FaceGrid.ElementClearing += OnFaceGridElementClearing;
         FaceGrid.ItemTemplate = (DataTemplate)XamlReader.Load("""
             <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
                           xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'>
@@ -85,6 +86,15 @@ public sealed partial class PersonDetailSheet : UserControl
         flyout.Items.Add(moveItem);
 
         el.ContextFlyout = flyout;
+    }
+
+    private void OnFaceGridElementClearing(ItemsRepeater sender, ItemsRepeaterElementClearingEventArgs args)
+    {
+        if (args.Element is FrameworkElement el)
+        {
+            el.ContextFlyout = null;
+            el.DataContext = null;
+        }
     }
 
     private async Task RemoveFaceFromPersonAsync(long faceId)
