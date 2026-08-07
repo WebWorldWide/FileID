@@ -1141,7 +1141,14 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // would keep the OLD name. Evict the renamed tiles first so the
             // re-query rebuilds them as fresh tiles carrying the new on-disk
             // name (a failed per-file rename just re-lands unchanged). (F-C5-004)
-            foreach (var t in selected) ViewModel.Items.Remove(t);
+            var renamedIds = new HashSet<long>(selected.Select(t => t.Id));
+            for (int i = ViewModel.Items.Count - 1; i >= 0; i--)
+            {
+                if (renamedIds.Contains(ViewModel.Items[i].Id))
+                {
+                    ViewModel.Items.RemoveAt(i);
+                }
+            }
             RequestLibraryRefresh(force: true);
         }
     });
