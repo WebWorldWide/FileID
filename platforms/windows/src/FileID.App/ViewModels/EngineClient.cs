@@ -1568,7 +1568,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 string frame = st.Buffer.ToString(0, nl);
                 st.Buffer.Remove(0, nl + 1);
                 st.Scanned = 0;
-                st.Utf8Bytes = Encoding.UTF8.GetByteCount(st.Buffer.ToString());
+                st.Utf8Bytes = Math.Max(0, st.Utf8Bytes - Encoding.UTF8.GetByteCount(frame) - 1);
                 if (st.Resyncing)
                 {
                     // This frame is the tail of an oversize line — drop it and
