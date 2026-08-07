@@ -1,4 +1,4 @@
-// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
+﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
 // Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
 // stdout loop, event router) stays separate from the per-command surface.
 
