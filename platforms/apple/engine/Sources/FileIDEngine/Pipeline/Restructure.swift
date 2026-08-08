@@ -101,6 +101,13 @@ public enum Restructure {
             "\(UUID().uuidString.lowercased()).planning.sqlite")
         defer { try? FileManager.default.removeItem(at: planningURL) }
         let planDB = try DatabaseQueue(path: planningURL.path)
+        try await planDB.writeWithoutTransaction { db in
+            try db.execute(sql: """
+                PRAGMA journal_mode=OFF;
+                PRAGMA synchronous=OFF;
+                PRAGMA temp_store=FILE;
+                """)
+        }
         try await planDB.write { db in
             try db.execute(sql: """
                 CREATE TABLE raw_moves(
@@ -113,11 +120,6 @@ public enum Restructure {
                     confidence TEXT NOT NULL,
                     reason TEXT,
                     actionable INTEGER NOT NULL);
-                CREATE TABLE folder_stats(
-                    folder TEXT NOT NULL,
-                    category TEXT NOT NULL,
-                    count INTEGER NOT NULL,
-                    PRIMARY KEY(folder,category));
                 CREATE TABLE folder_tiers(
                     folder TEXT PRIMARY KEY,
                     tier TEXT NOT NULL);
@@ -137,13 +139,29 @@ public enum Restructure {
                     SELECT
                       f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                       f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                      (SELECT GROUP_CONCAT(name, char(31))
-                         FROM (SELECT DISTINCT p.name
+                      f.vlm_description,
+                      (SELECT LENGTH(TRIM(o.text)) FROM ocr_text o WHERE o.file_id=f.id)
+                        AS ocr_length,
+                      (SELECT GROUP_CONCAT(display_name, char(31))
+                         FROM (SELECT DISTINCT TRIM(COALESCE(
+                                   NULLIF(TRIM(p.name), ''),
+                                   COALESCE(NULLIF(TRIM(p.title), '') || ' ', '') ||
+                                   COALESCE(NULLIF(TRIM(p.first_name), '') || ' ', '') ||
+                                   COALESCE(NULLIF(TRIM(p.middle_name), '') || ' ', '') ||
+                                   COALESCE(NULLIF(TRIM(p.last_name), '') || ' ', '') ||
+                                   COALESCE(NULLIF(TRIM(p.suffix), '') || ' ', '')
+                                 )) AS display_name
                                  FROM persons p
                                  JOIN face_prints fp ON fp.person_id = p.id
                                 WHERE fp.file_id = f.id
-                                  AND p.name IS NOT NULL AND p.name <> ''
-                                ORDER BY p.name)) AS names
+                                  AND IFNULL(p.is_unknown, 0) = 0
+                                  AND (TRIM(COALESCE(p.name, '')) <> ''
+                                    OR TRIM(COALESCE(p.title, '')) <> ''
+                                    OR TRIM(COALESCE(p.first_name, '')) <> ''
+                                    OR TRIM(COALESCE(p.middle_name, '')) <> ''
+                                    OR TRIM(COALESCE(p.last_name, '')) <> ''
+                                    OR TRIM(COALESCE(p.suffix, '')) <> '')
+                                ORDER BY display_name)) AS names
                     FROM files f
                     WHERE f.failed=0
                       AND (?='' OR f.path_text=? OR (f.path_text>=? AND f.path_text<?))
@@ -161,9 +179,14 @@ public enum Restructure {
                         kind: row["kind"] ?? "other",
                         modifiedUnix: row["modified_at"] ?? 0,
                         createdUnix: row["created_at"],
-                        personName: firstPersonName(names),
+                        personName: solePersonName(names),
                         lat: row["location_lat"], lon: row["location_lon"],
-                        hasText: (row["has_text"] ?? 0) != 0,
+                        documentLike: isDocumentLike(
+                            kind: row["kind"] ?? "other",
+                            hasText: (row["has_text"] ?? 0) != 0,
+                            ocrLength: row["ocr_length"] ?? 0,
+                            source: row["path_text"] ?? "",
+                            description: row["vlm_description"]),
                         vlmProposed: row["vlm_proposed_name"])
                 }
             }
@@ -172,22 +195,19 @@ public enum Restructure {
             let proposals = ruleClassify(chunk, libraryRoot: libraryRoot)
             let chunkBase = sequence
             try await planDB.write { plan in
+                let insert = try plan.cachedStatement(sql: """
+                    INSERT INTO raw_moves
+                      (seq,file_id,source,source_folder,destination,category,confidence,reason,
+                       actionable)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                    """)
                 for (offset, proposal) in proposals.enumerated() {
                     let folder = (proposal.oldPath as NSString).deletingLastPathComponent
-                    try plan.execute(sql: """
-                        INSERT INTO raw_moves
-                          (seq,file_id,source,source_folder,destination,category,confidence,reason,
-                           actionable)
-                        VALUES (?,?,?,?,?,?,?,?,?)
-                        """, arguments: [
+                    try insert.execute(arguments: [
                             chunkBase + offset, proposal.fileID, proposal.oldPath, folder,
                             proposal.newPath, proposal.bucket,
                             proposal.confidence, proposal.reason,
                             pathsEqual(proposal.oldPath, proposal.newPath) ? 0 : 1])
-                    try plan.execute(sql: """
-                        INSERT INTO folder_stats(folder,category,count) VALUES (?,?,1)
-                        ON CONFLICT(folder,category) DO UPDATE SET count=count+1
-                        """, arguments: [folder, proposal.bucket])
                 }
             }
             sequence = chunkBase + proposals.count
@@ -200,6 +220,9 @@ public enum Restructure {
                 SELECT folder,
                   CASE
                     WHEN total <= 2
+                      OR lower(folder) LIKE '%/desktop'
+                      OR lower(folder) LIKE '%/unsorted'
+                      OR lower(folder) LIKE '%/inbox'
                       OR lower(folder) LIKE '%/downloads'
                       OR lower(folder) LIKE '%/downloaded'
                       OR lower(folder) LIKE '%/new folder'
@@ -211,14 +234,20 @@ public enum Restructure {
                       OR lower(folder) LIKE '%/stuff'
                       OR lower(folder) LIKE '%/things'
                       OR lower(folder) LIKE '%/files' THEN 'Junk'
+                    WHEN folder = ? THEN 'Mixed'
                     WHEN top_count * 100 >= total * 80 THEN 'Anchor'
                     ELSE 'Mixed'
                   END
                 FROM (
-                  SELECT folder, SUM(count) AS total, MAX(count) AS top_count
-                  FROM folder_stats GROUP BY folder
+                  SELECT folder, SUM(category_count) AS total, MAX(category_count) AS top_count
+                  FROM (
+                    SELECT source_folder AS folder, category, COUNT(*) AS category_count
+                    FROM raw_moves
+                    GROUP BY source_folder, category
+                  )
+                  GROUP BY folder
                 )
-                """)
+                """, arguments: [bounds.root])
         }
 
         let summary = try await planDB.read { db -> (
@@ -348,7 +377,7 @@ public enum Restructure {
             let modifiedAt: Double?
             let lat: Double?
             let lon: Double?
-            let hasText: Int
+            let documentLike: Bool
             let vlmProposed: String?
             let personNames: String?     // comma-joined
         }
@@ -371,13 +400,29 @@ public enum Restructure {
                 SELECT
                   f.id, f.path_text, f.kind, f.created_at, f.modified_at,
                   f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
-                  (SELECT GROUP_CONCAT(name, char(31))
-                     FROM (SELECT DISTINCT p.name
+                  f.vlm_description,
+                  (SELECT LENGTH(TRIM(o.text)) FROM ocr_text o WHERE o.file_id=f.id)
+                    AS ocr_length,
+                  (SELECT GROUP_CONCAT(display_name, char(31))
+                     FROM (SELECT DISTINCT TRIM(COALESCE(
+                               NULLIF(TRIM(p.name), ''),
+                               COALESCE(NULLIF(TRIM(p.title), '') || ' ', '') ||
+                               COALESCE(NULLIF(TRIM(p.first_name), '') || ' ', '') ||
+                               COALESCE(NULLIF(TRIM(p.middle_name), '') || ' ', '') ||
+                               COALESCE(NULLIF(TRIM(p.last_name), '') || ' ', '') ||
+                               COALESCE(NULLIF(TRIM(p.suffix), '') || ' ', '')
+                             )) AS display_name
                              FROM persons p
                              JOIN face_prints fp ON fp.person_id = p.id
                             WHERE fp.file_id = f.id
-                              AND p.name IS NOT NULL AND p.name <> ''
-                            ORDER BY p.name)) AS names
+                              AND IFNULL(p.is_unknown, 0) = 0
+                              AND (TRIM(COALESCE(p.name, '')) <> ''
+                                OR TRIM(COALESCE(p.title, '')) <> ''
+                                OR TRIM(COALESCE(p.first_name, '')) <> ''
+                                OR TRIM(COALESCE(p.middle_name, '')) <> ''
+                                OR TRIM(COALESCE(p.last_name, '')) <> ''
+                                OR TRIM(COALESCE(p.suffix, '')) <> '')
+                            ORDER BY display_name)) AS names
                 FROM files f
                 WHERE f.failed = 0
                   AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
@@ -392,7 +437,12 @@ public enum Restructure {
                     modifiedAt: row["modified_at"],
                     lat: row["location_lat"],
                     lon: row["location_lon"],
-                    hasText: row["has_text"] ?? 0,
+                    documentLike: isDocumentLike(
+                        kind: row["kind"] ?? "other",
+                        hasText: (row["has_text"] ?? 0) != 0,
+                        ocrLength: row["ocr_length"] ?? 0,
+                        source: row["path_text"] ?? "",
+                        description: row["vlm_description"]),
                     vlmProposed: row["vlm_proposed_name"],
                     personNames: row["names"]
                 )
@@ -554,8 +604,9 @@ public enum Restructure {
             return FileForClassify(
                 fileID: s.id, source: s.path, kind: s.kind,
                 modifiedUnix: s.modifiedAt ?? 0, createdUnix: s.createdAt,
-                personName: Self.firstPersonName(s.personNames),
-                lat: s.lat, lon: s.lon, hasText: s.hasText != 0, vlmProposed: s.vlmProposed)
+                personName: Self.solePersonName(s.personNames),
+                lat: s.lat, lon: s.lon, documentLike: s.documentLike,
+                vlmProposed: s.vlmProposed)
         }
         proposals.append(contentsOf: ruleClassify(ruleFiles, libraryRoot: libraryRoot))
 
@@ -580,7 +631,7 @@ public enum Restructure {
         // recompute can't see those folders at all and the "Keep" tile would silently
         // undercount the folders actually being left alone. Mirrors the Windows engine,
         // which computes folder_class on the full proposed set before stripping. (audit)
-        let folderClass = classifyFolders(proposals)
+        let folderClass = classifyFolders(proposals, libraryRoot: libraryRoot.path)
         let tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
         let stripped = stripAnchorFolderMovesExcept(
             proposals, classified: folderClass, exempt: semanticSourceFolders)
@@ -666,13 +717,13 @@ public enum Restructure {
         public let personName: String?
         public let lat: Double?
         public let lon: Double?
-        public let hasText: Bool
+        public let documentLike: Bool
         public let vlmProposed: String?
 
         public init(fileID: Int64, source: String, kind: String,
                     modifiedUnix: Double, createdUnix: Double?,
                     personName: String?, lat: Double?, lon: Double?,
-                    hasText: Bool, vlmProposed: String? = nil) {
+                    documentLike: Bool, vlmProposed: String? = nil) {
             self.fileID = fileID
             self.source = source
             self.kind = kind
@@ -681,7 +732,7 @@ public enum Restructure {
             self.personName = personName
             self.lat = lat
             self.lon = lon
-            self.hasText = hasText
+            self.documentLike = documentLike
             self.vlmProposed = vlmProposed
         }
     }
@@ -702,12 +753,18 @@ public enum Restructure {
         out.reserveCapacity(files.count)
         for f in files {
             let ts = f.createdUnix ?? f.modifiedUnix
-            // A zero or near-zero timestamp is not a real date (FAT32 zero-epoch,
-            // corrupt mtime). Flag with Ask confidence and skip year sub-folders
-            // so the user isn't silently placed into a 1970 folder.
-            let tsValid = ts > 86_400  // > 1970-01-02 avoids zero/near-zero epoch artefacts
-            let (y, m) = yearMonth(ts)
-            let mname = monthName(m)
+            let timestampValid = ts > 86_400
+            let timestampDate = yearMonth(ts)
+            let pathDate = trustedPathDate(f.source)
+            let y = pathDate?.year ?? timestampDate.year
+            let month: Int? = if let pathMonth = pathDate?.month {
+                pathMonth
+            } else if pathDate == nil || pathDate?.year == timestampDate.year {
+                timestampDate.month
+            } else {
+                nil
+            }
+            let dateValid = pathDate != nil || timestampValid
 
             let category: String
             let confidence: String
@@ -721,7 +778,7 @@ public enum Restructure {
                 category = "People/\(safe)"
                 confidence = "auto"
                 reason = "Named person: \(safe)"
-            } else if let lat = f.lat, let lon = f.lon {
+            } else if let (lat, lon) = validLocation(lat: f.lat, lon: f.lon) {
                 let latB = (lat * 2).rounded() / 2
                 let lonB = (lon * 2).rounded() / 2
                 let b = String(format: "%.1f_%.1f", latB, lonB)
@@ -731,33 +788,43 @@ public enum Restructure {
                 category = "Places/\(b)"
                 confidence = "review"
                 reason = "Taken at a shared location"
-            } else if f.hasText || f.kind == "pdf" || f.kind == "doc" {
+            } else if f.documentLike || f.kind == "pdf" || f.kind == "doc" {
                 let docs = libraryRoot.appendingPathComponent("Documents", isDirectory: true)
-                dir = tsValid ? docs.appendingPathComponent("\(y)", isDirectory: true) : docs
+                dir = dateValid ? docs.appendingPathComponent("\(y)", isDirectory: true) : docs
                 category = "document"
-                confidence = tsValid ? "review" : "ask"
-                reason = tsValid ? "Document from \(y)" : "Document — no date signal"
+                confidence = dateValid ? "review" : "ask"
+                reason = dateValid ? "Document from \(y)" : "Document — no date signal"
             } else if f.kind == "image" {
                 let photos = libraryRoot.appendingPathComponent("Photos", isDirectory: true)
-                dir = tsValid
-                    ? photos.appendingPathComponent("\(y)", isDirectory: true)
-                            .appendingPathComponent(mname, isDirectory: true)
-                    : photos
+                let yearFolder = photos.appendingPathComponent("\(y)", isDirectory: true)
+                dir = if dateValid, let month {
+                    yearFolder.appendingPathComponent(monthName(month), isDirectory: true)
+                } else if dateValid {
+                    yearFolder
+                } else {
+                    photos
+                }
                 category = "photo"
-                confidence = tsValid ? "review" : "ask"
-                reason = tsValid ? "Photo from \(mname) \(y)" : "Photo — no capture date"
+                confidence = dateValid ? "review" : "ask"
+                reason = if let month {
+                    "Photo from \(monthName(month)) \(y)"
+                } else if dateValid {
+                    "Photo from \(y)"
+                } else {
+                    "Photo — no capture date"
+                }
             } else if f.kind == "video" {
                 let videos = libraryRoot.appendingPathComponent("Videos", isDirectory: true)
-                dir = tsValid ? videos.appendingPathComponent("\(y)", isDirectory: true) : videos
+                dir = dateValid ? videos.appendingPathComponent("\(y)", isDirectory: true) : videos
                 category = "video"
-                confidence = tsValid ? "review" : "ask"
-                reason = tsValid ? "Video from \(y)" : "Video — no date signal"
+                confidence = dateValid ? "review" : "ask"
+                reason = dateValid ? "Video from \(y)" : "Video — no date signal"
             } else if f.kind == "audio" {
                 let audio = libraryRoot.appendingPathComponent("Audio", isDirectory: true)
-                dir = tsValid ? audio.appendingPathComponent("\(y)", isDirectory: true) : audio
+                dir = dateValid ? audio.appendingPathComponent("\(y)", isDirectory: true) : audio
                 category = "audio"
                 confidence = "review"
-                reason = tsValid ? "Audio file from \(y)" : "Audio file"
+                reason = dateValid ? "Audio file from \(y)" : "Audio file"
             } else if f.kind == "model" {
                 dir = libraryRoot.appendingPathComponent("3D Models", isDirectory: true)
                 category = "model"
@@ -798,14 +865,80 @@ public enum Restructure {
         return out
     }
 
-    /// First named person from the `\u{1F}`-joined names string, or nil when
-    /// there's no named person (Windows filters empty → None → next branch).
-    static func firstPersonName(_ names: String?) -> String? {
+    static func solePersonName(_ names: String?) -> String? {
         guard let names, !names.isEmpty else { return nil }
-        let first = names.split(separator: "\u{1F}").first
+        let people = names.split(separator: "\u{1F}")
             .map { String($0).trimmingCharacters(in: .whitespaces) }
-        guard let f = first, !f.isEmpty else { return nil }
-        return f
+            .filter { !$0.isEmpty }
+        return people.count == 1 ? people[0] : nil
+    }
+
+    static func validLocation(lat: Double?, lon: Double?) -> (Double, Double)? {
+        guard let lat, let lon, lat.isFinite, lon.isFinite,
+              (-90...90).contains(lat), (-180...180).contains(lon),
+              abs(lat) > 0.001 || abs(lon) > 0.001 else { return nil }
+        return (lat, lon)
+    }
+
+    static func isDocumentLike(
+        kind: String,
+        hasText: Bool,
+        ocrLength: Int,
+        source: String,
+        description: String?
+    ) -> Bool {
+        if kind == "pdf" || kind == "doc" { return true }
+        guard kind == "image", hasText else { return false }
+        if ocrLength >= 120 { return true }
+        let stem = URL(fileURLWithPath: source)
+            .deletingPathExtension().lastPathComponent.lowercased()
+        if stem.hasPrefix("scan") || stem.hasPrefix("pdi_") { return true }
+        let evidence = (description ?? "").lowercased()
+        let words = Set(evidence.split { !$0.isLetter }.map(String.init))
+        let terms: Set<String> = [
+            "document", "receipt", "invoice", "statement", "certificate", "form",
+            "spreadsheet", "screenshot", "worksheet"
+        ]
+        if !words.isDisjoint(with: terms) { return true }
+        return ["report card", "presentation slide", "business card", "identification card"]
+            .contains { evidence.contains($0) }
+    }
+
+    static func trustedPathDate(_ path: String) -> (year: Int, month: Int?)? {
+        let url = URL(fileURLWithPath: path)
+        let stem = url.deletingPathExtension().lastPathComponent
+        if let date = trustedDate(in: stem, allowBareYear: false) { return date }
+        for component in url.deletingLastPathComponent().pathComponents.reversed() {
+            if let date = trustedDate(in: component, allowBareYear: true) { return date }
+        }
+        return nil
+    }
+
+    private static func trustedDate(
+        in component: String, allowBareYear: Bool
+    ) -> (year: Int, month: Int?)? {
+        let bytes = Array(component.utf8)
+        guard bytes.count >= 4 else { return nil }
+        if !allowBareYear, bytes.count == 4 { return nil }
+        func isDigit(_ byte: UInt8) -> Bool { (48...57).contains(byte) }
+        for index in 0...(bytes.count - 4) {
+            if index > 0, isDigit(bytes[index - 1]) { continue }
+            let yearBytes = bytes[index..<(index + 4)]
+            guard yearBytes.allSatisfy(isDigit),
+                  index + 4 == bytes.count || !isDigit(bytes[index + 4]) else { continue }
+            let year = yearBytes.reduce(0) { $0 * 10 + Int($1 - 48) }
+            guard (1900..<2100).contains(year) else { continue }
+            var month: Int?
+            if index + 6 < bytes.count,
+               bytes[index + 4] == 45 || bytes[index + 4] == 46 || bytes[index + 4] == 95,
+               isDigit(bytes[index + 5]), isDigit(bytes[index + 6]) {
+                let candidate = Int(bytes[index + 5] - 48) * 10 + Int(bytes[index + 6] - 48)
+                if (1...12).contains(candidate) { month = candidate }
+            }
+            if allowBareYear, month == nil, bytes.count != 4 { continue }
+            return (year, month)
+        }
+        return nil
     }
 
     // MARK: - Folder classification (Windows restructure::classify_folders)
@@ -820,8 +953,8 @@ public enum Restructure {
     }
 
     private static let genericFolderNames: Set<String> = [
-        "downloads", "downloaded", "new folder", "untitled", "temp", "tmp",
-        "misc", "other", "stuff", "things", "files",
+        "downloads", "downloaded", "desktop", "unsorted", "inbox", "new folder",
+        "untitled", "temp", "tmp", "misc", "other", "stuff", "things", "files",
     ]
 
     /// Classify each source folder by destination-category homogeneity. The
@@ -829,7 +962,9 @@ public enum Restructure {
     /// photos is dominated by "People/<that person>" — homogeneity is measured
     /// against the DOMINANT person, F-C3-035). ≤2 files or a generic name →
     /// Junk; ≥80% one category → Anchor; else Mixed.
-    static func classifyFolders(_ moves: [RestructureProposal]) -> [ClassifiedFolder] {
+    static func classifyFolders(
+        _ moves: [RestructureProposal], libraryRoot: String? = nil
+    ) -> [ClassifiedFolder] {
         var byFolder: [String: [RestructureProposal]] = [:]
         for m in moves {
             let parent = (m.oldPath as NSString).deletingLastPathComponent
@@ -855,6 +990,8 @@ public enum Restructure {
             let classification: FolderClassification
             if generic || total <= 2 {
                 classification = .junk
+            } else if folder == libraryRoot {
+                classification = .mixed
             } else if homogeneity >= 0.80 {
                 classification = .anchor
             } else {

@@ -350,6 +350,11 @@ public enum DeepAnalyzeRunner {
                     } else {
                         documentText = await DocText.extractForDeepAnalyze(path: target.path)
                     }
+                } else if kind == .image || kind == .video || kind == .model {
+                    documentText = try? await fetchOCRText(
+                        database: database,
+                        fileID: target.id
+                    )
                 } else {
                     documentText = nil
                 }
@@ -361,6 +366,7 @@ public enum DeepAnalyzeRunner {
                         mediaKind: kind,
                         documentText: documentText,
                         faceNames: faceNames,
+                        tagsOnly: tagsOnly,
                         onToken: onToken
                     )
                 }
@@ -520,10 +526,15 @@ public enum DeepAnalyzeRunner {
     static func trustedYears(database: Database, fileID: Int64) async throws -> Set<Int> {
         try await database.pool.read { db in
             guard let row = try Row.fetchOne(db, sql: """
-                SELECT created_at, ocr_text FROM files WHERE id = ?
+                SELECT f.created_at, o.text AS ocr_text, d.text AS doc_text
+                FROM files f
+                LEFT JOIN ocr_text o ON o.file_id = f.id
+                LEFT JOIN doc_text d ON d.file_id = f.id
+                WHERE f.id = ?
                 """, arguments: [fileID]) else { return [] }
 
             var years = Self.trustedYears(in: (row["ocr_text"] as String?) ?? "")
+            years.formUnion(Self.trustedYears(in: (row["doc_text"] as String?) ?? ""))
             if let createdAt: Double = row["created_at"], createdAt.isFinite {
                 let year = Calendar(identifier: .gregorian)
                     .component(.year, from: Date(timeIntervalSince1970: createdAt))
@@ -656,6 +667,16 @@ public enum DeepAnalyzeRunner {
             try String.fetchOne(
                 db,
                 sql: "SELECT text FROM doc_text WHERE file_id = ?",
+                arguments: [fileID]
+            )
+        }
+    }
+
+    private static func fetchOCRText(database: Database, fileID: Int64) async throws -> String? {
+        try await database.pool.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT text FROM ocr_text WHERE file_id = ?",
                 arguments: [fileID]
             )
         }

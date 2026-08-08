@@ -50,8 +50,40 @@ struct DeepAnalyzePureLogicTests {
         #expect(prompt.contains("only when it is clearly legible"))
         #expect(prompt.contains("Never infer a person's identity or name"))
         #expect(prompt.contains("Known people in this photo: Adam"))
+        #expect(prompt.contains("TAGS:"))
         #expect(!prompt.contains("Self.filenameDateRule"))
-        #expect(DeepAnalyze.filenameRetryPrompt.contains("Use only facts stated"))
+    }
+
+    @Test("primary analysis output carries caption, filename, and tags in one pass")
+    func combinedAnalysisOutputParsing() {
+        let result = DeepAnalyze.parseAnalysisOutput("""
+            DESCRIPTION: A child holds a glowing lantern beside carved pumpkins.
+            FILENAME: child-holding-glowing-lantern
+            TAGS: child, carved pumpkins
+            """)
+        #expect(result.description == "A child holds a glowing lantern beside carved pumpkins.")
+        #expect(result.proposedName == "child-holding-glowing-lantern")
+        #expect(result.tags == ["child", "carved pumpkins"])
+    }
+
+    @Test("photo analysis uses fewer visual tokens while documents retain OCR resolution")
+    func adaptiveAnalysisResolution() {
+        #expect(DeepAnalyze.analysisImageSize(for: .image) == 336)
+        #expect(DeepAnalyze.analysisImageSize(
+            for: .image, hasExtractedText: true) == 448)
+        #expect(DeepAnalyze.analysisImageSize(for: .video) == 336)
+        #expect(DeepAnalyze.analysisImageSize(for: .pdf) == 448)
+        #expect(DeepAnalyze.analysisImageSize(for: .doc) == 448)
+        #expect(DeepAnalyze.analysisImageSize(for: .image).isMultiple(of: 28))
+        #expect(DeepAnalyze.analysisImageSize(for: .pdf).isMultiple(of: 28))
+        #expect(DeepAnalyze.analysisDecodeSize(for: .image) == 512)
+        #expect(DeepAnalyze.analysisDecodeSize(
+            for: .image, hasExtractedText: true) == 768)
+        #expect(DeepAnalyze.analysisDecodeSize(for: .pdf) == 768)
+        #expect(DeepAnalyze.hasMeaningfulExtractedText("Invoice total 42.00"))
+        #expect(!DeepAnalyze.hasMeaningfulExtractedText("Exit"))
+        #expect(DeepAnalyze.boundedDocumentText(
+            String(repeating: "a", count: 2_000), mediaKind: .image)?.count == 1_000)
     }
 
     @Test("malformed generated filenames are repaired or rejected")
@@ -63,6 +95,10 @@ struct DeepAnalyzePureLogicTests {
             "FILENAME: boy-getting-face-paint\nNo extension."
         ) == "boy-getting-face-paint")
         #expect(DeepAnalyze.filenameOnlyCandidate("ramsonmakeup") == nil)
+        #expect(DeepAnalyze.groundedFilename(
+            "baby-halloween-costume-photo",
+            description: "A baby wears a red Halloween costume on an orange cushion."
+        ) == "baby-halloween-costume")
     }
 
     @Test("empty metadata-only results never establish model completion")
@@ -326,6 +362,30 @@ struct DeepAnalyzeRunnerTests {
                 """, arguments: [path, Date().timeIntervalSince1970])
             return db.lastInsertedRowID
         }
+    }
+
+    @Test("trusted filename years read OCR, document text, and file metadata")
+    func trustedYearsReadPersistedTextTables() async throws {
+        let (db, tmp) = try makeDB()
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let fileID = try await insertFile(db, path: "/root/invoice.jpg")
+        let created = ISO8601DateFormatter().date(from: "2007-06-01T00:00:00Z")!
+            .timeIntervalSince1970
+        try await db.pool.write { db in
+            try db.execute(
+                sql: "UPDATE files SET created_at = ? WHERE id = ?",
+                arguments: [created, fileID])
+            try db.execute(
+                sql: "INSERT INTO ocr_text(file_id, text) VALUES (?, 'Invoice 2024')",
+                arguments: [fileID])
+            try db.execute(
+                sql: "INSERT INTO doc_text(file_id, text) VALUES (?, 'Statement 2025')",
+                arguments: [fileID])
+        }
+
+        let years = try await DeepAnalyzeRunner.trustedYears(
+            database: db, fileID: fileID)
+        #expect(years == [2007, 2024, 2025])
     }
 
     // F-C3-027 — a folder whose name contains `_` must not over-match a

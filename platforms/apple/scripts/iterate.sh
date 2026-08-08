@@ -147,7 +147,7 @@ fi
 ok "faceClusteringComplete (auto-triggered)"
 
 # Clean shutdown
-ipc_send "\"shutdown\""
+ipc_send '{"shutdown":{}}'
 sleep 2
 
 # U4: the IPC wire must carry ONLY JSON event lines — any library

@@ -35,7 +35,7 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "platforms/apple/scripts/build_corpus.sh": "a5f53f4df77c07dc7aefd4e0c31dbbaa90dac92e68d3e614c789c36320cced87",
     "platforms/apple/scripts/build_dmg.sh": "45e074444c3d59fb94a39f086460ece87a1d3c4fae57be5ef461dc30baf09bea",
     "platforms/apple/scripts/ensure_mlx_metallib.sh": "00bc071a793e01afb782f43ab12279f00bd17cd6d6cc15d71921a7543d5fc068",
-    "platforms/apple/scripts/iterate.sh": "58b9e08c70f18001b92446e4a8553677ee3da07f1a03d2bdd667c069e3c44422",
+    "platforms/apple/scripts/iterate.sh": "b05fcd94ea1cf5aaaabb83322bc603f346d581f813951c99b1c8bde42895851f",
     "platforms/apple/scripts/release.sh": "c53811551f5ea3c5e775005b780ed6ade2bd6ef5336de40a6af06fae2fa6cec8",
     "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
     "platforms/linux/build/build.sh": "8fb81d5a508916a72009d494ccdbee85c09a2b54e7bdfcf43910ab07af6f8550",

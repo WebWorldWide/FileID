@@ -49,11 +49,23 @@ enum Theme {
 // MARK: - GlassCard
 
 struct GlassCard<Content: View>: View {
-    @ViewBuilder var content: Content
-    var padding: CGFloat = Theme.Space.m
+    let content: Content
+    let padding: CGFloat
+    let fillsWidth: Bool
+
+    init(
+        padding: CGFloat = Theme.Space.m,
+        fillsWidth: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.content = content()
+        self.padding = padding
+        self.fillsWidth = fillsWidth
+    }
 
     var body: some View {
         content
+            .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.m)
@@ -99,11 +111,11 @@ struct SettingToggleRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.caption.bold())
+                Text(title).font(.callout)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

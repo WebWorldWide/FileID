@@ -21,6 +21,33 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 - **Long-running work stays active while the display dims.** Scan, clustering, model installation, and Deep Analyze hold the native platform sleep inhibitor for their full operation lifetime.
 - **Face and media failures are bounded per file.** Corrupt image, video, document, and audio inputs cannot terminate the catalog operation or damage SQLite state.
+### Added
+
+- **RAM++ scan tagging is an explicit macOS opt-in.** The fast built-in on-device classifier is the
+  default, while users who want the richer 4,585-label model can enable it in Settings and restart
+  the engine.
+- **macOS has complete uninstall controls.** Every Deep Analyze LLM can be removed individually;
+  Settings can remove all AI models while preserving the library, erase all FileID data, or move the
+  app to Trash. Destructive actions require confirmation and never touch the user's original files.
+
+### Changed
+
+- **Deep Analyze is faster and more precise.** Caption, filename, and tags now come from one model
+  response; ordinary visual media use the model's native 336-pixel geometry, while documents and
+  OCR-bearing images retain the higher-resolution path. Grounded filename repair no longer needs a
+  second generation.
+- **Large-library interaction stays responsive.** Live scan refreshes avoid duplicate-ranking work,
+  previews navigate lightweight file IDs, and the disk-backed Restructure planner performs one
+  scratch insert per file with post-stream SQL aggregation.
+- **Settings cards use one consistent full width.** Short preference cards and detailed model cards
+  now align to the same edges, and native gold switches sit consistently on the trailing edge.
+
+### Fixed
+
+- **Restructure rejects weak routing signals.** Placeholder GPS, incidental image text, ambiguous
+  multi-person matches, copy-time dates, and incidental four-digit IDs in parent folders no longer
+  override stronger file evidence.
+- **Deep Analyze year grounding reads the normalized OCR and document-text tables.**
 
 ## [0.1.4] - 2026-08-03
 

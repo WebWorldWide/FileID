@@ -29,6 +29,7 @@ public final class BGEModelInstaller {
 
     private var task: Task<Void, Never>?
     private var installing = false
+    private var uninstalling = false
 
     // Pins live in ModelManifest (bge_model / bge_vocab) + shared/models/manifest.json.
     private static let onnxURLString = "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx"
@@ -59,7 +60,7 @@ public final class BGEModelInstaller {
     }
 
     public func install() {
-        guard task == nil else { return }
+        guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install BGE model") {
                 await self?.runInstall()
@@ -70,8 +71,14 @@ public final class BGEModelInstaller {
 
     public func cancel() { task?.cancel() }
 
-    public func uninstall() {
-        cancel()
+    public func uninstall() async {
+        guard !uninstalling else { return }
+        uninstalling = true
+        defer { uninstalling = false }
+        let activeTask = task
+        activeTask?.cancel()
+        await activeTask?.value
+        task = nil
         try? FileManager.default.removeItem(at: Self.dir)
         refreshStatus()
     }

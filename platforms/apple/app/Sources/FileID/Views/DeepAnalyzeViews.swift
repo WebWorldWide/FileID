@@ -10,6 +10,9 @@ import FileIDShared
 struct DeepAnalyzeModelPickerCard: View {
     let engine: EngineClient
     @State private var settings = DeepAnalyzeSettings.shared
+    @State private var confirmRemoval: AIModelKind?
+    @State private var removalError: String?
+    @State private var removalInFlight = false
 
     private var ramGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
@@ -19,7 +22,7 @@ struct DeepAnalyzeModelPickerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("AI Models — accuracy tier (Deep Analyze)").font(.headline)
@@ -52,6 +55,30 @@ struct DeepAnalyzeModelPickerCard: View {
                 .font(.caption)
             }
         }
+        .confirmationDialog(
+            "Remove Deep Analyze model?",
+            isPresented: Binding(
+                get: { confirmRemoval != nil },
+                set: { if !$0 { confirmRemoval = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: confirmRemoval
+        ) { kind in
+            Button("Remove \(kind.displayName)", role: .destructive) {
+                remove(kind)
+            }
+            Button("Keep", role: .cancel) { confirmRemoval = nil }
+        } message: { kind in
+            Text("Deletes this model's downloaded weights. Deep Analyze will download it again if you select and run it later.")
+        }
+        .alert("Model couldn't be removed", isPresented: Binding(
+            get: { removalError != nil },
+            set: { if !$0 { removalError = nil } }
+        )) {
+            Button("OK", role: .cancel) { removalError = nil }
+        } message: {
+            Text(removalError ?? "Unknown error")
+        }
     }
 
     @ViewBuilder
@@ -62,8 +89,26 @@ struct DeepAnalyzeModelPickerCard: View {
             installed: ModelInstallStatus.isInstalled(kind: kind),
             fits: kind.fits(ramGB: ramGB),
             ramGB: ramGB,
-            onPick: { settings.activeKind = kind }
+            onPick: { settings.activeKind = kind },
+            onRemove: { confirmRemoval = kind },
+            removalInFlight: removalInFlight
         )
+    }
+
+    private func remove(_ kind: AIModelKind) {
+        confirmRemoval = nil
+        removalInFlight = true
+        engine.stopForMaintenance()
+        Task {
+            let report = await Task.detached(priority: .userInitiated) {
+                ModelStorage.removeDeepAnalyzeModel(kind)
+            }.value
+            removalInFlight = false
+            if let failure = report.failureMessage {
+                removalError = failure
+            }
+            engine.start()
+        }
     }
 
 }
@@ -76,36 +121,48 @@ private struct ModelOptionRow: View {
     let fits: Bool
     let ramGB: Double
     let onPick: () -> Void
+    let onRemove: () -> Void
+    let removalInFlight: Bool
 
     var body: some View {
-        Button {
-            guard fits else { return }   // would OOM-kill the engine
-            onPick()
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                indicatorIcon
-                VStack(alignment: .leading, spacing: 2) {
-                    titleRow
-                    Text(kind.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    statsLine
-                    if !fits {
-                        Text("Disabled — would OOM-kill the engine on a \(Int(ramGB)) GB Mac. Pick a smaller model.")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
+        HStack(alignment: .center, spacing: 8) {
+            Button {
+                guard fits else { return }
+                onPick()
+            } label: {
+                HStack(alignment: .top, spacing: 10) {
+                    indicatorIcon
+                    VStack(alignment: .leading, spacing: 2) {
+                        titleRow
+                        Text(kind.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        statsLine
+                        if !fits {
+                            Text("Disabled — would OOM-kill the engine on a \(Int(ramGB)) GB Mac. Pick a smaller model.")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
                     }
+                    Spacer()
                 }
-                Spacer()
+                .contentShape(Rectangle())
             }
-            .padding(8)
-            .background(rowBackground)
-            .overlay(rowBorder)
-            .opacity(fits ? 1.0 : 0.55)
+            .buttonStyle(.plain)
+            .disabled(!fits || removalInFlight)
+            .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. With your \(Int(ramGB)) GB Mac and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.")
+
+            if installed {
+                Button("Remove", role: .destructive, action: onRemove)
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .disabled(removalInFlight)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!fits)
-        .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. With your \(Int(ramGB)) GB Mac and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.")
+        .padding(8)
+        .background(rowBackground)
+        .overlay(rowBorder)
+        .opacity(fits ? 1.0 : 0.55)
     }
 
     @ViewBuilder
@@ -176,12 +233,10 @@ private struct ModelOptionRow: View {
 // while gigabytes of safetensors are still streaming in.
 enum ModelInstallStatus {
     static func isInstalled(kind: AIModelKind) -> Bool {
-        guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
-        let url = base
-            .appendingPathComponent("huggingface/models", isDirectory: true)
-            .appendingPathComponent(kind.sourceRepo, isDirectory: true)
+        guard let url = ModelStorage.deepAnalyzeDirectory(for: kind) else { return false }
+        let sentinel = url
             .appendingPathComponent(".fileid-installed")
-        return FileManager.default.fileExists(atPath: url.path)
+        return FileManager.default.fileExists(atPath: sentinel.path)
     }
 }
 
@@ -619,9 +674,10 @@ struct DeepAnalyzeView: View {
                 if !hasNamedAnyone, !engine.deepAnalyzeInFlight {
                     namingRequiredBanner
                 }
-                Toggle("Skip files already analyzed by \(settings.activeKind.displayName)",
-                       isOn: $skipExisting)
-                    .font(.callout)
+                SettingToggleRow(
+                    "Skip files already analyzed by \(settings.activeKind.displayName)",
+                    isOn: $skipExisting
+                )
                 HStack(spacing: 10) {
                     Button {
                         guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
