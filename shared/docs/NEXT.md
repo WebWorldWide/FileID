@@ -1,6 +1,46 @@
 # NEXT — resume here
 
+## STATUS 2026-08-08 — macOS v0.1.0 performance release is green
+
+The live 97,256-row macOS library is healthy and the production bundle has passed a read-only
+six-tab smoke test against Adlon. Settings cards are uniformly full-width, and the macOS bundle and
+engine release identity are 0.1.0. Preserve the new performance policy: ordinary app scans use
+Apple's fast native Vision tags; the installed RAM++ model remains available through the explicit
+**Detailed RAM++ tags during scans** Settings toggle. A fixed 15-image Adlon sample improved from
+14.17 s warm and approximately 7.3 GB engine RSS to 0.54 s and approximately 0.7 GB, a 26.3× warm
+speedup. Do not silently turn RAM++ back on for app scans without re-measuring time and memory on a
+fixed real corpus.
+
+Deep Analyze's Qwen3-VL 8B path now measures 4.50 s/image warm on the fixed three-image Adlon sample,
+down from 6.58 s/image. Preserve the single combined caption/name/tag generation, deterministic
+grounded filename repair, and adaptive visual resolution: 336 pixels for ordinary visual media,
+448 pixels for documents, PDFs, and visual files with meaningful persisted OCR. Image OCR is bounded
+to 1,000 characters so it improves visible-text grounding without turning every photo into a long
+document prompt. A change to model size, input resolution, prompt structure, or
+parallelism must win a fixed quality-and-time A/B; do not trade away OCR or grounded naming for an
+unmeasured throughput claim. The UI's 4.5 s/image estimate and approximately 83-hour remaining
+library estimate reflect the measured 8B path on this 16 GB M1 Pro.
+
+Live scan refreshes must continue to avoid duplicate-ranking queries, and Library previews must
+continue to navigate through lightweight ordered IDs rather than materializing complete rows for
+the whole library. The production bundle opened a preview and moved to the next item promptly on
+the 97k-row database. Preserve the bounded disk-backed Restructure path: one scratch insert per
+file, post-stream SQL aggregation, root folders kept reviewable, zero GPS rejected, structured names
+honored only for sole-person photos, source-path dates preferred over copy timestamps, and incidental
+image text kept photographic. The final live plan rendered in about six seconds with 27,951 moves;
+1,608 were Auto and 26,343 stayed review-only. No mutation was issued.
+
+Local verification is green across 396 strict Swift tests, the release engine, the shared Rust engine,
+79 CLI tests, and 111 TUI tests; CLI/TUI Clippy gates are clean. Remaining release evidence is external: Developer ID
+signing/notarization, clean-machine lifecycle, hosted WinUI/.NET and native Linux packaging, and
+the Windows ARM64/AMD/Intel/QNN hardware matrices. Keep Adlon read-only unless the owner explicitly
+authorizes a mutation against a disposable copy. Do not run `platforms/apple/scripts/iterate.sh`
+against the live default database because the harness deliberately wipes it before scanning.
+
 ## STATUS 2026-08-03 — v0.1.4 macOS parity release candidate ready for hosted refresh
+
+Superseded by the owner-directed v0.1.0 macOS prerelease above. Keep this section only as historical
+evidence; do not republish v0.1.4.
 
 The macOS parity/polish implementation is complete and locally green. Preserve the 385-test strict
 Swift result, the complete Rust/CLI/TUI normal and million-file scale results, and the read-only

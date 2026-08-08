@@ -54,10 +54,11 @@ struct LibraryView: View {
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
-    @State private var previewSiblings: [FileRow] = []
-    /// In-flight full-library sibling upgrade for the open preview. Cancelled
+    @State private var previewSiblingIDs: [Int64] = []
+    @State private var previewInitialFile: FileRow? = nil
+    /// In-flight full-library ID upgrade for the open preview. Cancelled
     /// before each new `openPreview` and on dismiss so rapid open/close or
-    /// fast photo-switching can't pile up concurrent 1M-row fetches.
+    /// fast photo-switching can't pile up concurrent full-library queries.
     @State private var previewSiblingTask: Task<Void, Never>? = nil
     @State private var bulkRenameSheetOpen: Bool = false
     @State private var lastBatchAvailable: Bool = false
@@ -142,7 +143,7 @@ struct LibraryView: View {
                 lastSeenBatchIndex = new
                 guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
                 lastReloadAt = Date()
-                store.notifyChanged()
+                store.notifyChanged(includeDuplicateMetrics: false)
                 reload()
                 refreshBulkState()
             }
@@ -156,7 +157,6 @@ struct LibraryView: View {
         // Reloading on any terminal event guarantees the grid ends complete.
         .onChange(of: engine.lastTerminalEventAt) { _, _ in
             store.notifyChanged()
-            refreshOpenPreview()
             reload()
             refreshBulkState()
         }
@@ -705,10 +705,14 @@ struct LibraryView: View {
                 }
             }
         )) {
-            FilePreviewSheet(siblings: previewSiblings,
-                              selectedID: $previewSelectedID,
-                              store: store, engine: engine,
-                              onEdit: { editEpoch += 1 })
+            if let previewInitialFile {
+                FilePreviewSheet(siblingIDs: previewSiblingIDs,
+                                 initialFile: previewInitialFile,
+                                 selectedID: $previewSelectedID,
+                                 store: store, engine: engine,
+                                 refreshToken: tileRefreshToken,
+                                 onEdit: { editEpoch += 1 })
+            }
         }
     }
 
@@ -737,28 +741,22 @@ struct LibraryView: View {
     /// live-scan `scanned_at` reorder). A search / find-similar result keeps its own set
     /// so arrows stay within those matches.
     private func openPreview(_ row: FileRow) {
-        previewSiblings = rows
+        previewSiblingIDs = rows.map(\.id)
+        previewInitialFile = row
         previewSelectedID = row.id
         guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
         let kf = kindFilter
         previewSiblingTask?.cancel()
         previewSiblingTask = Task { @MainActor in
-            let full = await store.filesAsync(limit: 1_000_000, kindFilter: kf)
+            let full = await store.fileIDsAsync(kindFilter: kf)
             guard !Task.isCancelled else { return }
             // Upgrade the nav context by id — the user may have arrowed to a
             // different photo while this loaded; keep the upgrade as long as the
             // current selection is still represented in the full set.
             guard let id = previewSelectedID, !full.isEmpty,
-                  full.contains(where: { $0.id == id }) else { return }
-            previewSiblings = full
+                  full.contains(id) else { return }
+            previewSiblingIDs = full
         }
-    }
-
-    private func refreshOpenPreview() {
-        guard let id = previewSelectedID,
-              let updated = store.files(forFileIDs: [id]).first,
-              let index = previewSiblings.firstIndex(where: { $0.id == id }) else { return }
-        previewSiblings[index] = updated
     }
 
     private func reload() {
@@ -1098,16 +1096,18 @@ struct FileTile: View {
 //
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
 private struct FilePreviewSheet: View {
-    let siblings: [FileRow]              // for prev/next arrow nav
+    let siblingIDs: [Int64]
     @Binding var selectedID: Int64?
     let store: ReadStore
     let engine: EngineClient
+    let refreshToken: String
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
     @State private var tags: [String] = []
+    @State private var file: FileRow?
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
     @FocusState private var keyFocus: Bool
@@ -1115,14 +1115,25 @@ private struct FilePreviewSheet: View {
 
     /// Displayed file + its position, derived from selectedID so navigation
     /// mutates the shown file in place without swapping the sheet's identity.
-    private var file: FileRow? { siblings.first { $0.id == selectedID } }
-    private var siblingIndex: Int? { siblings.firstIndex { $0.id == selectedID } }
+    init(siblingIDs: [Int64], initialFile: FileRow,
+         selectedID: Binding<Int64?>, store: ReadStore, engine: EngineClient,
+         refreshToken: String, onEdit: @escaping () -> Void = {}) {
+        self.siblingIDs = siblingIDs
+        self._selectedID = selectedID
+        self.store = store
+        self.engine = engine
+        self.refreshToken = refreshToken
+        self.onEdit = onEdit
+        self._file = State(initialValue: initialFile)
+    }
+
+    private var siblingIndex: Int? { siblingIDs.firstIndex { $0 == selectedID } }
 
     private func step(_ delta: Int) {
         guard let idx = siblingIndex else { return }
         let t = idx + delta
-        guard siblings.indices.contains(t) else { return }
-        selectedID = siblings[t].id
+        guard siblingIDs.indices.contains(t) else { return }
+        selectedID = siblingIDs[t]
     }
 
     var body: some View {
@@ -1132,6 +1143,14 @@ private struct FilePreviewSheet: View {
             } else {
                 Color.clear.onAppear { dismiss() }
             }
+        }
+        .task(id: "\(selectedID ?? -1)·\(refreshToken)") {
+            guard let selectedID else { return }
+            let loaded = await Task.detached(priority: .userInitiated) { [store] in
+                store.files(forFileIDs: [selectedID]).first
+            }.value
+            guard !Task.isCancelled else { return }
+            file = loaded
         }
     }
 
@@ -1150,9 +1169,9 @@ private struct FilePreviewSheet: View {
                         .lineLimit(1).truncationMode(.head)
                 }
                 Spacer()
-                if siblings.count > 1 {
+                if siblingIDs.count > 1 {
                     let idx = siblingIndex ?? 0
-                    Text("\(idx + 1) of \(siblings.count)")
+                    Text("\(idx + 1) of \(siblingIDs.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     HStack(spacing: 4) {
@@ -1166,7 +1185,7 @@ private struct FilePreviewSheet: View {
                             Image(systemName: "chevron.right")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(idx >= siblings.count - 1)
+                        .disabled(idx >= siblingIDs.count - 1)
                         .help("Next file")
                     }
                 }

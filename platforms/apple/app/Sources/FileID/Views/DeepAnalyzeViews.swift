@@ -19,7 +19,7 @@ struct DeepAnalyzeModelPickerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("AI Models — accuracy tier (Deep Analyze)").font(.headline)

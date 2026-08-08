@@ -58,6 +58,15 @@ public final class RamPlusService: @unchecked Sendable {
             .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
     private let inferenceSem = DispatchSemaphore(value: RamPlusService.inferenceConcurrency)
 
+    public static let scanTaggingEnabled = resolveScanTaggingEnabled(
+        ProcessInfo.processInfo.environment["FILEID_RAMPLUS_SCAN_ENABLED"]
+    )
+
+    static func resolveScanTaggingEnabled(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return true }
+        return !["0", "false", "no", "off"].contains(rawValue.lowercased())
+    }
+
     private init() {}
 
     // MARK: - Paths

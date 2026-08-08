@@ -331,6 +331,10 @@ public final class EngineClient {
         // "Install all" clicks. Its escape hatch (HubApi.swift:822).
         var env = ProcessInfo.processInfo.environment
         env["CI_DISABLE_NETWORK_MONITOR"] = "1"
+        let detailedScanTags = UserDefaults.standard.object(
+            forKey: AppSettings.detailedScanTagsKey
+        ) as? Bool ?? AppSettings.detailedScanTagsDefault
+        env["FILEID_RAMPLUS_SCAN_ENABLED"] = detailedScanTags ? "1" : "0"
         // Restructure folder-granularity (Settings ▸ Restructure). The engine reads
         // FILEID_RESTRUCTURE_GRANULARITY at plan time; pass the user's saved choice
         // through at spawn so it applies on the next engine start. "normal"/unset is the

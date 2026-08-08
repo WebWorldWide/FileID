@@ -49,12 +49,24 @@ enum Theme {
 // MARK: - GlassCard
 
 struct GlassCard<Content: View>: View {
-    @ViewBuilder var content: Content
-    var padding: CGFloat = Theme.Space.m
+    let content: Content
+    let padding: CGFloat
+    let fillsWidth: Bool
+
+    init(
+        padding: CGFloat = Theme.Space.m,
+        fillsWidth: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.content = content()
+        self.padding = padding
+        self.fillsWidth = fillsWidth
+    }
 
     var body: some View {
         content
             .padding(padding)
+            .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.m)
                     .fill(.ultraThinMaterial)

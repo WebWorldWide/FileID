@@ -6,6 +6,32 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-08
+
+### Added
+
+- **RAM++ scan tagging is an explicit macOS opt-in.** The fast built-in on-device classifier is the
+  default, while users who want the richer 4,585-label model can enable it in Settings and restart
+  the engine.
+
+### Changed
+
+- **Deep Analyze is faster and more precise.** Caption, filename, and tags now come from one model
+  response; ordinary visual media use the model's native 336-pixel geometry, while documents and
+  OCR-bearing images retain the higher-resolution path. Grounded filename repair no longer needs a
+  second generation.
+- **Large-library interaction stays responsive.** Live scan refreshes avoid duplicate-ranking work,
+  previews navigate lightweight file IDs, and the disk-backed Restructure planner performs one
+  scratch insert per file with post-stream SQL aggregation.
+- **Settings cards use one consistent full width.** Short preference cards and detailed model cards
+  now align to the same edges.
+
+### Fixed
+
+- **Restructure rejects weak routing signals.** Placeholder GPS, incidental image text, ambiguous
+  multi-person matches, and copy-time dates no longer override stronger file evidence.
+- **Deep Analyze year grounding reads the normalized OCR and document-text tables.**
+
 ## [0.1.4] - 2026-08-03
 
 ### Fixed
@@ -336,7 +362,8 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/WebWorldWide/FileID/compare/v0.1.4...v0.1.0
 [0.1.4]: https://github.com/WebWorldWide/FileID/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...v0.1.2
