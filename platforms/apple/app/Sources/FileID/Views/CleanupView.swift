@@ -76,7 +76,7 @@ struct CleanupView: View {
         .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
             if new != lastSeenBatchIndex {
                 lastSeenBatchIndex = new
-                store.notifyChanged()
+                store.notifyChanged(includeDuplicateMetrics: false)
                 // Exact mode's reload() runs a live full-file SHA-256 pass over up
                 // to ExactDuplicateVerifier.candidateCap candidates; the digest
                 // cache lives only 30 s, so re-verifying on every ~1 Hz scan batch

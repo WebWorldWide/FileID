@@ -99,7 +99,7 @@ struct FileIDEngineMain {
         // Engine ready handshake. App waits for this before sending the first
         // command, so it knows the pipe is live and the engine started clean.
         await sink.emit(.ready(EngineInfo(
-            version: "0.1.4",
+            version: "0.1.0",
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
             physicalMemoryGB: Hardware.physicalMemoryGB
@@ -1251,7 +1251,9 @@ struct FileIDEngineMain {
             MobileCLIPService.shared.preWarm()
             // RAM++ primary tagger (macOS lockstep) — no-op if not installed, in
             // which case Tagging falls back to the Vision scene classifier.
-            RamPlusService.shared.preWarm()
+            if RamPlusService.scanTaggingEnabled {
+                RamPlusService.shared.preWarm()
+            }
             // Pick whichever ArcFace variant the user has on disk —
             // iResNet50 takes precedence when both are present.
             for kind in FaceEmbedderKind.installedKinds() {

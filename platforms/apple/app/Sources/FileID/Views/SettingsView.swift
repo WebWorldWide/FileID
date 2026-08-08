@@ -10,6 +10,7 @@ struct SettingsTab: View {
     let engine: EngineClient
     let store: ReadStore
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
+    @AppStorage(AppSettings.detailedScanTagsKey) private var detailedScanTags: Bool = AppSettings.detailedScanTagsDefault
     @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
@@ -22,7 +23,23 @@ struct SettingsTab: View {
 
                 // ─── User-facing settings (always visible) ───────────────
 
-                GlassCard {
+                GlassCard(fillsWidth: true) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Scan performance").font(.headline)
+                        Toggle(isOn: $detailedScanTags) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Detailed RAM++ tags during scans")
+                                    .font(.callout)
+                                Text("Off keeps scans fast with Apple's built-in on-device classifier. Turn on for the richer 4,585-label RAM++ model; it uses substantially more memory and can make large photo scans much slower. Takes effect after restarting the engine.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.switch)
+                    }
+                }
+
+                GlassCard(fillsWidth: true) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Cleanup").font(.headline)
                         Toggle(isOn: $cleanupAutoTag) {
@@ -38,7 +55,7 @@ struct SettingsTab: View {
                     }
                 }
 
-                GlassCard {
+                GlassCard(fillsWidth: true) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Restructure").font(.headline)
                         Picker("Folder granularity", selection: $restructureGranularity) {
@@ -69,7 +86,7 @@ struct SettingsTab: View {
                 // doesn't help a casual user choose anything; hiding it
                 // declutters the page.
 
-                GlassCard {
+                GlassCard(fillsWidth: true) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
                             Divider().opacity(0.3)
@@ -263,7 +280,7 @@ struct DeepAnalyzeExclusionsCard: View {
     @State private var message: (text: String, isError: Bool)?
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Deep Analyze exclusions").font(.headline)
                 Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
@@ -347,7 +364,7 @@ struct CLIPSemanticSearchCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — semantic search (CLIP)").font(.headline)
                 Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
@@ -550,8 +567,8 @@ struct CLIPSemanticSearchCard: View {
 /// state with Download/Uninstall buttons. The engine picks up whichever
 /// .mlpackage is on disk the next time face clustering runs.
 // AI Models — RAM++ tagger (macOS lockstep). Single-model card; the engine's
-// RamPlusService reads whatever this installs and falls back to Vision tags if
-// absent, so installing is purely an upgrade.
+// RamPlusService reads whatever this installs when detailed scan tags are on
+// and otherwise uses the lighter Vision classifier.
 struct RamPlusTaggerCard: View {
     @State private var installer = RamPlusModelInstaller.shared
     @State private var confirmUninstall = false
@@ -561,10 +578,10 @@ struct RamPlusTaggerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — image tagging").font(.headline)
-                Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
+                Text("RAM++ recognizes 4,585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Enable Detailed RAM++ tags under Scan performance to use it during scans.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 HStack(alignment: .top, spacing: 8) {
@@ -647,7 +664,7 @@ struct BGEDocCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — document understanding").font(.headline)
                 Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
@@ -729,7 +746,7 @@ struct FaceEmbedderCard: View {
     @State private var confirmUninstall: FaceEmbedderKind?
 
     var body: some View {
-        GlassCard {
+        GlassCard(fillsWidth: true) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(.headline)
                 Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")

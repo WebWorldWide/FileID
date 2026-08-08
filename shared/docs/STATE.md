@@ -8,6 +8,65 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-08 — macOS large-library performance pass and full terminal verification
+
+Final v0.1.0 release polish makes every Settings card span the same content width while preserving
+intrinsic card sizing elsewhere in the app. The rebuilt no-wipe bundle visually confirms the aligned
+cards and the RAM++ opt-in in its default-off state. A fresh strict validation passes all 396 Swift
+tests, the shared Rust engine's 1,366 tests and Clippy gate, 79 CLI tests and Clippy, and 111 TUI tests
+and Clippy. The release pipeline has no Developer ID identity or notary credentials on this Mac, so
+the publishable DMG is necessarily an explicitly labeled unsigned prerelease.
+
+The macOS app no longer performs duplicate-ranking window queries on every live scan refresh, and
+Library preview navigation no longer materializes up to one million complete file rows. Live scan
+ticks now fetch only cheap counters; duplicate metrics refresh at terminal or mutation boundaries.
+Preview navigation loads ordered file IDs and fetches just the selected row. Against the healthy
+97,256-row, approximately 500 MB live SQLite library, the former duplicate query cost about 0.47 s
+per refresh and the former full preview query alone cost about 1.2 s. The production bundle now
+opened the first preview in about 1.75 s end to end, including UI automation capture, and advanced
+to the next file in about 1.43 s.
+
+RAM++ was the dominant scan bottleneck on the 16 GB M1 Pro. A warm 15-image Adlon sample took
+14.17 s with RAM++, pushed the engine to approximately 7.3 GB RSS, and accumulated 3–10 s waits per
+file. Keeping installed CLIP and SFace while using Apple's native on-device classifier reduced the
+cold run to 2.61 s and the warm run to 0.54 s, approximately 26.3× faster warm at approximately
+0.7 GB RSS; terminal batches reached 281 files/s. The app therefore defaults to native Vision tags
+and exposes richer 4,585-label RAM++ scan tagging as an explicit Settings opt-in. Direct engine
+clients retain RAM++ by default unless `FILEID_RAMPLUS_SCAN_ENABLED=0` is supplied.
+
+Deep Analyze now obtains caption, filename, and up to two VLM tags from one Qwen response instead
+of re-encoding each image for a second tag inference. Invalid model filenames are repaired from the
+grounded description without another model generation. Ordinary photos, videos, and 3D previews use
+Qwen3-VL's native 336-pixel patch geometry and a bounded 512-pixel decode; documents and PDFs keep
+448-pixel model input and 768-pixel decode for OCR. Visual files with meaningful persisted OCR reuse
+a bounded 1,000-character excerpt and the higher-resolution path, while ordinary photos stay on the
+faster route. Filename-year grounding now reads the normalized `ocr_text` and `doc_text` tables
+instead of a nonexistent `files.ocr_text` column. On the same three copied-database Adlon records,
+warm Qwen3-VL 8B improved from 19.75 s (6.58 s/image) to 13.50 s (4.50 s/image), 31.6% faster, while
+captions, filenames, and tags remained specific and grounded. The remaining-library UI estimate
+dropped from about 129 hours to 83 hours.
+
+The disk-backed Restructure planner now writes one scratch row per file instead of a move plus a
+second per-folder statistic row, uses disposable SQLite journaling, and aggregates folder tiers in
+SQL after streaming. The same isolated 97,256-row snapshot improved from 11 s to 9 s while keeping
+memory bounded. Accuracy fixes reject placeholder `(0,0)` GPS, honor structured People names while
+leaving multi-person photos out of an arbitrary single-person folder, prefer trustworthy years in
+the existing path over copy-time metadata, keep the selected library root reviewable, and classify
+only dense/document-grounded image text as a document. The rebuilt app recomputed the live Adlon
+plan read-only in about six seconds: 27,951 proposed moves, with 1,608 Auto and 26,343 held for
+review. Apply was not invoked.
+
+The release bundle built and launched without wiping the live database; both foreground app and
+background engine remained running. Read-only smoke testing rendered Library, Deep Analyze,
+Restructure, and Settings against the exact rebuilt bundle. Adlon was never mutated. The iteration
+harness now sends the schema-correct shutdown payload (`{"shutdown":{}}`). Strict Swift
+concurrency/warnings-as-errors, release engine build, shared Rust engine
+formatting/Clippy/1,366-test suite, CLI formatting/Clippy/79 normal plus two scale tests, TUI
+formatting/Clippy/111 normal plus its million-row test, and diff hygiene all pass. The final Apple
+tree passes 396 strict Swift tests across 74 suites; CLI passes 79 tests and TUI passes 111 tests
+with both Clippy gates clean. The rebuilt production bundle is running with the live database
+preserved at 97,256 rows and `PRAGMA quick_check = ok`.
+
 ## 2026-08-03 — Person detail sheet card tap, display name formatting, and unknown face hiding fixes
 
 Fixed People tab cluster card tap gesture (`OnClusterTapped` in `PeopleView.xaml.cs`) to check both `el.DataContext` and `el.Tag` (`ClusterId`) so opening the **Person details** sheet succeeds reliably even when compiled bindings haven't populated `DataContext` on recycled grid elements. Unified dialog opening into a single thread-safe method. Updated Rust engine `handle_rename_person` (`bulk.rs`) to construct display names from all non-empty name parts (`title`, `first_name`, `middle_name`, `last_name`, `suffix`), ensuring person renaming succeeds regardless of which fields are entered. Added `rename_person_display_name_combines_parts` unit test to `bulk.rs`. Fixed issue where marked unknown faces failed to disappear from grid by setting `PeopleHideUnknown` default to `true` (matching macOS reference), auto-persisting `PeopleHideUnknown = true` on bulk mark as unknown, and adding "I don't know who this is" checkbox support to `PersonDetailSheet`.
