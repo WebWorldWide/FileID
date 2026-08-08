@@ -1951,18 +1951,18 @@ where
     (new_assignments, new_anchors)
 }
 
-/// Remove only the far tail of an unprotected cluster. The 0.15 default was
-/// measured on the isolated Adlon catalog: 330 of 103,184 candidate assignments
-/// were withheld while assigned-face retention stayed above 99% relative to the
-/// constrained partition and every top-cluster cohesion oracle improved. Named,
-/// manually merged, and verdict-backed identities bypass this polish entirely.
+/// Remove only the far tail of an unprotected high-quality cluster. The 0.30
+/// default is paired with the 0.33 pre-clustering quality gate and was measured
+/// on the isolated Family Photos catalog: it retained the labelled same-person
+/// pair, separated every reviewed impostor, and improved every top-cluster
+/// cohesion floor. Named, merged, and verdict-backed identities bypass it.
 pub fn outlier_cosine_floor() -> f32 {
     std::env::var("FILEID_FACE_OUTLIER_COSINE")
         .ok()
         .and_then(|value| value.trim().parse::<f32>().ok())
         .filter(|value| value.is_finite())
         .map(|value| value.clamp(-1.0, 1.0))
-        .unwrap_or(0.15)
+        .unwrap_or(0.30)
 }
 
 pub fn suppress_embedding_outliers_with_keep<S>(

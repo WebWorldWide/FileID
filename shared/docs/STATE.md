@@ -8,6 +8,31 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-08 — Family Photos face clustering is label-calibrated and deterministic
+
+Windows SFace clustering was recalibrated against an isolated clone of the 41,855-face
+`Family Photos` catalog after the old defaults merged visually confirmed siblings, unrelated
+adults and children, and a non-face object. Production defaults are now `0.66` for pass 1,
+`0.54` for pass 2, `0.33` for pre-clustering quality, and `0.30` for centroid outlier removal;
+mutual-kNN remains enabled. Intel's Apache-2.0 `face-reidentification-retail-0095` was evaluated
+and rejected because it separated the labelled newborn pair worse than SFace, so no model or
+dependency was added.
+
+The default-only labelled sweep is GREEN: all reviewed different-person pairs are separated, the
+same-person pair is retained, 17,909 of 24,737 eligible faces are assigned, 838 raw clusters remain,
+and 170 are displayable at the existing six-face unnamed People boundary. The largest cluster is
+3,318 faces; top-cluster minimum cohesion is 0.3894 at p01 and 0.4742 at p05. A canonical two-run
+harness produced identical partitions and assigned counts, clean engine shutdown and Job Object
+teardown, healthy SQLite, stable source/model/crop fingerprints, and no failed checks. The release
+engine used for that evidence is 19,241,984 bytes with SHA-256
+`5dd4f596cab5b6103da5a0ca6da0c40847a5a1d7e5814dbf24e99b212fa03717`.
+
+Focused identity tests, Rust formatting, Python compilation, diff hygiene, and the optimized x64
+engine build are green. The remaining Windows acceptance work is a complete strict engine/.NET
+rerun, native WinUI regression (including all five naming fields and person tags), and a refreshed
+all-format Mistral Deep Analyze run against this exact engine. Signing, hosted CI, ARM64/vendor
+hardware, and native Linux screenshot parity remain external gates.
+
 ## 2026-08-08 — Linux native artifact and terminal front-end verification
 
 Hardened Linux Deep Analyze tag application so Apply All is one single-flight job, waits for

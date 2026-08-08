@@ -1,5 +1,30 @@
 # NEXT — resume here
 
+## STATUS 2026-08-08 — Windows Family Photos face gate is green; refresh GUI and VLM acceptance
+
+The Windows face pipeline now uses labelled Family Photos evidence rather than cohesion-only
+thresholds. Preserve the production defaults `pass1=0.66`, `pass2=0.54`, quality floor `0.33`,
+outlier floor `0.30`, and mutual-kNN. A default-only sweep separated every reviewed negative and
+retained the reviewed same-person pair. The canonical two-run harness is GREEN with identical
+partitions, 17,909 assigned of 24,737 eligible faces, 838 raw retained clusters, 170 displayable
+clusters, and a 3,318-face maximum cluster. The six-face boundary hides only unnamed groups at the
+People presentation query; named groups remain visible and all evidence remains available for
+search, review, and reclustering.
+
+Resume Windows acceptance in this order:
+
+1. Run full strict engine Clippy/tests, Release x64 app build, format verification, and the separate
+   App and IPC test projects using isolated `LOCALAPPDATA` and `FILEID_DB`.
+2. Commit and push the face checkpoint, then run the native WinUI regression for naming-sheet
+   visibility and all five structured fields, person tags, scoped rename/replacement, sidecar/native
+   tags, partial-failure messaging, Undo, keep-awake, Deep Analyze, provider logs, and clean exit.
+3. Rerun the eight-format Mistral Deep Analyze matrix with release engine SHA-256
+   `5dd4f596cab5b6103da5a0ca6da0c40847a5a1d7e5814dbf24e99b212fa03717`, then refresh CLI/TUI and
+   Linux shared-engine gates.
+4. Keep signing, hosted CI, Windows ARM64/AMD/Intel/QNN hardware, clean-machine lifecycle, and native
+   Linux screenshot comparison explicit as external evidence. Do not infer zero bugs from local
+   x64 validation.
+
 ## STATUS 2026-08-08 — Linux native build and CLI/TUI gates are green; visual and external gates remain
 
 Linux now has a single-flight, result-aware Deep Analyze tag-apply path with duplicate prevention,
@@ -96,17 +121,16 @@ privacy, license, or egress gates to close them. Future model changes need the s
 license review and a fixed real-data A/B; Mistral-Small-3.2 remains the max-quality option only on Macs
 with at least 30 GB RAM.
 
-## STATUS 2026-08-02 — No hidden faces; safe reduction floor and release candidate
+## STATUS 2026-08-02 — Superseded face-presentation policy
 
-The final Adlon evidence supports 2,215 active clusters, not a cosmetically smaller hidden grid.
-Every platform shows all active groups. Recovery thresholds `0.75`, `0.70`, and `0.60` produced the
-same partition, while exact-capture and exact-embedding checks found no additional evidence-backed
-merge. Keep `0.75`; further automatic reduction requires a commercially clean stronger embedder and
-an identity-disjoint labelled evaluation across age, pose, blur, lighting, and scanned photographs.
+This historical Adlon entry showed that recovery thresholds `0.75`, `0.70`, and `0.60` produced the
+same 2,215-cluster partition. Its instruction to show every active group is superseded by the
+2026-08-08 labelled Family Photos decision: unnamed groups under six active faces are hidden only at
+the presentation query, named groups remain visible, and no face evidence is deleted.
 
 Suggested merges remain per-pair human decisions. Preserve same-file cannot-link suppression,
 excluded-face filtering, different-person verdicts where supported, neutral numeric similarity, and
-the 50-pair bound. Do not restore bulk “likely/all” actions or reintroduce a presentation size floor.
+the 50-pair bound. Do not restore bulk “likely/all” actions.
 
 The final read-only Restructure and real Mistral Deep Analyze reports are GREEN at
 `.ralph/adlon-final-quality-20260802i-restructure-audit/summary.json` and
@@ -132,8 +156,8 @@ The final branch combines the Adlon-driven clustering containment work with macO
 Same-file cannot-links, protected centroid outlier suppression, and deterministic neighbor ordering
 apply without lowering the global merge threshold. A candidate anti-correlation split was removed
 after a controlled Adlon A/B failed four blocking quality oracles. Windows, macOS, and Linux share a
-13-face presentation floor with explicit Show/Hide controls; named and Unknown groups remain visible
-regardless of size. The macOS read path also ranks useful user/VLM/auto tags ahead of generic labels,
+historical 13-face presentation floor, now superseded by the six-face unnamed boundary recorded
+above; named groups remain visible regardless of size. The macOS read path also ranks useful user/VLM/auto tags ahead of generic labels,
 and its Factory Reset and global Cancel behavior match what the UI promises.
 
 The exact final Rust 1.90 engine is
@@ -165,7 +189,7 @@ historical validation checklist was:
 1. Assemble with `cd platforms/apple && bash run.sh --no-wipe`; do this with
    no existing FileID instance running because the script stops stale app and
    engine processes before launch.
-2. Check the People 13-face disclosure, including a last-name-only and explicit Unknown cluster;
+2. Check the current People six-face unnamed boundary, including a last-name-only and explicit Unknown cluster;
    Library tags with generic plus useful labels; and global Cancel during Scan,
    Restructure, and Deep Analyze.
 3. Test Factory Reset against a disposable profile. It must clear FileID data

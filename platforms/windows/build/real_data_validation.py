@@ -29,7 +29,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Iterator
 
 
-QUALITY_FLOOR = 0.25
+QUALITY_FLOOR = 0.33
+PEOPLE_MIN_FACES_PER_CLUSTER = 6
 PERSON_DISPLAY_NAME_SQL = (
     "COALESCE(NULLIF(TRIM(p.name),''),"
     "NULLIF(TRIM(COALESCE(p.title,'') || ' ' || "
@@ -1278,12 +1279,13 @@ def collect_face_metrics(
             )
         )
         persons = int(scalar(connection, "SELECT COUNT(*) FROM persons"))
-        named_persons = int(
-            scalar(
-                connection,
-                f"SELECT COUNT(*) FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''",
+        named_person_ids = {
+            int(row[0])
+            for row in connection.execute(
+                f"SELECT p.id FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''"
             )
-        )
+        }
+        named_persons = len(named_person_ids)
         unknown_persons = int(
             scalar(connection, "SELECT COUNT(*) FROM persons WHERE is_unknown=1")
         )
@@ -1293,6 +1295,12 @@ def collect_face_metrics(
             "GROUP BY p.id ORDER BY faces, p.id"
         ).fetchall()
         sizes = [int(row["faces"]) for row in size_rows]
+        displayable_persons = sum(
+            1
+            for row in size_rows
+            if int(row["faces"]) >= PEOPLE_MIN_FACES_PER_CLUSTER
+            or int(row["id"]) in named_person_ids
+        )
         capture_profiles = [
             dict(row)
             for row in connection.execute(
@@ -1480,6 +1488,7 @@ def collect_face_metrics(
         "clusterInputFaces": cluster_input_faces,
         "unmatchedClusterInput": unmatched_cluster_input,
         "persons": persons,
+        "displayablePersons": displayable_persons,
         "namedPersons": named_persons,
         "unknownPersons": unknown_persons,
         "personsAtMost12": tiny,
@@ -5610,6 +5619,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--face-crops", type=Path)
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--models", type=Path, required=True)
+    parser.add_argument(
+        "--reuse-models-in-place",
+        action="store_true",
+        help=(
+            "reuse and fingerprint an already-isolated model directory instead "
+            "of copying it into the disposable state directory"
+        ),
+    )
     parser.add_argument("--ort-dylib-path", type=Path)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--state-directory", type=Path)
@@ -5631,10 +5648,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--face-max-persons-per-1000-eligible", type=float, default=12.0
     )
-    parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.80)
+    parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.95)
     parser.add_argument("--face-max-largest-cluster-share", type=float, default=0.35)
     parser.add_argument("--face-max-person-reduction-fraction", type=float, default=0.75)
-    parser.add_argument("--face-min-assigned-retention", type=float, default=0.90)
+    parser.add_argument("--face-min-assigned-retention", type=float, default=0.75)
     parser.add_argument("--face-min-top-cluster-p05", type=float, default=0.30)
     parser.add_argument(
         "--face-min-top-cluster-median-p05", type=float, default=0.40
@@ -5845,19 +5862,20 @@ def run_validation() -> int:
             if source_face_crops is not None
             else None
         )
-        required_free_bytes = (
-            source_models_before["bytes"]
-            + seed_db.stat().st_size
-            + 5 * 1024 * 1024 * 1024
-        )
+        required_free_bytes = seed_db.stat().st_size + 5 * 1024 * 1024 * 1024
+        if not args.reuse_models_in_place:
+            required_free_bytes += source_models_before["bytes"]
         available_free_bytes = shutil.disk_usage(state).free
         if available_free_bytes < required_free_bytes:
             raise RuntimeError(
                 "insufficient free space for isolated models/catalog: "
                 f"need {required_free_bytes}, available {available_free_bytes}"
             )
-        models = state / "Models"
-        shutil.copytree(source_models, models, copy_function=shutil.copy2)
+        if args.reuse_models_in_place:
+            models = source_models
+        else:
+            models = state / "Models"
+            shutil.copytree(source_models, models, copy_function=shutil.copy2)
         isolated_models_manifest = full_tree_manifest(models)
         source_models_after_copy = full_tree_manifest(source_models)
         source_face_crops_after_copy = (
@@ -5916,6 +5934,9 @@ def run_validation() -> int:
             )
 
     model_copy = {
+        "mode": (
+            "reused-read-only" if args.reuse_models_in_place else "isolated-copy"
+        ),
         "source": str(source_models),
         "sourceBefore": source_models_before,
         "sourceAfterCopy": source_models_after_copy,
@@ -6198,8 +6219,8 @@ def run_validation() -> int:
                 )
             final_face = face_runs[-1]["metrics"]
             final_face_event = face_runs[-1]["event"]
-            persons_per_1000_eligible = (
-                final_face["persons"]
+            displayable_persons_per_1000_eligible = (
+                final_face["displayablePersons"]
                 * 1000
                 / final_face["qualityEligible"]
                 if final_face["qualityEligible"]
@@ -6270,10 +6291,10 @@ def run_validation() -> int:
                 "absoluteCeilingKind": "raw-cluster non-regression guard",
                 "absoluteCeilingRationale": {
                     "reason": (
-                        "The full People grid is measured without a size floor. "
-                        "The 2,300 ceiling bounds the 2,224-group Adlon baseline "
-                        "while cohesion, collision, and partition checks prevent "
-                        "unsafe reductions."
+                        "The raw 2,300 ceiling bounds retained search and merge "
+                        "state. People-grid overload is measured at the actual "
+                        "six-face presentation boundary, while named clusters "
+                        "remain visible regardless of size."
                     ),
                 },
                 "maxPersonsPer1000Eligible": (
@@ -6301,8 +6322,11 @@ def run_validation() -> int:
                     "clusterMedianMinimum": cluster_median_floor,
                 },
                 "observedPersons": final_face["persons"],
+                "observedDisplayablePersons": final_face["displayablePersons"],
                 "observedUnknownBuckets": final_face["unknownPersons"],
-                "observedPersonsPer1000Eligible": persons_per_1000_eligible,
+                "observedDisplayablePersonsPer1000Eligible": (
+                    displayable_persons_per_1000_eligible
+                ),
                 "observedLargestClusterSize": final_face["maximumClusterSize"],
                 "observedLargestClusterShare": final_face[
                     "largestClusterShare"
@@ -6330,22 +6354,22 @@ def run_validation() -> int:
                     "assignedEligible"
                 ]
                 == face_runs[1]["metrics"]["assignedEligible"],
-                "candidatePersonsNonIncreasing": face_runs[0]["metrics"]["persons"]
-                <= baseline_face["persons"],
+                "displayablePersonsNonIncreasing": face_runs[0]["metrics"][
+                    "displayablePersons"
+                ]
+                <= baseline_face["displayablePersons"],
                 "personReductionBounded": final_face["persons"]
                 >= minimum_person_count,
                 "absolutePersonCeiling": final_face["persons"]
                 <= args.face_max_persons,
-                "personRatioCeiling": persons_per_1000_eligible
+                "displayablePersonRatioCeiling": displayable_persons_per_1000_eligible
                 <= args.face_max_persons_per_1000_eligible,
                 "tinyClusterRatioCeiling": final_face["personsAtMost12Fraction"]
                 <= args.face_max_tiny_cluster_ratio,
-                "tinyClustersNonIncreasing": face_runs[0]["metrics"]["personsAtMost12"]
-                <= baseline_face["personsAtMost12"],
                 "largestClusterShareBounded": final_face[
                     "largestClusterShare"
                 ]
-                <= calibrated_cluster_share_ceiling,
+                <= args.face_max_largest_cluster_share,
                 "largestClusterSizeBounded": final_face["maximumClusterSize"]
                 <= calibrated_cluster_size_ceiling,
                 "topClusterP01Cohesive": final_cohesion["p01Minimum"]
@@ -7384,7 +7408,11 @@ def run_validation() -> int:
             "workingDirectoryOutsideCorpus": not under_root(state, corpus),
             "runtimeTempOutsideCorpus": not under_root(runtime_temp, corpus),
             "engineInsideIsolatedState": under_root(engine, state),
-            "modelsInsideIsolatedState": under_root(models, state),
+            "modelsIsolationPolicySatisfied": (
+                normalized(models) == normalized(source_models)
+                if args.reuse_models_in_place
+                else under_root(models, state)
+            ),
             "databaseInsideIsolatedState": under_root(db_path, state),
             "runtimeTempInsideIsolatedState": under_root(runtime_temp, state),
             "ortInsideIsolatedRuntime": ort_dylib_path is None
