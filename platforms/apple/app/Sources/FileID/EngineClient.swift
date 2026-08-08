@@ -331,6 +331,10 @@ public final class EngineClient {
         // "Install all" clicks. Its escape hatch (HubApi.swift:822).
         var env = ProcessInfo.processInfo.environment
         env["CI_DISABLE_NETWORK_MONITOR"] = "1"
+        let detailedScanTags = UserDefaults.standard.object(
+            forKey: AppSettings.detailedScanTagsKey
+        ) as? Bool ?? AppSettings.detailedScanTagsDefault
+        env["FILEID_RAMPLUS_SCAN_ENABLED"] = detailedScanTags ? "1" : "0"
         // Restructure folder-granularity (Settings ▸ Restructure). The engine reads
         // FILEID_RESTRUCTURE_GRANULARITY at plan time; pass the user's saved choice
         // through at spawn so it applies on the next engine start. "normal"/unset is the
@@ -990,11 +994,17 @@ public final class EngineClient {
         }
     }
 
+    public func stopForMaintenance() {
+        terminateRunningEngine()
+        state = .starting
+    }
+
     /// Factory Reset: terminate the engine, wipe the Application Support folder,
     /// purge all UserDefaults, and exit the macOS app immediately.
     public func factoryResetAndQuit() {
         terminateRunningEngine()
         let fm = FileManager.default
+        _ = ModelStorage.removeAllModels()
         try? fm.removeItem(at: AppSupportPath.fileID)
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
@@ -1003,6 +1013,22 @@ public final class EngineClient {
         #if os(macOS)
         NSApplication.shared.terminate(nil)
         #endif
+    }
+
+    public func uninstallApplicationAndQuit() async -> String? {
+        terminateRunningEngine()
+        let appURL = Bundle.main.bundleURL.standardizedFileURL
+        guard appURL.pathExtension.lowercased() == "app" else {
+            return "The running FileID bundle could not be identified. Move FileID to Trash from Finder."
+        }
+        let errorMessage: String? = await withCheckedContinuation { continuation in
+            NSWorkspace.shared.recycle([appURL]) { _, error in
+                continuation.resume(returning: error?.localizedDescription)
+            }
+        }
+        guard errorMessage == nil else { return errorMessage }
+        factoryResetAndQuit()
+        return nil
     }
 
     /// Wipes the SQLite library + scan logs and triggers a fresh

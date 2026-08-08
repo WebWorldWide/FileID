@@ -18,6 +18,16 @@ import UniformTypeIdentifiers
 @Suite("Tagging image loading")
 struct TaggingLoadSizeTests {
 
+    @Test("RAM++ scan mode defaults on for direct engine clients and honors explicit opt-out")
+    func ramPlusScanModeParsing() {
+        #expect(RamPlusService.resolveScanTaggingEnabled(nil))
+        #expect(RamPlusService.resolveScanTaggingEnabled("1"))
+        #expect(RamPlusService.resolveScanTaggingEnabled("true"))
+        #expect(!RamPlusService.resolveScanTaggingEnabled("0"))
+        #expect(!RamPlusService.resolveScanTaggingEnabled("FALSE"))
+        #expect(!RamPlusService.resolveScanTaggingEnabled("off"))
+    }
+
     /// Writes a real, decodable PNG (>256 B) to a fresh temp dir; returns its URL.
     private func makeTempPNG(width: Int = 64, height: Int = 64) throws -> URL {
         let cs = CGColorSpaceCreateDeviceRGB()

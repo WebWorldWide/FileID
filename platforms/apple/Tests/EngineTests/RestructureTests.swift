@@ -25,7 +25,7 @@ struct RestructureCascadeTests {
         Restructure.FileForClassify(
             fileID: id, source: source ?? "/in/file\(id).\(kind)", kind: kind,
             modifiedUnix: modified ?? ts, createdUnix: created,
-            personName: person, lat: lat, lon: lon, hasText: hasText)
+            personName: person, lat: lat, lon: lon, documentLike: hasText)
     }
 
     @Test("monthName(6) == June (full English month names)")
@@ -66,6 +66,70 @@ struct RestructureCascadeTests {
         let moves = Restructure.ruleClassify([f(1, "image")], libraryRoot: root)
         #expect(moves[0].newPath.contains("/Photos/2024/March"))
         #expect(moves[0].bucket == "photo")
+    }
+
+    @Test("Existing path dates outrank copied-file timestamps")
+    func pathDatesOutrankTimestamps() {
+        let folderYear = Restructure.ruleClassify([
+            f(1, "image", source: "/Library/2020/copied.jpg")
+        ], libraryRoot: root)[0]
+        #expect(folderYear.newPath.contains("/Photos/2020/copied.jpg"))
+        #expect(!folderYear.newPath.contains("/March/"))
+
+        let filenameDate = Restructure.ruleClassify([
+            f(2, "image", source: "/Library/2020/2013-02-14_game.jpg")
+        ], libraryRoot: root)[0]
+        #expect(filenameDate.newPath.contains("/Photos/2013/February/"))
+
+        let incidentalYear = Restructure.ruleClassify([
+            f(3, "image", source: "/Library/FileIDLargePlanner-A120-2026-FFFF/copied.jpg")
+        ], libraryRoot: root)[0]
+        #expect(!incidentalYear.newPath.contains("/Photos/2026/"))
+
+        let explicitMonth = Restructure.ruleClassify([
+            f(4, "image", source: "/Library/2021-07/copied.jpg")
+        ], libraryRoot: root)[0]
+        #expect(explicitMonth.newPath.contains("/Photos/2021/July/"))
+    }
+
+    @Test("Placeholder GPS never overrides content routing")
+    func placeholderGPSIsIgnored() {
+        let zero = Restructure.ruleClassify([
+            f(1, "image", lat: 0, lon: 0)
+        ], libraryRoot: root)[0]
+        #expect(zero.bucket == "photo")
+        let valid = Restructure.ruleClassify([
+            f(2, "image", lat: 38.63, lon: -90.20)
+        ], libraryRoot: root)[0]
+        #expect(valid.bucket == "Places/38.5_-90.0")
+    }
+
+    @Test("Incidental text stays photographic while dense OCR routes as a document")
+    func documentEvidenceRequiresPrecision() {
+        #expect(!Restructure.isDocumentLike(
+            kind: "image", hasText: true, ocrLength: 45,
+            source: "/Library/scoreboard.jpg",
+            description: "A scoreboard displays the final score."))
+        #expect(!Restructure.isDocumentLike(
+            kind: "image", hasText: true, ocrLength: 45,
+            source: "/Library/team.jpg",
+            description: "Baseball players wear matching uniforms."))
+        #expect(Restructure.isDocumentLike(
+            kind: "image", hasText: true, ocrLength: 120,
+            source: "/Library/page.jpg", description: nil))
+        #expect(Restructure.isDocumentLike(
+            kind: "image", hasText: true, ocrLength: 30,
+            source: "/Library/photo.jpg",
+            description: "A receipt lists groceries and a total."))
+        #expect(!Restructure.isDocumentLike(
+            kind: "image", hasText: false, ocrLength: 500,
+            source: "/Library/photo.jpg", description: "A document."))
+    }
+
+    @Test("Only one named person produces a People destination")
+    func soleNamedPerson() {
+        #expect(Restructure.solePersonName("Uncle Andrew Liefer") == "Uncle Andrew Liefer")
+        #expect(Restructure.solePersonName("Adam Nolle\u{1F}Christine Nolle") == nil)
     }
 
     @Test("A file with no timestamp gets flat folder + Ask confidence")
@@ -116,6 +180,25 @@ struct RestructureCascadeTests {
         #expect(family?.dominantCategory == "People/Alice")
         // 5/6 ≈ 0.83 ≥ 0.80 → Anchor (homogeneity measured against Alice, not Bob).
         #expect(family?.classification == .anchor)
+    }
+
+    @Test("Library root stays reviewable and desktop-like folders are junk")
+    func rootAndGenericFolderClassification() {
+        let rootMoves = (0..<3).map { index in
+            f(Int64(index), "image", source: "/Library/\(index).jpg")
+        }
+        let rootClass = Restructure.classifyFolders(
+            Restructure.ruleClassify(rootMoves, libraryRoot: root),
+            libraryRoot: root.path)
+        #expect(rootClass.first?.classification == .mixed)
+
+        let desktopMoves = (0..<3).map { index in
+            f(Int64(index), "image", source: "/Library/Desktop/\(index).jpg")
+        }
+        let desktopClass = Restructure.classifyFolders(
+            Restructure.ruleClassify(desktopMoves, libraryRoot: root),
+            libraryRoot: root.path)
+        #expect(desktopClass.first?.classification == .junk)
     }
 }
 
@@ -765,6 +848,39 @@ struct RestructureApplyTests {
         #expect(large.totalMoves == nil)
         let confidence = try #require(large.confidenceCounts)
         #expect(confidence.auto + confidence.review + confidence.ask + confidence.unknown == 0)
+    }
+
+    @Test("disk-backed planner never hides a homogeneous library root")
+    func largePlannerKeepsRootReviewable() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDRootPlanner-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let db = try makeDB(tmp)
+        try await db.pool.write { db in
+            for id in 1...3 {
+                let path = root.appendingPathComponent("\(id).jpg").path
+                try db.execute(sql: """
+                    INSERT INTO files
+                      (id,path_text,path_hash,size_bytes,created_at,modified_at,scanned_at,
+                       kind,extension,failed)
+                    VALUES (?,?,?,?,?,?,?,'image','jpg',0)
+                    """, arguments: [
+                        id, path, StablePathHash.hash(path), 1,
+                        1_710_504_000.0, 1_710_504_000.0, 1_710_504_000.0])
+            }
+        }
+
+        let plan = try #require(try await Restructure.proposeLargeStoredIfNeeded(
+            database: db,
+            libraryRoot: root,
+            directory: tmp.appendingPathComponent("plans"),
+            threshold: 0
+        ))
+        #expect(plan.moves.count == 3)
+        let folders = try #require(plan.folderClassifications)
+        #expect(folders.mixedFolders == 1)
+        #expect(folders.anchorFolders == 0)
     }
 
     @Test("planners preserve the mounted volume's case-only path semantics")

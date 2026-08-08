@@ -85,7 +85,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B:     return 2.5
         case .qwen3VL4B:     return 5.0
-        case .qwen3VL8B:     return 7.0
+        case .qwen3VL8B:     return 4.5
         case .gemma3_4B:     return 1.7
         case .gemma3_12B:    return 5.0
         case .mistralSmall32: return 6.0

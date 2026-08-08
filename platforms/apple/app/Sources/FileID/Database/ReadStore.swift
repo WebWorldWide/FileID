@@ -20,11 +20,12 @@ public final class ReadStore: @unchecked Sendable {
         get { connLock.lock(); defer { connLock.unlock() }; return _queue }
         set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
     }
-    // Coalesce + throttle state for the off-main counters refresh. The
-    // duplicate-group window query is O(N log N) and must not run on the
-    // main thread on every scan tick — see `refreshCounters`.
+    // Coalesce + throttle state for the off-main counters refresh. Live scan
+    // ticks request only cheap file totals; terminal and mutation refreshes
+    // also request the O(N log N) duplicate-group metrics.
     @ObservationIgnored private let countersLock = NSLock()
     @ObservationIgnored private var countersDirty = false
+    @ObservationIgnored private var duplicateCountersDirty = false
     @ObservationIgnored private var countersRunning = false
     private let dbURL: URL
     public private(set) var version: Int = 0
@@ -84,10 +85,10 @@ public final class ReadStore: @unchecked Sendable {
                 return
             }
         }
-        refreshCounters()
+        refreshCounters(includeDuplicateMetrics: true)
     }
 
-    public func notifyChanged() {
+    public func notifyChanged(includeDuplicateMetrics: Bool = true) {
         // R3-06: `version` is an @Observable property SwiftUI reads on the
         // MainActor; notifyChanged() is reached OFF main from the bulk-rename /
         // merge / undo detached tasks, so a bare `version &+= 1` is an off-main
@@ -95,7 +96,7 @@ public final class ReadStore: @unchecked Sendable {
         // increment on the main actor. refreshCounters() is already internally
         // thread-safe (countersLock + Task.detached → MainActor.run publish).
         Task { @MainActor in self.version &+= 1 }
-        refreshCounters()
+        refreshCounters(includeDuplicateMetrics: includeDuplicateMetrics)
     }
 
     /// Explicit teardown. Drops our reference to the read connection
@@ -161,6 +162,10 @@ public final class ReadStore: @unchecked Sendable {
     private struct CounterSnapshot {
         let totalFiles: Int
         let totalImages: Int
+        let duplicateMetrics: DuplicateCounterSnapshot?
+    }
+
+    private struct DuplicateCounterSnapshot {
         let totalDuplicateGroups: Int
         let totalReclaimableMB: Double
     }
@@ -171,17 +176,13 @@ public final class ReadStore: @unchecked Sendable {
         case noDatabase
     }
 
-    /// Schedule a counters refresh off the main thread. The duplicate-group
-    /// window query is O(N log N) over the whole `files` table; run inline it
-    /// pegged the UI because a live scan calls `notifyChanged` up to once a
-    /// second from `@MainActor` views. A single background worker coalesces
-    /// bursts (one in-flight run, re-run once if more requests arrived while
-    /// it ran) and throttles successive heavy queries, so the main thread
-    /// never pays for scan ticks and the table is scanned at most ~once a
-    /// second during a burst. Property writes still land on the main actor.
-    private func refreshCounters() {
+    /// Schedule a counters refresh off the main thread. A single background
+    /// worker coalesces bursts; live scan ticks update cheap totals, while the
+    /// expensive duplicate ranking runs only when explicitly requested.
+    private func refreshCounters(includeDuplicateMetrics: Bool) {
         countersLock.lock()
         countersDirty = true
+        duplicateCountersDirty = duplicateCountersDirty || includeDuplicateMetrics
         if countersRunning {
             countersLock.unlock()
             return
@@ -196,17 +197,19 @@ public final class ReadStore: @unchecked Sendable {
                 // context under Swift 6 (it must never be held across a
                 // suspension point — it isn't here, but the scoped form makes
                 // that guarantee explicit and silences the diagnostic).
-                let shouldStop = self.countersLock.withLock { () -> Bool in
+                let work = self.countersLock.withLock { () -> (stop: Bool, duplicates: Bool) in
                     if !self.countersDirty {
                         self.countersRunning = false
-                        return true
+                        return (true, false)
                     }
                     self.countersDirty = false
-                    return false
+                    let duplicates = self.duplicateCountersDirty
+                    self.duplicateCountersDirty = false
+                    return (false, duplicates)
                 }
-                if shouldStop { return }
+                if work.stop { return }
 
-                switch self.computeCounters() {
+                switch self.computeCounters(includeDuplicateMetrics: work.duplicates) {
                 case .ok(let snapshot):
                     await MainActor.run { self.applyCounters(snapshot) }
                 case .failure(let message):
@@ -214,20 +217,28 @@ public final class ReadStore: @unchecked Sendable {
                 case .noDatabase:
                     break
                 }
-                // Throttle: cap the heavy window query to ~once per interval
-                // so a steady scan can't spin the background worker; the
-                // trailing dirty flag still guarantees a final, accurate run.
+                // Throttle successive requests so a steady scan cannot spin
+                // the background worker; the trailing dirty flag guarantees a
+                // final accurate run.
                 try? await Task.sleep(nanoseconds: 750_000_000)
             }
         }
     }
 
-    private func computeCounters() -> CounterResult {
+    private func computeCounters(includeDuplicateMetrics: Bool) -> CounterResult {
         guard let q = queue else { return .noDatabase }
         do {
             return try q.read { db -> CounterResult in
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
+
+                guard includeDuplicateMetrics else {
+                    return .ok(CounterSnapshot(
+                        totalFiles: totalFiles,
+                        totalImages: totalImages,
+                        duplicateMetrics: nil
+                    ))
+                }
 
                 // Fast stored-hash candidate metrics for Settings only. Cleanup itself
                 // performs bounded live full-file verification before display and Trash.
@@ -262,8 +273,10 @@ public final class ReadStore: @unchecked Sendable {
                 return .ok(CounterSnapshot(
                     totalFiles: totalFiles,
                     totalImages: totalImages,
-                    totalDuplicateGroups: groups,
-                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576
+                    duplicateMetrics: DuplicateCounterSnapshot(
+                        totalDuplicateGroups: groups,
+                        totalReclaimableMB: Double(reclaimableBytes) / 1_048_576
+                    )
                 ))
             }
         } catch {
@@ -275,8 +288,10 @@ public final class ReadStore: @unchecked Sendable {
     private func applyCounters(_ snapshot: CounterSnapshot) {
         self.totalFiles = snapshot.totalFiles
         self.totalImages = snapshot.totalImages
-        self.totalDuplicateGroups = snapshot.totalDuplicateGroups
-        self.totalReclaimableMB = snapshot.totalReclaimableMB
+        if let duplicateMetrics = snapshot.duplicateMetrics {
+            self.totalDuplicateGroups = duplicateMetrics.totalDuplicateGroups
+            self.totalReclaimableMB = duplicateMetrics.totalReclaimableMB
+        }
     }
 
     // MARK: - Library queries
@@ -357,6 +372,33 @@ public final class ReadStore: @unchecked Sendable {
                            kindFilter: String? = nil) async -> [FileRow] {
         await Task.detached(priority: .userInitiated) { [self] in
             files(offset: offset, limit: limit, search: search, kindFilter: kindFilter)
+        }.value
+    }
+
+    public func fileIDs(limit: Int = 1_000_000, kindFilter: String? = nil) -> [Int64] {
+        guard let q = queue else { return [] }
+        do {
+            return try q.read { db in
+                var sql = "SELECT id FROM files WHERE failed = 0"
+                var arguments: StatementArguments = []
+                if let kindFilter {
+                    sql += " AND kind = ?"
+                    arguments += [kindFilter]
+                }
+                sql += " ORDER BY scanned_at DESC LIMIT ?"
+                arguments += [limit]
+                return try Int64.fetchAll(db, sql: sql, arguments: arguments)
+            }
+        } catch {
+            reportError("Preview navigation query failed: \(error)")
+            return []
+        }
+    }
+
+    public func fileIDsAsync(limit: Int = 1_000_000,
+                             kindFilter: String? = nil) async -> [Int64] {
+        await Task.detached(priority: .userInitiated) { [self] in
+            fileIDs(limit: limit, kindFilter: kindFilter)
         }.value
     }
 

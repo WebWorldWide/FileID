@@ -26,6 +26,46 @@ for search, review, and reclustering. This supersedes both the 2026-08-02 show-e
 and the 2026-08-01 13-face presentation floor without using an unsafe automatic merge to make the UI
 look smaller. Further recall changes require broader identity-disjoint labels or a stronger vetted
 embedder, not an unlabelled threshold reduction.
+## 2026-08-08 — Uninstall only FileID-owned model roots and preserve original files
+
+macOS exposes separate destructive actions for one Deep Analyze LLM, all downloaded AI models, all
+FileID data, and the application bundle. Bulk model removal deletes the dedicated Application
+Support model root plus only the curated `AIModelKind.sourceRepo` directories under MLX's shared
+Hugging Face cache; deleting the entire shared cache was rejected because unrelated apps may own
+neighboring downloads. Active installers are cancelled and awaited before deletion, the engine is
+stopped and restarted around model changes, and complete app uninstall uses the system Trash. Every
+path is confirmation-gated and explicitly preserves the user's original scanned files.
+
+## 2026-08-08 — Reset the macOS public prerelease to v0.1.0 without rewriting tags
+
+The owner directed that the accidentally incremented GitHub release objects be removed and the
+current macOS build become the sole public release at v0.1.0. Historical Git tags remain intact so
+published commit identities are not rewritten. The macOS bundle and Swift engine report 0.1.0; the
+Windows/Linux canonical version files remain untouched because those ports are being updated on a
+separate machine. With no Developer ID identity or notary profile on this Mac, the artifact remains
+an explicitly labeled unsigned prerelease rather than implying Gatekeeper trust it does not have.
+
+## 2026-08-08 — Keep Deep Analyze fast by routing visual detail from persisted OCR
+
+Deep Analyze emits caption, smart filename, and VLM tags from one deterministic Qwen response.
+Ordinary visual media uses 336-pixel model input and a 512-pixel decode; documents remain 448/768,
+and an image rises to that detail tier only when its persisted OCR contains meaningful text. Visual
+OCR is capped at 1,000 characters, while documents retain the existing 4,000-character bound. This
+preserves the measured 4.50 s/image ordinary-photo path while improving signs, screenshots, scans,
+and other text-bearing images. A second tag inference and a second filename-repair generation were
+rejected because both repeat model work that deterministic parsing and grounded source text can do.
+
+## 2026-08-08 — Large Restructure plans stream once, then apply conservative evidence rules
+
+The macOS million-file planner stores one raw move row per file, disables durability work for its
+disposable scratch database, and derives folder statistics in one post-stream SQL aggregation.
+Keeping a second row-by-row statistics table was rejected after the isolated 97,256-row plan improved
+from 11 seconds to 9 seconds without it. Precision remains fail-toward-review: `(0,0)` is not a real
+location; a People destination requires exactly one known structured person; years already present
+in a filename or parent folder outrank copy-time metadata; the selected root can never disappear as
+an Anchor; and image OCR needs dense text, scan naming, or explicit document-language evidence before
+the file leaves Photos for Documents. Broad `has_text` routing and arbitrary first-person selection
+were rejected because real Adlon rows proved they misfile scoreboards, signs, and group photos.
 
 ## 2026-08-02 — Treat extracted document text as bounded, untrusted model data
 
@@ -4907,3 +4947,38 @@ activation in this host and are not retained.
 only for those two expected registration/class-factory HRESULTs, allowing the existing synchronous
 notification path to test non-XAML state binding; all other COM failures propagate. Skipping the
 five progress-binding tests was rejected because their state-transition contracts remain valuable.
+
+## 2026-08-08 — Fast app scans default to native Vision; RAM++ is an explicit quality tier
+
+On the 16 GB M1 Pro, RAM++ scan inference was the measured bottleneck rather than file discovery,
+SQLite, CLIP, or SFace. A fixed warm 15-image Adlon run took 14.17 s and approximately 7.3 GB RSS
+with RAM++; omitting only RAM++ reduced it to 0.54 s and approximately 0.7 GB, a 26.3× speedup while
+preserving the rest of the installed model stack. The macOS app therefore starts the engine with
+`FILEID_RAMPLUS_SCAN_ENABLED=0` by default and offers the richer 4,585-label model as a clearly
+described Settings opt-in. Direct engine clients default to enabled for compatibility unless they
+set the environment variable. Removing RAM++ or silently degrading its results was rejected: users
+who prefer tag breadth retain an explicit, commercially clean, entirely local quality tier.
+
+Large-library UI reads follow a separate cost boundary. Live scan ticks may fetch cheap aggregate
+counters but not duplicate-ranking window queries; those refresh only at terminal or mutation
+boundaries. Preview navigation stores ordered file IDs and fetches a complete record only for the
+current selection. Materializing all file rows for navigation and recomputing duplicate ranks every
+second were rejected because both serialized unrelated reads through the single database queue and
+made a healthy 97k-row library feel stalled.
+
+## 2026-08-08 — Deep Analyze performs one grounded generation per visual file
+
+The macOS Qwen3-VL path previously encoded and evaluated every image once for caption/filename and
+again for at most two tags; malformed filenames could trigger a third language-model generation.
+The primary response now contains DESCRIPTION, FILENAME, and TAGS. A malformed generic filename is
+repaired by removing generic tokens or deriving a deterministic name from the already-grounded
+description. Tags-only jobs retain their short dedicated prompt, but full analysis never pays for a
+redundant second vision pass.
+
+Qwen3-VL visual input is 336 pixels for photos, videos, and 3D previews, a native multiple of its
+28-pixel merged patch geometry. PDFs and documents remain at 448 pixels with a 768-pixel bounded
+decode because small text and OCR quality matter more than the photo-path throughput win. A fixed
+three-image Qwen3-VL 8B Adlon batch improved from 6.58 to 4.50 s/image (31.6%) with grounded captions,
+filenames, and tags preserved. Two concurrent 8B containers were rejected on a 16 GB unified-memory
+Mac: the runtime guarantees single-threaded access per container, and duplicating approximately
+8.5 GB of model residency would create memory pressure rather than reliable throughput.

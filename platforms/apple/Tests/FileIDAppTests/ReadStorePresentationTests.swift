@@ -18,6 +18,7 @@ struct ReadStorePresentationTests {
                     path_text TEXT NOT NULL DEFAULT '',
                     kind TEXT NOT NULL DEFAULT '',
                     failed INTEGER NOT NULL DEFAULT 0,
+                    scanned_at REAL NOT NULL DEFAULT 0,
                     content_hash BLOB,
                     size_bytes INTEGER NOT NULL DEFAULT 0,
                     aesthetic REAL,
@@ -81,6 +82,26 @@ struct ReadStorePresentationTests {
         let store = ReadStore(dbURL: databaseURL)
         store.openIfPossible()
         return (store, root)
+    }
+
+    @Test("preview navigation fetches ordered IDs without materializing file rows")
+    func previewNavigationUsesOrderedIDs() async throws {
+        let fixture = try makeStore { db in
+            try db.execute(sql: """
+                INSERT INTO files (id, path_text, kind, failed, scanned_at) VALUES
+                    (1, '/one.jpg', 'image', 0, 1),
+                    (2, '/two.pdf', 'pdf', 0, 3),
+                    (3, '/three.jpg', 'image', 0, 2),
+                    (4, '/failed.jpg', 'image', 1, 4)
+                """)
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        #expect(fixture.store.fileIDs() == [2, 3, 1])
+        #expect(await fixture.store.fileIDsAsync(kindFilter: "image") == [3, 1])
     }
 
     @Test("generic tags do not consume a file's visible tag slots")

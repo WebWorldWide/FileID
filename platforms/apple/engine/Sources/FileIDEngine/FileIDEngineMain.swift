@@ -1251,7 +1251,9 @@ struct FileIDEngineMain {
             MobileCLIPService.shared.preWarm()
             // RAM++ primary tagger (macOS lockstep) — no-op if not installed, in
             // which case Tagging falls back to the Vision scene classifier.
-            RamPlusService.shared.preWarm()
+            if RamPlusService.scanTaggingEnabled {
+                RamPlusService.shared.preWarm()
+            }
             // Pick whichever ArcFace variant the user has on disk —
             // iResNet50 takes precedence when both are present.
             for kind in FaceEmbedderKind.installedKinds() {

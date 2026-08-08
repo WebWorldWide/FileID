@@ -271,8 +271,10 @@ public enum Tagging {
                     // above keeps using pass.classifyTags (its heuristic was tuned
                     // for the Vision vocab).
                     let ramStart = CFAbsoluteTimeGetCurrent()
-                    let ramTags = RamPlusService.shared.tag(cgImage)
-                    let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
+                    let ramTags = RamPlusService.scanTaggingEnabled
+                        ? RamPlusService.shared.tag(cgImage) : []
+                    let ramMs = RamPlusService.scanTaggingEnabled
+                        ? (CFAbsoluteTimeGetCurrent() - ramStart) * 1000 : 0
                     var tagScores: [String: Double]? = nil
                     var primaryTags: [String]
                     if !ramTags.isEmpty {
