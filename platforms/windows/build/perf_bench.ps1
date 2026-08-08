@@ -19,7 +19,9 @@ param(
     [string]$Label = "run",
     [int]$ScanTimeoutMin = 20,
     [switch]$NoGpu,
-    [switch]$KeepState
+    [switch]$KeepState,
+    [switch]$DeterministicSample,
+    [string]$ExtensionFilter = ""
 )
 $ErrorActionPreference = 'Stop'
 function Step($m){ Write-Host ">> $m" -ForegroundColor Cyan }
@@ -39,6 +41,41 @@ if (-not (Test-Path $RealModels)) { Write-Host "models not found: $RealModels" -
 $Temp  = Join-Path $env:TEMP ("fileid_perf_state_" + [guid]::NewGuid().ToString("N"))
 $State = Join-Path $Temp "FileID"
 New-Item -ItemType Directory -Force -Path $State | Out-Null
+$ScanCorpus = $Corpus
+if ($DeterministicSample) {
+    if ([IO.Path]::GetPathRoot($Corpus) -ne [IO.Path]::GetPathRoot($Temp)) {
+        throw "deterministic hardlink samples require corpus and temp state on the same volume"
+    }
+    $ScanCorpus = Join-Path $Temp "Corpus"
+    New-Item -ItemType Directory -Force -Path $ScanCorpus | Out-Null
+    $linked = 0
+    $skippedLinks = 0
+    $extensions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($ext in ($ExtensionFilter -split ',')) {
+        $normalized = $ext.Trim().TrimStart('.')
+        if ($normalized) { [void]$extensions.Add($normalized) }
+    }
+    $candidates = Get-ChildItem -LiteralPath $Corpus -Recurse -File -Force -ErrorAction SilentlyContinue
+    if ($extensions.Count -gt 0) {
+        $candidates = $candidates | Where-Object { $extensions.Contains($_.Extension.TrimStart('.')) }
+    }
+    $candidates = $candidates | Sort-Object FullName
+    foreach ($candidate in $candidates) {
+        if ($linked -ge $Cap) { break }
+        $ext = [IO.Path]::GetExtension($candidate.Name)
+        $dest = Join-Path $ScanCorpus ("{0:D8}{1}" -f $linked, $ext)
+        try {
+            New-Item -ItemType HardLink -Path $dest -Target $candidate.FullName -ErrorAction Stop | Out-Null
+            $linked++
+        } catch {
+            $skippedLinks++
+        }
+    }
+    if ($linked -lt $Cap) {
+        throw "could create only $linked of $Cap deterministic sample links; state preserved at $Temp"
+    }
+    Info "deterministic sample: $linked sorted hardlinks ($skippedLinks skipped)"
+}
 $appSettings = Join-Path $RealRoot "app-settings.json"
 if (Test-Path $appSettings) { Copy-Item $appSettings (Join-Path $State "app-settings.json") -Force }
 
@@ -66,7 +103,7 @@ if (-not $NoGpu -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
 }
 
 # --- spawn engine -----------------------------------------------------
-Step "Bench '$Label': scanning <= $Cap files of $Corpus"
+Step "Bench '$Label': scanning <= $Cap files of $ScanCorpus"
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $EnginePath
 $psi.UseShellExecute = $false
@@ -123,8 +160,8 @@ Info "EP=$ep  GPU=$gpuName"
 
 # scan
 $scanStart = Get-Date
-Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null; rescan = $true } } }
-$done = $false; $peakMB = 0; $processed = 0; $failed = 0; $engineSec = 0.0
+Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $ScanCorpus; rootDisplay = $null; rescan = $true } } }
+$done = $false; $terminalFailure = $false; $peakMB = 0; $processed = 0; $failed = 0; $engineSec = 0.0
 $deadline = (Get-Date).AddMinutes($ScanTimeoutMin)
 while (-not $done -and (Get-Date) -lt $deadline -and -not $proc.HasExited) {
     Start-Sleep -Seconds 1
@@ -135,6 +172,7 @@ while (-not $done -and (Get-Date) -lt $deadline -and -not $proc.HasExited) {
         if ($line -match '"failed"\s*:\s*(\d+)') { $f=[int]$Matches[1]; if ($f -gt $failed){$failed=$f} }
         if ($line -match '"failedFiles"\s*:\s*(\d+)') { $f=[int]$Matches[1]; if ($f -gt $failed){$failed=$f} }
         if ($line -match '"totalSeconds"\s*:\s*([\d.]+)') { $engineSec=[double]$Matches[1] }
+        if ($line -match '"phaseChanged".*"(failed|cancelled)"') { $terminalFailure = $true; $done = $true }
         if ($line -match '"scanComplete"') { $done = $true }
     }
 }
@@ -163,11 +201,17 @@ $providerFallbackCount = @($diagnosticLines | Where-Object {
 if (-not $done) {
     throw "benchmark scan did not complete; diagnostic state preserved at $Temp"
 }
+if ($terminalFailure) {
+    throw "benchmark scan entered a failed or cancelled terminal phase; diagnostic state preserved at $Temp"
+}
 if ($proc.ExitCode -ne 0) {
     throw "benchmark engine exited with code $($proc.ExitCode); diagnostic state preserved at $Temp"
 }
 if ($ep -eq 'cuda' -and ($providerBindCount -eq 0 -or $providerFallbackCount -gt 0)) {
     throw "CUDA was advertised but did not bind cleanly (binds=$providerBindCount fallbacks=$providerFallbackCount); diagnostic state preserved at $Temp"
+}
+if ($DeterministicSample -and $processed -ne $Cap) {
+    throw "deterministic sample processed $processed of $Cap links; use ExtensionFilter to exclude unsupported file types; diagnostic state preserved at $Temp"
 }
 
 $tput = if ($wallSec -gt 0 -and $processed -gt 0) { [math]::Round($processed / $wallSec, 2) } else { 0 }
