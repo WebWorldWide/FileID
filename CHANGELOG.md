@@ -13,6 +13,9 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 - **RAM++ scan tagging is an explicit macOS opt-in.** The fast built-in on-device classifier is the
   default, while users who want the richer 4,585-label model can enable it in Settings and restart
   the engine.
+- **macOS has complete uninstall controls.** Every Deep Analyze LLM can be removed individually;
+  Settings can remove all AI models while preserving the library, erase all FileID data, or move the
+  app to Trash. Destructive actions require confirmation and never touch the user's original files.
 
 ### Changed
 
@@ -29,7 +32,8 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 ### Fixed
 
 - **Restructure rejects weak routing signals.** Placeholder GPS, incidental image text, ambiguous
-  multi-person matches, and copy-time dates no longer override stronger file evidence.
+  multi-person matches, copy-time dates, and incidental four-digit IDs in parent folders no longer
+  override stronger file evidence.
 - **Deep Analyze year grounding reads the normalized OCR and document-text tables.**
 
 ## [0.1.4] - 2026-08-03

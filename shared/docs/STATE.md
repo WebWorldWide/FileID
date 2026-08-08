@@ -12,7 +12,11 @@
 
 Final v0.1.0 release polish makes every Settings card span the same content width while preserving
 intrinsic card sizing elsewhere in the app. The rebuilt no-wipe bundle visually confirms the aligned
-cards and the RAM++ opt-in in its default-off state. A fresh strict validation passes all 396 Swift
+cards, the RAM++ opt-in in its default-off state, per-LLM Remove controls, and the full-width Storage
+& uninstall card. That card can remove every AI model while preserving the library, factory-reset
+all FileID state, or move the app to Trash; confirmations state that original files are untouched.
+Deletion-scope tests prove unrelated Hugging Face downloads remain intact. A fresh strict validation
+passes all 398 Swift
 tests, the shared Rust engine's 1,366 tests and Clippy gate, 79 CLI tests and Clippy, and 111 TUI tests
 and Clippy. The release pipeline has no Developer ID identity or notary credentials on this Mac, so
 the publishable DMG is necessarily an explicitly labeled unsigned prerelease.

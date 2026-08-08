@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-08-08 — Uninstall only FileID-owned model roots and preserve original files
+
+macOS exposes separate destructive actions for one Deep Analyze LLM, all downloaded AI models, all
+FileID data, and the application bundle. Bulk model removal deletes the dedicated Application
+Support model root plus only the curated `AIModelKind.sourceRepo` directories under MLX's shared
+Hugging Face cache; deleting the entire shared cache was rejected because unrelated apps may own
+neighboring downloads. Active installers are cancelled and awaited before deletion, the engine is
+stopped and restarted around model changes, and complete app uninstall uses the system Trash. Every
+path is confirmation-gated and explicitly preserves the user's original scanned files.
+
 ## 2026-08-08 — Reset the macOS public prerelease to v0.1.0 without rewriting tags
 
 The owner directed that the accidentally incremented GitHub release objects be removed and the

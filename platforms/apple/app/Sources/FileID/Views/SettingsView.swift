@@ -15,6 +15,10 @@ struct SettingsTab: View {
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
     @State private var confirmFactoryReset = false
+    @State private var confirmRemoveAllModels = false
+    @State private var confirmUninstallApp = false
+    @State private var maintenanceInFlight = false
+    @State private var maintenanceMessage: (text: String, isError: Bool)?
 
     var body: some View {
         ScrollView {
@@ -80,6 +84,7 @@ struct SettingsTab: View {
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 FaceEmbedderCard(engine: engine, store: store)
+                storageAndUninstallCard
 
                 // ─── Advanced (collapsed by default) ─────────────────────
                 // Engine PIDs, DB paths, log files. Power-user info that
@@ -167,33 +172,6 @@ struct SettingsTab: View {
                                 }
                             }
 
-                            Divider().opacity(0.3)
-
-                            // Danger Zone
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Danger Zone").font(.subheadline.bold()).foregroundStyle(.red)
-                                Text("Permanently erase FileID's library, local models, settings, and caches.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Button(role: .destructive) {
-                                    confirmFactoryReset = true
-                                } label: {
-                                    Text("Factory Reset & Quit")
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.red)
-                                .confirmationDialog(
-                                    "Are you sure you want to completely erase FileID?",
-                                    isPresented: $confirmFactoryReset,
-                                    titleVisibility: .visible
-                                ) {
-                                    Button("Erase Everything and Quit", role: .destructive) {
-                                        engine.factoryResetAndQuit()
-                                    }
-                                    Button("Cancel", role: .cancel) { }
-                                } message: {
-                                    Text("This will permanently delete the database, all tags, faces, settings, FileID-managed models, and caches. Shared Deep Analyze model downloads are kept. This action cannot be undone.")
-                                }
-                            }
                         }
                         .padding(.top, 8)
                     } label: {
@@ -215,6 +193,138 @@ struct SettingsTab: View {
         }
         .onChange(of: showAdvanced) { _, expanded in
             if expanded { Task { sessions = store.recentSessions() } }
+        }
+    }
+
+    private var storageAndUninstallCard: some View {
+        GlassCard(fillsWidth: true) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Storage & uninstall").font(.headline)
+                Text("Remove downloaded models without touching your library, reset all FileID data, or move the app itself to Trash.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                if let maintenanceMessage {
+                    Label(
+                        maintenanceMessage.text,
+                        systemImage: maintenanceMessage.isError
+                            ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(maintenanceMessage.isError ? .red : .green)
+                }
+
+                HStack(spacing: 8) {
+                    Button("Remove All AI Models…", role: .destructive) {
+                        confirmRemoveAllModels = true
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Factory Reset & Quit…", role: .destructive) {
+                        confirmFactoryReset = true
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Uninstall FileID…", role: .destructive) {
+                        confirmUninstallApp = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                }
+                .disabled(maintenanceInFlight)
+
+                if maintenanceInFlight {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Removing files safely…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .confirmationDialog(
+            "Remove every downloaded AI model?",
+            isPresented: $confirmRemoveAllModels,
+            titleVisibility: .visible
+        ) {
+            Button("Remove All Models", role: .destructive) {
+                Task { await removeAllModels(restartEngine: true) }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Deletes CLIP, RAM++, BGE, face recognition, and all downloaded Deep Analyze LLM weights. Your library, tags, people, and settings stay intact. Models can be downloaded again later.")
+        }
+        .confirmationDialog(
+            "Erase all FileID data and quit?",
+            isPresented: $confirmFactoryReset,
+            titleVisibility: .visible
+        ) {
+            Button("Erase Everything and Quit", role: .destructive) {
+                Task {
+                    let success = await removeAllModels(restartEngine: false)
+                    if success { engine.factoryResetAndQuit() }
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Permanently deletes the library database, tags, faces, settings, caches, every FileID-managed model, and all downloaded Deep Analyze LLMs. Your original files are not changed.")
+        }
+        .confirmationDialog(
+            "Uninstall FileID completely?",
+            isPresented: $confirmUninstallApp,
+            titleVisibility: .visible
+        ) {
+            Button("Uninstall FileID", role: .destructive) {
+                Task { await uninstallApplication() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Moves this FileID app to Trash and permanently deletes its library database, tags, faces, settings, caches, and every downloaded AI model. Your original files are not changed.")
+        }
+    }
+
+    private func removeAllModels(restartEngine: Bool) async -> Bool {
+        maintenanceInFlight = true
+        maintenanceMessage = nil
+        engine.stopForMaintenance()
+        await CLIPModelInstaller.shared.uninstall()
+        await RamPlusModelInstaller.shared.uninstall()
+        await BGEModelInstaller.shared.uninstall()
+        for kind in FaceEmbedderKind.allCases {
+            await ArcFaceModelInstaller.shared.uninstall(kind)
+        }
+        let report = await Task.detached(priority: .userInitiated) {
+            ModelStorage.removeAllModels()
+        }.value
+        CLIPTextEncoder.shared.unload()
+        CLIPModelInstaller.shared.refreshStatus()
+        RamPlusModelInstaller.shared.refreshStatus()
+        BGEModelInstaller.shared.refreshStatus()
+        ArcFaceModelInstaller.shared.refreshStatus()
+        maintenanceInFlight = false
+        if let failure = report.failureMessage {
+            maintenanceMessage = (failure, true)
+            engine.start()
+            return false
+        }
+        maintenanceMessage = (
+            report.removedCount == 0
+                ? "No downloaded AI models were found."
+                : "All downloaded AI models were removed.",
+            false
+        )
+        if restartEngine { engine.start() }
+        return true
+    }
+
+    private func uninstallApplication() async {
+        guard await removeAllModels(restartEngine: false) else { return }
+        maintenanceInFlight = true
+        if let error = await engine.uninstallApplicationAndQuit() {
+            maintenanceInFlight = false
+            maintenanceMessage = ("Couldn't move FileID to Trash: \(error)", true)
+            engine.start()
         }
     }
 
@@ -604,7 +714,10 @@ struct RamPlusTaggerCard: View {
             isPresented: $confirmUninstall,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
+            Button("Remove", role: .destructive) {
+                Task { await installer.uninstall() }
+                confirmUninstall = false
+            }
             Button("Keep", role: .cancel) { confirmUninstall = false }
         } message: {
             Text("Frees ~450 MB. Tagging falls back to the lighter built-in classifier.")
@@ -690,7 +803,10 @@ struct BGEDocCard: View {
             isPresented: $confirmUninstall,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
+            Button("Remove", role: .destructive) {
+                Task { await installer.uninstall() }
+                confirmUninstall = false
+            }
             Button("Keep", role: .cancel) { confirmUninstall = false }
         } message: {
             Text("Frees ~135 MB. Documents fall back to filename-based grouping in Restructure.")
@@ -771,7 +887,7 @@ struct FaceEmbedderCard: View {
             presenting: confirmUninstall
         ) { kind in
             Button("Remove", role: .destructive) {
-                installer.uninstall(kind)
+                Task { await installer.uninstall(kind) }
                 confirmUninstall = nil
             }
             Button("Keep", role: .cancel) { confirmUninstall = nil }

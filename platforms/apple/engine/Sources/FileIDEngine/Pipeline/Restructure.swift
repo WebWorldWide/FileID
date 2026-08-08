@@ -935,6 +935,7 @@ public enum Restructure {
                 let candidate = Int(bytes[index + 5] - 48) * 10 + Int(bytes[index + 6] - 48)
                 if (1...12).contains(candidate) { month = candidate }
             }
+            if allowBareYear, month == nil, bytes.count != 4 { continue }
             return (year, month)
         }
         return nil
