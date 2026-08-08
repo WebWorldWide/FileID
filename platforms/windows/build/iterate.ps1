@@ -161,8 +161,9 @@ if ($SkipWipe) {
 
 # --- 4. Drive engine --------------------------------------------------
 Step "Driving engine (scan + cluster)"
-$tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_.FullName }
-$eventLog = Join-Path $tempDir "events.jsonl"
+$tempDirPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-iterate-" + [guid]::NewGuid().ToString("N"))
+$tempDir = [System.IO.Directory]::CreateDirectory($tempDirPath)
+$eventLog = Join-Path $tempDir.FullName "events.jsonl"
 
 # Spawn engine with redirected stdio.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -205,26 +206,41 @@ if ($env:FILEID_CLIP_BATCH_SIZE) {
 
 $engineProc = New-Object System.Diagnostics.Process
 $engineProc.StartInfo = $psi
-$engineProc.EnableRaisingEvents = $true
-# Forensics for a mid-scan engine death: the exit code names the failure
-# class (0xC0000005 AV, 0xC0000409 fail-fast/alloc-abort, 0 clean) that
-# neither the engine log (native deaths never reach it) nor WER records.
-Register-ObjectEvent -InputObject $engineProc -EventName 'Exited' -Action {
-    $p = $Event.Sender
-    $msg = "ENGINE EXITED code={0} (0x{0:X8}) at {1}" -f $p.ExitCode, (Get-Date -Format HH:mm:ss)
-    Write-Host "  [!!] $msg" -ForegroundColor Red
-    Add-Content -Path $event.MessageData -Value $msg
-} -MessageData $eventLog | Out-Null
 [void]$engineProc.Start()
+$script:stdoutTask = $engineProc.StandardOutput.ReadLineAsync()
+$script:stderrTask = $engineProc.StandardError.ReadLineAsync()
+$script:stdoutClosed = $false
+$script:stderrClosed = $false
+$script:engineExitReported = $false
 
-# Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7;
-# the += operator on events fails on 5.1. Capture stdout/stderr to the temp
-# event log.
-$stdoutSub = Register-ObjectEvent -InputObject $engineProc -EventName 'OutputDataReceived' -Action {
-    if ($EventArgs.Data) { Add-Content -Path $event.MessageData -Value $EventArgs.Data }
-} -MessageData $eventLog
-$engineProc.BeginOutputReadLine()
-$engineProc.BeginErrorReadLine()
+function Pump-EngineOutput {
+    $lines = [System.Collections.Generic.List[string]]::new()
+    while (-not $script:stdoutClosed -and $script:stdoutTask.IsCompleted) {
+        $line = $script:stdoutTask.GetAwaiter().GetResult()
+        if ($null -eq $line) {
+            $script:stdoutClosed = $true
+            break
+        }
+        Add-Content -LiteralPath $eventLog -Value $line
+        $lines.Add($line)
+        $script:stdoutTask = $engineProc.StandardOutput.ReadLineAsync()
+    }
+    while (-not $script:stderrClosed -and $script:stderrTask.IsCompleted) {
+        $line = $script:stderrTask.GetAwaiter().GetResult()
+        if ($null -eq $line) {
+            $script:stderrClosed = $true
+            break
+        }
+        Add-Content -LiteralPath $eventLog -Value ("[stderr] " + $line)
+        $script:stderrTask = $engineProc.StandardError.ReadLineAsync()
+    }
+    if ($engineProc.HasExited -and -not $script:engineExitReported) {
+        $script:engineExitReported = $true
+        $message = "ENGINE EXITED code={0} (0x{0:X8}) at {1}" -f $engineProc.ExitCode, (Get-Date -Format HH:mm:ss)
+        Add-Content -LiteralPath $eventLog -Value $message
+    }
+    return $lines.ToArray()
+}
 
 # Send commands as JSON over stdin.
 function Send-Cmd($cmd) {
@@ -239,20 +255,21 @@ $ready = $false
 $deadline = (Get-Date).AddSeconds(30)
 while (-not $ready -and (Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 250
-    if (Test-Path $eventLog) {
-        $tail = Get-Content $eventLog -Tail 10 -ErrorAction SilentlyContinue
-        if ($tail | Where-Object { $_ -match '"ready"' }) { $ready = $true }
-    }
+    $newLines = Pump-EngineOutput
+    if ($newLines | Where-Object { $_ -match '"ready"' }) { $ready = $true }
+    if ($engineProc.HasExited) { break }
 }
 if (-not $ready) {
     Fail "engine never emitted ready (30s timeout)"
-    $engineProc.Kill()
+    [void](Pump-EngineOutput)
+    if (-not $engineProc.HasExited) { $engineProc.Kill() }
     exit 2
 }
 OK "engine ready"
 
 $eventOffset = 0L
 function Read-NewEventLines {
+    [void](Pump-EngineOutput)
     if (-not (Test-Path -LiteralPath $eventLog -PathType Leaf)) { return @() }
     $stream = [System.IO.FileStream]::new(
         $eventLog,

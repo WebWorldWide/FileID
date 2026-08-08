@@ -1227,6 +1227,11 @@ async fn handle_line(
                 &payload.person_ids,
                 &message,
             )),
+            CommandPayload::ReassignFace(payload) => Some(bulk_rejection_event(
+                "reassignFace",
+                &[payload.face_id],
+                &message,
+            )),
             CommandPayload::RevertMerge(_) => {
                 Some(bulk_rejection_event("revertMerge", &[], &message))
             }
@@ -1645,6 +1650,36 @@ async fn handle_line(
                 rejection,
                 async move {
                     commands::bulk::handle_rename_person(sink_c, db_c, payload).await;
+                },
+            )
+            .await;
+        }
+        CommandPayload::ReassignFace(payload) => {
+            let face_ids = [payload.face_id];
+            let Some(db) = db else {
+                emit_db_unavailable(sink, "reassignFace").await;
+                sink.send(bulk_rejection_event(
+                    "reassignFace",
+                    &face_ids,
+                    "The face could not be reassigned because the library database is unavailable.",
+                ))
+                .await;
+                return;
+            };
+            let rejection = bulk_rejection_event(
+                "reassignFace",
+                &face_ids,
+                "The face could not be reassigned while the library scan is paused.",
+            );
+            let sink_c = sink.clone();
+            let db_c = db.clone();
+            spawn_mutation_with_rejection(
+                mutation_gate,
+                sink,
+                scan_state,
+                rejection,
+                async move {
+                    commands::bulk::handle_reassign_face(sink_c, db_c, payload).await;
                 },
             )
             .await;

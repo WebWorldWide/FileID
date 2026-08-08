@@ -207,6 +207,30 @@ public sealed class BulkActionJournalingTests
     }
 
     [Fact]
+    public void ScopedPersonTagReplacementPreservesUnrelatedTagsAndDeduplicatesNewName()
+    {
+        var prior = new Dictionary<long, List<string>>
+        {
+            [1] = ["Family", "alex"],
+            [2] = ["Vacation", "Alex Morgan"],
+            [3] = ["School"],
+        };
+
+        var groups = TagChangeJournal.BuildScopedReplacementGroups(
+            [1, 2, 3],
+            prior,
+            "Alex",
+            "Alex Morgan");
+        var byId = groups
+            .SelectMany(group => group.Ids.Select(id => (Id: id, group.Tags)))
+            .ToDictionary(entry => entry.Id, entry => entry.Tags);
+
+        Assert.Equal(["Alex Morgan", "Family"], byId[1]);
+        Assert.Equal(["Alex Morgan", "Vacation"], byId[2]);
+        Assert.Equal(["Alex Morgan", "School"], byId[3]);
+    }
+
+    [Fact]
     public void ProductionFlowsJournalOnlyAfterTerminalAndUseConfirmedIds()
     {
         var root = FindRepoRoot();

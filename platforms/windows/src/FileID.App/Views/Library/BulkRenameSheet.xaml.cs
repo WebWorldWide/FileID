@@ -121,7 +121,7 @@ public sealed partial class BulkRenameSheet : UserControl
             var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "renameFiles",
                 () => EngineClient.Instance.RenameFilesAsync(entries),
-                TimeSpan.FromSeconds(30));
+                Services.BulkActionTimeout.ForFileCount(entries.Length));
             var inverse = BuildConfirmedInverse(submittedPlans, result);
             if (inverse.Length > 0)
             {
@@ -135,7 +135,7 @@ public sealed partial class BulkRenameSheet : UserControl
                             renames => EngineClient.Instance.WaitForBulkActionResultAsync(
                                 "renameFiles",
                                 () => EngineClient.Instance.RenameFilesAsync(renames),
-                                TimeSpan.FromSeconds(30))).ConfigureAwait(false);
+                                Services.BulkActionTimeout.ForFileCount(renames.Count))).ConfigureAwait(false);
                         if (!confirmed)
                         {
                             throw new InvalidOperationException(

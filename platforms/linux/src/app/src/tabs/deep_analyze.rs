@@ -156,6 +156,10 @@ fn host_recommended_vlm_kind() -> &'static str {
     recommended_vlm_kind(total, available, free)
 }
 
+pub fn recommended_vlm_kind_for_host() -> &'static str {
+    host_recommended_vlm_kind()
+}
+
 // ─── Tab entrypoint ──────────────────────────────────────────────────────────
 
 pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
@@ -211,7 +215,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     // Actions card.
     let naming_banner = build_naming_banner();
     let skip_check =
-        gtk::CheckButton::with_label("Skip images already analyzed by the active model");
+        gtk::CheckButton::with_label("Skip files already analyzed by the active model");
     skip_check.set_active(true);
     let run_btn = gtk::Button::builder()
         .label("Analyze entire library")
@@ -235,6 +239,21 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         &folder_btn,
         &cancel_btn,
     ));
+
+    let apply_status = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .wrap(true)
+        .build();
+    let apply_tags = gtk::Button::builder()
+        .label("Apply tags")
+        .css_classes(["pill"])
+        .build();
+    let apply_people = gtk::Button::builder()
+        .label("Apply people as tags")
+        .css_classes(["pill"])
+        .build();
+    content.append(&build_apply_card(&apply_status, &apply_tags, &apply_people));
 
     // Smart-names list.
     let smart_count = gtk::Label::builder()
@@ -317,6 +336,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let ui = Rc::new(DeepUi {
         engine,
         in_flight: Cell::new(false),
+        apply_in_flight: Cell::new(false),
+        apply_generation: Cell::new(0),
         active_kind: Cell::new(default_kind),
         lbl_active,
         lbl_total,
@@ -326,6 +347,9 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         cancel_btn,
         skip_check,
         naming_banner,
+        apply_status,
+        apply_tags,
+        apply_people,
         picker_box,
         pick_rows: RefCell::new(Vec::new()),
         download_card,
@@ -389,6 +413,8 @@ struct PickRow {
 struct DeepUi {
     engine: Rc<RefCell<EngineClient>>,
     in_flight: Cell<bool>,
+    apply_in_flight: Cell<bool>,
+    apply_generation: Cell<u64>,
     active_kind: Cell<&'static str>,
 
     lbl_active: gtk::Label,
@@ -426,6 +452,10 @@ struct DeepUi {
     last_card: gtk::Box,
     last_desc: gtk::Label,
     last_name: gtk::Label,
+
+    apply_status: gtk::Label,
+    apply_tags: gtk::Button,
+    apply_people: gtk::Button,
 }
 
 // ─── Command routing ─────────────────────────────────────────────────────────
@@ -547,8 +577,129 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             ) {
                 schedule_refresh(&ui, 900);
             }
+            apply_file_tags_modes(&ui, &[false, true]);
         }
     ));
+
+    ui.apply_tags.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| apply_file_tags(&ui, false),
+    ));
+    ui.apply_people.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| apply_file_tags(&ui, true),
+    ));
+}
+
+fn apply_file_tags(ui: &Rc<DeepUi>, people: bool) {
+    apply_file_tags_modes(ui, &[people]);
+}
+
+fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
+    if ui.in_flight.get() || ui.apply_in_flight.replace(true) {
+        return;
+    }
+    let generation = ui.apply_generation.get().wrapping_add(1);
+    ui.apply_generation.set(generation);
+    ui.apply_tags.set_sensitive(false);
+    ui.apply_people.set_sensitive(false);
+    ui.apply_status.set_text(if modes.len() == 1 && modes[0] {
+        "Reading named people…"
+    } else if modes.len() == 1 {
+        "Reading analyzed tags…"
+    } else {
+        "Reading analyzed tags and named people…"
+    });
+    let modes = modes.to_vec();
+    let ui = ui.clone();
+    let event_rx = ui.engine.borrow_mut().subscribe();
+    glib::MainContext::default().spawn_local(async move {
+        let mut expected_results = 0usize;
+        let mut requested_files = 0usize;
+        for people in modes {
+            let groups = query_tag_groups(people).recv().await.unwrap_or_default();
+            for (tag, ids) in groups {
+                if ids.is_empty() {
+                    continue;
+                }
+                let sent = ui.engine.borrow_mut().send(CommandPayload::ApplyTags(
+                    fileid_engine::ipc::ApplyTagsPayload {
+                        file_ids: ids.clone(),
+                        tags: vec![tag],
+                        mode: fileid_engine::ipc::TagMode::Add,
+                    },
+                ));
+                if sent.is_ok() {
+                    requested_files += ids.len();
+                    expected_results += 1;
+                } else {
+                    tracing::warn!(target: "deep_analyze", "applyTags command could not be sent");
+                }
+            }
+        }
+
+        if expected_results == 0 {
+            finish_apply_tags(&ui, generation, "Nothing to apply yet. Name people in People or run Deep Analyze first.");
+            return;
+        }
+
+        // A missing result must not strand the controls after an engine crash.
+        // The generation check keeps a late result from an expired job from
+        // overwriting the status of a newer apply operation.
+        let timeout_ui = ui.clone();
+        glib::timeout_add_local_once(Duration::from_secs(15), move || {
+            if timeout_ui.apply_in_flight.get()
+                && timeout_ui.apply_generation.get() == generation
+            {
+                finish_apply_tags(
+                    &timeout_ui,
+                    generation,
+                    "Timed out waiting for the engine to finish applying tags. Check the engine status and try again.",
+                );
+            }
+        });
+
+        let mut received_results = 0usize;
+        let mut succeeded = 0u32;
+        let mut failed = 0u32;
+        while received_results < expected_results {
+            match event_rx.recv().await {
+                Ok(EngineEvent::BulkActionResult(result)) if result.action == "applyTags" => {
+                    received_results += 1;
+                    succeeded = succeeded.saturating_add(result.succeeded);
+                    failed = failed.saturating_add(result.failed);
+                }
+                Ok(EngineEvent::Exited) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        if received_results == expected_results {
+            let status = if failed == 0 {
+                format!("Applied tags to {succeeded} file updates ({requested_files} queued).")
+            } else {
+                format!("Applied {succeeded} file updates; {failed} failed. Check the engine log for details.")
+            };
+            finish_apply_tags(&ui, generation, &status);
+        } else if ui.apply_in_flight.get() && ui.apply_generation.get() == generation {
+            finish_apply_tags(
+                &ui,
+                generation,
+                "The engine stopped before tag application completed. Check the engine status and try again.",
+            );
+        }
+    });
+}
+
+fn finish_apply_tags(ui: &Rc<DeepUi>, generation: u64, status: &str) {
+    if ui.apply_generation.get() != generation || !ui.apply_in_flight.get() {
+        return;
+    }
+    ui.apply_in_flight.set(false);
+    ui.apply_tags.set_sensitive(true);
+    ui.apply_people.set_sensitive(true);
+    ui.apply_status.set_text(status);
 }
 
 /// Optimistic refresh after a fire-and-forget command (the engine's
@@ -696,7 +847,7 @@ fn refresh(ui: &Rc<DeepUi>) {
 }
 
 fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
-    ui.lbl_total.set_text(&c.total_images.to_string());
+    ui.lbl_total.set_text(&c.total_files.to_string());
     ui.lbl_pending.set_text(&c.pending.to_string());
     let secs = c.pending as f64 * vlm_by_key(ui.active_kind.get()).secs_per_image;
     ui.lbl_eta.set_text(&format_duration(secs));
@@ -825,7 +976,7 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
 
 // ─── Model picker ────────────────────────────────────────────────────────────
 
-fn vlm_runtime_available() -> bool {
+pub fn vlm_runtime_available() -> bool {
     std::env::var_os("FLATPAK_ID").is_none()
 }
 
@@ -927,7 +1078,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
                     }
                 }
                 ui.skip_check.set_label(Some(&format!(
-                    "Skip images already analyzed by {}",
+                    "Skip files already analyzed by {}",
                     vlm_by_key(key).display
                 )));
                 refresh(&ui);
@@ -960,7 +1111,7 @@ fn model_install_info(key: &str) -> (bool, f64) {
 
 #[derive(Default)]
 struct StatusCounts {
-    total_images: i64,
+    total_files: i64,
     pending: i64,
     named_people: i64,
 }
@@ -989,15 +1140,19 @@ fn query_status(active: String) -> async_channel::Receiver<StatusCounts> {
 }
 
 fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
-    let total_images: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE kind = 'image'", [], |r| {
-            r.get(0)
-        })
+    let total_files: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE kind IN ('image','video','pdf','doc','audio','model') \
+             AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     let pending: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM files WHERE kind = 'image' AND \
-             (vlm_full_model IS NULL OR vlm_full_model <> ?1)",
+            "SELECT COUNT(*) FROM files WHERE kind IN ('image','video','pdf','doc','audio','model') \
+             AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj') \
+             AND (vlm_full_model IS NULL OR vlm_full_model <> ?1)",
             rusqlite::params![active],
             |r| r.get(0),
         )
@@ -1012,7 +1167,7 @@ fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
         )
         .unwrap_or(0);
     StatusCounts {
-        total_images,
+        total_files,
         pending,
         named_people,
     }
@@ -1049,6 +1204,71 @@ fn query_proposed() -> async_channel::Receiver<Vec<ProposedRow>> {
             Err(_) => Vec::new(),
         }
     })
+}
+
+fn query_tag_groups(people: bool) -> async_channel::Receiver<Vec<(String, Vec<i64>)>> {
+    spawn_db(move |conn| {
+        let sql = if people {
+            "SELECT fp.file_id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name \
+             FROM face_prints fp INNER JOIN persons p ON p.id = fp.person_id \
+             INNER JOIN files f ON f.id = fp.file_id \
+             WHERE f.failed = 0 AND IFNULL(p.is_unknown, 0) = 0 \
+             AND (p.name IS NOT NULL OR p.title IS NOT NULL OR p.first_name IS NOT NULL \
+                  OR p.middle_name IS NOT NULL OR p.last_name IS NOT NULL OR p.suffix IS NOT NULL)"
+        } else {
+            "SELECT file_id, tag, NULL, NULL, NULL, NULL, NULL FROM tags \
+             INNER JOIN files ON files.id = tags.file_id \
+             WHERE files.failed = 0 AND tag IS NOT NULL AND tag <> ''"
+        };
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            let file_id = row.get::<_, i64>(0)?;
+            if people {
+                let mut parts = Vec::new();
+                for index in 1..=5 {
+                    if let Ok(Some(value)) = row.get::<_, Option<String>>(index) {
+                        let value = value.trim();
+                        if !value.is_empty() {
+                            parts.push(value.to_string());
+                        }
+                    }
+                }
+                let legacy = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+                Ok((file_id, person_tag_name(&parts, &legacy)))
+            } else {
+                Ok((file_id, row.get::<_, String>(1)?))
+            }
+        }) else {
+            return Vec::new();
+        };
+        group_tag_rows(rows.flatten())
+    })
+}
+
+fn group_tag_rows(rows: impl IntoIterator<Item = (i64, String)>) -> Vec<(String, Vec<i64>)> {
+    let mut grouped: std::collections::BTreeMap<String, std::collections::BTreeSet<i64>> =
+        std::collections::BTreeMap::new();
+    for (file_id, raw_tag) in rows {
+        let tag = raw_tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        grouped.entry(tag.to_string()).or_default().insert(file_id);
+    }
+    grouped
+        .into_iter()
+        .map(|(tag, ids)| (tag, ids.into_iter().collect()))
+        .collect()
+}
+
+fn person_tag_name(parts: &[String], legacy: &str) -> String {
+    if parts.is_empty() {
+        legacy.trim().to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 /// Run a closure against a fresh read-only DB connection off the main loop.
@@ -1106,7 +1326,7 @@ fn build_header() -> gtk::Box {
             .build(),
     );
     text.append(&wrap_caption(
-        "Reads each of your images and writes a sentence about it plus a smart filename.",
+        "Reads photos, videos, documents, PDFs, and audio metadata to write useful descriptions and smart filenames.",
     ));
     row.append(&icon);
     row.append(&text);
@@ -1162,7 +1382,7 @@ fn build_status_card(
     card.append(&heading("Library status"));
     card.append(&wrap_caption(
         "Run a scan first (top bar). Then come back here — Deep Analyze adds human-readable \
-         captions and suggests smart filenames for every image.",
+         captions and suggests smart filenames for every supported file.",
     ));
     let grid = gtk::Grid::builder()
         .row_spacing(4)
@@ -1170,7 +1390,7 @@ fn build_status_card(
         .build();
     grid.attach(&dim_key("Active model"), 0, 0, 1, 1);
     grid.attach(active, 1, 0, 1, 1);
-    grid.attach(&dim_key("Total images"), 0, 1, 1, 1);
+    grid.attach(&dim_key("Total files"), 0, 1, 1, 1);
     grid.attach(total, 1, 1, 1, 1);
     grid.attach(&dim_key("Not yet analyzed"), 0, 2, 1, 1);
     grid.attach(pending, 1, 2, 1, 1);
@@ -1189,7 +1409,7 @@ fn build_picker_card(picker_box: &gtk::Box, download_card: &gtk::Box) -> gtk::Bo
         "Weights download on first run. A compatible external llama-mtmd-cli must be visible on PATH."
     };
     card.append(&wrap_caption(&format!(
-        "Reads images and writes captions plus smart filenames. {runtime_note}"
+        "Reads supported media and documents, then writes captions, tags, and smart filenames. {runtime_note}"
     )));
     card.append(picker_box);
     card.append(download_card);
@@ -1219,6 +1439,23 @@ fn build_actions_card(
         "Runs serially on the GPU. Safe to leave running — captions need named people to read \
          best (name faces in the People tab first).",
     ));
+    card
+}
+
+fn build_apply_card(status: &gtk::Label, tags: &gtk::Button, people: &gtk::Button) -> gtk::Box {
+    let card = glass_card();
+    card.append(&heading("Apply to your files"));
+    card.append(&wrap_caption(
+        "Write analyzed tags and named people onto the files as native Linux file tags. Existing tags are preserved.",
+    ));
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .build();
+    actions.append(tags);
+    actions.append(people);
+    card.append(&actions);
+    card.append(status);
     card
 }
 
@@ -1442,6 +1679,8 @@ mod recommendation_tests {
             "CREATE TABLE files (
                 id INTEGER PRIMARY KEY,
                 kind TEXT NOT NULL,
+                path_text TEXT NOT NULL DEFAULT '',
+                failed INTEGER NOT NULL DEFAULT 0,
                 vlm_description TEXT,
                 vlm_model TEXT,
                 vlm_full_model TEXT
@@ -1452,17 +1691,44 @@ mod recommendation_tests {
                 last_name TEXT
             );
             INSERT INTO files VALUES
-                (1, 'image', NULL, 'model-a', 'model-a'),
-                (2, 'image', 'legacy', 'model-a', NULL),
-                (3, 'image', 'other', 'model-b', 'model-b'),
-                (4, 'video', 'done', 'model-a', 'model-a');
+                (1, 'image', 'a.jpg', 0, NULL, 'model-a', 'model-a'),
+                (2, 'image', 'b.jpg', 0, 'legacy', 'model-a', NULL),
+                (3, 'image', 'c.jpg', 0, 'other', 'model-b', 'model-b'),
+                (4, 'video', 'd.mp4', 0, 'done', 'model-a', 'model-a');
             INSERT INTO persons VALUES (NULL, 'Ada', NULL);",
         )
         .unwrap();
 
         let counts = status_counts(&conn, "model-a");
-        assert_eq!(counts.total_images, 3);
+        assert_eq!(counts.total_files, 4);
         assert_eq!(counts.pending, 2);
         assert_eq!(counts.named_people, 1);
+    }
+
+    #[test]
+    fn person_tag_name_prefers_structured_fields_and_trims_legacy() {
+        assert_eq!(
+            person_tag_name(&["Dr".into(), "Ada".into(), "Lovelace".into()], " old "),
+            "Dr Ada Lovelace"
+        );
+        assert_eq!(person_tag_name(&[], "  old name  "), "old name");
+        assert_eq!(person_tag_name(&[], "   "), "");
+    }
+
+    #[test]
+    fn group_tag_rows_is_sorted_and_deduplicates_file_ids() {
+        assert_eq!(
+            group_tag_rows(vec![
+                (9, " Ada Lovelace ".into()),
+                (3, "Ada Lovelace".into()),
+                (9, "Ada Lovelace".into()),
+                (3, "".into()),
+                (4, "Beach".into()),
+            ]),
+            vec![
+                ("Ada Lovelace".into(), vec![3, 9]),
+                ("Beach".into(), vec![4]),
+            ]
+        );
     }
 }

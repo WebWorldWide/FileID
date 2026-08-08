@@ -148,6 +148,14 @@ public sealed record RenamePersonCommand(
     string? LastName = null,
     string? Suffix = null) : CommandPayload;
 
+/// <summary>Move a face through the engine writer. A null destination removes
+/// the face from its current person; createNewPerson creates a fresh unnamed
+/// person before assigning it.</summary>
+public sealed record ReassignFaceCommand(
+    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("destinationPersonID")] long? DestinationPersonId = null,
+    bool CreateNewPerson = false) : CommandPayload;
+
 /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select.</summary>
 public sealed record MarkPersonsAsUnknownCommand(
     [property: JsonPropertyName("personIDs")] System.Collections.Generic.IReadOnlyList<long> PersonIds) : CommandPayload;
@@ -226,6 +234,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "mergeClusters" => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
             "embedTextQuery" => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
             "renamePerson" => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
+            "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
             "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
             "markPersonsDifferent" => JsonSerializer.Deserialize<MarkPersonsDifferentCommand>(ref reader, options) ?? throw new JsonException("markPersonsDifferent: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
@@ -290,6 +299,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case MergeClustersCommand c: WriteVariant(writer, "mergeClusters", c, options); break;
             case EmbedTextQueryCommand c: WriteVariant(writer, "embedTextQuery", c, options); break;
             case RenamePersonCommand c: WriteVariant(writer, "renamePerson", c, options); break;
+            case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
             case MarkPersonsAsUnknownCommand c: WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
             case MarkPersonsDifferentCommand c: WriteVariant(writer, "markPersonsDifferent", c, options); break;
             case FindMergeSuggestionsCommand: WriteEmpty(writer, "findMergeSuggestions"); break;

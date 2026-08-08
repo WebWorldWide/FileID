@@ -1068,7 +1068,10 @@ public sealed partial class RestructureView : UserControl
             stats = await Task.Run(
                 () => QueryRestructureQuality(libraryRoot)).ConfigureAwait(true);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Restructure quality query failed: " + ex.Message);
+        }
 
         if (_unloaded
             || !RootsMatch(libraryRoot, AppViewModel.Instance.FolderPath))

@@ -253,6 +253,15 @@
               "suffix": { "type": ["string", "null"] }
             } } } },
 
+        { "type": "object", "required": ["reassignFace"], "additionalProperties": false,
+          "properties": { "reassignFace": { "type": "object", "additionalProperties": false,
+            "required": ["faceID"],
+            "properties": {
+              "faceID": { "type": "integer" },
+              "destinationPersonID": { "type": ["integer", "null"] },
+              "createNewPerson": { "type": "boolean", "default": false }
+            } } } },
+
         { "type": "object", "required": ["markPersonsAsUnknown"], "additionalProperties": false,
           "properties": { "markPersonsAsUnknown": { "type": "object", "additionalProperties": false,
             "required": ["personIDs"],

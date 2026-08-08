@@ -1,5 +1,28 @@
 # NEXT — resume here
 
+## STATUS 2026-08-08 — Linux native build and CLI/TUI gates are green; visual and external gates remain
+
+Linux now has a single-flight, result-aware Deep Analyze tag-apply path with duplicate prevention,
+all structured person-name fields, and timeout/error recovery. Debian WSL is repaired and the
+native x86-64 GTK app plus engine rebuild and privacy scan are green. Linux app tests are 60,
+CLI is 58 unit + 12 smoke, and TUI is 111; strict Clippy is clean for all three. The same CLI/TUI
+tests pass natively on Windows, the Windows engine has 740 passing / 3 ignored with strict Clippy,
+and the Windows x64 app and IPC suites pass 452 and 53 respectively.
+
+The shared engine's `SleepGuard` covers scans, Deep Analyze, face clustering, and model
+prewarm/download work on Windows and Linux. Windows uses same-thread
+`SetThreadExecutionState(ES_SYSTEM_REQUIRED)` release; Linux uses a parent-cleaned
+`systemd-inhibit --what=sleep:idle` lease. Screen dimming remains allowed, while idle/system
+sleep cannot end active work.
+
+The next required gate is native Linux runtime evidence: launch at 1320x860 and capture Library,
+People, Cleanup, Deep Analyze, Restructure, Settings, naming, empty, progress, and error states
+against fixed-size macOS/Windows references. Pixel identity cannot be asserted from source/build
+checks, and the current WSLg RemoteApp capture limitation remains. Also compare the remaining
+People detail flows (face-level reassignment, selected-photo movement, and tag-all-photos) before
+calling parity done. Hosted CI, signing/notarization, and native macOS hardware gates remain
+external acceptance work.
+
 ## STATUS 2026-08-03 — v0.1.4 macOS parity release candidate ready for hosted refresh
 
 The macOS parity/polish implementation is complete and locally green. Preserve the 385-test strict

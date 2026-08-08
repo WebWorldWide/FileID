@@ -126,6 +126,12 @@ pub enum CommandPayload {
     #[serde(rename = "renamePerson")]
     RenamePerson(RenamePersonPayload),
 
+    /// Reassign one face through the engine's single-writer transaction.
+    /// A null destination removes it from a person; create_new_person creates
+    /// a new unnamed person before assigning the face.
+    #[serde(rename = "reassignFace")]
+    ReassignFace(ReassignFacePayload),
+
     /// FEAT-CRIT-1: bulk mark-as-unknown for multi-select People mode.
     /// Sets `persons.is_unknown = 1` and clears name fields for every id.
     #[serde(rename = "markPersonsAsUnknown")]
@@ -569,6 +575,17 @@ pub struct MergeClustersPayload {
     pub source_person_id: i64,
     #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReassignFacePayload {
+    #[serde(rename = "faceID")]
+    pub face_id: i64,
+    #[serde(rename = "destinationPersonID", default)]
+    pub destination_person_id: Option<i64>,
+    #[serde(default)]
+    pub create_new_person: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -198,7 +198,8 @@ public sealed partial class SidebarFolderHeader : UserControl
             try
             {
                 DebugLog.Info("[WIPE] engine-side wipeLibrary");
-                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(TimeSpan.FromSeconds(30));
+                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(
+                    BulkActionTimeout.Maximum);
                 if (wipeResult.Ok)
                 {
                     DebugLog.Info("[WIPE] engine confirmed libraryWiped");

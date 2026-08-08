@@ -99,7 +99,10 @@ impl WhisperRunner {
             use std::os::windows::io::AsRawHandle;
             crate::platform::assign_child_to_engine_job(child.as_raw_handle());
         }
-        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("whisper child stdout pipe was unavailable"))?;
         let reader = std::thread::spawn(move || {
             let mut s = String::new();
             let _ = stdout.read_to_string(&mut s);

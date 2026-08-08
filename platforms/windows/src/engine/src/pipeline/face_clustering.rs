@@ -2374,7 +2374,10 @@ mod tests {
         );
 
         assert_eq!(anchors.len(), 2);
-        assert_eq!(anchors.iter().map(|anchor| anchor.member_count).sum::<u32>(), 5_000);
+        assert_eq!(
+            anchors.iter().map(|anchor| anchor.member_count).sum::<u32>(),
+            BIMODAL_SPLIT_MIN_FACES as u32
+        );
         assert_eq!(
             assignments
                 .iter()

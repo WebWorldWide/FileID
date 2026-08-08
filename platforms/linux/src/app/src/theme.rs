@@ -64,7 +64,7 @@ const CSS: &str = r#"
    Font properties inherit in GTK CSS, so setting them on `window` cascades. */
 window {
     font-family: "Inter", "Inter Display", "Roboto", "Noto Sans", "Cantarell", sans-serif;
-    font-size: 10.5pt;
+    font-size: 13px;
 }
 label, button, entry, headerbar, .nav-row, row, popover, gridview, listview {
     font-family: "Inter", "Inter Display", "Roboto", "Noto Sans", "Cantarell", sans-serif;
@@ -96,8 +96,8 @@ window { background-color: @fileid_base; }
 .glass-card, .padded-card {
     background-color: alpha(#16161B, 0.64);
     border: 1px solid alpha(#FFFFFF, 0.10);
-    border-radius: 14px;
-    padding: 16px 18px;
+    border-radius: 12px;
+    padding: 16px;
     box-shadow: 0 4px 18px alpha(#000000, 0.38);
 }
 
@@ -301,6 +301,18 @@ spinner { color: @fileid_gold; }
 }
 
 .tile-caption { color: alpha(#FFFFFF, 0.55); font-size: 9pt; }
+
+.edit-name-hint {
+    color: @fileid_gold;
+    font-size: 10pt;
+    font-weight: 700;
+    margin-top: 2px;
+}
+
+.people-flow-banner {
+    padding: 10px 12px;
+    border-color: alpha(@fileid_gold, 0.35);
+}
 
 /* Centered ▶ badge over video tile keyframes. */
 .video-play-badge {

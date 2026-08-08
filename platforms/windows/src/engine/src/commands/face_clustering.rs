@@ -12,6 +12,7 @@ use std::time::Instant;
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, FaceClusteringResult, IpcEvent, Wrap,
 };
+use crate::platform::SleepGuard;
 use crate::pipeline::face_clustering::{cluster, ClusterAnchor, ClusterAssignment, FaceRow};
 use rusqlite::OptionalExtension;
 
@@ -532,6 +533,7 @@ pub(crate) async fn handle_run_face_clustering(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     active: Arc<AtomicBool>,
 ) {
+    let _sleep = SleepGuard::acquire();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
 

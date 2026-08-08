@@ -8,6 +8,46 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-08 — Linux native artifact and terminal front-end verification
+
+Hardened Linux Deep Analyze tag application so Apply All is one single-flight job, waits for
+each `applyTags` bulk result, reports partial failures, and re-enables controls after an engine
+exit or 15-second timeout. Named-person extraction includes all structured fields, and tag/file
+grouping is deterministic and set-based to prevent duplicate requests. Added regression coverage
+for structured names and duplicate file IDs.
+
+Native Debian/WSL validation is green: Linux GTK app 60 tests, Linux CLI 58 unit + 12 smoke,
+Linux TUI 111 tests, all with locked dependencies; strict Clippy is clean for the Linux app,
+CLI, and TUI. The Windows CLI/TUI suites also pass (57 + 12 and 111 respectively), while the
+Windows engine passes 740 tests / 3 ignored with strict Clippy, the x64 app suite passes 452, and
+the IPC suite passes 53. `platforms/linux/build/build.sh` rebuilt and staged x86-64 PIE ELF
+`fileid-linux` and `FileIDEngine`; the binary privacy gate is clean.
+
+## 2026-08-07 — Linux parity pass: People flow and native validation gate
+
+The Linux People tab now mirrors the Windows/macOS naming handoff: after faces are grouped it
+surfaces the same continue/skip Deep Analyze action, routes the action through the shared IPC
+payload, and updates the active sidebar row when switching tabs. Person cards use the reference
+180px card geometry and retain the explicit Edit name affordance; the Linux detail sheet exposes
+all five structured name fields plus the unknown-person toggle. Shared glass-card spacing/radius,
+typography, and the fixed 260px sidebar were aligned with the reference tokens.
+
+`cargo fmt --manifest-path platforms/linux/Cargo.toml -- --check`, Linux clippy with warnings as
+errors, `git diff --check`, and the Linux workspace tests are green in the repaired Debian WSL
+instance (58 app tests; shared engine 712 passed / 2 ignored). Windows engine tests are green at
+1,439 passed / 8 ignored / 0 failed, with strict clippy clean.
+
+The shared `SleepGuard` now covers the complete scan lifetime, Deep Analyze, face clustering, and
+model prewarm/download work. Windows holds `ES_SYSTEM_REQUIRED` on a dedicated thread and clears
+it on that same thread; Linux holds a `systemd-inhibit --what=sleep:idle` child with parent-death
+cleanup. The display may dim, but idle/system sleep cannot interrupt active work, and the lease is
+released on success, cancellation, failure, or engine shutdown. A Linux acquire/drop smoke test
+covers systems without logind as well as normal WSL builds.
+
+The Linux GTK runtime and screenshot identity remain unverified: source/build checks are not a
+pixel comparison, and fixed-size native Linux/macOS/Windows captures still need state-by-state
+comparison before claiming screenshot parity.
+
 ## 2026-08-03 — Person detail sheet card tap, display name formatting, and unknown face hiding fixes
 
 Fixed People tab cluster card tap gesture (`OnClusterTapped` in `PeopleView.xaml.cs`) to check both `el.DataContext` and `el.Tag` (`ClusterId`) so opening the **Person details** sheet succeeds reliably even when compiled bindings haven't populated `DataContext` on recycled grid elements. Unified dialog opening into a single thread-safe method. Updated Rust engine `handle_rename_person` (`bulk.rs`) to construct display names from all non-empty name parts (`title`, `first_name`, `middle_name`, `last_name`, `suffix`), ensuring person renaming succeeds regardless of which fields are entered. Added `rename_person_display_name_combines_parts` unit test to `bulk.rs`. Fixed issue where marked unknown faces failed to disappear from grid by setting `PeopleHideUnknown` default to `true` (matching macOS reference), auto-persisting `PeopleHideUnknown = true` on bulk mark as unknown, and adding "I don't know who this is" checkbox support to `PersonDetailSheet`.

@@ -32,7 +32,7 @@
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
+                           Text="Run local analysis across photos, videos, documents, PDFs, and audio metadata to write descriptions and propose smart filenames." />
             </StackPanel>
 
             <!-- Item 4: plain-language explainer distinguishing automatic
@@ -295,7 +295,7 @@
                                 Click="OnAnalyzeAllClicked"
                                 Style="{StaticResource AccentButtonStyle}"
                                 AutomationProperties.Name="Analyze whole library"
-                                AutomationProperties.HelpText="Run the selected vision-language model on every image in the library">
+                                AutomationProperties.HelpText="Run the selected model across every supported file in the library">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE945;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
                                 <TextBlock Text="Whole library" />

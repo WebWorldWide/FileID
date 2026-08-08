@@ -85,6 +85,31 @@ internal static class TagChangeJournal
         return groups.Values.ToList();
     }
 
+    internal static List<(List<long> Ids, List<string> Tags)> BuildScopedReplacementGroups(
+        IReadOnlyList<long> fileIds,
+        IReadOnlyDictionary<long, List<string>> priorTags,
+        string oldTag,
+        string newTag)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(oldTag);
+        ArgumentException.ThrowIfNullOrWhiteSpace(newTag);
+        var replacement = newTag.Trim();
+        var desired = new Dictionary<long, List<string>>();
+        foreach (var fileId in fileIds.Distinct())
+        {
+            var tags = priorTags.TryGetValue(fileId, out var prior)
+                ? prior.Where(tag => !string.Equals(tag, oldTag, StringComparison.OrdinalIgnoreCase))
+                    .ToList()
+                : [];
+            if (!tags.Contains(replacement, StringComparer.OrdinalIgnoreCase))
+            {
+                tags.Add(replacement);
+            }
+            desired[fileId] = tags;
+        }
+        return GroupByTagSet(fileIds, desired);
+    }
+
     internal static void PushUndo(
         string label,
         IReadOnlyList<long> confirmedFileIds,
@@ -100,7 +125,7 @@ internal static class TagChangeJournal
                 (ids, tags) => EngineClient.Instance.WaitForBulkActionResultAsync(
                     "applyTags",
                     () => EngineClient.Instance.ApplyTagsAsync(ids, tags, "replace"),
-                    TimeSpan.FromSeconds(30))).ConfigureAwait(false);
+                    BulkActionTimeout.ForFileCount(ids.Count))).ConfigureAwait(false);
             if (!confirmed)
             {
                 throw new InvalidOperationException(

@@ -42,6 +42,7 @@ public class AppSettingsTests
         Assert.False(s.RestructureTreeMode);
         Assert.Equal("all", s.LibraryKindFilter);
         Assert.True(s.PeopleHideUnknown);
+        Assert.Empty(s.PersonTagHistory);
         Assert.Null(s.GpuExecutionProviderOverride);
         Assert.False(s.WelcomeSheetSeen);
         Assert.False(s.DisableAutoInstallCuda);
@@ -75,6 +76,10 @@ public class AppSettingsTests
             DisableAutoInstallCudnn = true,
             SelectedVlmModelKind = "mistral_small_3_2",
             SelectedVlmModelWasUserChosen = true,
+            PersonTagHistory = new Dictionary<string, string>
+            {
+                ["42"] = "Dr Alex Morgan Jr",
+            },
             SchemaVersion = 1,
         };
 
@@ -97,6 +102,7 @@ public class AppSettingsTests
         Assert.Equal(original.DisableAutoInstallCudnn, decoded.DisableAutoInstallCudnn);
         Assert.Equal(original.SelectedVlmModelKind, decoded.SelectedVlmModelKind);
         Assert.Equal(original.SelectedVlmModelWasUserChosen, decoded.SelectedVlmModelWasUserChosen);
+        Assert.Equal(original.PersonTagHistory, decoded.PersonTagHistory);
         Assert.Equal(original.SchemaVersion, decoded.SchemaVersion);
     }
 
@@ -169,6 +175,7 @@ public class AppSettingsTests
         Assert.Empty(decoded.ExcludedFolders);
         Assert.True(decoded.ConfirmCloseOnPendingChanges);
         Assert.Empty(decoded.DeepAnalyzeExcludedFolders);
+        Assert.Empty(decoded.PersonTagHistory);
     }
 
     [Fact]
@@ -243,5 +250,49 @@ public class AppSettingsTests
             .Invoke(s, null)!;
         s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Other");
         Assert.Single(clone.DeepAnalyzeExcludedFolders);
+    }
+
+    [Fact]
+    public void PersonTagHistory_RecordsAndFindsOnlyTheRequestedPerson()
+    {
+        var s = new AppSettings();
+        s.RecordPersonTag(42, "  Dr Alex Morgan Jr  ");
+
+        Assert.Equal("Dr Alex Morgan Jr", s.LastPersonTag(42));
+        Assert.Null(s.LastPersonTag(43));
+    }
+
+    [Fact]
+    public void SanitizePersonTagHistory_DropsInvalidEntriesAndCanonicalizesKeys()
+    {
+        var raw = new Dictionary<string, string>
+        {
+            ["0042"] = "  Alex Morgan  ",
+            ["0"] = "Nobody",
+            ["-1"] = "Invalid",
+            ["not-a-number"] = "Invalid",
+            ["43"] = "   ",
+        };
+
+        var sanitized = AppSettings.SanitizePersonTagHistory(raw);
+
+        var pair = Assert.Single(sanitized);
+        Assert.Equal("42", pair.Key);
+        Assert.Equal("Alex Morgan", pair.Value);
+    }
+
+    [Fact]
+    public void CloneForWrite_SnapshotsPersonTagHistory()
+    {
+        var s = new AppSettings();
+        s.RecordPersonTag(42, "Alex");
+        var clone = (AppSettings)typeof(AppSettings)
+            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(s, null)!;
+
+        s.RecordPersonTag(42, "Alex Morgan");
+
+        Assert.Equal("Alex", clone.LastPersonTag(42));
+        Assert.Equal("Alex Morgan", s.LastPersonTag(42));
     }
 }

@@ -17,7 +17,7 @@ use super::{
     ExactTrashIdentity, FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
     HardwareInfo, HardwareReprobed, HealthCheckPayload, HealthCheckResult, IpcCommand, IpcEvent,
     JobCategory, LibraryWiped, LogLevel, LogLine, MarkPersonsAsUnknownPayload,
-    MarkPersonsDifferentPayload, MergeClustersPayload,
+    MarkPersonsDifferentPayload, MergeClustersPayload, ReassignFacePayload,
     MergeSuggestion, MergeSuggestions, ModelDownloadProgress, PlanRestructurePayload,
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
@@ -212,6 +212,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::MergeClusters(_) => "mergeClusters",
         CommandPayload::EmbedTextQuery(_) => "embedTextQuery",
         CommandPayload::RenamePerson(_) => "renamePerson",
+        CommandPayload::ReassignFace(_) => "reassignFace",
         CommandPayload::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
         CommandPayload::FindMergeSuggestions(_) => "findMergeSuggestions",
         CommandPayload::MarkPersonsDifferent(_) => "markPersonsDifferent",
@@ -384,6 +385,11 @@ fn command_exemplars() -> Vec<CommandPayload> {
             middle_name: Some("Byron".into()),
             last_name: Some("Lovelace".into()),
             suffix: Some("Jr.".into()),
+        }),
+        CommandPayload::ReassignFace(ReassignFacePayload {
+            face_id: 3,
+            destination_person_id: Some(2),
+            create_new_person: false,
         }),
         CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
             person_ids: vec![1, 2],
