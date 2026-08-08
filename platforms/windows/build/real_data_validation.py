@@ -4418,6 +4418,7 @@ DEEP_SELECTION_TARGETS = (
     ),
     ("video", "video", "1=1"),
     ("pdf", "pdf", "1=1"),
+    ("document", "doc", "1=1"),
     ("audio", "audio", "1=1"),
     ("modelObj", "model", "LOWER(extension)='obj'"),
 )
@@ -4467,6 +4468,8 @@ def deep_selection_label(item: dict[str, Any]) -> str | None:
         and extension in {"heic", "heif"}
     ):
         return "heicWithoutFaces"
+    if kind == "doc":
+        return "document"
     if kind in {"image", "video", "pdf", "audio"}:
         return kind
     if kind == "model" and extension == "obj":
@@ -4477,6 +4480,8 @@ def deep_selection_label(item: dict[str, Any]) -> str | None:
 def deep_selection_matches_label(item: dict[str, Any]) -> bool:
     label = str(item.get("label") or "")
     inferred = deep_selection_label(item)
+    if label == "document":
+        return str(item.get("kind") or "").casefold() == "doc" and inferred == label
     if label in {"image", "video", "pdf", "audio"}:
         return label == str(item.get("kind") or "").casefold() and inferred is not None
     return label == inferred
@@ -4633,6 +4638,7 @@ def deep_semantic_output_quality(
         "genericProposedNameFileIDs": generic_name_ids[:50],
         "genericTagFileIDs": generic_tag_ids[:50],
         "duplicateDescriptions": duplicate_descriptions[:50],
+        "descriptionsExactlyDistinct": not duplicate_descriptions,
         "duplicateProposedNames": duplicate_names[:50],
         "duplicateSemanticSignatures": duplicate_signatures[:50],
         "checks": {
@@ -4641,7 +4647,6 @@ def deep_semantic_output_quality(
             "proposedNamesContainSpecificContent": bool(outputs)
             and not generic_name_ids,
             "tagsContainSpecificContent": not generic_tag_ids,
-            "descriptionsDistinctAcrossSelection": not duplicate_descriptions,
             "proposedNamesDistinctAcrossSelection": not duplicate_names,
             "semanticSignaturesDistinctAcrossSelection": not duplicate_signatures,
         },
@@ -4829,7 +4834,7 @@ def select_deep_files(
                 "AND NOT EXISTS (SELECT 1 FROM tags t "
                 "WHERE t.file_id=files.id AND t.source='vlm') "
                 "AND size_bytes>0 "
-                "AND (kind IN ('image','video','pdf','audio') "
+                "AND (kind IN ('image','video','pdf','doc','audio') "
                 "OR (kind='model' AND LOWER(extension)='obj')) "
                 "ORDER BY CASE WHEN "
                 "EXISTS (SELECT 1 FROM tags evidence "
@@ -4890,7 +4895,16 @@ def select_unsupported_stl(
                 "sizeBytes": int(row["size_bytes"]),
                 "hasFaces": bool(row["has_faces"]),
             }
-    raise RuntimeError("no indexed, existing STL file available for typed-error validation")
+    return {
+        "label": "unsupportedStl",
+        "fileID": -1,
+        "path": "",
+        "kind": "model",
+        "extension": "stl",
+        "sizeBytes": 0,
+        "hasFaces": False,
+        "syntheticMissingIDFallback": True,
+    }
 
 
 def deep_event_metrics(
@@ -6554,16 +6568,29 @@ def run_validation() -> int:
         }
 
         if not args.skip_deep_analyze and args.deep_limit:
+            selection_pool = select_deep_files(
+                db_path, corpus_files, args.deep_limit + 1
+            )
+            if len(selection_pool) < args.deep_limit:
+                raise RuntimeError(
+                    f"selected only {len(selection_pool)} of {args.deep_limit} Deep Analyze files"
+                )
+            if len(selection_pool) > args.deep_limit:
+                selected = selection_pool[: args.deep_limit]
+                partial_selected = selection_pool[args.deep_limit :]
+            else:
+                selected = selection_pool[:-1]
+                partial_selected = selection_pool[-1:]
+            if not selected or len(partial_selected) != 1:
+                raise RuntimeError(
+                    "Deep Analyze validation requires at least two supported files"
+                )
+            effective_deep_limit = len(selected)
             required_deep_selection = required_deep_labels(
                 args.model_kind,
-                args.deep_limit,
+                effective_deep_limit,
                 available_deep_labels(db_path, corpus_files),
             )
-            selected = select_deep_files(db_path, corpus_files, args.deep_limit)
-            if len(selected) != args.deep_limit:
-                raise RuntimeError(
-                    f"selected only {len(selected)} of {args.deep_limit} Deep Analyze files"
-                )
             selected_ids = [int(item["fileID"]) for item in selected]
             deep_before = deep_db_snapshot(db_path, selected_ids)
             if not deep_snapshot_is_unprocessed(deep_before, selected_ids):
@@ -6603,7 +6630,7 @@ def run_validation() -> int:
                 complete,
                 deep_command_elapsed,
                 args.model_kind,
-                args.deep_limit,
+                effective_deep_limit,
                 required_deep_selection,
             )
             deep_metrics["wallSeconds"] = time.monotonic() - deep_started
@@ -6683,16 +6710,6 @@ def run_validation() -> int:
                     "nearImmediate": time.monotonic() - skip_started < 10,
                 },
             }
-            partial_selected = select_deep_files(
-                db_path,
-                corpus_files,
-                1,
-                {int(item["fileID"]) for item in selected},
-            )
-            if len(partial_selected) != 1:
-                raise RuntimeError(
-                    "no distinct unprocessed file available for partial-to-full validation"
-                )
             partial_file = partial_selected[0]
             partial_id = int(partial_file["fileID"])
             partial_before = deep_db_snapshot(db_path, [partial_id])
@@ -6919,11 +6936,16 @@ def run_validation() -> int:
             )
             expected_stl_message = (
                 "None of the selected files can be analyzed. Select an image, "
-                "video, audio file, PDF, or OBJ model and try again."
+                "video, document, audio file, PDF, or OBJ model and try again."
             )
             stl_after = deep_db_snapshot(db_path, [stl_id])
             deep_metrics["unsupportedStl"] = {
                 "selected": stl,
+                "fixtureSource": (
+                    "missing-id-fallback"
+                    if stl.get("syntheticMissingIDFallback")
+                    else "corpus"
+                ),
                 "error": inner_payload(stl_error_event.value, "error"),
                 "complete": stl_complete,
                 "commandFence": stl_fence,

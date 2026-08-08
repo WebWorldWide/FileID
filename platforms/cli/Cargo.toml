@@ -14,7 +14,7 @@
 
 [package]
 name = "fileid-cli"
-version = "0.1.4"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID — local AI file organizer. Cross-platform CLI front-end over the shared Rust engine."

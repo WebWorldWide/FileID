@@ -322,7 +322,7 @@ internal sealed partial class EngineClient
         WaitForBulkActionResultAsync(
             "purgeExcluded",
             () => SendCommandAsync(new PurgeExcludedCommand(excludedPaths), ct),
-            TimeSpan.FromSeconds(30),
+            BulkActionTimeout.Maximum,
             ct);
 
     /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
@@ -1584,6 +1584,9 @@ internal sealed partial class EngineClient
     public Task RenamePersonAsync(long personId, string? title, string? first, string? middle, string? last, string? suffix) =>
         SendCommandAsync(new RenamePersonCommand(personId, title, first, middle, last, suffix));
 
+    public Task ReassignFaceAsync(long faceId, long? destinationPersonId = null, bool createNewPerson = false) =>
+        SendCommandAsync(new ReassignFaceCommand(faceId, destinationPersonId, createNewPerson));
+
     /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select mode.</summary>
     public Task MarkPersonsAsUnknownAsync(System.Collections.Generic.IReadOnlyList<long> personIds) =>
         SendCommandAsync(new MarkPersonsAsUnknownCommand(personIds));
@@ -1670,7 +1673,7 @@ internal sealed partial class EngineClient
                 "restoreFromTrash",
                 () => SendUndoCommandWithChannelRetryAsync(
                     new RestoreFromTrashCommand(batchId)),
-                TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                BulkActionTimeout.Maximum).ConfigureAwait(false);
             if (result.Failed > 0)
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
@@ -1686,7 +1689,7 @@ internal sealed partial class EngineClient
         {
             _ui.TryEnqueue(() => LastError = new EngineError(
                 "restore_no_confirm",
-                "The engine didn't confirm the restore within 30 seconds. The files may or may not have been restored — re-run the scan to check before retrying.",
+                "The engine didn't confirm the restore before its safety timeout. The files may or may not have been restored — re-run the scan to check before retrying.",
                 null));
             throw;
         }

@@ -50,7 +50,10 @@ platforms/apple/dist/
 platforms/windows/src/engine/target/
 platforms/linux/**/target/
 platforms/linux/target/
+platforms/linux/dist/
 **/*.rs.bk
+# Local Linux UI capture evidence (not release assets).
+/.linux-ui-*.png
 Cargo.lock.bak
 # Stray local-build outputs dropped next to the engine source (e.g. rust_out.exe
 # from an ad-hoc `rustc -o`); the canonical build lands under target/.

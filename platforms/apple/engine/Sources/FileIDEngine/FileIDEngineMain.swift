@@ -99,7 +99,7 @@ struct FileIDEngineMain {
         // Engine ready handshake. App waits for this before sending the first
         // command, so it knows the pipe is live and the engine started clean.
         await sink.emit(.ready(EngineInfo(
-            version: "0.1.4",
+            version: "0.1.0",
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
             physicalMemoryGB: Hardware.physicalMemoryGB

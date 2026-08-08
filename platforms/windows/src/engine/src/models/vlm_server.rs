@@ -34,6 +34,10 @@ pub struct VlmServer {
     pub slots: usize,
 }
 
+pub struct PreparedVlmImage {
+    data_uri: String,
+}
+
 /// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
 /// bare elsewhere (parity with `whisper::BIN_EXT` / `vlm::BIN_EXT`).
 #[cfg(windows)]
@@ -254,36 +258,44 @@ impl VlmServer {
         })
     }
 
-    /// Run one multimodal completion: image + text prompt → text. The image is
-    /// read from disk and inlined as a base64 data URI (the format
-    /// `/v1/chat/completions` accepts for `image_url`).
-    pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
+    pub async fn prepare_image(&self, image_path: &Path) -> Result<PreparedVlmImage> {
         let bytes = read_image_bounded(image_path).await?;
         let data_uri = format!(
             "data:{};base64,{}",
             image_mime(&bytes),
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         );
-        let body = serde_json::json!({
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri } }
-                ]
-            }],
-            // The OpenAI-compatible chat endpoint reads `max_tokens`; the native
-            // completion endpoint reads `n_predict`. Send BOTH so the token cap
-            // (80/40/30) is honored regardless of which the server build maps —
-            // without this the server ran to its default cap (long, slow, and a
-            // rename prompt could return a paragraph).
-            "max_tokens": max_tokens,
-            "n_predict": max_tokens,
-            "temperature": 0.0,
-            "stream": false
-        });
-        // reqwest is built without the `json` feature here, so serialize the
-        // body + parse the reply by hand via serde_json.
+        Ok(PreparedVlmImage { data_uri })
+    }
+
+    pub async fn complete_prepared(
+        &self,
+        image: &PreparedVlmImage,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.complete_request(Some(image), prompt, max_tokens).await
+    }
+
+    pub async fn complete_text(&self, prompt: &str, max_tokens: u32) -> Result<String> {
+        self.complete_request(None, prompt, max_tokens).await
+    }
+
+    /// Run one multimodal completion: image + text prompt → text. The image is
+    /// read from disk and inlined as a base64 data URI (the format
+    /// `/v1/chat/completions` accepts for `image_url`).
+    pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
+        let image = self.prepare_image(image_path).await?;
+        self.complete_prepared(&image, prompt, max_tokens).await
+    }
+
+    async fn complete_request(
+        &self,
+        image: Option<&PreparedVlmImage>,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let body = request_body(image, prompt, max_tokens);
         let body_bytes = serde_json::to_vec(&body).context("encode VLM request body")?;
         let url = format!("{}/v1/chat/completions", self.base_url);
         let resp = self
@@ -308,6 +320,41 @@ impl VlmServer {
             .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
         Ok(content.trim().to_string())
     }
+}
+
+fn request_body(
+    image: Option<&PreparedVlmImage>,
+    prompt: &str,
+    max_tokens: u32,
+) -> serde_json::Value {
+        let content = if let Some(image) = image {
+            serde_json::json!([
+                { "type": "text", "text": prompt },
+                { "type": "image_url", "image_url": { "url": image.data_uri } }
+            ])
+        } else {
+            serde_json::json!([{ "type": "text", "text": prompt }])
+        };
+        let body = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": content
+            }],
+            // The OpenAI-compatible chat endpoint reads `max_tokens`; the native
+            // completion endpoint reads `n_predict`. Send BOTH so the token cap
+            // (80/40/30) is honored regardless of which the server build maps —
+            // without this the server ran to its default cap (long, slow, and a
+            // rename prompt could return a paragraph).
+            "max_tokens": max_tokens,
+            "n_predict": max_tokens,
+            // llama.cpp defaults this to true. Multimodal requests have no
+            // reusable prefix across files, and retaining image KV state
+            // eventually consumes the remaining VRAM and collapses throughput.
+            "cache_prompt": false,
+            "temperature": 0.0,
+            "stream": false
+        });
+        body
 }
 
 fn build_loopback_client() -> Result<reqwest::Client> {
@@ -438,6 +485,54 @@ mod tests {
         let bytes = read_image_bounded(&path).await.unwrap();
         let _ = std::fs::remove_file(path);
         assert_eq!(bytes, [0xFF, 0xD8, 0xFF]);
+    }
+
+    #[tokio::test]
+    async fn prepared_image_is_reusable_across_request_bodies() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-vlm-reuse-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, [0x89, b'P', b'N', b'G', 1, 2, 3]).unwrap();
+        let bytes = read_image_bounded(&path).await.unwrap();
+        let prepared = PreparedVlmImage {
+            data_uri: format!(
+                "data:{};base64,{}",
+                image_mime(&bytes),
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            ),
+        };
+        let first = prepared.data_uri.as_ptr();
+        let first_len = prepared.data_uri.len();
+        let first_body = serde_json::json!({
+            "image_url": { "url": prepared.data_uri.as_str() },
+            "prompt": "caption"
+        });
+        let second_body = serde_json::json!({
+            "image_url": { "url": prepared.data_uri.as_str() },
+            "prompt": "tags"
+        });
+        let _ = std::fs::remove_file(path);
+        assert_eq!(prepared.data_uri.as_ptr(), first);
+        assert_eq!(prepared.data_uri.len(), first_len);
+        assert_eq!(first_body["image_url"], second_body["image_url"]);
+        assert_ne!(first_body["prompt"], second_body["prompt"]);
+    }
+
+    #[test]
+    fn request_body_disables_cross_file_prompt_cache_and_caps_generation() {
+        let prepared = PreparedVlmImage {
+            data_uri: "data:image/jpeg;base64,/9j/".to_string(),
+        };
+        let body = request_body(Some(&prepared), "caption", 30);
+        assert_eq!(body["cache_prompt"], false);
+        assert_eq!(body["max_tokens"], 30);
+        assert_eq!(body["n_predict"], 30);
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            prepared.data_uri
+        );
     }
 
     #[test]

@@ -635,7 +635,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
         IReadOnlyList<FileID.IpcSchema.ExactTrashIdentity>? identities = null;
         var preflightRejected = 0;
-        var timeout = TimeSpan.FromSeconds(30);
+        var timeout = Services.BulkActionTimeout.ForFileCount(selectedCount);
         if (!similar)
         {
             var proof = await BuildExactProofAsync(requests);

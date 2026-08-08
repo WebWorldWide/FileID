@@ -6,6 +6,22 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-07
+
+### Added
+
+- **Fresh cross-platform functional baseline.** Windows, macOS, and Linux ship the same six product areas with native UI, the shared IPC contract, local-only processing, and clearly labeled unsigned prerelease artifacts.
+
+### Changed
+
+- **Deep Analyze is faster and more reliable on Windows.** Visual analysis combines caption, tags, and filename generation in one grounded request, disables multimodal prompt-cache retention, reuses document text, and falls back safely for corrupt or unsupported previews.
+- **People editing is complete on Windows and Linux.** Naming, moving, splitting, and removing faces reconcile counts and representatives without losing named people or face-level identity exclusions.
+
+### Fixed
+
+- **Long-running work stays active while the display dims.** Scan, clustering, model installation, and Deep Analyze hold the native platform sleep inhibitor for their full operation lifetime.
+- **Face and media failures are bounded per file.** Corrupt image, video, document, and audio inputs cannot terminate the catalog operation or damage SQLite state.
+
 ## [0.1.4] - 2026-08-03
 
 ### Fixed
@@ -336,7 +352,8 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 
 Versions V11–V15.2.1 predate this CHANGELOG. Their release notes live in commit messages and `shared/docs/STATE.md` (top-of-file entries, latest-first). Anyone wanting the history can `git log --oneline` or read STATE.md from the bottom up. Future releases (V15.3+) populate this file at tag time.
 
-[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/WebWorldWide/FileID/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/WebWorldWide/FileID/releases/tag/v0.1.0
 [0.1.4]: https://github.com/WebWorldWide/FileID/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/WebWorldWide/FileID/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/WebWorldWide/FileID/compare/v0.1.1...v0.1.2

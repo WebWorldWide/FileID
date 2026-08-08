@@ -32,10 +32,21 @@ public sealed class UiInteractionSafetyContractTests
     public void PeopleCardsExposeKeyboardDetailAndContextPaths()
     {
         var xaml = ReadSource("Views", "People", "PeopleView.xaml");
+        var detailXaml = ReadSource("Views", "People", "PersonDetailSheet.xaml");
         var source = ReadSource("Views", "People", "PeopleView.xaml.cs");
 
         Assert.Contains("IsTabStop=\"True\"", xaml, StringComparison.Ordinal);
         Assert.Contains("KeyDown=\"OnClusterKeyDown\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"OnClusterEditNameClicked\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("AutomationProperties.Name=\"Edit person name\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"NameFieldsPanel\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"TitleBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"FirstBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"MiddleBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"LastBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"SuffixBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"IsUnknownCheckBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("OnClusterEditNameClicked", source, StringComparison.Ordinal);
         Assert.Contains("await OpenDetailSheetAsync(cluster)", source, StringComparison.Ordinal);
     }
 

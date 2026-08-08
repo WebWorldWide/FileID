@@ -126,7 +126,7 @@ macOS is the canonical visual + behavioral reference; the Windows and Linux apps
 
 `fileid` and `fileid-tui` share the Rust engine crate and the **same library format** as the desktop apps. Read/query and model-free paths run in-process; full-ML scans spawn `FileIDEngine` over the canonical IPC.
 
-Download the matching `FileID-tools-0.1.4-*` archive from the [v0.1.4 prerelease](https://github.com/WebWorldWide/FileID/releases/tag/v0.1.4), or build from source. This command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin`:
+Download the matching `FileID-tools-0.1.0-*` archive from the [v0.1.0 prerelease](https://github.com/WebWorldWide/FileID/releases/tag/v0.1.0), or build from source. This command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin`:
 
 ```bash
 bash scripts/build-tools.sh
@@ -174,9 +174,9 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 
 | Platform | Format | Notes |
 | :-- | :-- | :-- |
-| **Windows app** | `FileID-0.1.4-UNSIGNED-Setup.exe` · x64/ARM64 `.msi` | The Burn setup bundle chooses the native MSI; all are unsigned prerelease builds. |
-| **macOS app** | `FileID-0.1.4-UNSIGNED-macOS.dmg` | Apple Silicon app bundle in an unsigned prerelease disk image. |
-| **CLI + TUI** | `FileID-tools-0.1.4-*` | x64/ARM64 archives for Windows, macOS, and Linux; Windows archives are explicitly marked unsigned. |
+| **Windows app** | `FileID-0.1.0-UNSIGNED-Setup.exe` · x64/ARM64 `.msi` | The Burn setup bundle chooses the native MSI; all are unsigned prerelease builds. |
+| **macOS app** | `FileID-0.1.0-UNSIGNED-macOS.dmg` | Apple Silicon app bundle in an unsigned prerelease disk image. |
+| **CLI + TUI** | `FileID-tools-0.1.0-*` | x64/ARM64 archives for Windows, macOS, and Linux; Windows archives are explicitly marked unsigned. |
 | **Linux app** | Flatpak · AppImage · Nix flake · AUR `PKGBUILD` recipes | Build from source for now; clean-sandbox and distro lifecycle validation remain release gates in `SHIP.md`. |
 
 ---

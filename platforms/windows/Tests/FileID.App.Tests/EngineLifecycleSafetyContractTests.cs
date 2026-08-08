@@ -629,7 +629,7 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("e.Error.Kind == \"gpu_device_removed\"", client, StringComparison.Ordinal);
         Assert.Contains("_gpuDeviceRemovedGeneration != generation", client, StringComparison.Ordinal);
         Assert.Contains("if (LastError?.Kind == \"gpu_device_removed\") LastError = null;", client, StringComparison.Ordinal);
-        Assert.Contains("pc.Phase == ScanPhase.Failed && !GpuDeviceRemoved", client, StringComparison.Ordinal);
+        Assert.DoesNotContain("pc.Phase == ScanPhase.Failed && !GpuDeviceRemoved", client, StringComparison.Ordinal);
         Assert.Contains("if (GpuDeviceRemoved)", commands, StringComparison.Ordinal);
         Assert.Contains("!EngineClient.Instance.GpuDeviceRemoved", sidebar, StringComparison.Ordinal);
         Assert.Contains("Use Restart Engine here in the sidebar", sidebar, StringComparison.Ordinal);

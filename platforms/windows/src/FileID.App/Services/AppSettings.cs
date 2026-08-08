@@ -62,6 +62,11 @@ internal sealed class AppSettings
     /// <summary>Hide marked-as-unknown clusters in People (matches macOS PeopleView toggle).</summary>
     public bool PeopleHideUnknown { get; set; } = true;
 
+    /// <summary>The last person-name tag successfully written for each person id.
+    /// This lets a later rename replace only FileID's prior person tag while
+    /// preserving every unrelated user tag.</summary>
+    public Dictionary<string, string> PersonTagHistory { get; set; } = new();
+
     /// <summary>
     /// Manual GPU execution provider override. Null = auto-detect (engine
     /// uses RuntimeProbe). Values: "directml", "cuda", "openvino", "qnn",
@@ -200,6 +205,8 @@ internal sealed class AppSettings
     /// run drag a giant exclusion list through IPC. Matches the schema's
     /// deepAnalyzeAll.excludedFolders maxItems.</summary>
     private const int MaxExcludedFolders = 256;
+    private const int MaxPersonTagHistoryEntries = 10_000;
+    private const int MaxPersonTagLength = 256;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -263,6 +270,56 @@ internal sealed class AppSettings
         }
         s.ExcludedFolders = SanitizeExcludedFolders(s.ExcludedFolders);
         s.DeepAnalyzeExcludedFolders = SanitizeExcludedFolders(s.DeepAnalyzeExcludedFolders);
+        s.PersonTagHistory = SanitizePersonTagHistory(s.PersonTagHistory);
+    }
+
+    internal string? LastPersonTag(long personId)
+    {
+        if (personId <= 0) return null;
+        return PersonTagHistory.TryGetValue(
+            personId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            out var tag)
+            ? tag
+            : null;
+    }
+
+    internal void RecordPersonTag(long personId, string tag)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(personId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(tag);
+        var trimmed = tag.Trim();
+        if (trimmed.Length > MaxPersonTagLength)
+        {
+            throw new ArgumentException(
+                $"Person tags cannot exceed {MaxPersonTagLength} characters.",
+                nameof(tag));
+        }
+        PersonTagHistory[
+            personId.ToString(System.Globalization.CultureInfo.InvariantCulture)] = trimmed;
+    }
+
+    internal static Dictionary<string, string> SanitizePersonTagHistory(
+        IReadOnlyDictionary<string, string>? raw)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var pair in raw ?? new Dictionary<string, string>())
+        {
+            if (result.Count >= MaxPersonTagHistoryEntries) break;
+            if (!long.TryParse(
+                    pair.Key,
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var personId)
+                || personId <= 0
+                || string.IsNullOrWhiteSpace(pair.Value))
+            {
+                continue;
+            }
+            var tag = pair.Value.Trim();
+            if (tag.Length > MaxPersonTagLength) continue;
+            result[personId.ToString(System.Globalization.CultureInfo.InvariantCulture)] = tag;
+        }
+        return result;
     }
 
     /// <summary>Drop null/whitespace/relative/invalid entries, trim trailing
@@ -310,6 +367,7 @@ internal sealed class AppSettings
     private static readonly SemaphoreSlim s_writeGate = new(1, 1);
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
     private static CancellationTokenSource? s_pendingSaveCts;
+    private static long s_saveGeneration;
 
     public void Save()
     {
@@ -319,13 +377,14 @@ internal sealed class AppSettings
         var newCts = new CancellationTokenSource();
         var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
         try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
+        var generation = Interlocked.Increment(ref s_saveGeneration);
         var snapshot = CloneForWrite();
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(SaveDebounce, newCts.Token).ConfigureAwait(false);
-                await WriteAsync(snapshot).ConfigureAwait(false);
+                await WriteAsync(snapshot, generation).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { /* superseded */ }
             catch (Exception ex)
@@ -339,17 +398,25 @@ internal sealed class AppSettings
     /// pending debounced save actually lands on disk before exit.</summary>
     public void SaveImmediately()
     {
+        _ = SaveImmediatelyAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task<bool> SaveImmediatelyAsync()
+    {
         try
         {
             // Cancel any debounced save — the synchronous write supersedes.
             var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
             try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
+            var generation = Interlocked.Increment(ref s_saveGeneration);
             var snapshot = CloneForWrite();
-            WriteAsync(snapshot).GetAwaiter().GetResult();
+            await WriteAsync(snapshot, generation).ConfigureAwait(false);
+            return true;
         }
         catch (Exception ex)
         {
             DebugLog.Warn("AppSettings.SaveImmediately failed: " + ex.Message);
+            return false;
         }
     }
 
@@ -363,14 +430,16 @@ internal sealed class AppSettings
         var clone = (AppSettings)MemberwiseClone();
         clone.ExcludedFolders = new List<string>(ExcludedFolders);
         clone.DeepAnalyzeExcludedFolders = new List<string>(DeepAnalyzeExcludedFolders);
+        clone.PersonTagHistory = new Dictionary<string, string>(PersonTagHistory, StringComparer.Ordinal);
         return clone;
     }
 
-    private static async Task WriteAsync(AppSettings snapshot)
+    private static async Task WriteAsync(AppSettings snapshot, long generation)
     {
         await s_writeGate.WaitAsync().ConfigureAwait(false);
         try
         {
+            if (generation != Interlocked.Read(ref s_saveGeneration)) return;
             AppPaths.EnsureDirectories();
             var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, s_jsonOptions);
             var tmp = AppPaths.SettingsPath + ".tmp";

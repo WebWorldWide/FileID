@@ -694,7 +694,7 @@ public sealed partial class MainWindow : Window
             }
         }
 
-        try { AppViewModel.Instance.Settings.SaveImmediately(); } catch { /* swallow */ }
+        await AppViewModel.Instance.Settings.SaveImmediatelyAsync();
         if (!closeStop.TryCommit())
         {
             await AbortCloseAfterEngineStopAsync(
@@ -865,7 +865,9 @@ public sealed partial class MainWindow : Window
         // AppWindow.Closing (e.g. WM_ENDSESSION) — best-effort only.
         if (!_closeFinalized)
         {
-            try { _ = EngineClient.Instance.ShutdownAsync(); } catch { }
+            _ = DebugLog.SafeRunAsync(
+                "MainWindow.OnClosed.Shutdown",
+                EngineClient.Instance.ShutdownAsync);
         }
 
         // flush the debounced AppSettings.Save so pending edits

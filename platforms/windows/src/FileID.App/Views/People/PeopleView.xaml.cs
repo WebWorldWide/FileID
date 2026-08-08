@@ -52,6 +52,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
     private bool _selectMaintenancePending;
     private bool _continueBannerRefreshPending;
+    private int _hiddenUnknownsRefreshGeneration;
+    private int _continueBannerRefreshGeneration;
 
     private bool _unloaded;
     public PeopleView()
@@ -110,9 +112,16 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // the user can flip the visibility without diving into Settings.
     // Matches macOS PeopleView's bottom-strip behavior.
 
-    private async void UpdateHiddenUnknownsFooter()
+    private void UpdateHiddenUnknownsFooter()
+        => _ = DebugLog.SafeRunAsync(
+            nameof(UpdateHiddenUnknownsFooter),
+            UpdateHiddenUnknownsFooterAsync);
+
+    private async Task UpdateHiddenUnknownsFooterAsync()
     {
         if (_unloaded) return;
+        var generation = System.Threading.Interlocked.Increment(
+            ref _hiddenUnknownsRefreshGeneration);
         int hiddenCount = 0;
         try
         {
@@ -135,12 +144,25 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     var v = cmd.ExecuteScalar();
                     return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
                 }
-                catch { return 0; }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("UpdateHiddenUnknownsFooter query failed: " + ex.Message);
+                    return 0;
+                }
             }).ConfigureAwait(true);
         }
-        catch { hiddenCount = 0; }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("UpdateHiddenUnknownsFooter worker failed: " + ex.Message);
+            hiddenCount = 0;
+        }
 
-        if (_unloaded) return;
+        if (_unloaded
+            || generation != System.Threading.Volatile.Read(
+                ref _hiddenUnknownsRefreshGeneration))
+        {
+            return;
+        }
         bool hideUnknown = false;
         try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
         // Defensive: view may have unloaded during the DB-read await.
@@ -171,9 +193,16 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // its captions + smart filenames. Mirrors macOS PeopleView's
     // continueToDeepAnalyzeRow.
 
-    private async void RefreshContinueToDeepAnalyzeBanner()
+    private void RefreshContinueToDeepAnalyzeBanner()
+        => _ = DebugLog.SafeRunAsync(
+            nameof(RefreshContinueToDeepAnalyzeBanner),
+            RefreshContinueToDeepAnalyzeBannerAsync);
+
+    private async Task RefreshContinueToDeepAnalyzeBannerAsync()
     {
         if (_unloaded) return;
+        var generation = System.Threading.Interlocked.Increment(
+            ref _continueBannerRefreshGeneration);
         int named = 0;
         try
         {
@@ -202,12 +231,25 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     var v = cmd.ExecuteScalar();
                     return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
                 }
-                catch { return 0; }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("RefreshContinueToDeepAnalyzeBanner query failed: " + ex.Message);
+                    return 0;
+                }
             }).ConfigureAwait(true);
         }
-        catch { named = 0; }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("RefreshContinueToDeepAnalyzeBanner worker failed: " + ex.Message);
+            named = 0;
+        }
 
-        if (_unloaded) return;
+        if (_unloaded
+            || generation != System.Threading.Volatile.Read(
+                ref _continueBannerRefreshGeneration))
+        {
+            return;
+        }
         try
         {
             ContinueToDeepAnalyzeBanner.Visibility =
@@ -633,13 +675,20 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
     {
+        if (IsEditNameButtonSource(e.OriginalSource)) return;
         e.Handled = true;
         await HandleClusterActivationAsync(sender);
     }
 
     private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
+        if (IsEditNameButtonSource(e.OriginalSource)) return;
         e.Handled = true;
+        await HandleClusterActivationAsync(sender);
+    }
+
+    private async void OnClusterEditNameClicked(object sender, RoutedEventArgs e)
+    {
         await HandleClusterActivationAsync(sender);
     }
 
@@ -653,6 +702,17 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         try { await OpenDetailSheetAsync(pc); }
         finally { _detailOpen = false; }
     });
+
+    private static bool IsEditNameButtonSource(object? source)
+    {
+        if (source is not DependencyObject current) return false;
+        while (current is not null)
+        {
+            if (current is Button button && button.Tag is int or long or string) return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return false;
+    }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
         => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>
