@@ -30,32 +30,22 @@ struct SettingsTab: View {
                 GlassCard(fillsWidth: true) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Scan performance").font(.headline)
-                        Toggle(isOn: $detailedScanTags) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Detailed RAM++ tags during scans")
-                                    .font(.callout)
-                                Text("Off keeps scans fast with Apple's built-in on-device classifier. Turn on for the richer 4,585-label RAM++ model; it uses substantially more memory and can make large photo scans much slower. Takes effect after restarting the engine.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .toggleStyle(.switch)
+                        SettingToggleRow(
+                            "Detailed RAM++ tags during scans",
+                            subtitle: "Off keeps scans fast with Apple's built-in on-device classifier. Turn on for the richer 4,585-label RAM++ model; it uses substantially more memory and can make large photo scans much slower. Takes effect after restarting the engine.",
+                            isOn: $detailedScanTags
+                        )
                     }
                 }
 
                 GlassCard(fillsWidth: true) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Cleanup").font(.headline)
-                        Toggle(isOn: $cleanupAutoTag) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Tag kept files after Cleanup")
-                                    .font(.callout)
-                                Text("When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .toggleStyle(.switch)
+                        SettingToggleRow(
+                            "Tag kept files after Cleanup",
+                            subtitle: "When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.",
+                            isOn: $cleanupAutoTag
+                        )
                     }
                 }
 

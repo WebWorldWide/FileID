@@ -27,7 +27,7 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
   previews navigate lightweight file IDs, and the disk-backed Restructure planner performs one
   scratch insert per file with post-stream SQL aggregation.
 - **Settings cards use one consistent full width.** Short preference cards and detailed model cards
-  now align to the same edges.
+  now align to the same edges, and native gold switches sit consistently on the trailing edge.
 
 ### Fixed
 

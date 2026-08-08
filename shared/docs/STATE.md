@@ -11,7 +11,8 @@
 ## 2026-08-08 — macOS large-library performance pass and full terminal verification
 
 Final v0.1.0 release polish makes every Settings card span the same content width while preserving
-intrinsic card sizing elsewhere in the app. The rebuilt no-wipe bundle visually confirms the aligned
+intrinsic card sizing elsewhere in the app. Native switches now use the gold accent and align to the
+trailing card edge. The rebuilt no-wipe bundle visually confirms the aligned
 cards, the RAM++ opt-in in its default-off state, per-LLM Remove controls, and the full-width Storage
 & uninstall card. That card can remove every AI model while preserving the library, factory-reset
 all FileID state, or move the app to Trash; confirmations state that original files are untouched.
