@@ -4,7 +4,10 @@
 
 The live 97,256-row macOS library is healthy and the production bundle has passed a read-only
 six-tab smoke test against Adlon. Settings cards are uniformly full-width, and the macOS bundle and
-engine release identity are 0.1.0. Preserve the new performance policy: ordinary app scans use
+engine release identity are 0.1.0. The Storage & uninstall card removes individual LLMs, all AI
+models, all FileID state, or the app itself without deleting original files; keep bulk removal scoped
+to FileID's known model directories so unrelated Hugging Face downloads survive. Preserve the new
+performance policy: ordinary app scans use
 Apple's fast native Vision tags; the installed RAM++ model remains available through the explicit
 **Detailed RAM++ tags during scans** Settings toggle. A fixed 15-image Adlon sample improved from
 14.17 s warm and approximately 7.3 GB engine RSS to 0.54 s and approximately 0.7 GB, a 26.3× warm
@@ -30,12 +33,22 @@ honored only for sole-person photos, source-path dates preferred over copy times
 image text kept photographic. The final live plan rendered in about six seconds with 27,951 moves;
 1,608 were Auto and 26,343 stayed review-only. No mutation was issued.
 
-Local verification is green across 396 strict Swift tests, the release engine, the shared Rust engine,
+Local verification is green across 398 strict Swift tests, the release engine, the shared Rust engine,
 79 CLI tests, and 111 TUI tests; CLI/TUI Clippy gates are clean. Remaining release evidence is external: Developer ID
 signing/notarization, clean-machine lifecycle, hosted WinUI/.NET and native Linux packaging, and
 the Windows ARM64/AMD/Intel/QNN hardware matrices. Keep Adlon read-only unless the owner explicitly
 authorizes a mutation against a disposable copy. Do not run `platforms/apple/scripts/iterate.sh`
 against the live default database because the harness deliberately wipes it before scanning.
+
+### Windows agent handoff — uninstall parity required
+
+Implement the same Settings contract on the active Windows branch: individual removal for every
+downloaded model/LLM, Remove All AI Models without touching the library, Factory Reset for all
+FileID-owned state, and an app-uninstall action that opens or invokes the registered MSI/Burn
+uninstaller. Every destructive action needs a confirmation that says original files are untouched;
+active downloads and engine inference must stop before weights are deleted; bulk removal must be
+limited to FileID-owned model paths. Add tests for deletion scope and installer invocation, then run
+the Windows engine, .NET, packaging, and clean-uninstall gates before merging.
 
 ## STATUS 2026-08-03 — v0.1.4 macOS parity release candidate ready for hosted refresh
 

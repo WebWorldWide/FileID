@@ -80,6 +80,16 @@ struct RestructureCascadeTests {
             f(2, "image", source: "/Library/2020/2013-02-14_game.jpg")
         ], libraryRoot: root)[0]
         #expect(filenameDate.newPath.contains("/Photos/2013/February/"))
+
+        let incidentalYear = Restructure.ruleClassify([
+            f(3, "image", source: "/Library/FileIDLargePlanner-A120-2026-FFFF/copied.jpg")
+        ], libraryRoot: root)[0]
+        #expect(!incidentalYear.newPath.contains("/Photos/2026/"))
+
+        let explicitMonth = Restructure.ruleClassify([
+            f(4, "image", source: "/Library/2021-07/copied.jpg")
+        ], libraryRoot: root)[0]
+        #expect(explicitMonth.newPath.contains("/Photos/2021/July/"))
     }
 
     @Test("Placeholder GPS never overrides content routing")
