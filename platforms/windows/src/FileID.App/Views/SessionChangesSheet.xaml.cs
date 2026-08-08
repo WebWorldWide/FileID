@@ -153,8 +153,16 @@ public sealed partial class SessionChangesSheet : UserControl
                     var ok = isRetry
                         ? await ChangeLog.Instance.RetryAsync(entry)
                         : await ChangeLog.Instance.UndoAsync(entry);
-                    // Rebuild fires via ChangeLog.Changed; on failure the row
-                    // re-renders as UndoFailed with the reason — no silent drop.
+                    // ContentDialog reparenting can miss the coarse Changed
+                    // subscription, so refresh the sheet that initiated the action.
+                    if (DispatcherQueue.HasThreadAccess)
+                    {
+                        Rebuild();
+                    }
+                    else
+                    {
+                        DispatcherQueue.TryEnqueue(Rebuild);
+                    }
                     if (!ok) DebugLog.Info($"[CHANGES] undo declined/failed for '{entry.Label}'");
                 });
             Grid.SetColumn(button, 2);
