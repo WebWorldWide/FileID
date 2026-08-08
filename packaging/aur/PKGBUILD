@@ -7,7 +7,7 @@
 # Generate .SRCINFO before publishing:  makepkg --printsrcinfo > .SRCINFO
 
 pkgname=fileid
-pkgver=0.1.3
+pkgver=0.1.0
 pkgrel=1
 pkgdesc="On-device AI file organizer — tag, dedupe, restructure, rename files locally (GTK4)"
 arch=('x86_64' 'aarch64')
