@@ -67,6 +67,7 @@ struct PersonRow {
     is_unknown: bool,
     file_count: i64,
     face_count: i64,
+    rep_face_id: Option<i64>,
     rep_path: Option<String>,
     rep_bbox: Option<String>,
     rep_size_bytes: i64,
@@ -1121,19 +1122,23 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
         }
     });
 
-    match p.rep_path.clone() {
-        Some(path) => load_card_thumb(
-            ui,
-            &pic,
-            PersonThumbKey {
-                path,
-                bbox: p.rep_bbox.clone(),
-                size_bytes: p.rep_size_bytes,
-                modified_bits: p.rep_modified.map(f64::to_bits),
-                file_ref: p.rep_file_ref,
-                content_hash: p.rep_content_hash.clone(),
-            },
-        ),
+    match p.rep_path.as_deref() {
+        Some(source_path) => {
+            let (path, bbox) =
+                face_thumbnail_source(p.rep_face_id, source_path, p.rep_bbox.as_deref());
+            load_card_thumb(
+                ui,
+                &pic,
+                PersonThumbKey {
+                    path,
+                    bbox,
+                    size_bytes: p.rep_size_bytes,
+                    modified_bits: p.rep_modified.map(f64::to_bits),
+                    file_ref: p.rep_file_ref,
+                    content_hash: p.rep_content_hash.clone(),
+                },
+            )
+        }
         None => pic.set_paintable(person_icon().as_ref()),
     }
 
@@ -1656,13 +1661,12 @@ fn build_photo_tile(ui: &Rc<Ui>, face: &PersonFace, current_person_id: i64) -> g
         .build();
     vbox.append(&move_button);
 
-    let rx = ui
-        .engine
-        .borrow()
-        .request_thumbnail_with(face.path.clone(), {
-            let bbox = face.bbox.clone();
-            move |bytes| cropped_texture(bytes, bbox.as_deref(), PHOTO_THUMB_PX)
-        });
+    let (thumbnail_path, thumbnail_bbox) =
+        face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
+    let rx = ui.engine.borrow().request_thumbnail_with(thumbnail_path, {
+        let bbox = thumbnail_bbox;
+        move |bytes| cropped_texture(bytes, bbox.as_deref(), PHOTO_THUMB_PX)
+    });
     let pic_weak = pic.downgrade();
     let tile_weak = vbox.downgrade();
     let ui_for_move = ui.clone();
@@ -2193,7 +2197,7 @@ const PERSON_SNAPSHOT_SQL: &str = "\
            COALESCE(p.is_unknown, 0), \
            (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
            (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
-           f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
+           rf.id, f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
     FROM persons p \
     LEFT JOIN face_prints rf ON rf.id = COALESCE( \
         (SELECT fp1.id FROM face_prints fp1 \
@@ -2247,12 +2251,13 @@ fn map_person(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
         is_unknown: row.get::<_, i64>(7)? != 0,
         file_count: row.get(8)?,
         face_count: row.get(9)?,
-        rep_path: row.get(10)?,
-        rep_bbox: row.get(11)?,
-        rep_size_bytes: row.get(12)?,
-        rep_modified: row.get(13)?,
-        rep_file_ref: row.get(14)?,
-        rep_content_hash: row.get(15)?,
+        rep_face_id: row.get(10)?,
+        rep_path: row.get(11)?,
+        rep_bbox: row.get(12)?,
+        rep_size_bytes: row.get(13)?,
+        rep_modified: row.get(14)?,
+        rep_file_ref: row.get(15)?,
+        rep_content_hash: row.get(16)?,
     })
 }
 
@@ -2290,6 +2295,31 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
 /// full-res is required because the bbox is in the original image's pixel space
 /// and the DB stores no dimensions to normalize against. Any failure falls back
 /// to the uncropped frame, then to `None` (icon placeholder).
+fn face_thumbnail_source(
+    face_id: Option<i64>,
+    source_path: &str,
+    bbox: Option<&str>,
+) -> (String, Option<String>) {
+    let faces_dir = fileid_engine::paths::faces_dir().ok();
+    face_thumbnail_source_in(faces_dir.as_deref(), face_id, source_path, bbox)
+}
+
+fn face_thumbnail_source_in(
+    faces_dir: Option<&std::path::Path>,
+    face_id: Option<i64>,
+    source_path: &str,
+    bbox: Option<&str>,
+) -> (String, Option<String>) {
+    let crop = face_id
+        .filter(|id| *id > 0)
+        .and_then(|id| faces_dir.map(|dir| dir.join(format!("{id}.jpg"))))
+        .filter(|path| path.is_file());
+    match crop {
+        Some(path) => (path.to_string_lossy().into_owned(), None),
+        None => (source_path.to_string(), bbox.map(str::to_string)),
+    }
+}
+
 fn cropped_texture(bytes: Vec<u8>, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
     let gbytes = glib::Bytes::from_owned(bytes);
     let stream = gio::MemoryInputStream::from_bytes(&gbytes);
@@ -2389,8 +2419,8 @@ fn sim_markup(s: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_rename_terminal, BoundedLru, FaceClusteringLifecycle, PersonActionGate,
-        PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
+        classify_rename_terminal, face_thumbnail_source_in, BoundedLru, FaceClusteringLifecycle,
+        PersonActionGate, PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
 
@@ -2402,6 +2432,47 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
         conn.prepare(super::PERSON_SNAPSHOT_SQL).unwrap();
+    }
+
+    #[test]
+    fn saved_face_crop_replaces_full_source_decode_and_bbox_crop() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-face-thumb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let crop = dir.join("42.jpg");
+        std::fs::write(&crop, b"crop").unwrap();
+
+        let (path, bbox) = face_thumbnail_source_in(
+            Some(&dir),
+            Some(42),
+            "/photos/source.jpg",
+            Some(r#"{"x":1}"#),
+        );
+
+        assert_eq!(path, crop.to_string_lossy());
+        assert_eq!(bbox, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_face_crop_falls_back_to_source_and_bbox() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-face-thumb-missing-{}",
+            std::process::id()
+        ));
+        let bbox_json = r#"{"x":1}"#;
+
+        let (path, bbox) =
+            face_thumbnail_source_in(Some(&dir), Some(42), "/photos/source.jpg", Some(bbox_json));
+
+        assert_eq!(path, "/photos/source.jpg");
+        assert_eq!(bbox.as_deref(), Some(bbox_json));
     }
 
     #[test]
