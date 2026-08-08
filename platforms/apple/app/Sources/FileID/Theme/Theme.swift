@@ -65,8 +65,8 @@ struct GlassCard<Content: View>: View {
 
     var body: some View {
         content
-            .padding(padding)
             .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
+            .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.m)
                     .fill(.ultraThinMaterial)
@@ -111,11 +111,11 @@ struct SettingToggleRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.caption.bold())
+                Text(title).font(.callout)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

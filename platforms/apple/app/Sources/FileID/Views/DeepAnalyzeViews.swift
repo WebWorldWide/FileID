@@ -674,9 +674,10 @@ struct DeepAnalyzeView: View {
                 if !hasNamedAnyone, !engine.deepAnalyzeInFlight {
                     namingRequiredBanner
                 }
-                Toggle("Skip files already analyzed by \(settings.activeKind.displayName)",
-                       isOn: $skipExisting)
-                    .font(.callout)
+                SettingToggleRow(
+                    "Skip files already analyzed by \(settings.activeKind.displayName)",
+                    isOn: $skipExisting
+                )
                 HStack(spacing: 10) {
                     Button {
                         guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
