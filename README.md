@@ -143,17 +143,44 @@ fileid --db ~/fileid-test.sqlite dedupe --similar
 fileid --db ~/fileid-test.sqlite restructure --plan
 ```
 
+### A normal CLI session
+
+Use one database path for a project or drive. Start with a read-only scan, then
+query the results:
+
+```bash
+DB=~/fileid-library.sqlite
+fileid --db "$DB" scan ~/Pictures
+fileid --db "$DB" search "birthday beach"
+fileid --db "$DB" people
+fileid --db "$DB" dedupe
+fileid --db "$DB" restructure --plan
+```
+
+Add `scan --models` when you want OCR, faces, embeddings, and local tags. Install
+the two baseline model slots first:
+
+```bash
+fileid --db "$DB" models download mobileclip_s2 arcface
+fileid --db "$DB" scan --models ~/Pictures
+```
+
+The CLI does not change files unless you opt in. Use `dedupe --apply` or
+`restructure --apply` only after reviewing the plan; similar-file deletion also
+requires `--yes`. Add `--json` for scripts and `--quiet` for cron jobs.
+
 > **Full ML scanning** (tags + faces + CLIP) via `scan --models` uses the Rust engine on all three platforms. Install the two required slots with `fileid models download mobileclip_s2 arcface`. Those names are stable compatibility IDs: `mobileclip_s2` now installs the commercial-clean CLIP ViT-B/32 image encoder, while `arcface` installs YuNet + SFace—not the retired research models. `models download --all` also selects optional multi-GB models and is not required for scanning. On **macOS**, CLI/TUI weights live under `~/.local/share/FileID/Models`, separate from the desktop app's CoreML/MLX set.
 
 On macOS, the CLI finds an existing native-app library before falling back to the engine default. The TUI deliberately opens an isolated scratch library unless you pass `--db` or `$FILEID_DB`, so an exploratory terminal scan cannot silently replace a desktop library. Add `--json` for machine-readable CLI output or `--quiet` to silence progress.
 
-**Terminal dashboard:**
+### Terminal dashboard
 
 ```bash
 fileid-tui --db ~/fileid-test.sqlite
 ```
 
 Keys: **1–6** jump to a tab · **Tab/Shift-Tab** cycle tabs · **↑↓/jk** navigate · **g/G** first/last · **/** search · **s** scan a folder · **r** reload · **D** install scan models · **?** help · **q/Esc** close or quit · **Ctrl-C** quit anywhere. The TUI paints its own dark theme, so it stays readable on light terminals. Its Deep Analyze screen is a read-only companion for results created by a desktop VLM run; it does not claim to run VLM review itself.
+Keys: **1–6** jump to a tab · **Tab/Shift-Tab** cycle tabs · **↑↓/jk** navigate · **g/G** first/last · **/** search · **s** scan a folder · **r** reload · **D** install scan models · **?** help · **q/Esc** close or quit · **Ctrl-C** quit anywhere. The TUI paints its own dark theme, so it stays readable on light terminals. Its Deep Analyze screen is a read-only companion for results created by a desktop VLM run; it does not run the VLM itself.
 
 ### Safety
 

@@ -714,11 +714,25 @@ img { display: block; max-width: 100%; }
   margin-bottom: 18px;
   position: relative;
 }
-/* Distinct mini-icons per feature, drawn with CSS — no emoji, no stock icons */
-.feature-glyph::before {
-  content: "";
+.feature-glyph svg {
   position: absolute;
-  inset: 10px;
+  inset: 9px;
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--gold);
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.feature-accent .feature-glyph svg { stroke: var(--lavender); }
+.platform-icon { flex: 0 0 auto; }
+.platform-icon-windows { fill: #62b5e5; }
+.platform-icon-apple { fill: #d8c8f2; }
+.platform-icon-linux { fill: #f0c85a; }
+
+.feature-glyph::before {
+  display: none;
 }
 .feature-glyph[data-glyph="library"]::before {
   background:
