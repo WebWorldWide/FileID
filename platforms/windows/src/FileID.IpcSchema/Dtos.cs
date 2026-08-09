@@ -1,4 +1,4 @@
-﻿// Plain DTO records used inside command + event payloads. 1:1 mirror of the
+// Plain DTO records used inside command + event payloads. 1:1 mirror of the
 // schema's `$defs` section. Records (immutable, init-only, value-equality)
 // match Swift's struct semantics and Rust's #[derive(Debug, Clone)] structs.
 //
@@ -18,13 +18,19 @@ public sealed record EngineInfo(
     [property: JsonPropertyName("physicalMemoryGB")] double PhysicalMemoryGB,
     HardwareInfo? Hardware = null);
 
+public sealed record RestructureConfidenceCounts(ulong Auto, ulong Review, ulong Ask, ulong Unknown);
+
 public sealed record RestructurePlan(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
     System.Collections.Generic.IReadOnlyList<RestructureCategoryCount> CategoryCounts,
     /// <summary>Engine-authoritative Anchor/Mixed/Junk counts. Null on
     /// plans from older engine builds that didn't compute it.</summary>
-    FolderClassificationCounts? FolderClassifications = null);
+    FolderClassificationCounts? FolderClassifications = null,
+    ulong? TotalMoves = null,
+    RestructureConfidenceCounts? ConfidenceCounts = null,
+    bool Truncated = false,
+    string? PlanId = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
 

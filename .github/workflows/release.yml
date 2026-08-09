@@ -7,13 +7,6 @@ name: Release (Windows)
 # blocker (see shared/docs/SHIP.md). Until then a tagged push FAILS LOUDLY at the
 # signing gate rather than shipping unsigned binaries; use the workflow_dispatch
 # "dry_run" input to exercise the build path without a cert.
-#
-# FIRST-RELEASE NOTE: validate this end-to-end on the first real tagged release.
-# The WiX MSI + Burn bundle build and the ARM64 engine cross-compile run HERE for
-# the first time (the CI workflows build the app + engine but never the
-# installer), so first-release surprises — e.g. the runner needing the ARM64 MSVC
-# VC tools for the aarch64 cross-compile, or WiX v4 SDK restore — are expected and
-# get ironed out then. publish-bundle.ps1 fails loudly if a toolchain is missing.
 
 on:
   push:
@@ -27,12 +20,14 @@ on:
         default: false
 
 permissions:
-  contents: write   # required for `gh release create` + asset upload
+  contents: read
 
 jobs:
   windows-release:
     name: Build + sign + publish Windows release
     runs-on: windows-latest
+    outputs:
+      publish: ${{ steps.mode.outputs.publish }}
     defaults:
       run:
         working-directory: platforms/windows
@@ -47,7 +42,7 @@ jobs:
           targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
       - name: Install .NET 8
-        uses: actions/setup-dotnet@3951218d6a067d0e7440306129990867807d4b47 # v4
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 8.0.x
 
@@ -103,15 +98,38 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
-      - name: Create GitHub release
+      - name: Upload release-ready assets
         if: steps.mode.outputs.publish == 'true'
-        shell: pwsh
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-release-ready-${{ github.run_id }}
+          path: platforms/windows/dist/installer/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    name: Publish release
+    needs: windows-release
+    if: needs.windows-release.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download release-ready assets
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: FileID-release-ready-${{ github.run_id }}
+          path: release-assets
+
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" `
-            --title "FileID ${{ github.ref_name }}" `
-            --generate-notes `
-            "dist/installer/FileIDSetup.exe" `
-            "dist/installer/FileID-x64.msi" `
-            "dist/installer/FileID-arm64.msi"
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -ge 1
+          gh release create "${{ github.ref_name }}" \
+            --title "FileID ${{ github.ref_name }}" \
+            --notes "Unsigned FileID v0.1.0 release. See README and CHANGELOG.md for platform details." \
+            release-assets/*

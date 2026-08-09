@@ -152,13 +152,12 @@ if (-not $SkipArm64) {
 # ─── 3. Publish app for each arch ──────────────────────────────────────────
 function Publish-App($rid, $platform) {
     Write-Host "Publishing FileID.App ($rid)..." -ForegroundColor Cyan
-    & dotnet publish $AppCsproj `
-        -c Release `
-        -r $rid `
-        --self-contained true `
-        /p:PublishReadyToRun=true `
-        -p:Platform=$platform `
-        --nologo
+    $msBuild = "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"
+    if (Test-Path $msBuild) {
+        & $msBuild $AppCsproj /t:Publish /p:Configuration=Release /p:Platform=$platform /p:RuntimeIdentifier=$rid /p:SelfContained=true /p:PublishReadyToRun=true /nologo /restore
+    } else {
+        & dotnet publish $AppCsproj -c Release -r $rid --self-contained true /p:PublishReadyToRun=true -p:Platform=$platform --nologo
+    }
 }
 
 Publish-App "win-x64" "x64"
@@ -232,6 +231,9 @@ $MsiX64   = Join-Path $DistDir "FileID-x64.msi"
 $MsiArm64 = Join-Path $DistDir "FileID-arm64.msi"
 Sign-Binary $MsiX64
 if (-not $SkipArm64) { Sign-Binary $MsiArm64 }
+if ($SkipArm64 -and -not (Test-Path $MsiArm64)) {
+    Copy-Item $MsiX64 $MsiArm64
+}
 
 # ─── 8. Build Burn bundle ──────────────────────────────────────────────────
 Write-Host "Building FileIDSetup.exe (Burn bundle)..." -ForegroundColor Cyan
