@@ -346,6 +346,5 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "FileID ${{ github.ref_name }}" \
             --generate-notes \
-            --clobber \
             release-assets/*
 
