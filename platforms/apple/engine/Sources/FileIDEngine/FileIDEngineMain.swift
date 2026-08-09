@@ -809,6 +809,11 @@ struct FileIDEngineMain {
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
             guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
             await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+        case .reassignFace:
+            await sink.emit(.error(EngineError(
+                kind: "not_implemented_yet",
+                message: "This IPC command is not implemented by the macOS engine yet."
+            )))
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
             await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
