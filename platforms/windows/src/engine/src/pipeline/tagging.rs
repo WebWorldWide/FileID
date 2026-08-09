@@ -1666,28 +1666,24 @@ fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// panicking codec (malformed JPEG) so it surfaces as Err instead of
 /// crashing the decoder thread.
 ///
-/// On Windows, falls back to the WinRT BitmapDecoder (HEIF Image
-/// Extensions) when image-rs fails on a .heic / .heif file. The
-/// fallback is silent on other extensions.
+/// On Windows, falls back to the WinRT BitmapDecoder when image-rs fails.
+/// This covers installed HEIF and camera-RAW codecs as well as the standard
+/// Windows bitmap codecs. The fallback is still per-file and bounded, so a
+/// missing codec only marks that file as undecodable.
 fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let primary = decode_image_sync_imagecrate(path, bytes);
     if primary.is_ok() {
         return primary;
     }
-    // Extension probe — only try the WinRT fallback for HEIC/HEIF.
+    // Windows Imaging Component may provide codecs image-rs does not (HEIF,
+    // camera RAW, vendor codecs). Let the system decoder inspect the content;
+    // decode_image_sync is only called for files already classified as images.
     #[cfg(windows)]
     {
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        if ext == "heic" || ext == "heif" {
-            match shell::heic::decode(path) {
-                Ok(out) => return Ok(out),
-                Err(heic_err) => {
-                    return Err(heic_err.context("HEIC/HEIF decode failed"));
-                }
+        match shell::heic::decode(path) {
+            Ok(out) => return Ok(out),
+            Err(wic_err) => {
+                tracing::debug!(?wic_err, "Windows bitmap decoder fallback did not decode image");
             }
         }
     }

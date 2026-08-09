@@ -1170,7 +1170,7 @@ impl SleepGuard {
             .args([
                 "--what=sleep:idle",
                 "--who=FileID",
-                "--why=Scanning your library",
+                "--why=FileID is processing your library",
                 "--mode=block",
                 // The held command exits on pipe EOF, including abrupt engine
                 // death, so no infinite descendant can be orphaned.
@@ -1216,6 +1216,17 @@ impl Drop for SleepGuard {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod sleep_guard_linux_tests {
+    use super::SleepGuard;
+
+    #[test]
+    fn acquire_and_drop_is_safe_without_logind() {
+        let guard = SleepGuard::acquire();
+        drop(guard);
     }
 }
 

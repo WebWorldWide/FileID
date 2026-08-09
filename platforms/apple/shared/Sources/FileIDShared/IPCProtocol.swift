@@ -87,6 +87,7 @@ public struct IPCCommand: Codable, Sendable {
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
+        case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
         case markPersonsAsUnknown(personIDs: [Int64])
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)

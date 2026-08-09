@@ -29,8 +29,8 @@ use gtk::glib;
 
 use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
-    RenamePersonPayload,
+    BulkActionResult, CommandPayload, DeepAnalyzeAllPayload, Empty, MarkPersonsAsUnknownPayload,
+    MergeClustersPayload, ReassignFacePayload, RenamePersonPayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -67,12 +67,21 @@ struct PersonRow {
     is_unknown: bool,
     file_count: i64,
     face_count: i64,
+    rep_face_id: Option<i64>,
     rep_path: Option<String>,
     rep_bbox: Option<String>,
     rep_size_bytes: i64,
     rep_modified: Option<f64>,
     rep_file_ref: Option<i64>,
     rep_content_hash: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug)]
+struct PersonFace {
+    face_id: i64,
+    file_id: i64,
+    path: String,
+    bbox: Option<String>,
 }
 
 impl PersonRow {
@@ -343,6 +352,10 @@ fn classify_rename_terminal(result: &BulkActionResult, person_id: i64) -> Rename
     classify_person_terminal(result, "renamePerson", person_id)
 }
 
+fn classify_face_terminal(result: &BulkActionResult, face_id: i64) -> RenameTerminal {
+    classify_person_terminal(result, "reassignFace", face_id)
+}
+
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
 
@@ -367,6 +380,10 @@ struct Ui {
 
     count_label: gtk::Label,
     status_label: gtk::Label,
+    flow_banner: gtk::Box,
+    flow_banner_label: gtk::Label,
+    flow_banner_button: gtk::Button,
+    switch_tab: Rc<dyn Fn(&str)>,
     actions_box: gtk::Box,
     bulk_strip: gtk::Box,
     bulk_label: gtk::Label,
@@ -383,7 +400,7 @@ struct Ui {
     anchor: gtk::Box,
 }
 
-pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
+pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) -> gtk::Widget {
     // ── Header ────────────────────────────────────────────────────────────────
     let title = gtk::Label::builder()
         .label("People")
@@ -417,6 +434,25 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["dim-label"])
         .build();
 
+    let flow_banner_label = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .hexpand(true)
+        .css_classes(["dim-label"])
+        .build();
+    let flow_banner_button = gtk::Button::builder()
+        .css_classes(["pill"])
+        .sensitive(crate::tabs::deep_analyze::vlm_runtime_available())
+        .build();
+    let flow_banner = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .visible(false)
+        .css_classes(["glass-card", "people-flow-banner"])
+        .build();
+    flow_banner.append(&flow_banner_label);
+    flow_banner.append(&flow_banner_button);
+
     let bulk_label = gtk::Label::builder()
         .label("")
         .css_classes(["dim-label"])
@@ -441,6 +477,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
     header.append(&title_row);
     header.append(&status_label);
+    header.append(&flow_banner);
     header.append(&bulk_strip);
 
     // ── Content: grid / empty / no-clusters ──────────────────────────────────
@@ -549,6 +586,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_CAP)),
         count_label: count_label.clone(),
         status_label: status_label.clone(),
+        flow_banner: flow_banner.clone(),
+        flow_banner_label: flow_banner_label.clone(),
+        flow_banner_button: flow_banner_button.clone(),
+        switch_tab,
         actions_box: actions_box.clone(),
         bulk_strip: bulk_strip.clone(),
         bulk_label: bulk_label.clone(),
@@ -568,6 +609,27 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     {
         let ui = ui.clone();
         bulk_button.connect_clicked(move |_| on_bulk_clicked(&ui));
+    }
+    {
+        let ui = ui.clone();
+        flow_banner_button.connect_clicked(move |button| {
+            let kind = crate::tabs::deep_analyze::recommended_vlm_kind_for_host();
+            if !crate::model_license::ensure_or_prompt(button, kind) {
+                return;
+            }
+            let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
+                model_kind: kind.to_string(),
+                skip_existing: true,
+                file_ids: None,
+                tags_only: false,
+                propose_renames: true,
+                excluded_folders: crate::app_settings::deep_analyze_excluded_folders(),
+            });
+            if send_cmd(&ui, payload) {
+                set_status(&ui, "Deep Analyze started.".to_string());
+                (ui.switch_tab)("deep");
+            }
+        });
     }
     {
         let ui = ui.clone();
@@ -716,6 +778,23 @@ fn refresh_view(ui: &Rc<Ui>) {
         )
     };
     ui.count_label.set_text(&count_text);
+
+    let named = ui.persons.borrow().iter().any(PersonRow::has_any_name);
+    if named {
+        ui.flow_banner_label.set_text(
+            "Names set — keep going. Generate captions and smart filenames using the people you've named.",
+        );
+        ui.flow_banner_button.set_label("Continue to Deep Analyze");
+        ui.flow_banner_button.remove_css_class("flat");
+        ui.flow_banner_button.add_css_class("gold-button");
+    } else {
+        ui.flow_banner_label
+            .set_text("Don't want to name anyone? Run Deep Analyze with generic captions.");
+        ui.flow_banner_button.set_label("Skip — run without names");
+        ui.flow_banner_button.remove_css_class("gold-button");
+        ui.flow_banner_button.add_css_class("flat");
+    }
+    ui.flow_banner.set_visible(persons_len > 0);
 
     let has_faces = ui.total_faces.get() > 0;
     ui.grid_scroller.set_visible(has_persons);
@@ -943,7 +1022,7 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
 
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
-        .height_request(150)
+        .height_request(160)
         .hexpand(true)
         .css_classes(["tile-thumb"])
         .build();
@@ -983,16 +1062,24 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
         .xalign(0.0)
         .css_classes(["tile-caption"])
         .build();
+    let edit_hint = gtk::Label::builder()
+        .label("Edit name")
+        .xalign(0.0)
+        .css_classes(["edit-name-hint"])
+        .build();
 
     let vbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
-        .width_request(150)
+        .width_request(180)
         .css_classes(["file-tile"])
         .build();
     vbox.append(&overlay);
     vbox.append(&name);
     vbox.append(&caption);
+    if ui.mode.get() == Mode::Normal {
+        vbox.append(&edit_hint);
+    }
     if checked {
         vbox.add_css_class("file-tile-selected");
     }
@@ -1035,19 +1122,23 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
         }
     });
 
-    match p.rep_path.clone() {
-        Some(path) => load_card_thumb(
-            ui,
-            &pic,
-            PersonThumbKey {
-                path,
-                bbox: p.rep_bbox.clone(),
-                size_bytes: p.rep_size_bytes,
-                modified_bits: p.rep_modified.map(f64::to_bits),
-                file_ref: p.rep_file_ref,
-                content_hash: p.rep_content_hash.clone(),
-            },
-        ),
+    match p.rep_path.as_deref() {
+        Some(source_path) => {
+            let (path, bbox) =
+                face_thumbnail_source(p.rep_face_id, source_path, p.rep_bbox.as_deref());
+            load_card_thumb(
+                ui,
+                &pic,
+                PersonThumbKey {
+                    path,
+                    bbox,
+                    size_bytes: p.rep_size_bytes,
+                    modified_bits: p.rep_modified.map(f64::to_bits),
+                    file_ref: p.rep_file_ref,
+                    content_hash: p.rep_content_hash.clone(),
+                },
+            )
+        }
         None => pic.set_paintable(person_icon().as_ref()),
     }
 
@@ -1238,6 +1329,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     body.append(&subtitle);
 
     let group = adw::PreferencesGroup::new();
+    let unknown_check = gtk::CheckButton::with_label("I don't know who this is");
+    unknown_check.set_active(person.is_unknown);
+    unknown_check.set_tooltip_text(Some(
+        "Excludes this person from AI clustering and Deep Analyze captions.",
+    ));
     let title_row = adw::EntryRow::builder()
         .title("Title (Uncle, Grandma…)")
         .build();
@@ -1261,6 +1357,8 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     group.add(&middle_row);
     group.add(&last_row);
     group.add(&suffix_row);
+    group.set_visible(!person.is_unknown);
+    body.append(&unknown_check);
     body.append(&group);
 
     let btn_row = gtk::Box::builder()
@@ -1306,6 +1404,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let group = group.clone();
         let done_btn = done_btn.clone();
         let mark_btn = mark_btn.clone();
+        let unknown_check = unknown_check.clone();
         let (t, f, m, l, s) = (
             title_row.clone(),
             first_row.clone(),
@@ -1314,6 +1413,10 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             suffix_row.clone(),
         );
         dialog.connect_close_attempt(move |dialog| {
+            if unknown_check.is_active() {
+                mark_btn.emit_clicked();
+                return;
+            }
             if !lifecycle.begin(PersonDialogOperation::Renaming) {
                 return;
             }
@@ -1397,6 +1500,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                     );
                 }
             });
+        });
+    }
+    {
+        let group = group.clone();
+        unknown_check.connect_toggled(move |check| {
+            group.set_visible(!check.is_active());
         });
     }
     {
@@ -1514,22 +1623,23 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let Some(photos) = photos_weak.upgrade() else {
             return;
         };
-        for (_id, path) in files {
-            let tile = build_photo_tile(&ui, &path);
+        for face in files {
+            let tile = build_photo_tile(&ui, &face, pid);
             photos.append(&tile);
         }
     });
 }
 
-fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
+fn build_photo_tile(ui: &Rc<Ui>, face: &PersonFace, current_person_id: i64) -> gtk::Widget {
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
-        .height_request(110)
-        .width_request(110)
+        .height_request(118)
+        .width_request(118)
         .css_classes(["tile-thumb"])
         .build();
     let name = gtk::Label::builder()
-        .label(basename(path))
+        .label(basename(&face.path))
+        .tooltip_text(format!("File #{}, face #{}", face.file_id, face.face_id))
         .xalign(0.5)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .max_width_chars(14)
@@ -1544,11 +1654,26 @@ fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
     vbox.append(&pic);
     vbox.append(&name);
 
-    let rx = ui
-        .engine
-        .borrow()
-        .request_scaled_thumbnail(path.to_string(), PHOTO_THUMB_PX);
+    let move_button = gtk::Button::builder()
+        .label("Move…")
+        .css_classes(["flat"])
+        .tooltip_text(format!("Move face #{} to another person", face.face_id))
+        .build();
+    vbox.append(&move_button);
+
+    let (thumbnail_path, thumbnail_bbox) =
+        face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
+    let rx = ui.engine.borrow().request_thumbnail_with(thumbnail_path, {
+        let bbox = thumbnail_bbox;
+        move |bytes| cropped_texture(bytes, bbox.as_deref(), PHOTO_THUMB_PX)
+    });
     let pic_weak = pic.downgrade();
+    let tile_weak = vbox.downgrade();
+    let ui_for_move = ui.clone();
+    let face_for_move = face.clone();
+    move_button.connect_clicked(move |_| {
+        open_face_move_picker(&ui_for_move, current_person_id, &face_for_move, &tile_weak);
+    });
     glib::MainContext::default().spawn_local(async move {
         let Ok(Some(decoded)) = rx.recv().await else {
             return;
@@ -1558,6 +1683,141 @@ fn build_photo_tile(ui: &Rc<Ui>, path: &str) -> gtk::Widget {
         }
     });
     vbox.upcast()
+}
+
+fn open_face_move_picker(
+    ui: &Rc<Ui>,
+    current_person_id: i64,
+    face: &PersonFace,
+    tile: &glib::WeakRef<gtk::Box>,
+) {
+    let candidates: Vec<PersonRow> = ui
+        .person_by_id
+        .borrow()
+        .values()
+        .filter(|person| person.id != current_person_id)
+        .cloned()
+        .collect();
+    if candidates.is_empty() {
+        set_status(
+            ui,
+            "No other people are available to move this face to.".to_string(),
+        );
+        return;
+    }
+
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Move face to…");
+    dialog.set_content_width(460);
+    dialog.set_content_height(420);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+    let explanation = gtk::Label::builder()
+        .label(
+            "Pick the person this face actually belongs to. The change is saved transactionally.",
+        )
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    body.append(&explanation);
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    for person in candidates {
+        let row = adw::ActionRow::builder()
+            .title(person.display_name())
+            .subtitle(person.counts())
+            .activatable(true)
+            .build();
+        let target_id = person.id;
+        let ui = ui.clone();
+        let dialog = dialog.clone();
+        let tile = tile.clone();
+        let face_id = face.face_id;
+        row.connect_activated(move |_| {
+            if !begin_person_action(&ui, "reassignFace") {
+                set_status(&ui, "Another face move is still saving.".to_string());
+                return;
+            }
+            let events = ui.engine.borrow_mut().subscribe();
+            if !send_cmd(
+                &ui,
+                CommandPayload::ReassignFace(ReassignFacePayload {
+                    face_id,
+                    destination_person_id: Some(target_id),
+                    create_new_person: false,
+                }),
+            ) {
+                finish_person_action(&ui, "reassignFace");
+                return;
+            }
+            dialog.set_can_close(false);
+            set_status(&ui, "Moving face…".to_string());
+            let ui = ui.clone();
+            let dialog = dialog.clone();
+            let tile = tile.clone();
+            glib::MainContext::default().spawn_local(async move {
+                while let Ok(event) = events.recv().await {
+                    match event {
+                        EngineEvent::BulkActionResult(result) => {
+                            match classify_face_terminal(&result, face_id) {
+                                RenameTerminal::Ignore => continue,
+                                RenameTerminal::Success => {
+                                    finish_person_action(&ui, "reassignFace");
+                                    if let Some(tile) = tile.upgrade() {
+                                        tile.set_visible(false);
+                                    }
+                                    set_status(
+                                        &ui,
+                                        "Face moved to the selected person.".to_string(),
+                                    );
+                                    schedule_reload_burst(&ui);
+                                    dialog.set_can_close(true);
+                                    dialog.close();
+                                }
+                                RenameTerminal::Failure => {
+                                    finish_person_action(&ui, "reassignFace");
+                                    set_status(
+                                        &ui,
+                                        "Couldn't move face; the engine rejected the change."
+                                            .to_string(),
+                                    );
+                                    dialog.set_can_close(true);
+                                }
+                            }
+                            break;
+                        }
+                        EngineEvent::Exited => {
+                            finish_person_action(&ui, "reassignFace");
+                            set_status(&ui, "Couldn't move face: the engine exited.".to_string());
+                            dialog.set_can_close(true);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+        list.append(&row);
+    }
+    let scroll = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&list)
+        .build();
+    body.append(&scroll);
+    toolbar.set_content(Some(&body));
+    dialog.set_child(Some(&toolbar));
+    dialog.present(Some(&ui.anchor));
 }
 
 // ── Merge-target picker (manual merge mode) ───────────────────────────────────
@@ -1918,8 +2178,8 @@ fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     rx
 }
 
-fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<(i64, String)>> {
-    let (tx, rx) = async_channel::bounded::<Vec<(i64, String)>>(1);
+fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<PersonFace>> {
+    let (tx, rx) = async_channel::bounded::<Vec<PersonFace>>(1);
     std::thread::spawn(move || {
         let files = read_person_files(pid).unwrap_or_default();
         let _ = tx.send_blocking(files);
@@ -1937,7 +2197,7 @@ const PERSON_SNAPSHOT_SQL: &str = "\
            COALESCE(p.is_unknown, 0), \
            (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
            (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
-           f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
+           rf.id, f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
     FROM persons p \
     LEFT JOIN face_prints rf ON rf.id = COALESCE( \
         (SELECT fp1.id FROM face_prints fp1 \
@@ -1991,16 +2251,17 @@ fn map_person(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
         is_unknown: row.get::<_, i64>(7)? != 0,
         file_count: row.get(8)?,
         face_count: row.get(9)?,
-        rep_path: row.get(10)?,
-        rep_bbox: row.get(11)?,
-        rep_size_bytes: row.get(12)?,
-        rep_modified: row.get(13)?,
-        rep_file_ref: row.get(14)?,
-        rep_content_hash: row.get(15)?,
+        rep_face_id: row.get(10)?,
+        rep_path: row.get(11)?,
+        rep_bbox: row.get(12)?,
+        rep_size_bytes: row.get(13)?,
+        rep_modified: row.get(14)?,
+        rep_file_ref: row.get(15)?,
+        rep_content_hash: row.get(16)?,
     })
 }
 
-fn read_person_files(pid: i64) -> anyhow::Result<Vec<(i64, String)>> {
+fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
     let Ok(db_path) = fileid_engine::paths::db_path() else {
         return Ok(Vec::new());
     };
@@ -2009,16 +2270,21 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<(i64, String)>> {
     }
     let conn = fileid_engine::db::open_read(&db_path)?;
     let mut stmt = conn.prepare(
-        "SELECT f.id, f.path_text FROM files f \
+        "SELECT fp.id, f.id, f.path_text, fp.bbox FROM files f \
          JOIN face_prints fp ON fp.file_id = f.id \
          WHERE fp.person_id = ?1 \
-         GROUP BY f.id ORDER BY f.scanned_at DESC LIMIT ?2",
+         AND f.failed = 0 ORDER BY f.scanned_at DESC, fp.id LIMIT ?2",
     )?;
     let rows = stmt
         .query_map(rusqlite::params![pid, PERSON_FILE_LIMIT], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            Ok(PersonFace {
+                face_id: r.get(0)?,
+                file_id: r.get(1)?,
+                path: r.get(2)?,
+                bbox: r.get(3)?,
+            })
         })?
-        .collect::<rusqlite::Result<Vec<(i64, String)>>>()?;
+        .collect::<rusqlite::Result<Vec<PersonFace>>>()?;
     Ok(rows)
 }
 
@@ -2029,6 +2295,31 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<(i64, String)>> {
 /// full-res is required because the bbox is in the original image's pixel space
 /// and the DB stores no dimensions to normalize against. Any failure falls back
 /// to the uncropped frame, then to `None` (icon placeholder).
+fn face_thumbnail_source(
+    face_id: Option<i64>,
+    source_path: &str,
+    bbox: Option<&str>,
+) -> (String, Option<String>) {
+    let faces_dir = fileid_engine::paths::faces_dir().ok();
+    face_thumbnail_source_in(faces_dir.as_deref(), face_id, source_path, bbox)
+}
+
+fn face_thumbnail_source_in(
+    faces_dir: Option<&std::path::Path>,
+    face_id: Option<i64>,
+    source_path: &str,
+    bbox: Option<&str>,
+) -> (String, Option<String>) {
+    let crop = face_id
+        .filter(|id| *id > 0)
+        .and_then(|id| faces_dir.map(|dir| dir.join(format!("{id}.jpg"))))
+        .filter(|path| path.is_file());
+    match crop {
+        Some(path) => (path.to_string_lossy().into_owned(), None),
+        None => (source_path.to_string(), bbox.map(str::to_string)),
+    }
+}
+
 fn cropped_texture(bytes: Vec<u8>, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
     let gbytes = glib::Bytes::from_owned(bytes);
     let stream = gio::MemoryInputStream::from_bytes(&gbytes);
@@ -2128,8 +2419,8 @@ fn sim_markup(s: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_rename_terminal, BoundedLru, FaceClusteringLifecycle, PersonActionGate,
-        PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
+        classify_rename_terminal, face_thumbnail_source_in, BoundedLru, FaceClusteringLifecycle,
+        PersonActionGate, PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
 
@@ -2141,6 +2432,47 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         fileid_engine::db::migrations::apply(&conn).unwrap();
         conn.prepare(super::PERSON_SNAPSHOT_SQL).unwrap();
+    }
+
+    #[test]
+    fn saved_face_crop_replaces_full_source_decode_and_bbox_crop() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-face-thumb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let crop = dir.join("42.jpg");
+        std::fs::write(&crop, b"crop").unwrap();
+
+        let (path, bbox) = face_thumbnail_source_in(
+            Some(&dir),
+            Some(42),
+            "/photos/source.jpg",
+            Some(r#"{"x":1}"#),
+        );
+
+        assert_eq!(path, crop.to_string_lossy());
+        assert_eq!(bbox, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_face_crop_falls_back_to_source_and_bbox() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-face-thumb-missing-{}",
+            std::process::id()
+        ));
+        let bbox_json = r#"{"x":1}"#;
+
+        let (path, bbox) =
+            face_thumbnail_source_in(Some(&dir), Some(42), "/photos/source.jpg", Some(bbox_json));
+
+        assert_eq!(path, "/photos/source.jpg");
+        assert_eq!(bbox.as_deref(), Some(bbox_json));
     }
 
     #[test]

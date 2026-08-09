@@ -41,42 +41,21 @@ pub struct Hyperparameters {
 
 impl Default for Hyperparameters {
     fn default() -> Self {
-        // SFace (128-d) defaults, calibrated on-hardware against F:\TrueNAS with a
-        // GROUND-TRUTH LABELLED set (RTX 5080, 2026-07-05: the owner labelled ~185
-        // faces across a dozen people via the face-labeler tool). The labels
-        // overturned the earlier cohesion-only guess (pass1=0.82) — see below.
+        // SFace defaults recalibrated on the isolated 41,855-face Family Photos
+        // catalog (RTX 5080, 2026-08-08) with an explicit crop oracle. The old
+        // 0.50/0.45 core admitted every reviewed impostor, including unrelated
+        // adults, children, siblings, and a non-face object. 0.66/0.54 with
+        // mutual-kNN separated every negative pair while retaining the reviewed
+        // clear same-person pair and lifting top-cluster p05 cohesion from 0.28
+        // to 0.47. Ambiguous low-quality faces are gated before this stage rather
+        // than being allowed to bridge otherwise-clean identities.
         //
-        // What the labels showed, on REAL same-age same-person pairs: SFace works
-        // WELL — same-person cosine median ~0.59 (p90 0.82), different-person
-        // median 0.16 with a MAX of only 0.47. So the classes separate cleanly and
-        // the optimal link threshold is ~0.43–0.50, NOT 0.82. At 0.82 recall was
-        // ~1% (it only linked near-duplicate shots) — which is exactly why real
-        // people fragmented into many clusters. Dropping to 0.50 took the labelled
-        // People-tab F1 from ~0.02 to 1.00 (precision 1.0, recall 1.0).
-        //
-        // Two confounds that had masked this and MUST stay in mind:
-        //  (1) A person across a big AGE gap (child↔adult) is genuinely unmatchable
-        //      by any face model (their embeddings differ like different people) —
-        //      those legitimately land in separate clusters; only manual naming /
-        //      "Suggest merges" unites them. Not a bug.
-        //  (2) LOW-QUALITY faces (this corpus is scanned/old — quality caps ~0.42)
-        //      produce noise embeddings: same-person cosine on quality<0.35 faces
-        //      is ~0.14 (== different-person), and they chain into cones. Handled
-        //      by the PRE-clustering quality gate FILEID_FACE_CLUSTER_MIN_QUALITY
-        //      (commands/face_clustering.rs, default 0.35) — a mild gate that drops
-        //      only the deepest noise and lifted labelled F1 to a clean 1.00.
-        //
-        // So: pass1=0.50 (link threshold in the same/diff gap), pass2=0.45, and
-        // MUTUAL-kNN default-ON (each edge needs both faces in the other's above-
-        // threshold neighbourhood — kills the last single-bridge chaining; lifted
-        // recall to 1.0 with no fragmentation). All env-overridable per corpus
+        // All values remain env-overridable for corpus-specific sweeps
         // (unset → these defaults): FILEID_FACE_PASS1_COSINE / _PASS2_COSINE /
         // _PASS2_MARGIN / _MUTUAL_KNN / _PASS3_MIN_MEAN_COSINE /
         // _PASS3_VARIANCE_THRESHOLD / _PASS3_MAX_SPLITS, plus the quality gate.
-        // On a higher-quality (modern-photo) corpus these thresholds still hold
-        // (same-person there is even higher, ~0.85+); loosen only if a corpus is
-        // unusually low-quality. Further gains want a stronger face embedder +
-        // cross-corpus labels — see NEXT.md.
+        // Further recall gains require stronger labelled evidence or a stronger
+        // commercially clean embedder, not a blind reduction of these floors.
         // Reject non-finite (NaN/inf) env values — they'd silently poison
         // comparisons (e.g. `q < NaN` is always false). `clamp` for the cosine
         // knobs keeps a fat-fingered env from making pass1 a value that makes
@@ -90,8 +69,8 @@ impl Default for Hyperparameters {
         };
         let env_cos = |key: &str, default: f32| -> f32 { env_f32(key, default).clamp(0.0, 1.0) };
         Self {
-            pass1_cosine: env_cos("FILEID_FACE_PASS1_COSINE", 0.50),
-            pass2_cosine: env_cos("FILEID_FACE_PASS2_COSINE", 0.45),
+            pass1_cosine: env_cos("FILEID_FACE_PASS1_COSINE", 0.66),
+            pass2_cosine: env_cos("FILEID_FACE_PASS2_COSINE", 0.54),
             pass2_margin: env_cos("FILEID_FACE_PASS2_MARGIN", 0.10),
             pass3_variance_threshold: env_f32("FILEID_FACE_PASS3_VARIANCE_THRESHOLD", 0.04),
             pass3_min_mean_cosine: env_cos("FILEID_FACE_PASS3_MIN_MEAN_COSINE", 0.60),

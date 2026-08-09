@@ -579,12 +579,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// first, else title, else legacy name).</summary>
     public async Task<IReadOnlyDictionary<string, List<long>>> NamedPersonFileIdsAsync(CancellationToken ct)
     {
-        var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
-        if (_connection == null) return map;
+        var sets = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
+        if (_connection == null) return new Dictionary<string, List<long>>(StringComparer.Ordinal);
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_connection == null) return map;
+            if (_connection == null) return new Dictionary<string, List<long>>(StringComparer.Ordinal);
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT face_prints.file_id, persons.title, persons.first_name,
@@ -609,10 +609,47 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6));
                 if (name.Length == 0) continue;
-                if (!map.TryGetValue(name, out var ids)) { ids = new List<long>(); map[name] = ids; }
-                if (!ids.Contains(fileId)) ids.Add(fileId);
+                if (!sets.TryGetValue(name, out var ids))
+                {
+                    ids = new HashSet<long>();
+                    sets[name] = ids;
+                }
+                ids.Add(fileId);
             }
-            return map;
+            return sets
+                .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                .ToDictionary(
+                    entry => entry.Key,
+                    entry => entry.Value.OrderBy(id => id).ToList(),
+                    StringComparer.Ordinal);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<IReadOnlyList<long>> PersonFileIdsAsync(long personId, CancellationToken ct)
+    {
+        if (_connection == null) return Array.Empty<long>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return Array.Empty<long>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT DISTINCT face_prints.file_id
+                FROM face_prints
+                INNER JOIN files ON files.id = face_prints.file_id
+                WHERE face_prints.person_id = $personId
+                  AND files.failed = 0
+                ORDER BY face_prints.file_id
+                """;
+            cmd.Parameters.AddWithValue("$personId", personId);
+            var ids = new List<long>();
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                ids.Add(reader.GetInt64(0));
+            }
+            return ids;
         }
         finally { _gate.Release(); }
     }
@@ -621,8 +658,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// [title, first, middle, last, suffix] joined by single spaces, else the legacy
     /// `name`. Byte-faithful with the macOS `ReadStore.personTagName` so a person is
     /// tagged identically on both platforms.</summary>
-    private static string FormatPersonTagName(string? title, string? first, string? middle,
-                                              string? last, string? suffix, string? legacy)
+    internal static string FormatPersonTagName(string? title, string? first, string? middle,
+                                               string? last, string? suffix, string? legacy)
     {
         var parts = new List<string>(5);
         foreach (var s in new[] { title, first, middle, last, suffix })

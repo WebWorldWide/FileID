@@ -23,6 +23,8 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _activeModel = "qwen2_5_vl_7b";
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
+    private bool _hasNamedPeople;
+    private long _namePeopleGateGeneration;
 
     // L5: set the moment Cancel is clicked while a Deep Analyze command is still
     // in flight (most importantly while it's QUEUED behind a running scan, where
@@ -88,6 +90,9 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
+        _unloaded = false;
+        _hasNamedPeople = false;
+        ApplyPeopleButton.IsEnabled = false;
         ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         EngineClient.Instance.DeepAnalyzeFileDoneReceived += OnDeepAnalyzeFileDoneReceived;
@@ -163,54 +168,70 @@ public sealed partial class DeepAnalyzeView : UserControl
     /// when the count is non-zero.</summary>
     private async System.Threading.Tasks.Task RefreshNamePeopleGateAsync()
     {
+        var generation = System.Threading.Interlocked.Increment(
+            ref _namePeopleGateGeneration);
         int unnamed = 0;
+        bool hasNamedPeople = false;
         try
         {
             var dbPath = AppPaths.DbPath;
-            unnamed = await System.Threading.Tasks.Task.Run(() =>
+            var summary = await System.Threading.Tasks.Task.Run(() =>
             {
-                try
-                {
-                    if (!System.IO.File.Exists(dbPath)) return 0;
-                    using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
-                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                        {
-                            DataSource = dbPath,
-                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                        }.ToString());
-                    conn.Open();
-                    using var cmd = conn.CreateCommand();
-                    // A cluster is unnamed only when every legacy and
-                    // structured name component is blank.
-                    cmd.CommandText = """
-                        SELECT COUNT(*) FROM persons
-                        WHERE TRIM(COALESCE(name, '') || COALESCE(title, '') ||
-                                   COALESCE(first_name, '') || COALESCE(middle_name, '') ||
-                                   COALESCE(last_name, '') || COALESCE(suffix, '')) = '';
-                        """;
-                    var result = cmd.ExecuteScalar();
-                    return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
-                }
-                catch { return 0; }
+                if (!System.IO.File.Exists(dbPath)) return (Unnamed: 0, HasNamed: false);
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                    {
+                        DataSource = dbPath,
+                        Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                    }.ToString());
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                                                     COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                                                     COALESCE(last_name, '') || COALESCE(suffix, '')) = ''
+                                          THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN IFNULL(is_unknown, 0) = 0
+                                                   AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
+                                                            COALESCE(first_name, '') || COALESCE(middle_name, '') ||
+                                                            COALESCE(last_name, '') || COALESCE(suffix, '')) != ''
+                                          THEN 1 ELSE 0 END), 0)
+                    FROM persons;
+                    """;
+                using var reader = cmd.ExecuteReader();
+                if (!reader.Read()) return (Unnamed: 0, HasNamed: false);
+                var unnamedCount = Math.Min(reader.GetInt64(0), int.MaxValue);
+                return (Unnamed: (int)unnamedCount, HasNamed: reader.GetInt64(1) > 0);
             }).ConfigureAwait(false);
+            unnamed = summary.Unnamed;
+            hasNamedPeople = summary.HasNamed;
         }
         catch (Exception ex)
         {
             DebugLog.Warn("RefreshNamePeopleGateAsync failed: " + ex.Message);
-            unnamed = 0;
         }
-        if (_unloaded) return;
+        if (_unloaded
+            || generation != System.Threading.Interlocked.Read(
+                ref _namePeopleGateGeneration))
+        {
+            return;
+        }
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (_unloaded) return;
+            if (_unloaded
+                || generation != System.Threading.Interlocked.Read(
+                    ref _namePeopleGateGeneration))
+            {
+                return;
+            }
+            _hasNamedPeople = hasNamedPeople;
             if (unnamed > 0)
             {
                 NamePeopleGateBanner.Visibility = Visibility.Visible;
                 NamePeopleGateText.Text = unnamed == 1
                     ? "1 face cluster isn't named yet. Naming it first gives sharper captions — or analyze now and name later."
                     : $"{unnamed} face clusters aren't named yet. Naming them first gives sharper captions — or analyze now and name later.";
-                // Advisory, NOT blocking — the shared control reducer still owns
-                // whether an active/preparing command may start another run.
                 ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
             else
@@ -219,6 +240,9 @@ public sealed partial class DeepAnalyzeView : UserControl
                 ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
             SyncDeepAnalyzeControls();
+            SetApplyBusy(
+                System.Threading.Volatile.Read(ref _applyInFlight) != 0,
+                ApplyStatusText.Text);
         });
     }
 
@@ -724,7 +748,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // `using` so the SQLite connection + SemaphoreSlim are released on
             // every exit — the empty-pending early return and the catch path
             // below both used to leak the store.
-            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            await using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
             if (pending.Count == 0)
@@ -991,7 +1015,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         var confirmedTagFileIds = new HashSet<long>();
         try
         {
-            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            await using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var ct = System.Threading.CancellationToken.None;
             IReadOnlyDictionary<string, List<long>>? keywordMap = null;
@@ -1020,7 +1044,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                     var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                         "applyTags",
                         () => EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add"),
-                        TimeSpan.FromSeconds(30));
+                        Services.BulkActionTimeout.ForFileCount(kv.Value.Count));
                     tagged += (int)result.Succeeded;
                     applyFailed += (int)result.Failed;
                     foreach (var fileId in Services.BulkActionResultTruth
@@ -1038,7 +1062,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                     var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                         "applyTags",
                         () => EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add"),
-                        TimeSpan.FromSeconds(30));
+                        Services.BulkActionTimeout.ForFileCount(kv.Value.Count));
                     peopled += (int)result.Succeeded;
                     applyFailed += (int)result.Failed;
                     foreach (var fileId in Services.BulkActionResultTruth
@@ -1101,7 +1125,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = !busy;
-            ApplyPeopleButton.IsEnabled = !busy;
+            ApplyPeopleButton.IsEnabled = !busy && _hasNamedPeople;
             ApplyAllButton.IsEnabled = !busy;
             ApplyProgressRing.IsActive = busy;
             ApplyProgressRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;

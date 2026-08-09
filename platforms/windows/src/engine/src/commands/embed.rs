@@ -169,7 +169,9 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             crate::models::ep_guard::disarm(armed_ep.as_str());
             *guard = Some(loaded?);
         }
-        let model = guard.as_mut().expect("just set");
+        let Some(model) = guard.as_mut() else {
+            anyhow::bail!("CLIP text model initialization completed without a model");
+        };
         if crate::coordinator::process_gpu_device_removed() {
             anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
         }

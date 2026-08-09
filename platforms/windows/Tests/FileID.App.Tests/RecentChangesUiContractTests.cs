@@ -59,6 +59,18 @@ public sealed class RecentChangesUiContractTests
     }
 
     [Fact]
+    public void UndoRowDirectlyRefreshesItsVisibleDialogState()
+    {
+        var sheet = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "Views", "SessionChangesSheet.xaml.cs"));
+        var undo = sheet.IndexOf("ChangeLog.Instance.UndoAsync(entry)", StringComparison.Ordinal);
+        var rebuild = sheet.IndexOf("DispatcherQueue.HasThreadAccess", undo, StringComparison.Ordinal);
+
+        Assert.True(undo >= 0 && rebuild > undo);
+        Assert.Contains("DispatcherQueue.TryEnqueue(Rebuild)", sheet[rebuild..], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PeopleUndoWaitsForAReadyEngineAndRequiresItsTerminalResult()
     {
         var source = File.ReadAllText(PathInRepo(

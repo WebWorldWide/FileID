@@ -5,7 +5,7 @@ name = "fileid-engine"
 # script (no new deps) and exposes its own version via CARGO_PKG_VERSION
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
-version = "0.1.4"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
@@ -132,7 +132,7 @@ quick-xml = "0.41"
 # audio files in the library get real content-style tag chips. MPL-2.0 (file-
 # level copyleft; fine for separate use). YAMNet sound-event tagging + Whisper
 # transcription are documented follow-ups (need offline ONNX conversion).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
+symphonia = { version = "0.5", default-features = false, features = ["all-codecs", "all-formats"] }
 
 # ONNX Runtime bindings + ndarray for tensor wrangling. Both pinned to
 # EXACT versions (no caret) because the 2.0 RC line had ABI churn between

@@ -154,9 +154,18 @@ fn apply_tags_row(
     file_id: i64,
     tags: &[String],
     mode: &TagMode,
-) -> rusqlite::Result<Vec<String>> {
+) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
     let mut savepoint = tx.savepoint()?;
-    let result = (|| -> rusqlite::Result<Vec<String>> {
+    let result = (|| -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+        let previous = {
+            let mut stmt = savepoint.prepare_cached(
+                "SELECT tag FROM tags WHERE file_id = ?1 AND source = 'user' ORDER BY tag",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![file_id], |row| {
+                row.get::<_, String>(0)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         if matches!(mode, TagMode::Replace) {
             savepoint
                 .prepare_cached("DELETE FROM tags WHERE file_id = ?1 AND source = 'user'")?
@@ -184,7 +193,10 @@ fn apply_tags_row(
             "SELECT tag FROM tags WHERE file_id = ?1 AND source = 'user' ORDER BY tag",
         )?;
         let rows = stmt.query_map(rusqlite::params![file_id], |row| row.get::<_, String>(0))?;
-        rows.collect()
+        Ok((
+            previous,
+            rows.collect::<rusqlite::Result<Vec<_>>>()?,
+        ))
     })();
     match result {
         Ok(tags) => {
@@ -231,9 +243,10 @@ pub(crate) async fn handle_apply_tags(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        // (path, tags) to persist to disk (sidecar JSON + IPropertyStore COM)
+        // (result index, path, tags) to persist to disk (sidecar JSON + IPropertyStore COM)
         // AFTER the tx commits and the writer lock drops — never inside it. (audit P0)
-        let mut sidecar_writes: Vec<(String, Vec<String>)> = Vec::new();
+        let mut sidecar_writes: Vec<(usize, i64, String, Vec<String>, Vec<String>)> =
+            Vec::new();
         let conn = db.lock();
         let mut tx = conn.unchecked_transaction()?;
         // Cache prepared statements outside the per-file loop. Raw
@@ -257,8 +270,8 @@ pub(crate) async fn handle_apply_tags(
                 }
             };
             match apply_tags_row(&mut tx, *fid, &payload.tags, &payload.mode) {
-                Ok(tags) => {
-                    sidecar_writes.push((path, tags));
+                Ok((previous, current)) => {
+                    sidecar_writes.push((messages.len(), *fid, path, previous, current));
                     succeeded += 1;
                     messages.push(BulkActionItem {
                         file_id: Some(*fid),
@@ -281,10 +294,39 @@ pub(crate) async fn handle_apply_tags(
         // writes so a large bulk-tag can't wedge the engine's only writer (and
         // any concurrent scan flush) for the whole operation. (audit P0)
         drop(conn);
-        for (path, tags) in &sidecar_writes {
-            if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(path), tags) {
+        let mut sidecar_failures = Vec::new();
+        for (message_index, file_id, path, previous, current) in &sidecar_writes {
+            if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(path), current) {
                 tracing::warn!(?err, path = %crate::platform::redact_path_for_log(path), "sidecar tag write failed");
+                mark_tag_sidecar_failure(
+                    &mut succeeded,
+                    &mut failed,
+                    &mut messages,
+                    *message_index,
+                    err.to_string(),
+                );
+                sidecar_failures.push((*message_index, *file_id, previous, current));
             }
+        }
+        if !sidecar_failures.is_empty() {
+            let conn = db.lock();
+            let mut tx = conn.unchecked_transaction()?;
+            for (message_index, file_id, previous, current) in sidecar_failures {
+                match restore_tags_if_unchanged(&mut tx, file_id, current, previous) {
+                    Ok(true) => {}
+                    Ok(false) => append_bulk_failure_detail(
+                        &mut messages,
+                        message_index,
+                        "catalog tags changed concurrently; kept the newer catalog value",
+                    ),
+                    Err(err) => append_bulk_failure_detail(
+                        &mut messages,
+                        message_index,
+                        &format!("catalog rollback failed: {err}"),
+                    ),
+                }
+            }
+            tx.commit()?;
         }
         Ok(BulkActionResult {
             action: "applyTags".into(),
@@ -1567,6 +1609,219 @@ pub(crate) async fn handle_rename_person(
     emit_bulk_result(&sink, "renamePerson", result).await;
 }
 
+fn mark_tag_sidecar_failure(
+    succeeded: &mut u32,
+    failed: &mut u32,
+    messages: &mut [BulkActionItem],
+    message_index: usize,
+    error: String,
+) {
+    *succeeded = succeeded.saturating_sub(1);
+    *failed = failed.saturating_add(1);
+    if let Some(message) = messages.get_mut(message_index) {
+        message.ok = false;
+        message.message = Some(format!("file tag write failed: {error}"));
+    }
+}
+
+fn append_bulk_failure_detail(
+    messages: &mut [BulkActionItem],
+    message_index: usize,
+    detail: &str,
+) {
+    if let Some(message) = messages.get_mut(message_index) {
+        let prefix = message.message.take().unwrap_or_default();
+        message.message = Some(if prefix.is_empty() {
+            detail.to_string()
+        } else {
+            format!("{prefix}; {detail}")
+        });
+    }
+}
+
+fn restore_tags_if_unchanged(
+    tx: &mut rusqlite::Transaction<'_>,
+    file_id: i64,
+    expected: &[String],
+    previous: &[String],
+) -> rusqlite::Result<bool> {
+    let current = {
+        let mut stmt = tx.prepare_cached(
+            "SELECT tag FROM tags WHERE file_id = ?1 AND source = 'user' ORDER BY tag",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![file_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if current != expected {
+        return Ok(false);
+    }
+    apply_tags_row(tx, file_id, previous, &TagMode::Replace)?;
+    Ok(true)
+}
+
+/// Reassign one face through the engine-owned writer. Keeping this mutation
+/// here prevents the People sheet from racing the scan writer with a second
+/// SQLite connection and makes remove/split/move equally transactional.
+pub(crate) async fn handle_reassign_face(
+    sink: Sink,
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    payload: ipc::ReassignFacePayload,
+) {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+        let conn = db.lock();
+        let tx = conn.unchecked_transaction()?;
+        let previous_row: Option<Option<i64>> = tx
+            .query_row(
+                "SELECT person_id FROM face_prints WHERE id=?1",
+                rusqlite::params![payload.face_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(previous_person_id) = previous_row else {
+            return Ok(BulkActionResult {
+                action: "reassignFace".into(),
+                succeeded: 0,
+                failed: 1,
+                messages: vec![BulkActionItem {
+                    file_id: Some(payload.face_id),
+                    ok: false,
+                    message: Some("This face no longer exists; refresh People and try again.".into()),
+                }],
+            });
+        };
+        if payload.create_new_person && payload.destination_person_id.is_some() {
+            return Ok(BulkActionResult {
+                action: "reassignFace".into(),
+                succeeded: 0,
+                failed: 1,
+                messages: vec![BulkActionItem {
+                    file_id: Some(payload.face_id),
+                    ok: false,
+                    message: Some(
+                        "Choose either a new person or an existing destination, not both."
+                            .into(),
+                    ),
+                }],
+            });
+        }
+
+        let destination = if payload.create_new_person {
+            let created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            tx.execute(
+                "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, ?1)",
+                [created_at],
+            )?;
+            Some(tx.last_insert_rowid())
+        } else if let Some(person_id) = payload.destination_person_id {
+            let target_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM persons WHERE id=?1)",
+                rusqlite::params![person_id],
+                |row| row.get(0),
+            )?;
+            if !target_exists {
+                return Ok(BulkActionResult {
+                    action: "reassignFace".into(),
+                    succeeded: 0,
+                    failed: 1,
+                    messages: vec![BulkActionItem {
+                        file_id: Some(payload.face_id),
+                        ok: false,
+                        message: Some("The destination person no longer exists; refresh People and try again.".into()),
+                    }],
+                });
+            }
+            Some(person_id)
+        } else {
+            None
+        };
+
+        if destination == previous_person_id {
+            return Ok(BulkActionResult {
+                action: "reassignFace".into(),
+                succeeded: 1,
+                failed: 0,
+                messages: vec![BulkActionItem {
+                    file_id: Some(payload.face_id),
+                    ok: true,
+                    message: None,
+                }],
+            });
+        }
+
+        tx.execute(
+            "UPDATE face_prints SET person_id=?1 WHERE id=?2",
+            rusqlite::params![destination, payload.face_id],
+        )?;
+
+        let mut affected_people = std::collections::BTreeSet::new();
+        if let Some(person_id) = previous_person_id {
+            affected_people.insert(person_id);
+        }
+        if let Some(person_id) = destination {
+            affected_people.insert(person_id);
+        }
+        for person_id in affected_people {
+            tx.execute(
+                "UPDATE persons
+                 SET file_count = (SELECT COUNT(DISTINCT file_id)
+                                   FROM face_prints WHERE person_id = ?1),
+                     representative_face_id = COALESCE(
+                         (SELECT fp.id FROM face_prints fp
+                          WHERE fp.person_id = ?1
+                            AND fp.arcface_embedding IS NOT NULL
+                          ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                         (SELECT fp.id FROM face_prints fp
+                          WHERE fp.person_id = ?1
+                          ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1)),
+                     centroid = NULL,
+                     anchor_radius = NULL,
+                     last_clustered_at = NULL
+                 WHERE id = ?1",
+                rusqlite::params![person_id],
+            )?;
+        }
+        if let Some(source_person_id) = previous_person_id {
+            let deleted = tx.execute(
+                "DELETE FROM persons
+                 WHERE id=?1
+                   AND NOT EXISTS (SELECT 1 FROM face_prints WHERE person_id=?1)
+                   AND COALESCE(TRIM(name), '')=''
+                   AND COALESCE(TRIM(title), '')=''
+                   AND COALESCE(TRIM(first_name), '')=''
+                   AND COALESCE(TRIM(middle_name), '')=''
+                   AND COALESCE(TRIM(last_name), '')=''
+                   AND COALESCE(TRIM(suffix), '')=''",
+                [source_person_id],
+            )?;
+            if deleted > 0 {
+                tx.execute(
+                    "DELETE FROM face_verifications
+                     WHERE (person_a=?1 OR person_b=?1)
+                       AND (face_a IS NULL OR face_b IS NULL)",
+                    [source_person_id],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(BulkActionResult {
+            action: "reassignFace".into(),
+            succeeded: 1,
+            failed: 0,
+            messages: vec![BulkActionItem {
+                file_id: Some(payload.face_id),
+                ok: true,
+                message: destination.map(|id| format!("Assigned to person #{id}.")),
+            }],
+        })
+    })
+    .await;
+
+    emit_bulk_result(&sink, "reassignFace", result).await;
+}
+
 /// FEAT-CRIT-1: bulk "Mark as unknown" for multi-select people view. Sets
 /// persons.is_unknown = 1 for every id in the payload + clears the display
 /// name (so a previously-named cluster becomes anonymous when the user
@@ -2369,6 +2624,112 @@ mod tests {
         assert_eq!(stored, ["original"]);
     }
 
+    #[test]
+    fn sidecar_failure_is_reported_as_a_failed_file() {
+        let mut succeeded = 1;
+        let mut failed = 0;
+        let mut messages = vec![BulkActionItem {
+            file_id: Some(42),
+            ok: true,
+            message: None,
+        }];
+
+        mark_tag_sidecar_failure(
+            &mut succeeded,
+            &mut failed,
+            &mut messages,
+            0,
+            "access denied".into(),
+        );
+
+        assert_eq!(succeeded, 0);
+        assert_eq!(failed, 1);
+        assert!(!messages[0].ok);
+        assert_eq!(
+            messages[0].message.as_deref(),
+            Some("file tag write failed: access denied")
+        );
+    }
+
+    #[test]
+    fn sidecar_failure_restores_prior_catalog_tags() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                 file_id INTEGER NOT NULL,
+                 tag TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 score REAL,
+                 UNIQUE(file_id, tag, source)
+             );
+             INSERT INTO tags(file_id, tag, source) VALUES (1, 'original', 'user');",
+        )
+        .unwrap();
+        let (previous, current) = {
+            let mut tx = conn.transaction().unwrap();
+            let change = apply_tags_row(
+                &mut tx,
+                1,
+                &["replacement".to_string()],
+                &TagMode::Replace,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            change
+        };
+
+        let mut tx = conn.transaction().unwrap();
+        assert!(restore_tags_if_unchanged(
+            &mut tx, 1, &current, &previous
+        )
+        .unwrap());
+        tx.commit().unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT tag FROM tags WHERE file_id = 1 AND source = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "original");
+    }
+
+    #[test]
+    fn sidecar_failure_does_not_clobber_newer_catalog_tags() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tags (
+                 file_id INTEGER NOT NULL,
+                 tag TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 score REAL,
+                 UNIQUE(file_id, tag, source)
+             );
+             INSERT INTO tags(file_id, tag, source) VALUES (1, 'newer', 'user');",
+        )
+        .unwrap();
+        let mut tx = conn.transaction().unwrap();
+
+        assert!(!restore_tags_if_unchanged(
+            &mut tx,
+            1,
+            &["failed-write".to_string()],
+            &["original".to_string()],
+        )
+        .unwrap());
+        tx.commit().unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT tag FROM tags WHERE file_id = 1 AND source = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "newer");
+    }
+
     // C1-012: the recovery line carries the file_id + src + dst so disk vs DB
     // can be reconciled. Pure wire-shape check (no filesystem).
     #[test]
@@ -2839,6 +3200,333 @@ mod tests {
         assert_eq!(result.inner.succeeded, 0);
         assert_eq!(result.inner.failed, 1);
         assert!(result.inner.messages.iter().all(|item| !item.ok));
+    }
+
+    fn reassign_face_db() -> std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>> {
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        db.lock()
+            .execute_batch(
+                "CREATE TABLE persons (
+                    id INTEGER PRIMARY KEY, name TEXT, is_unknown INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL, file_count INTEGER NOT NULL DEFAULT 0,
+                    representative_face_id INTEGER, title TEXT, first_name TEXT,
+                    middle_name TEXT, last_name TEXT, suffix TEXT, centroid BLOB,
+                    anchor_radius REAL, last_clustered_at REAL
+                 );
+                 CREATE TABLE face_prints (
+                    id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, person_id INTEGER,
+                    arcface_embedding BLOB, face_quality REAL
+                 );
+                 CREATE TABLE face_verifications (
+                    person_a INTEGER NOT NULL, person_b INTEGER NOT NULL,
+                    face_a INTEGER, face_b INTEGER
+                 );",
+            )
+            .unwrap();
+        db
+    }
+
+    async fn run_reassign(
+        db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+        payload: ipc::ReassignFacePayload,
+    ) -> BulkActionResult {
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_reassign_face(sink, db, payload).await;
+        let event = events.recv().await.expect("terminal bulk event");
+        let EventPayload::BulkActionResult(result) = event.payload else {
+            panic!("expected BulkActionResult");
+        };
+        result.inner
+    }
+
+    #[tokio::test]
+    async fn reassign_face_reconciles_counts_and_representatives() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at, file_count, representative_face_id)
+                    VALUES (1, 1.0, 2, 1), (2, 1.0, 1, 3);
+                 INSERT INTO face_prints(id, file_id, person_id, arcface_embedding, face_quality)
+                    VALUES (1, 10, 1, x'00', 0.9),
+                           (2, 11, 1, x'00', 0.8),
+                           (3, 12, 2, x'00', 0.7);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 2,
+                destination_person_id: Some(2),
+                create_new_person: false,
+            },
+        )
+        .await;
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+
+        let conn = db.lock();
+        let source: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT file_count, representative_face_id FROM persons WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let destination: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT file_count, representative_face_id FROM persons WHERE id=2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, (1, Some(1)));
+        assert_eq!(destination, (2, Some(2)));
+    }
+
+    #[tokio::test]
+    async fn reassign_face_assigns_a_previously_unowned_face() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at) VALUES (2, 1.0);
+                 INSERT INTO face_prints(id, file_id, person_id, arcface_embedding, face_quality)
+                    VALUES (5, 50, NULL, x'00', 0.8);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 5,
+                destination_person_id: Some(2),
+                create_new_person: false,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        let conn = db.lock();
+        assert_eq!(
+            conn.query_row("SELECT person_id FROM face_prints WHERE id=5", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT file_count FROM persons WHERE id=2", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_face_rejects_missing_face_and_stale_destination() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at) VALUES (1, 1.0);
+                 INSERT INTO face_prints(id, file_id, person_id) VALUES (1, 10, 1);",
+            )
+            .unwrap();
+
+        let missing = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 999,
+                destination_person_id: None,
+                create_new_person: false,
+            },
+        )
+        .await;
+        let stale = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 1,
+                destination_person_id: Some(999),
+                create_new_person: false,
+            },
+        )
+        .await;
+
+        assert_eq!((missing.succeeded, missing.failed), (0, 1));
+        assert_eq!((stale.succeeded, stale.failed), (0, 1));
+        assert_eq!(
+            db.lock()
+                .query_row("SELECT person_id FROM face_prints WHERE id=1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_face_same_person_is_a_true_no_op() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(
+                    id, created_at, file_count, representative_face_id,
+                    centroid, anchor_radius, last_clustered_at
+                 ) VALUES (1, 1.0, 1, 1, x'0102', 0.4, 9.0);
+                 INSERT INTO face_prints(id, file_id, person_id) VALUES (1, 10, 1);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 1,
+                destination_person_id: Some(1),
+                create_new_person: false,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        let values: (Vec<u8>, f64, f64) = db
+            .lock()
+            .query_row(
+                "SELECT centroid, anchor_radius, last_clustered_at FROM persons WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(values, (vec![1, 2], 0.4, 9.0));
+    }
+
+    #[tokio::test]
+    async fn reassign_face_new_person_uses_numeric_timestamp() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute("INSERT INTO face_prints(id, file_id, person_id) VALUES (5, 50, NULL)", [])
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 5,
+                destination_person_id: None,
+                create_new_person: true,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        let conn = db.lock();
+        let (storage_class, created_at, file_count): (String, f64, i64) = conn
+            .query_row(
+                "SELECT typeof(created_at), created_at, file_count FROM persons",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(storage_class, "real");
+        assert!(created_at > 0.0);
+        assert_eq!(file_count, 1);
+    }
+
+    #[tokio::test]
+    async fn reassign_face_cleans_empty_unnamed_source_but_preserves_anchored_verdicts() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at) VALUES (1, 1.0), (2, 1.0), (3, 1.0);
+                 INSERT INTO face_prints(id, file_id, person_id) VALUES (1, 10, 1);
+                 INSERT INTO face_verifications(person_a, person_b, face_a, face_b)
+                    VALUES (1, 2, NULL, NULL), (1, 3, 1, 30);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 1,
+                destination_person_id: Some(2),
+                create_new_person: false,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        let conn = db.lock();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM persons WHERE id=1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM face_verifications", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT face_a FROM face_verifications", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_face_preserves_an_empty_named_source() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, name, created_at) VALUES (1, 'Ada', 1.0), (2, NULL, 1.0);
+                 INSERT INTO face_prints(id, file_id, person_id) VALUES (1, 10, 1);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 1,
+                destination_person_id: Some(2),
+                create_new_person: false,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        assert_eq!(
+            db.lock()
+                .query_row("SELECT name FROM persons WHERE id=1", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "Ada"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassign_face_rejects_conflicting_destination_payload() {
+        let db = reassign_face_db();
+        db.lock()
+            .execute_batch(
+                "INSERT INTO persons(id, created_at) VALUES (1, 1.0), (2, 1.0);
+                 INSERT INTO face_prints(id, file_id, person_id) VALUES (1, 10, 1);",
+            )
+            .unwrap();
+
+        let result = run_reassign(
+            db.clone(),
+            ipc::ReassignFacePayload {
+                face_id: 1,
+                destination_person_id: Some(2),
+                create_new_person: true,
+            },
+        )
+        .await;
+
+        assert_eq!((result.succeeded, result.failed), (0, 1));
+        let conn = db.lock();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row("SELECT person_id FROM face_prints WHERE id=1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     fn test_suggestion_person(person_id: i64, embedding: Vec<f32>) -> SuggestionPerson {

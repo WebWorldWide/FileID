@@ -153,18 +153,6 @@ impl ScanCoordinator {
         }
     }
 
-    /// Reset for a new scan session. Must only be called when no tasks are
-    /// observing the coordinator.
-    /// NOTE: `gpu_dead` is intentionally NOT reset. Once the GPU device
-    /// has been removed in this process, every subsequent ORT session is
-    /// invalid — a full engine restart is required to recover. Resetting
-    /// would lure us back into the cascade-spam failure mode.
-    #[allow(dead_code)]
-    pub fn reset(&self) {
-        self.inner.paused.store(false, Ordering::Relaxed);
-        self.inner.cancelled.store(false, Ordering::Relaxed);
-    }
-
     /// Workers call this between batches; if paused, awaits resume. Returns
     /// `Err(())` if cancelled — the caller drops out of its loop.
     pub async fn check(&self) -> Result<(), ()> {

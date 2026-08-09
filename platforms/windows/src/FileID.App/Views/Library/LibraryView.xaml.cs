@@ -345,7 +345,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
         // in-flight reads use its connection — so the SQLite connection +
         // SemaphoreSlim are released instead of leaking per tab nav. (audit A7)
-        try { _store.Dispose(); } catch { /* swallow */ }
+        _ = DebugLog.SafeRunAsync(
+            "LibraryView.DisposeReadStore",
+            async () => await _store.DisposeAsync());
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -1217,7 +1219,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                     "trashFiles",
                     () => EngineClient.Instance.TrashFilesAsync(ids),
-                    TimeSpan.FromSeconds(30),
+                    BulkActionTimeout.ForFileCount(ids.Length),
                     beforeSend: CaptureUndo);
             }
             catch (TimeoutException ex)

@@ -33,6 +33,8 @@ public sealed partial class PersonDetailSheet : UserControl
 
     private long _personId;
     private readonly ObservableCollection<FaceTile> _faces = new();
+    private int _fileCount;
+    private int _tagInFlight;
 
     /// Most face crops rendered at once. A chained cluster can hold tens of
     /// thousands of faces (26,422 in the worst measured case); decoding that many
@@ -101,21 +103,11 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         try
         {
-            await Task.Run(() =>
-            {
-                var connStr = new SqliteConnectionStringBuilder
-                {
-                    DataSource = AppPaths.DbPath,
-                    Mode = SqliteOpenMode.ReadWrite,
-                    DefaultTimeout = 5
-                }.ToString();
-                using var conn = new SqliteConnection(connStr);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "UPDATE face_prints SET person_id = NULL WHERE id = @faceId";
-                cmd.Parameters.AddWithValue("@faceId", faceId);
-                cmd.ExecuteNonQuery();
-            });
+            var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "reassignFace",
+                () => EngineClient.Instance.ReassignFaceAsync(faceId),
+                TimeSpan.FromSeconds(30));
+            EnsureFaceMutationSucceeded(result, faceId);
 
             var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
             if (tile != null) _faces.Remove(tile);
@@ -132,38 +124,15 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         try
         {
-            long newPersonId = 0;
-            await Task.Run(() =>
-            {
-                var connStr = new SqliteConnectionStringBuilder
-                {
-                    DataSource = AppPaths.DbPath,
-                    Mode = SqliteOpenMode.ReadWrite,
-                    DefaultTimeout = 5
-                }.ToString();
-                using var conn = new SqliteConnection(connStr);
-                conn.Open();
-                using var tx = conn.BeginTransaction();
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, datetime('now')); SELECT last_insert_rowid();";
-                    newPersonId = Convert.ToInt64(cmd.ExecuteScalar());
-                }
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = "UPDATE face_prints SET person_id = @newPid WHERE id = @faceId";
-                    cmd.Parameters.AddWithValue("@newPid", newPersonId);
-                    cmd.Parameters.AddWithValue("@faceId", faceId);
-                    cmd.ExecuteNonQuery();
-                }
-                tx.Commit();
-            });
+            var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "reassignFace",
+                () => EngineClient.Instance.ReassignFaceAsync(faceId, createNewPerson: true),
+                TimeSpan.FromSeconds(30));
+            EnsureFaceMutationSucceeded(result, faceId);
 
             var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
             if (tile != null) _faces.Remove(tile);
-            StatusText.Text = $"Split Face #{faceId} into new Person #{newPersonId}.";
+            StatusText.Text = $"Split Face #{faceId} into a new person.";
         }
         catch (Exception ex)
         {
@@ -267,22 +236,11 @@ public sealed partial class PersonDetailSheet : UserControl
     {
         try
         {
-            await Task.Run(() =>
-            {
-                var connStr = new SqliteConnectionStringBuilder
-                {
-                    DataSource = AppPaths.DbPath,
-                    Mode = SqliteOpenMode.ReadWrite,
-                    DefaultTimeout = 5
-                }.ToString();
-                using var conn = new SqliteConnection(connStr);
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = "UPDATE face_prints SET person_id = @targetId WHERE id = @faceId";
-                cmd.Parameters.AddWithValue("@targetId", selected.PersonId);
-                cmd.Parameters.AddWithValue("@faceId", faceId);
-                cmd.ExecuteNonQuery();
-            });
+            var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "reassignFace",
+                () => EngineClient.Instance.ReassignFaceAsync(faceId, selected.PersonId),
+                TimeSpan.FromSeconds(30));
+            EnsureFaceMutationSucceeded(result, faceId);
 
             var tile = _faces.FirstOrDefault(f => f.FaceId == faceId);
             if (tile != null) _faces.Remove(tile);
@@ -295,6 +253,23 @@ public sealed partial class PersonDetailSheet : UserControl
         }
     }
 
+    private static void EnsureFaceMutationSucceeded(BulkActionResult result, long faceId)
+    {
+        if (result.Failed == 0 && result.Succeeded > 0) return;
+        string? detail = null;
+        foreach (var message in result.Messages)
+        {
+            if (message is not null && !message.Ok)
+            {
+                detail = message.Message;
+                break;
+            }
+        }
+        detail ??= result.Messages.Count > 0 ? result.Messages[0]?.Message : null;
+        detail ??= $"Face #{faceId} was not changed.";
+        throw new InvalidOperationException(detail);
+    }
+
     private sealed class LoadResult
     {
         public string Title = "";
@@ -304,6 +279,7 @@ public sealed partial class PersonDetailSheet : UserControl
         public string Suffix = "";
         public bool IsUnknown;
         public int MemberCount;
+        public int FileCount;
         public bool Found;
         public List<FaceTile> Faces = new();
         public string? Error;
@@ -312,8 +288,222 @@ public sealed partial class PersonDetailSheet : UserControl
     public void SetPerson(long personId, string? displayName)
     {
         _personId = personId;
+        _fileCount = 0;
         HeaderText.Text = string.IsNullOrEmpty(displayName) ? $"Person #{personId}" : displayName;
+        TagAllPhotosStatus.Visibility = Visibility.Collapsed;
+        SyncTagAllPhotosControls();
         Load();
+    }
+
+    private void OnUnknownChecked(object sender, RoutedEventArgs e)
+    {
+        NameFieldsPanel.Visibility = Visibility.Collapsed;
+        SyncTagAllPhotosControls();
+    }
+
+    private void OnUnknownUnchecked(object sender, RoutedEventArgs e)
+    {
+        NameFieldsPanel.Visibility = Visibility.Visible;
+        SyncTagAllPhotosControls();
+    }
+
+    private void OnNameFieldChanged(object sender, TextChangedEventArgs e)
+        => SyncTagAllPhotosControls();
+
+    private string CurrentPersonTagName() => ReadStore.FormatPersonTagName(
+        TitleBox.Text,
+        FirstBox.Text,
+        MiddleBox.Text,
+        LastBox.Text,
+        SuffixBox.Text,
+        null);
+
+    private string? PreviousPersonTagIfDifferent(string currentTag)
+    {
+        if (_personId <= 0 || currentTag.Length == 0) return null;
+        var previous = AppViewModel.Instance.Settings.LastPersonTag(_personId);
+        return !string.IsNullOrWhiteSpace(previous)
+               && !string.Equals(previous, currentTag, StringComparison.OrdinalIgnoreCase)
+            ? previous
+            : null;
+    }
+
+    private void SyncTagAllPhotosControls()
+    {
+        if (TagPersonPanel is null
+            || TagAllPhotosButton is null
+            || ReplacePersonTagButton is null)
+        {
+            return;
+        }
+        var unknown = IsUnknownCheckBox?.IsChecked == true;
+        var name = CurrentPersonTagName();
+        var previousTag = PreviousPersonTagIfDifferent(name);
+        var busy = System.Threading.Volatile.Read(ref _tagInFlight) != 0;
+        TagPersonPanel.Visibility = !unknown && _fileCount > 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        TagAllPhotosButton.IsEnabled = !busy && name.Length > 0;
+        TagAllPhotosButtonText.Text = name.Length == 0
+            ? "Enter a name to tag these photos"
+            : busy
+                ? $"Tagging {_fileCount:N0} photo{(_fileCount == 1 ? "" : "s")}…"
+                : $"Tag all {_fileCount:N0} photo{(_fileCount == 1 ? "" : "s")} with “{name}”";
+        ReplacePersonTagButton.Visibility = previousTag is null
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        ReplacePersonTagButton.IsEnabled = !busy && previousTag is not null;
+        if (previousTag is not null)
+        {
+            ReplacePersonTagButtonText.Text = $"Replace “{previousTag}” with “{name}”";
+            ToolTipService.SetToolTip(
+                ReplacePersonTagButton,
+                $"Removes only the old person tag “{previousTag}” and adds “{name}”.");
+        }
+        TagAllPhotosProgress.IsActive = busy;
+        TagAllPhotosProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void OnTagAllPhotosClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnTagAllPhotosClicked), TagAllPhotosAsync);
+
+    private async void OnReplacePersonTagClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(
+            nameof(OnReplacePersonTagClicked),
+            () => ApplyPersonTagAsync(replacePrevious: true));
+
+    private Task TagAllPhotosAsync() => ApplyPersonTagAsync(replacePrevious: false);
+
+    private async Task ApplyPersonTagAsync(bool replacePrevious)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _tagInFlight, 1, 0) != 0) return;
+        SyncTagAllPhotosControls();
+        TagAllPhotosStatus.Visibility = Visibility.Collapsed;
+        var personId = _personId;
+        var tag = CurrentPersonTagName();
+        var previousTag = replacePrevious ? PreviousPersonTagIfDifferent(tag) : null;
+        IReadOnlyDictionary<long, List<string>>? priorTags = null;
+        var confirmed = new HashSet<long>();
+        var undoRegistered = false;
+        try
+        {
+            if (tag.Length == 0 || (replacePrevious && previousTag is null)) return;
+            await using var store = new ReadStore(AppPaths.DbPath);
+            await store.OpenAsync();
+            var fileIds = await store.PersonFileIdsAsync(personId, default);
+            if (_personId != personId) return;
+            if (fileIds.Count == 0)
+            {
+                TagAllPhotosStatus.Text = "No indexed photos currently belong to this person.";
+                TagAllPhotosStatus.Visibility = Visibility.Visible;
+                return;
+            }
+
+            priorTags = await TagChangeJournal.CapturePriorUserTagsAsync(fileIds);
+            uint reportedFailed = 0;
+            string? firstFailure = null;
+            void Accumulate(BulkActionResult result, IReadOnlyList<long> expected)
+            {
+                reportedFailed += result.Failed;
+                firstFailure ??= result.Messages
+                    .FirstOrDefault(message => message is not null && !message.Ok)
+                    ?.Message;
+                foreach (var fileId in BulkActionResultTruth
+                             .ConfirmedSuccessfulFileIds(result, expected))
+                {
+                    confirmed.Add(fileId);
+                }
+            }
+
+            if (previousTag is null)
+            {
+                var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "applyTags",
+                    () => EngineClient.Instance.ApplyTagsAsync(fileIds, new[] { tag }, "add"),
+                    BulkActionTimeout.ForFileCount(fileIds.Count));
+                Accumulate(result, fileIds);
+            }
+            else
+            {
+                var groups = TagChangeJournal.BuildScopedReplacementGroups(
+                    fileIds,
+                    priorTags,
+                    previousTag,
+                    tag);
+                foreach (var group in groups)
+                {
+                    var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                        "applyTags",
+                        () => EngineClient.Instance.ApplyTagsAsync(group.Ids, group.Tags, "replace"),
+                        BulkActionTimeout.ForFileCount(group.Ids.Count));
+                    Accumulate(result, group.Ids);
+                }
+            }
+
+            var expectedCount = fileIds.Distinct().Count();
+            var failed = Math.Max((long)reportedFailed, expectedCount - confirmed.Count);
+            var complete = failed == 0 && confirmed.Count == expectedCount;
+            var historyPersisted = true;
+            if (confirmed.Count > 0)
+            {
+                TagChangeJournal.PushUndo(
+                    TagChangeJournal.FormatLabel(
+                        previousTag is null ? "add" : "replace",
+                        confirmed.Count),
+                    confirmed.OrderBy(id => id).ToArray(),
+                    priorTags);
+                undoRegistered = true;
+            }
+            if (complete)
+            {
+                var settings = AppViewModel.Instance.Settings;
+                settings.RecordPersonTag(personId, tag);
+                historyPersisted = await settings.SaveImmediatelyAsync();
+            }
+            if (_personId != personId) return;
+            if (!complete)
+            {
+                TagAllPhotosStatus.Text =
+                    $"Updated {confirmed.Count:N0}; {failed:N0} failed"
+                    + (string.IsNullOrWhiteSpace(firstFailure) ? "." : $" — {firstFailure}");
+            }
+            else if (previousTag is null)
+            {
+                TagAllPhotosStatus.Text =
+                    $"Tagged {confirmed.Count:N0} photo{(confirmed.Count == 1 ? "" : "s")} with “{tag}”.";
+            }
+            else
+            {
+                TagAllPhotosStatus.Text =
+                    $"Replaced “{previousTag}” with “{tag}” on {confirmed.Count:N0} photo{(confirmed.Count == 1 ? "" : "s")}.";
+            }
+            if (!historyPersisted)
+            {
+                TagAllPhotosStatus.Text +=
+                    " The photo tags were applied, but FileID couldn't save the rename history; check settings-folder permissions.";
+            }
+            TagAllPhotosStatus.Visibility = Visibility.Visible;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("TagAllPhotosAsync failed: " + ex.Message);
+            TagAllPhotosStatus.Text = "Couldn't tag these photos: " + ex.Message;
+            TagAllPhotosStatus.Visibility = Visibility.Visible;
+        }
+        finally
+        {
+            if (!undoRegistered && priorTags is not null && confirmed.Count > 0)
+            {
+                TagChangeJournal.PushUndo(
+                    TagChangeJournal.FormatLabel(
+                        previousTag is null ? "add" : "replace",
+                        confirmed.Count),
+                    confirmed.OrderBy(id => id).ToArray(),
+                    priorTags);
+            }
+            System.Threading.Interlocked.Exchange(ref _tagInFlight, 0);
+            SyncTagAllPhotosControls();
+        }
     }
 
     private async void Load()
@@ -343,7 +533,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 // Pull structured name fields + legacy name + is_unknown flag.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0), p.name " +
+                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COUNT(DISTINCT fp.file_id), COALESCE(p.is_unknown, 0), p.name " +
                                       "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
                                       "WHERE p.id = @id GROUP BY p.id";
                     cmd.Parameters.AddWithValue("@id", personId);
@@ -357,8 +547,9 @@ public sealed partial class PersonDetailSheet : UserControl
                         res.Last = r.IsDBNull(3) ? "" : r.GetString(3);
                         res.Suffix = r.IsDBNull(4) ? "" : r.GetString(4);
                         res.MemberCount = r.GetInt32(5);
-                        res.IsUnknown = r.GetInt32(6) != 0;
-                        var rawName = r.IsDBNull(7) ? "" : r.GetString(7);
+                        res.FileCount = r.GetInt32(6);
+                        res.IsUnknown = r.GetInt32(7) != 0;
+                        var rawName = r.IsDBNull(8) ? "" : r.GetString(8);
                         if (string.IsNullOrWhiteSpace(res.First) && !string.IsNullOrWhiteSpace(rawName) && !rawName.StartsWith("Person ", StringComparison.OrdinalIgnoreCase))
                         {
                             res.First = rawName;
@@ -406,9 +597,12 @@ public sealed partial class PersonDetailSheet : UserControl
                 LastBox.Text = result.Last;
                 SuffixBox.Text = result.Suffix;
                 IsUnknownCheckBox.IsChecked = result.IsUnknown;
+                NameFieldsPanel.Visibility = result.IsUnknown ? Visibility.Collapsed : Visibility.Visible;
+                _fileCount = result.FileCount;
                 MemberCountText.Text = result.MemberCount > result.Faces.Count
                     ? $"{result.MemberCount} faces clustered — showing the {result.Faces.Count} clearest."
                     : $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
+                SyncTagAllPhotosControls();
             }
             _faces.Clear();
             foreach (var f in result.Faces) _faces.Add(f);
@@ -497,7 +691,10 @@ public sealed partial class PersonDetailSheet : UserControl
                     s.PeopleHideUnknown = true;
                     s.Save();
                 }
-                catch { /* ignore */ }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("PersonDetailSheet unknown-visibility save failed: " + ex.Message);
+                }
                 return true;
             }
 

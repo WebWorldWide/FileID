@@ -58,13 +58,15 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // direct Bindings.Update() below forces re-evaluation even
             // if a PropertyChanged event was dropped (singleton first-
             // touched off the UI thread, etc.).
-            try { Svc.Refresh(); } catch { }
+            try { Svc.Refresh(); }
+            catch (Exception ex) { DebugLog.Warn("Settings model refresh failed: " + ex.Message); }
             // sync the CUDA llama.cpp + cuDNN install buttons to
             // reflect already-installed state at page load. Before this
             // the buttons always showed "Install" and the user had to
             // click them just to see the state flip (matching engine's
             // immediate sentinel-check short-circuit).
-            try { SyncInstallButtonStates(); } catch { }
+            try { SyncInstallButtonStates(); }
+            catch (Exception ex) { DebugLog.Warn("Settings install-state sync failed: " + ex.Message); }
             // Force a bindings refresh after sentinel re-seed. Without
             // this, the ArcFace / MobileCLIP install buttons can stay on
             // "Install" at page load even when the sentinels exist on
@@ -72,12 +74,20 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // PropertyChanged event when Refresh()'s SeedSlot writes a
             // status equal to the cached field. NEXT.md tracked this
             // as the "install-state detection at page load" bug.
-            try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
+            try
+            {
+                DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
+                    "SettingsView.Bindings.Update",
+                    Bindings.Update));
+            }
+            catch (Exception ex) { DebugLog.Warn("Settings binding refresh enqueue failed: " + ex.Message); }
             // Populate the Recent Scans card. Query is cheap (≤5 rows)
             // so we do it inline on the dispatcher.
-            try { _ = PopulateRecentScansAsync(); } catch { }
-            try { PopulateExcludedFolders(); } catch { }
-            try { PopulateDeepAnalyzeExcludedFolders(); } catch { }
+            _ = DebugLog.SafeRunAsync(nameof(PopulateRecentScansAsync), PopulateRecentScansAsync);
+            try { PopulateExcludedFolders(); }
+            catch (Exception ex) { DebugLog.Warn("Settings excluded-folder render failed: " + ex.Message); }
+            try { PopulateDeepAnalyzeExcludedFolders(); }
+            catch (Exception ex) { DebugLog.Warn("Settings Deep Analyze exclusion render failed: " + ex.Message); }
         };
     }
 

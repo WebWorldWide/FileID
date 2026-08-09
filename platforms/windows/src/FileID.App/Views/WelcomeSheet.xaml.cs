@@ -35,6 +35,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     private bool _autoDismissScheduled;
     private bool _syncingVlmPicker;
+    private int _dismissInFlight;
 
     /// <summary>Cancels the auto-dismiss task + any in-flight restart
     /// prompt if the sheet unloads before they complete. Without this
@@ -557,26 +558,27 @@ public sealed partial class WelcomeSheet : UserControl
     /// (FileIDApp.swift:39). Idempotent — safe to invoke from both the
     /// auto-dismiss path and the manual Skip/Done paths.</summary>
     private void RaiseDismissed()
+        => _ = DebugLog.SafeRunAsync(nameof(RaiseDismissed), RaiseDismissedAsync);
+
+    private async Task RaiseDismissedAsync()
     {
-        try
+        if (Interlocked.CompareExchange(ref _dismissInFlight, 1, 0) != 0) return;
+        // Use the ONE canonical in-memory instance, not a throwaway
+        // Load(): the long-lived AppViewModel instance would otherwise
+        // serialize its stale snapshot on its next Save() and revert this
+        // write (the Welcome sheet then re-appears every launch).
+        var settings = AppViewModel.Instance.Settings;
+        if (!settings.WelcomeSheetSeen)
         {
-            // Use the ONE canonical in-memory instance, not a throwaway
-            // Load(): the long-lived AppViewModel instance would otherwise
-            // serialize its stale snapshot on its next Save() and revert this
-            // write (the Welcome sheet then re-appears every launch).
-            var settings = AppViewModel.Instance.Settings;
-            if (!settings.WelcomeSheetSeen)
+            settings.WelcomeSheetSeen = true;
+            if (!await settings.SaveImmediatelyAsync())
             {
-                settings.WelcomeSheetSeen = true;
-                // Synchronous flush, not the debounced Save(): dismissing the
-                // sheet then closing the app within the ~200 ms debounce window
-                // would otherwise drop the write and re-show the sheet next
-                // launch. Mirrors MainWindow.OnClosed's SaveImmediately().
-                settings.SaveImmediately();
-                DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
+                settings.WelcomeSheetSeen = false;
+                throw new InvalidOperationException(
+                    "The welcome preference could not be saved. Check FileID's settings-folder permissions and try again.");
             }
+            DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
         }
-        catch (Exception ex) { DebugLog.Warn("RaiseDismissed: settings.Save threw: " + ex.Message); }
         Dismissed?.Invoke(this, EventArgs.Empty);
     }
 

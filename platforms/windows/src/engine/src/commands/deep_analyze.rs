@@ -13,9 +13,10 @@ use crate::ipc::{
     self, sink::Sink, DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeProgress,
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, EngineError, EventPayload, IpcEvent, Wrap,
 };
+use crate::platform::SleepGuard;
 use crate::pipeline::deep_analyze::{
-    analyze_file, analyze_file_via_server, is_vlm_server_request_error, sanitize_proposed_name,
-    AnalyzeMode, AnalyzeOutcome,
+    analyze_file, analyze_file_via_server, analyze_file_without_vlm, is_vlm_server_request_error,
+    sanitize_proposed_name, AnalyzeMode, AnalyzeOutcome,
 };
 
 /// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
@@ -311,6 +312,7 @@ pub(crate) async fn handle_deep_analyze_file(
     else {
         return;
     };
+    let _sleep = SleepGuard::acquire();
     if crate::coordinator::process_gpu_device_removed() {
         send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
         return;
@@ -325,8 +327,21 @@ pub(crate) async fn handle_deep_analyze_file(
     ))))
     .await;
 
-    let runner = match crate::models::vlm::VlmRunner::find() {
-        Ok(r) => r,
+    let requires_vlm_backend = {
+        let connection = db.lock();
+        connection
+            .query_row(
+                "SELECT kind FROM files WHERE id=?1",
+                [payload.file_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_or(true, |kind| kind != "audio")
+    };
+    let runner = match requires_vlm_backend
+        .then(crate::models::vlm::VlmRunner::find)
+        .transpose()
+    {
+        Ok(runner) => runner,
         Err(err) => {
             if crate::coordinator::process_gpu_device_removed() {
                 send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
@@ -366,15 +381,7 @@ pub(crate) async fn handle_deep_analyze_file(
         let conn = db.lock();
         fetch_face_names(&conn, file_id)
     };
-    let outcome = analyze_file(
-        db,
-        &runner,
-        file_id,
-        &model_kind,
-        AnalyzeMode::Both,
-        cancel.clone(),
-        &face_names,
-        move |chunk| {
+    let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if the
@@ -406,9 +413,29 @@ pub(crate) async fn handle_deep_analyze_file(
                     current_caption: Some(snapshot),
                 },
             ))));
-        },
-    )
-    .await;
+        };
+    let outcome = if let Some(runner) = runner.as_ref() {
+        analyze_file(
+            db.clone(),
+            runner,
+            file_id,
+            &model_kind,
+            AnalyzeMode::Both,
+            cancel.clone(),
+            &face_names,
+            on_token,
+        )
+        .await
+    } else {
+        analyze_file_without_vlm(
+            &db,
+            file_id,
+            &model_kind,
+            AnalyzeMode::Both,
+            &cancel,
+        )
+        .await
+    };
 
     match outcome {
         Ok(out) => {
@@ -566,7 +593,7 @@ pub(crate) async fn handle_deep_analyze_all(
     {
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "deep_analyze_no_supported_files".into(),
-            message: "None of the selected files can be analyzed. Select an image, video, audio file, PDF, or OBJ model and try again.".into(),
+            message: "None of the selected files can be analyzed. Select an image, video, document, audio file, PDF, or OBJ model and try again.".into(),
             path: None,
             model_kind: Some(model_kind.to_string()),
         }))))
@@ -590,16 +617,17 @@ pub(crate) async fn handle_deep_analyze_all(
 /// compiled in (default-on) — without it `rasterize_for_vlm` returns a
 /// feature-gate error for every PDF, so queuing them would only manufacture
 /// failures (F-C1-005). `'audio'` is named from its embedded title/artist tags
-/// (no VLM — `analyze_metadata_named_file`), not rasterized. `failed = 0`
+/// (no VLM — `analyze_metadata_named_file`), and `'doc'` is named from bounded
+/// extracted text by the same metadata path. `failed = 0`
 /// excludes rows a prior GPU death marked failed, parity with macOS (F-C1-022).
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
     #[cfg(feature = "pdf-analyze")]
     {
-        "kind IN ('image','video','pdf','audio','model') AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')"
+        "kind IN ('image','video','pdf','doc','audio','model') AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')"
     }
     #[cfg(not(feature = "pdf-analyze"))]
     {
-        "kind IN ('image','video','audio','model') AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')"
+        "kind IN ('image','video','doc','audio','model') AND failed = 0 AND (kind != 'model' OR lower(path_text) LIKE '%.obj')"
     }
 }
 
@@ -769,6 +797,29 @@ fn filter_pending_file_ids(
         .collect())
 }
 
+fn batch_requires_vlm_backend(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    file_ids: &[i64],
+    mode: AnalyzeMode,
+) -> rusqlite::Result<bool> {
+    let connection = db.lock();
+    for chunk in file_ids.chunks(ID_QUERY_CHUNK) {
+        let placeholders = (0..chunk.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT kind FROM files WHERE id IN ({placeholders})");
+        let mut statement = connection.prepare(&sql)?;
+        let kinds = statement.query_map(rusqlite::params_from_iter(chunk), |row| {
+            row.get::<_, String>(0)
+        })?;
+        for kind in kinds {
+            let kind = kind?;
+            if kind != "audio" && !(kind == "doc" && mode == AnalyzeMode::TagsOnly) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// `vlm_full_model` is the successful full-`Both` completion marker. A full pass
 /// subsumes later partial requests for the same model. Partial-only work stays
 /// unmarked, and a partial model switch invalidates the old marker, so a later
@@ -830,6 +881,7 @@ async fn run_deep_analyze_batch(
         .await;
         return;
     }
+    let _sleep = SleepGuard::acquire();
     if crate::coordinator::process_gpu_device_removed() {
         send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
         return;
@@ -845,6 +897,14 @@ async fn run_deep_analyze_batch(
     } else {
         AnalyzeMode::CaptionAndTags
     };
+    let requires_vlm_backend = match batch_requires_vlm_backend(&db, &file_ids, mode) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(?err, "deep_analyze backend-requirement query");
+            send_early_failure_complete(&sink, model_kind, &cancel).await;
+            return;
+        }
+    };
 
     // Resolve both VLM backends up front so we can gate correctly BEFORE
     // sending DeepAnalyzeStarting. The persistent llama-server only needs
@@ -858,12 +918,14 @@ async fn run_deep_analyze_batch(
     // clear, actionable error BEFORE DeepAnalyzeStarting — the client's Error
     // handler doesn't clear DeepAnalyze* state, so erroring after Starting would
     // strand the UI on a "Loading model…" banner.
-    let weights = crate::models::vlm::find_weights(model_kind);
+    let weights = requires_vlm_backend
+        .then(|| crate::models::vlm::find_weights(model_kind))
+        .flatten();
     if crate::coordinator::process_gpu_device_removed() {
         send_gpu_failure_complete(&sink, model_kind, 0, 1, 0.0).await;
         return;
     }
-    if weights.is_none() {
+    if requires_vlm_backend && weights.is_none() {
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "vlm_model_missing".into(),
             message: format!(
@@ -882,8 +944,10 @@ async fn run_deep_analyze_batch(
     // The CLI binary (llama-mtmd-cli.exe) is OPTIONAL: the persistent server only
     // needs llama-server.exe. None just means "server-only"; the no-backend gate
     // below surfaces a runtime error if the server also can't start.
-    let runner = crate::models::vlm::VlmRunner::find().ok();
-    if runner.is_none() {
+    let runner = requires_vlm_backend
+        .then(crate::models::vlm::VlmRunner::find)
+        .and_then(Result::ok);
+    if requires_vlm_backend && runner.is_none() {
         tracing::warn!("[VLM] llama-mtmd-cli unavailable; will rely on the persistent server");
     }
 
@@ -985,7 +1049,7 @@ async fn run_deep_analyze_batch(
     // start AND there's no CLI binary. Surface the runtime problem ONCE here
     // instead of failing every file in the loop, then clear the UI's
     // DeepAnalyze* state (Starting was already sent above).
-    if server.is_none() && runner.is_none() {
+    if requires_vlm_backend && server.is_none() && runner.is_none() {
         if crate::coordinator::process_gpu_device_removed() {
             send_gpu_failure_complete(&sink, model_kind, 0, 1, started_at.elapsed().as_secs_f64())
                 .await;
@@ -1185,6 +1249,15 @@ async fn run_deep_analyze_batch(
                         cancel.clone(),
                         &face_names,
                         on_token,
+                    )
+                    .await
+                } else if !requires_vlm_backend {
+                    analyze_file_without_vlm(
+                        &db,
+                        file_id,
+                        model_kind,
+                        mode,
+                        &cancel,
                     )
                     .await
                 } else {
@@ -1432,7 +1505,10 @@ async fn run_deep_analyze_batch(
 
 #[cfg(test)]
 mod tests {
-    use super::{append_caption_chunk, reserve_batch_proposed_name, GpuCancelBridge};
+    use super::{
+        append_caption_chunk, batch_requires_vlm_backend, reserve_batch_proposed_name,
+        AnalyzeMode, GpuCancelBridge,
+    };
     use parking_lot::Mutex;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1902,6 +1978,38 @@ mod tests {
     }
 
     #[test]
+    fn metadata_only_batches_do_not_load_a_visual_model() {
+        let db = in_memory_db();
+        let audio = insert_file(&db, r"C:\lib\song.flac", "audio", 0, None, None);
+        let document = insert_file(&db, r"C:\lib\notes.txt", "doc", 0, None, None);
+        let image = insert_file(&db, r"C:\lib\photo.jpg", "image", 0, None, None);
+        assert!(!batch_requires_vlm_backend(
+            &db,
+            &[audio],
+            AnalyzeMode::Both
+        )
+        .unwrap());
+        assert!(!batch_requires_vlm_backend(
+            &db,
+            &[audio, document],
+            AnalyzeMode::TagsOnly
+        )
+        .unwrap());
+        assert!(batch_requires_vlm_backend(
+            &db,
+            &[document],
+            AnalyzeMode::Both
+        )
+        .unwrap());
+        assert!(batch_requires_vlm_backend(
+            &db,
+            &[audio, image],
+            AnalyzeMode::TagsOnly
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn folder_scope_is_absolute_normalized_and_path_boundary_safe() {
         assert_eq!(
             super::normalize_folder_scope(" C:/Library/People/ "),
@@ -1987,8 +2095,9 @@ mod tests {
         let pdf = insert_file(&db, r"C:\lib\c.pdf", "pdf", 0, None, None);
         // failed=1 image (GPU-death-marked) must NOT be a target.
         let dead = insert_file(&db, r"C:\lib\d.jpg", "image", 1, None, None);
-        // A non-renderable, non-metadata-nameable kind (doc) is never a target.
-        let _doc = insert_file(&db, r"C:\lib\e.docx", "doc", 0, None, None);
+        // Documents are analyzed from their bounded extracted text, without a
+        // visual VLM call, so they must be first-class targets too.
+        let doc = insert_file(&db, r"C:\lib\e.docx", "doc", 0, None, None);
         // Audio IS a target now — named from embedded tags (no VLM).
         let aud = insert_file(&db, r"C:\lib\f.mp3", "audio", 0, None, None);
         let obj = insert_file(&db, r"C:\lib\g.obj", "model", 0, None, None);
@@ -2004,6 +2113,7 @@ mod tests {
         assert!(ids.contains(&img), "image must be a target");
         assert!(ids.contains(&vid), "video must be a target");
         assert!(ids.contains(&aud), "audio must be a target (metadata-named)");
+        assert!(ids.contains(&doc), "documents must be targets (text-named)");
         assert!(ids.contains(&obj), "OBJ is the supported model format");
         assert!(!ids.contains(&stl), "unsupported model formats must not be queued");
         #[cfg(feature = "pdf-analyze")]

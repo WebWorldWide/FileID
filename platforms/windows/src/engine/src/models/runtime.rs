@@ -191,6 +191,7 @@ fn bind_chain_with_availability(
     probe: &RuntimeProbe,
     tensorrt_provider_present: bool,
 ) -> Vec<ExecutionProvider> {
+    let directml_override = matches!(read_user_ep_override(), Some(ExecutionProvider::DirectMl));
     priority_chain(probe.vendor)
         .into_iter()
         .filter(|ep| match ep {
@@ -198,7 +199,11 @@ fn bind_chain_with_availability(
             ExecutionProvider::TensorRt => tensorrt_provider_present,
             ExecutionProvider::OpenVino => probe.openvino_pack_present,
             ExecutionProvider::Qnn => probe.qnn_pack_present,
-            ExecutionProvider::DirectMl | ExecutionProvider::Cpu => true,
+            // The matched CUDA ORT runtime does not export DirectML. Keep the
+            // fallback only on the base runtime, or when the user explicitly
+            // selected DirectML (which also suppresses the CUDA runtime pin).
+            ExecutionProvider::DirectMl => !probe.cuda_pack_present || directml_override,
+            ExecutionProvider::Cpu => true,
         })
         .collect()
 }
@@ -584,12 +589,21 @@ fn tensorrt_provider_present() -> bool {
     let Ok(root) = crate::paths::models_dir() else {
         return false;
     };
-    crate::platform::find_file_under(
+    let provider = crate::platform::find_file_under(
         &root.join("packs").join("cuda"),
         "onnxruntime_providers_tensorrt.dll",
         4,
-    )
-    .is_some()
+    );
+    // The ORT TensorRT provider is only loadable when NVIDIA's TensorRT
+    // runtime is installed as well. The CUDA performance pack intentionally
+    // does not ship that separately licensed dependency.
+    provider.is_some()
+        && crate::platform::find_file_under(
+            &root.join("packs").join("cuda"),
+            "nvinfer_10.dll",
+            4,
+        )
+        .is_some()
 }
 
 /// The CUDA EP's native dependency closure. `onnxruntime_providers_cuda.dll`
@@ -807,6 +821,12 @@ fn openvino_provider_present() -> bool {
 /// build pyke's base lacks. AMD/Qualcomm/None use DirectML/CPU — no pinned
 /// runtime, so this returns None.
 pub fn active_pack_dir() -> Option<(&'static str, PathBuf)> {
+    if matches!(
+        read_user_ep_override(),
+        Some(ExecutionProvider::DirectMl | ExecutionProvider::Cpu)
+    ) {
+        return None;
+    }
     let root = crate::paths::models_dir().ok()?;
     let (vendor, _, _) = probe_gpu_vendor();
     let ep = match vendor {
@@ -1016,13 +1036,9 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
 mod tests {
     use super::*;
 
-    /// Regression guard: every vendor's EP chain must end at CPU (the
-    /// always-present floor) and must include DirectML (the always-tried
-    /// fallback on Windows). The vendor-specific accelerated EPs come
-    /// first; ORT registers them in order and silently falls through
-    /// when an EP's DLLs aren't present at runtime — so unconditional
-    /// chain entry is correct here, the dynamic gating happens at
-    /// load time, not chain-build time.
+    /// Regression guard: every vendor's requested EP chain must end at CPU
+    /// (the always-present floor). Availability filtering below removes
+    /// providers whose matched native runtime cannot load them.
     fn assert_chain_terminates_at_cpu_with_directml(vendor: GpuVendor, chain: &[ExecutionProvider]) {
         assert_eq!(
             chain.last(),
@@ -1069,6 +1085,24 @@ mod tests {
         assert_eq!(
             bind_chain_with_availability(&probe, false),
             vec![ExecutionProvider::DirectMl, ExecutionProvider::Cpu]
+        );
+    }
+
+    #[test]
+    fn nvidia_bind_chain_omits_directml_from_cuda_runtime() {
+        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
+        let probe = RuntimeProbe {
+            vendor: GpuVendor::Nvidia,
+            adapter_name: None,
+            adapter_index: Some(0),
+            provider: ExecutionProvider::Cuda,
+            cuda_pack_present: true,
+            openvino_pack_present: false,
+            qnn_pack_present: false,
+        };
+        assert_eq!(
+            bind_chain_with_availability(&probe, false),
+            vec![ExecutionProvider::Cuda, ExecutionProvider::Cpu]
         );
     }
 

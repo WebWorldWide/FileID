@@ -75,6 +75,11 @@
   </branding>
 
   <releases>
+    <release version="0.1.0" date="2026-08-07">
+      <description>
+        <p>Fresh cross-platform functional baseline with all six native product areas, People naming and face reassignment parity, grounded Deep Analyze results, and native sleep inhibition for long-running scans.</p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-08-03">
       <description>
         <p>The macOS scan sidebar now keeps counting, estimating, and time-left feedback visible throughout a scan. The macOS engine is packaged and launched as a background agent, preventing a second Dock application during local AI processing.</p>
@@ -93,11 +98,6 @@
     <release version="0.1.1" date="2026-07-11">
       <description>
         <p>Cross-platform release with hardened CLI/TUI workflows, packaging, and engine portability.</p>
-      </description>
-    </release>
-    <release version="0.1.0" date="2026-06-20">
-      <description>
-        <p>First Linux preview: GTK4 + libadwaita app across all six tabs.</p>
       </description>
     </release>
   </releases>

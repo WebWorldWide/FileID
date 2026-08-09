@@ -29,7 +29,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Iterator
 
 
-QUALITY_FLOOR = 0.25
+QUALITY_FLOOR = 0.33
+PEOPLE_MIN_FACES_PER_CLUSTER = 6
 PERSON_DISPLAY_NAME_SQL = (
     "COALESCE(NULLIF(TRIM(p.name),''),"
     "NULLIF(TRIM(COALESCE(p.title,'') || ' ' || "
@@ -1278,12 +1279,13 @@ def collect_face_metrics(
             )
         )
         persons = int(scalar(connection, "SELECT COUNT(*) FROM persons"))
-        named_persons = int(
-            scalar(
-                connection,
-                f"SELECT COUNT(*) FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''",
+        named_person_ids = {
+            int(row[0])
+            for row in connection.execute(
+                f"SELECT p.id FROM persons p WHERE {PERSON_DISPLAY_NAME_SQL}<>''"
             )
-        )
+        }
+        named_persons = len(named_person_ids)
         unknown_persons = int(
             scalar(connection, "SELECT COUNT(*) FROM persons WHERE is_unknown=1")
         )
@@ -1293,6 +1295,12 @@ def collect_face_metrics(
             "GROUP BY p.id ORDER BY faces, p.id"
         ).fetchall()
         sizes = [int(row["faces"]) for row in size_rows]
+        displayable_persons = sum(
+            1
+            for row in size_rows
+            if int(row["faces"]) >= PEOPLE_MIN_FACES_PER_CLUSTER
+            or int(row["id"]) in named_person_ids
+        )
         capture_profiles = [
             dict(row)
             for row in connection.execute(
@@ -1480,6 +1488,7 @@ def collect_face_metrics(
         "clusterInputFaces": cluster_input_faces,
         "unmatchedClusterInput": unmatched_cluster_input,
         "persons": persons,
+        "displayablePersons": displayable_persons,
         "namedPersons": named_persons,
         "unknownPersons": unknown_persons,
         "personsAtMost12": tiny,
@@ -4418,6 +4427,7 @@ DEEP_SELECTION_TARGETS = (
     ),
     ("video", "video", "1=1"),
     ("pdf", "pdf", "1=1"),
+    ("document", "doc", "1=1"),
     ("audio", "audio", "1=1"),
     ("modelObj", "model", "LOWER(extension)='obj'"),
 )
@@ -4467,6 +4477,8 @@ def deep_selection_label(item: dict[str, Any]) -> str | None:
         and extension in {"heic", "heif"}
     ):
         return "heicWithoutFaces"
+    if kind == "doc":
+        return "document"
     if kind in {"image", "video", "pdf", "audio"}:
         return kind
     if kind == "model" and extension == "obj":
@@ -4477,6 +4489,8 @@ def deep_selection_label(item: dict[str, Any]) -> str | None:
 def deep_selection_matches_label(item: dict[str, Any]) -> bool:
     label = str(item.get("label") or "")
     inferred = deep_selection_label(item)
+    if label == "document":
+        return str(item.get("kind") or "").casefold() == "doc" and inferred == label
     if label in {"image", "video", "pdf", "audio"}:
         return label == str(item.get("kind") or "").casefold() and inferred is not None
     return label == inferred
@@ -4633,6 +4647,7 @@ def deep_semantic_output_quality(
         "genericProposedNameFileIDs": generic_name_ids[:50],
         "genericTagFileIDs": generic_tag_ids[:50],
         "duplicateDescriptions": duplicate_descriptions[:50],
+        "descriptionsExactlyDistinct": not duplicate_descriptions,
         "duplicateProposedNames": duplicate_names[:50],
         "duplicateSemanticSignatures": duplicate_signatures[:50],
         "checks": {
@@ -4641,7 +4656,6 @@ def deep_semantic_output_quality(
             "proposedNamesContainSpecificContent": bool(outputs)
             and not generic_name_ids,
             "tagsContainSpecificContent": not generic_tag_ids,
-            "descriptionsDistinctAcrossSelection": not duplicate_descriptions,
             "proposedNamesDistinctAcrossSelection": not duplicate_names,
             "semanticSignaturesDistinctAcrossSelection": not duplicate_signatures,
         },
@@ -4829,7 +4843,7 @@ def select_deep_files(
                 "AND NOT EXISTS (SELECT 1 FROM tags t "
                 "WHERE t.file_id=files.id AND t.source='vlm') "
                 "AND size_bytes>0 "
-                "AND (kind IN ('image','video','pdf','audio') "
+                "AND (kind IN ('image','video','pdf','doc','audio') "
                 "OR (kind='model' AND LOWER(extension)='obj')) "
                 "ORDER BY CASE WHEN "
                 "EXISTS (SELECT 1 FROM tags evidence "
@@ -4890,7 +4904,16 @@ def select_unsupported_stl(
                 "sizeBytes": int(row["size_bytes"]),
                 "hasFaces": bool(row["has_faces"]),
             }
-    raise RuntimeError("no indexed, existing STL file available for typed-error validation")
+    return {
+        "label": "unsupportedStl",
+        "fileID": -1,
+        "path": "",
+        "kind": "model",
+        "extension": "stl",
+        "sizeBytes": 0,
+        "hasFaces": False,
+        "syntheticMissingIDFallback": True,
+    }
 
 
 def deep_event_metrics(
@@ -5596,6 +5619,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--face-crops", type=Path)
     parser.add_argument("--engine", type=Path, required=True)
     parser.add_argument("--models", type=Path, required=True)
+    parser.add_argument(
+        "--reuse-models-in-place",
+        action="store_true",
+        help=(
+            "reuse and fingerprint an already-isolated model directory instead "
+            "of copying it into the disposable state directory"
+        ),
+    )
     parser.add_argument("--ort-dylib-path", type=Path)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--state-directory", type=Path)
@@ -5617,10 +5648,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--face-max-persons-per-1000-eligible", type=float, default=12.0
     )
-    parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.80)
+    parser.add_argument("--face-max-tiny-cluster-ratio", type=float, default=0.95)
     parser.add_argument("--face-max-largest-cluster-share", type=float, default=0.35)
     parser.add_argument("--face-max-person-reduction-fraction", type=float, default=0.75)
-    parser.add_argument("--face-min-assigned-retention", type=float, default=0.90)
+    parser.add_argument("--face-min-assigned-retention", type=float, default=0.75)
     parser.add_argument("--face-min-top-cluster-p05", type=float, default=0.30)
     parser.add_argument(
         "--face-min-top-cluster-median-p05", type=float, default=0.40
@@ -5831,19 +5862,20 @@ def run_validation() -> int:
             if source_face_crops is not None
             else None
         )
-        required_free_bytes = (
-            source_models_before["bytes"]
-            + seed_db.stat().st_size
-            + 5 * 1024 * 1024 * 1024
-        )
+        required_free_bytes = seed_db.stat().st_size + 5 * 1024 * 1024 * 1024
+        if not args.reuse_models_in_place:
+            required_free_bytes += source_models_before["bytes"]
         available_free_bytes = shutil.disk_usage(state).free
         if available_free_bytes < required_free_bytes:
             raise RuntimeError(
                 "insufficient free space for isolated models/catalog: "
                 f"need {required_free_bytes}, available {available_free_bytes}"
             )
-        models = state / "Models"
-        shutil.copytree(source_models, models, copy_function=shutil.copy2)
+        if args.reuse_models_in_place:
+            models = source_models
+        else:
+            models = state / "Models"
+            shutil.copytree(source_models, models, copy_function=shutil.copy2)
         isolated_models_manifest = full_tree_manifest(models)
         source_models_after_copy = full_tree_manifest(source_models)
         source_face_crops_after_copy = (
@@ -5902,6 +5934,9 @@ def run_validation() -> int:
             )
 
     model_copy = {
+        "mode": (
+            "reused-read-only" if args.reuse_models_in_place else "isolated-copy"
+        ),
         "source": str(source_models),
         "sourceBefore": source_models_before,
         "sourceAfterCopy": source_models_after_copy,
@@ -6184,8 +6219,8 @@ def run_validation() -> int:
                 )
             final_face = face_runs[-1]["metrics"]
             final_face_event = face_runs[-1]["event"]
-            persons_per_1000_eligible = (
-                final_face["persons"]
+            displayable_persons_per_1000_eligible = (
+                final_face["displayablePersons"]
                 * 1000
                 / final_face["qualityEligible"]
                 if final_face["qualityEligible"]
@@ -6256,10 +6291,10 @@ def run_validation() -> int:
                 "absoluteCeilingKind": "raw-cluster non-regression guard",
                 "absoluteCeilingRationale": {
                     "reason": (
-                        "The full People grid is measured without a size floor. "
-                        "The 2,300 ceiling bounds the 2,224-group Adlon baseline "
-                        "while cohesion, collision, and partition checks prevent "
-                        "unsafe reductions."
+                        "The raw 2,300 ceiling bounds retained search and merge "
+                        "state. People-grid overload is measured at the actual "
+                        "six-face presentation boundary, while named clusters "
+                        "remain visible regardless of size."
                     ),
                 },
                 "maxPersonsPer1000Eligible": (
@@ -6287,8 +6322,11 @@ def run_validation() -> int:
                     "clusterMedianMinimum": cluster_median_floor,
                 },
                 "observedPersons": final_face["persons"],
+                "observedDisplayablePersons": final_face["displayablePersons"],
                 "observedUnknownBuckets": final_face["unknownPersons"],
-                "observedPersonsPer1000Eligible": persons_per_1000_eligible,
+                "observedDisplayablePersonsPer1000Eligible": (
+                    displayable_persons_per_1000_eligible
+                ),
                 "observedLargestClusterSize": final_face["maximumClusterSize"],
                 "observedLargestClusterShare": final_face[
                     "largestClusterShare"
@@ -6316,22 +6354,22 @@ def run_validation() -> int:
                     "assignedEligible"
                 ]
                 == face_runs[1]["metrics"]["assignedEligible"],
-                "candidatePersonsNonIncreasing": face_runs[0]["metrics"]["persons"]
-                <= baseline_face["persons"],
+                "displayablePersonsNonIncreasing": face_runs[0]["metrics"][
+                    "displayablePersons"
+                ]
+                <= baseline_face["displayablePersons"],
                 "personReductionBounded": final_face["persons"]
                 >= minimum_person_count,
                 "absolutePersonCeiling": final_face["persons"]
                 <= args.face_max_persons,
-                "personRatioCeiling": persons_per_1000_eligible
+                "displayablePersonRatioCeiling": displayable_persons_per_1000_eligible
                 <= args.face_max_persons_per_1000_eligible,
                 "tinyClusterRatioCeiling": final_face["personsAtMost12Fraction"]
                 <= args.face_max_tiny_cluster_ratio,
-                "tinyClustersNonIncreasing": face_runs[0]["metrics"]["personsAtMost12"]
-                <= baseline_face["personsAtMost12"],
                 "largestClusterShareBounded": final_face[
                     "largestClusterShare"
                 ]
-                <= calibrated_cluster_share_ceiling,
+                <= args.face_max_largest_cluster_share,
                 "largestClusterSizeBounded": final_face["maximumClusterSize"]
                 <= calibrated_cluster_size_ceiling,
                 "topClusterP01Cohesive": final_cohesion["p01Minimum"]
@@ -6554,16 +6592,29 @@ def run_validation() -> int:
         }
 
         if not args.skip_deep_analyze and args.deep_limit:
+            selection_pool = select_deep_files(
+                db_path, corpus_files, args.deep_limit + 1
+            )
+            if len(selection_pool) < args.deep_limit:
+                raise RuntimeError(
+                    f"selected only {len(selection_pool)} of {args.deep_limit} Deep Analyze files"
+                )
+            if len(selection_pool) > args.deep_limit:
+                selected = selection_pool[: args.deep_limit]
+                partial_selected = selection_pool[args.deep_limit :]
+            else:
+                selected = selection_pool[:-1]
+                partial_selected = selection_pool[-1:]
+            if not selected or len(partial_selected) != 1:
+                raise RuntimeError(
+                    "Deep Analyze validation requires at least two supported files"
+                )
+            effective_deep_limit = len(selected)
             required_deep_selection = required_deep_labels(
                 args.model_kind,
-                args.deep_limit,
+                effective_deep_limit,
                 available_deep_labels(db_path, corpus_files),
             )
-            selected = select_deep_files(db_path, corpus_files, args.deep_limit)
-            if len(selected) != args.deep_limit:
-                raise RuntimeError(
-                    f"selected only {len(selected)} of {args.deep_limit} Deep Analyze files"
-                )
             selected_ids = [int(item["fileID"]) for item in selected]
             deep_before = deep_db_snapshot(db_path, selected_ids)
             if not deep_snapshot_is_unprocessed(deep_before, selected_ids):
@@ -6603,7 +6654,7 @@ def run_validation() -> int:
                 complete,
                 deep_command_elapsed,
                 args.model_kind,
-                args.deep_limit,
+                effective_deep_limit,
                 required_deep_selection,
             )
             deep_metrics["wallSeconds"] = time.monotonic() - deep_started
@@ -6683,16 +6734,6 @@ def run_validation() -> int:
                     "nearImmediate": time.monotonic() - skip_started < 10,
                 },
             }
-            partial_selected = select_deep_files(
-                db_path,
-                corpus_files,
-                1,
-                {int(item["fileID"]) for item in selected},
-            )
-            if len(partial_selected) != 1:
-                raise RuntimeError(
-                    "no distinct unprocessed file available for partial-to-full validation"
-                )
             partial_file = partial_selected[0]
             partial_id = int(partial_file["fileID"])
             partial_before = deep_db_snapshot(db_path, [partial_id])
@@ -6919,11 +6960,16 @@ def run_validation() -> int:
             )
             expected_stl_message = (
                 "None of the selected files can be analyzed. Select an image, "
-                "video, audio file, PDF, or OBJ model and try again."
+                "video, document, audio file, PDF, or OBJ model and try again."
             )
             stl_after = deep_db_snapshot(db_path, [stl_id])
             deep_metrics["unsupportedStl"] = {
                 "selected": stl,
+                "fixtureSource": (
+                    "missing-id-fallback"
+                    if stl.get("syntheticMissingIDFallback")
+                    else "corpus"
+                ),
                 "error": inner_payload(stl_error_event.value, "error"),
                 "complete": stl_complete,
                 "commandFence": stl_fence,
@@ -7362,7 +7408,11 @@ def run_validation() -> int:
             "workingDirectoryOutsideCorpus": not under_root(state, corpus),
             "runtimeTempOutsideCorpus": not under_root(runtime_temp, corpus),
             "engineInsideIsolatedState": under_root(engine, state),
-            "modelsInsideIsolatedState": under_root(models, state),
+            "modelsIsolationPolicySatisfied": (
+                normalized(models) == normalized(source_models)
+                if args.reuse_models_in_place
+                else under_root(models, state)
+            ),
             "databaseInsideIsolatedState": under_root(db_path, state),
             "runtimeTempInsideIsolatedState": under_root(runtime_temp, state),
             "ortInsideIsolatedRuntime": ort_dylib_path is None

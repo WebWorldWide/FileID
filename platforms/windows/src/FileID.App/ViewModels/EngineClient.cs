@@ -2794,20 +2794,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastProgress = null;
                             LastBatch = null;
                         }
-                        // Faces persist incrementally during a scan (dbwriter
-                        // commits per-batch), but auto-clustering otherwise fires
-                        // ONLY on ScanComplete. A Failed scan would leave
-                        // already-detected faces with no persons row, so fire the
-                        // (idempotent, zero-face-safe) auto-cluster there too so
-                        // persisted faces still surface. A user-Cancelled scan
-                        // instead DEFERS clustering to a manual re-cluster — the
-                        // user explicitly stopped, and auto-firing a clustering
-                        // pass on cancel races the engine's own teardown.
-                        if (pc.Phase == ScanPhase.Failed && !GpuDeviceRemoved)
-                        {
-                            FaceClusteringInFlight = true;
-                            _ = AutoTriggerFaceClusteringAsync();
-                        }
+                        // A failed scan is not a valid dataset boundary. In
+                        // particular, precondition failures such as missing
+                        // models arrive as a Failed phase before their ErrorEvent;
+                        // auto-clustering here would turn a clear scan failure
+                        // into a misleading "scan complete" + empty People pass.
+                        // Users can explicitly re-cluster persisted faces after a
+                        // recoverable partial scan. Only ScanComplete below is an
+                        // automatic transition; Cancelled remains user-controlled.
                         break;
                     case DiscoveryCompleteEvent:
                         // No dedicated property — UI consumes via LastProgress.Total,

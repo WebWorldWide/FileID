@@ -80,6 +80,40 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
     out
 }
 
+pub(crate) fn grounded_filename(text: &str) -> Option<String> {
+    let mut words = Vec::new();
+    for (keyword, _) in extract(text) {
+        for word in keyword.split_whitespace() {
+            if !words.iter().any(|existing| existing == word) {
+                words.push(word.to_string());
+                if words.len() == 5 {
+                    break;
+                }
+            }
+        }
+        if words.len() >= 3 {
+            break;
+        }
+    }
+    if words.len() < 3 {
+        let stops: HashSet<&str> = STOPWORDS.iter().copied().collect();
+        for phrase in split_into_phrases(text, &stops) {
+            for word in phrase {
+                if !words.contains(&word) {
+                    words.push(word);
+                    if words.len() == 5 {
+                        break;
+                    }
+                }
+            }
+            if words.len() >= 3 {
+                break;
+            }
+        }
+    }
+    (words.len() >= 3).then(|| words.into_iter().take(5).collect::<Vec<_>>().join("-"))
+}
+
 fn split_into_phrases(text: &str, stops: &HashSet<&str>) -> Vec<Vec<String>> {
     let mut phrases = Vec::new();
     let mut cur: Vec<String> = Vec::new();
@@ -187,5 +221,20 @@ mod tests {
             tags.iter().any(|t| t.contains("syncthing")),
             "alphabetic content should still tag; got {tags:?}"
         );
+    }
+
+    #[test]
+    fn grounded_filename_uses_three_to_five_source_words() {
+        let text = "Family vacation itinerary. Yellowstone national park hiking trail.";
+        let name = grounded_filename(text).unwrap();
+        let source_words: HashSet<String> = text
+            .to_ascii_lowercase()
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect();
+        let name_words = name.split('-').collect::<Vec<_>>();
+        assert!((3..=5).contains(&name_words.len()));
+        assert!(name_words.iter().all(|word| source_words.contains(*word)));
     }
 }
