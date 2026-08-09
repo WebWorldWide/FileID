@@ -35,79 +35,11 @@ struct MigrationParityTests {
         "v16_path_search",
         "v17_face_verification_stable_keys",
         "v18_restructure_feedback",
-        "v19_files_text_stage_done",
-        "v20_vlm_full_model",
     ]
 
     @Test("Registered migration identifiers match the canonical cross-platform list")
     func identifiersMatchCanonicalList() {
         #expect(Database.migrator.migrations == Self.canonicalIdentifiers)
-    }
-
-    @Test("v20 adds nullable TEXT full-model marker without rewriting provenance")
-    func vlmFullModelMigrationIsNullableAndPreservesProvenance() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("fileid-v20-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let q = try DatabaseQueue(path: dir.appendingPathComponent("fileid.sqlite").path)
-        let migrator = FileIDEngine.Database.migrator
-
-        try migrator.migrate(q, upTo: "v19_files_text_stage_done")
-        try q.write { db in
-            try db.execute(sql: """
-                INSERT INTO files
-                    (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, vlm_model)
-                VALUES (1, '/a.jpg', 1, 100, 0, 'image', 'jpg', 'qwen3-vl-4b')
-                """)
-        }
-        let v19Count = try q.read { db in
-            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM grdb_migrations") ?? -1
-        }
-        #expect(v19Count == 19)
-
-        try migrator.migrate(q)
-        try migrator.migrate(q)
-        let observed: (
-            migrationCount: Int,
-            provenance: String?,
-            fullModel: String?,
-            declaredType: String,
-            notNull: Int,
-            defaultValue: String?
-        )? = try q.read { db in
-            guard let file = try Row.fetchOne(db, sql: """
-                    SELECT vlm_model, vlm_full_model FROM files WHERE id = 1
-                    """),
-                  let column = try Row.fetchOne(db, sql: """
-                    SELECT type, "notnull", dflt_value
-                    FROM pragma_table_info('files')
-                    WHERE name = 'vlm_full_model'
-                    """)
-            else {
-                return nil
-            }
-            let migrationCount =
-                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM grdb_migrations") ?? -1
-            let provenance: String? = file["vlm_model"]
-            let fullModel: String? = file["vlm_full_model"]
-            let declaredType: String = column["type"] ?? ""
-            let notNull: Int = column["notnull"] ?? -1
-            let defaultValue: String? = column["dflt_value"]
-            return (
-                migrationCount, provenance, fullModel,
-                declaredType, notNull, defaultValue
-            )
-        }
-        let state = try #require(observed)
-
-        #expect(state.migrationCount == 20)
-        #expect(state.provenance == "qwen3-vl-4b")
-        #expect(state.fullModel == nil)
-        #expect(state.declaredType.uppercased() == "TEXT")
-        #expect(state.notNull == 0)
-        #expect(state.defaultValue == nil)
-        try q.close()
     }
 
     // R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)

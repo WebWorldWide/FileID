@@ -89,7 +89,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     // confirm makes both ops resolve on the FIRST reply (wrong counts) and both
     // push an undo entry for the first batchId (second op gets none). 0 = idle.
     private int _trashInFlight;
-    private readonly CancellationTokenSource _lifetimeCts = new();
 
     private void RequestCleanupRefresh()
     {
@@ -115,12 +114,11 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("CleanupView.OnViewModelPropertyChanged", () =>
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
-    });
+    }
 
     // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
     // explicitly so a CollectionChanged.Reset — which carries neither OldItems
@@ -188,9 +186,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
-        if (e.PropertyName is nameof(DuplicateMember.IsKeeper)
-            or nameof(DuplicateMember.IsSelectedForTrash)
-            or nameof(DuplicateGroup.IsSkipped))
+        if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped))
         {
             DispatcherQueue.TryEnqueue(() => OnPropertyChanged(nameof(HeaderStats)));
         }
@@ -214,12 +210,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         catch { /* swallow */ }
         try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
-        try { _lifetimeCts.Cancel(); } catch { /* swallow */ }
         foreach (var (_, cts) in _inflightThumbs) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
         _inflightThumbs.Clear();
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
         try { ViewModel.Dispose(); } catch { /* swallow */ }
-        try { _lifetimeCts.Dispose(); } catch { /* swallow */ }
     }
 
     // ─── Lazy thumbnail loading (macOS CopyTile parity) ───────────────────
@@ -227,7 +221,6 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     // ElementClearing so off-screen tiles don't pin BitmapImages.
     private void OnMemberPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                   Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
-        => DebugLog.SafeRun(nameof(OnMemberPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         // x:Bind doesn't populate a realized element's DataContext, so resolve
@@ -245,17 +238,16 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var cts = new CancellationTokenSource();
         if (!_inflightThumbs.TryAdd(member, cts)) { cts.Dispose(); return; }
         _ = LoadMemberThumbAsync(member, cts);
-    });
+    }
 
     private void OnMemberClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                   Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
-        => DebugLog.SafeRun(nameof(OnMemberClearing), () =>
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not DuplicateMember member) return;
         member.IsDetached = true;
         member.ClearThumbnailForRecycle();
         if (_inflightThumbs.TryRemove(member, out var cts)) { try { cts.Cancel(); } catch { /* swallow */ } cts.Dispose(); }
-    });
+    }
 
     private async System.Threading.Tasks.Task LoadMemberThumbAsync(DuplicateMember member, CancellationTokenSource ownCts)
     {
@@ -293,12 +285,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             if (!string.IsNullOrEmpty(ViewModel.ErrorMessage)) return ViewModel.ErrorMessage!;
             if (ViewModel.IsLoading) return "Scanning for duplicates…";
-            if (ViewModel.Groups.Count == 0)
-            {
-                return IsSimilarMode
-                    ? "No visually similar images to review. Scan again after adding files."
-                    : "No exact duplicates to review. Scan again after adding files.";
-            }
+            if (ViewModel.Groups.Count == 0) return "No duplicates found yet — run a scan first.";
             return $"{ViewModel.Groups.Count} duplicate groups";
         }
     }
@@ -309,49 +296,11 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         || ViewModel.Groups.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
-    // ─── Cleanup mode (Exact | Similar) — macOS parity ──────────────────────
-    public bool IsSimilarMode => ViewModel.Mode == CleanupMode.Similar;
-
-    /// <summary>The "review — not identical" warning banner shows only in Similar
-    /// mode.</summary>
-    public Visibility SimilarWarningVisibility =>
-        IsSimilarMode ? Visibility.Visible : Visibility.Collapsed;
-
-    /// <summary>The global "Trash non-keepers" bulk action is hidden in Similar
-    /// mode: those copies are NOT byte-identical, so one-click mass deletion would
-    /// be unsafe (macOS parity — "Select all non-keepers" is hidden there too). The
-    /// per-group right-click trash stays available for explicit, reviewed deletes.</summary>
-    public Visibility TrashNonKeepersVisibility =>
-        IsSimilarMode ? Visibility.Collapsed : Visibility.Visible;
-
     public string HeaderStats
     {
         get
         {
             if (ViewModel.Groups.Count == 0) return string.Empty;
-            // Similar mode never stages files for the (hidden) bulk delete — present
-            // a review-first summary instead of a "reclaimable" figure so nothing
-            // reads as pre-selected for deletion (macOS parity).
-            if (IsSimilarMode)
-            {
-                int skippedSimilar = 0;
-                int selectedSimilar = 0;
-                foreach (var g in ViewModel.Groups) if (g.IsSkipped) skippedSimilar++;
-                foreach (var g in ViewModel.Groups)
-                {
-                    foreach (var member in g.Members)
-                    {
-                        if (member.IsSelectedForTrash) selectedSimilar++;
-                    }
-                }
-                int activeSimilar = ViewModel.Groups.Count - skippedSimilar;
-                var msg = $"{activeSimilar} similar group{(activeSimilar == 1 ? "" : "s")} • review each before deleting — NOT byte-identical";
-                if (selectedSimilar > 0)
-                {
-                    msg += $" • {selectedSimilar} file{(selectedSimilar == 1 ? "" : "s")} explicitly selected";
-                }
-                return skippedSimilar > 0 ? $"{msg} • {skippedSimilar} skipped" : msg;
-            }
             long files = 0;
             long bytes = 0;
             int eligibleGroups = 0;
@@ -369,36 +318,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // ─── Mode toggle (Exact | Similar) ──────────────────────────────────────
-    // The two RadioButtons share GroupName="CleanupMode"; Checked fires only on
-    // the newly-selected one. The Exact radio's IsChecked="True" fires once during
-    // XAML init — SwitchMode no-ops because the VM already defaults to Exact, so
-    // the initial OnLoaded refresh stays the single first load.
-    private void OnExactModeChecked(object sender, RoutedEventArgs e)
-        => SwitchMode(CleanupMode.Exact);
-
-    private void OnSimilarModeChecked(object sender, RoutedEventArgs e)
-        => SwitchMode(CleanupMode.Similar);
-
-    private void SwitchMode(CleanupMode mode)
-        => DebugLog.SafeRun(nameof(SwitchMode), () =>
-        {
-            if (_unloaded) return;
-            if (ViewModel.Mode == mode) return;
-            ViewModel.Mode = mode;
-            OnPropertyChanged(nameof(IsSimilarMode));
-            OnPropertyChanged(nameof(SimilarWarningVisibility));
-            OnPropertyChanged(nameof(TrashNonKeepersVisibility));
-            OnPropertyChanged(nameof(HeaderStats));
-            // Reload for the new mode. RequestCleanupRefresh coalesces with any
-            // in-flight scan-driven refresh; the VM's generation guard discards a
-            // superseded result so the just-selected mode wins.
-            RequestCleanupRefresh();
-        });
-
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnRefreshClicked), async () =>
-            await ViewModel.RefreshAsync(CancellationToken.None));
+        => await ViewModel.RefreshAsync(CancellationToken.None);
 
     // Resets every group's keeper back to the first member. Useful after
     // the user has been clicking around and wants to start over without
@@ -411,25 +332,107 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 g.IsSkipped = false;
                 for (int i = 0; i < g.Members.Count; i++)
                 {
-                    g.Members[i].IsKeeper = !g.IsSimilar && i == 0;
-                    g.Members[i].IsSelectedForTrash = false;
+                    g.Members[i].IsKeeper = (i == 0);
                 }
             }
             OnPropertyChanged(nameof(HeaderStats));
         });
 
     private async void OnTrashNonKeepersClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnTrashNonKeepersClicked), async () =>
     {
         if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
         try { await TrashNonKeepersAsync(); }
         finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
-    });
+    }
 
-    private System.Threading.Tasks.Task TrashNonKeepersAsync()
+    private async System.Threading.Tasks.Task TrashNonKeepersAsync()
     {
-        var groups = ViewModel.Groups.Where(group => !group.IsSkipped).ToArray();
-        return TrashGroupsAsync(groups, "Trash duplicates?", recoverable: true);
+        var ids = new List<long>();
+        long bytes = 0;
+        foreach (var grp in ViewModel.Groups)
+        {
+            // FEAT-CRIT-2: skipped groups are excluded from the global
+            // "Trash non-keepers" run.
+            if (grp.IsSkipped) continue;
+            foreach (var m in grp.Members)
+            {
+                if (!m.IsKeeper)
+                {
+                    ids.Add(m.Id);
+                    bytes += m.SizeBytes;
+                }
+            }
+        }
+        if (ids.Count == 0)
+        {
+            await ShowAlertAsync(
+                "Nothing to trash",
+                "Every file in the active groups is marked as a keeper (skipped groups are excluded), so there are no non-keepers to move to the Recycle Bin.");
+            return;
+        }
+        var sizeDisplay = FormatSize(bytes);
+        var confirm = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Trash duplicates?",
+            Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({sizeDisplay}) will move to the Recycle Bin. They stay recoverable from there.",
+            PrimaryButtonText = "Move to Recycle Bin",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        var choice = await confirm.ShowAsync();
+        if (choice != ContentDialogResult.Primary) return;
+
+        // UndoStack still captures the same reply independently (it listens
+        // on its own PropertyChanged subscription); leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        // Await the engine's BulkActionResult so a partial/total failure is
+        // surfaced instead of fire-and-forgetting + unconditionally refreshing
+        // (the #1 silent failure: the user thinks files were trashed when some
+        // weren't). Only refresh on a clean run (Failed == 0).
+        try
+        {
+            var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                await ShowAlertAsync(
+                    "Some files weren't trashed",
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
+            }
+        }
+        catch (TimeoutException)
+        {
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
+        }
+
+        await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
     private static string FormatSize(long bytes)
@@ -442,40 +445,49 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
 
-    private void OnGroupFlyoutOpening(object sender, object e)
-        => DebugLog.SafeRun(nameof(OnGroupFlyoutOpening), () =>
-    {
-        if (sender is not MenuFlyout flyout) return;
-        var contentHash = (flyout.Target as FrameworkElement)?.DataContext is DuplicateGroup group
-            ? group.ContentHash
-            : null;
-        foreach (var item in flyout.Items)
-        {
-            if (item is FrameworkElement element) element.Tag = contentHash;
-        }
-    });
+    // WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
+    // inherit the parent Grid's DataContext, so the prior version's
+    // `item.DataContext as DuplicateGroup` always returned null and every
+    // per-group action silently no-op'd. Fix: cache the right-tapped group's
+    // ContentHash (the group's stable identity) at the moment the context menu
+    // is invoked, then re-resolve the live instance at action time. Caching the
+    // instance itself goes stale: a background scan refresh (MergeByContentHash)
+    // replaces a group's instance whenever its member set changes, detaching the
+    // cached copy from ViewModel.Groups while the flyout is still open — the
+    // MenuFlyout doesn't block the dispatcher — so the action would mutate a
+    // discarded instance and silently no-op again.
+    private string? _lastRightTappedHash;
 
+    private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
+        {
+            _lastRightTappedHash = g.ContentHash;
+        }
+    }
+
+    // Resolve the live group by the cached ContentHash so every per-group action
+    // hits the instance currently in ViewModel.Groups, not a snapshot a mid-flyout
+    // refresh may have replaced; no-op safely if the group is gone.
     private DuplicateGroup? GroupFromFlyoutItem(object sender) =>
-        sender is FrameworkElement { Tag: string contentHash }
-            ? ViewModel.Groups.FirstOrDefault(group => group.ContentHash == contentHash)
-            : null;
+        _lastRightTappedHash is null
+            ? null
+            : ViewModel.Groups.FirstOrDefault(g => g.ContentHash == _lastRightTappedHash);
 
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupKeepFirst), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
+        if (grp == null || grp.Members.Count == 0) return;
         for (int i = 0; i < grp.Members.Count; i++)
         {
             grp.Members[i].IsKeeper = (i == 0);
         }
-    });
+    }
 
     private void OnGroupKeepShallowest(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupKeepShallowest), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
+        if (grp == null || grp.Members.Count == 0) return;
         // Within a byte-identical group every member is the same size, so "keep
         // largest" was always a no-op (kept index 0). Keep the copy in the
         // least-nested / most-canonical location instead: fewest path
@@ -500,13 +512,12 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             grp.Members[i].IsKeeper = (i == bestIdx);
         }
-    });
+    }
 
     private void OnGroupInvert(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupInvert), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
-        if (grp == null || grp.IsSimilar || grp.Members.Count == 0) return;
+        if (grp == null || grp.Members.Count == 0) return;
         var currentIdx = -1;
         for (int i = 0; i < grp.Members.Count; i++)
         {
@@ -520,259 +531,90 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             grp.Members[i].IsKeeper = (i == nextIdx);
         }
-    });
+    }
 
     private void OnGroupSkip(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupSkip), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp != null) grp.IsSkipped = true;
-    });
+    }
 
     private void OnGroupUnskip(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGroupUnskip), () =>
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp != null) grp.IsSkipped = false;
-    });
+    }
 
     private async void OnGroupTrashNow(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnGroupTrashNow), async () =>
     {
         if (System.Threading.Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
         try { await TrashGroupAsync(sender); }
         finally { System.Threading.Interlocked.Exchange(ref _trashInFlight, 0); }
-    });
-
-    private System.Threading.Tasks.Task TrashGroupAsync(object sender)
-    {
-        var group = GroupFromFlyoutItem(sender);
-        return group is null
-            ? System.Threading.Tasks.Task.CompletedTask
-            : TrashGroupsAsync(new[] { group }, "Trash this group?", recoverable: false);
     }
 
-    private async System.Threading.Tasks.Task TrashGroupsAsync(
-        IReadOnlyList<DuplicateGroup> groups,
-        string confirmTitle,
-        bool recoverable)
+    private async System.Threading.Tasks.Task TrashGroupAsync(object sender)
     {
-        if (groups.Count == 0)
+        var grp = GroupFromFlyoutItem(sender);
+        if (grp == null) return;
+        var ids = new List<long>();
+        long bytes = 0;
+        foreach (var m in grp.Members)
         {
-            await ShowAlertAsync("Nothing to trash", "There are no active duplicate groups to process.");
-            return;
+            if (!m.IsKeeper) { ids.Add(m.Id); bytes += m.SizeBytes; }
         }
-        var similar = groups[0].IsSimilar;
-        if (groups.Any(group => group.IsSimilar != similar))
-        {
-            await ShowAlertAsync("Cleanup changed", "The duplicate view changed while the action was opening. Review the groups and try again.");
-            return;
-        }
-
-        var requests = new List<ExactCleanupGroupRequest>(groups.Count);
-        long selectedBytes = 0;
-        foreach (var group in groups)
-        {
-            var keeper = CleanupSelectionPolicy.RetainedCopy(group);
-            var victims = CleanupSelectionPolicy.SelectedVictims(group)
-                .Select(member => new ExactCleanupFile(member.Id, member.Path, member.SizeBytes))
-                .ToArray();
-            if (victims.Length == 0) continue;
-            if (keeper is null)
-            {
-                await ShowAlertAsync(
-                    similar ? "Keep at least one copy" : "Choose a keeper",
-                    similar
-                        ? "A visually similar group cannot trash every visible copy. Clear at least one Trash checkbox, review that retained copy, and try again."
-                        : "Every duplicate group must retain one unselected keeper before files can be trashed.");
-                return;
-            }
-            foreach (var victim in victims)
-            {
-                if (victim.SizeBytes < 0 || selectedBytes > long.MaxValue - victim.SizeBytes)
-                {
-                    await ShowAlertAsync("Invalid duplicate size", "The selected duplicate sizes are invalid. Re-run the scan before retrying.");
-                    return;
-                }
-                selectedBytes += victim.SizeBytes;
-            }
-            requests.Add(new ExactCleanupGroupRequest(
-                new ExactCleanupFile(keeper.Id, keeper.Path, keeper.SizeBytes),
-                victims));
-        }
-        var selectedCount = requests.Sum(request => request.Victims.Count);
-        if (selectedCount == 0)
-        {
-            await ShowAlertAsync(
-                similar ? "Select copies to trash" : "Nothing to trash",
-                similar
-                    ? "Nothing in Similar mode is pre-selected. Check Trash only on the visually similar copies you reviewed and explicitly want to move to the Recycle Bin."
-                    : "Every file in the active groups is marked as a keeper, so there are no non-keepers to move to the Recycle Bin.");
-            return;
-        }
-
-        var confirmationText = similar
-            ? $"{selectedCount} explicitly selected file{(selectedCount == 1 ? "" : "s")} ({FormatSize(selectedBytes)}) will move to the Recycle Bin. These files are visually similar, not byte-identical, and FileID will not byte-verify them. Unchecked copies stay in place."
-            : $"{selectedCount} non-keeper file{(selectedCount == 1 ? "" : "s")} ({FormatSize(selectedBytes)}) will move to the Recycle Bin." +
-                (recoverable ? " They stay recoverable from there." : string.Empty);
+        if (ids.Count == 0) return;
         var confirm = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = similar ? "Move selected similar copies?" : confirmTitle,
-            Content = confirmationText,
-            PrimaryButtonText = similar ? "Move Selected Copies" : "Move to Recycle Bin",
+            Title = "Trash this group?",
+            Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({FormatSize(bytes)}) will move to the Recycle Bin.",
+            PrimaryButtonText = "Move to Recycle Bin",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
         };
-        ContentDialogResult choice;
-        try { choice = await confirm.ShowAsync(); }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Trash confirm dialog failed (another dialog open?): " + ex.Message);
-            return;
-        }
-        if (choice != ContentDialogResult.Primary) return;
-
-        IReadOnlyList<FileID.IpcSchema.ExactTrashIdentity>? identities = null;
-        var preflightRejected = 0;
-        var timeout = Services.BulkActionTimeout.ForFileCount(selectedCount);
-        if (!similar)
-        {
-            var proof = await BuildExactProofAsync(requests);
-            if (proof is null) return;
-            identities = proof.Identities;
-            preflightRejected = proof.Rejections.Count;
-            if (identities.Count == 0)
-            {
-                await ShowAlertAsync(
-                    "No exact copies were trashed",
-                    $"All {preflightRejected} selected files changed or could not be byte-verified against their keeper.");
-                await ViewModel.RefreshAsync(CancellationToken.None);
-                return;
-            }
-            timeout = ExactCleanupProofBuilder.EngineTimeout(proof.AuthorizationBytes);
-        }
-
-        var ids = identities?.Select(identity => identity.FileId).ToArray()
-            ?? requests.SelectMany(request => request.Victims).Select(file => file.FileId).Distinct().ToArray();
-        IDisposable CaptureUndo() => Services.UndoStack.CaptureNextBulkResult(
+        if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        // UndoStack still captures the same reply independently; leave it in place.
+        Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
-            $"trash {ids.Length} duplicate{(ids.Length == 1 ? "" : "s")}",
-            kind: Services.ChangeKind.Trash,
-            timeout: Timeout.InfiniteTimeSpan,
-            reverse: async batchId =>
+            $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
+            async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
-                try { return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); }
+                try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
                 catch { return false; }
             });
 
+        // Await the engine reply: surface partial/total failure and only
+        // refresh on a clean run, so a per-group trash can't falsely look done.
         try
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
-                () => identities is null
-                    ? ViewModels.EngineClient.Instance.TrashFilesAsync(ids)
-                    : ViewModels.EngineClient.Instance.TrashExactFilesAsync(identities),
-                timeout,
-                beforeSend: CaptureUndo);
-            var totalFailed = checked((int)result.Failed + preflightRejected);
-            if (totalFailed > 0)
+                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
+            if (result.Failed > 0)
             {
-                var first = result.Messages?.FirstOrDefault(message => !message.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? string.Empty : $" — {first}";
-                var preflight = preflightRejected == 0
-                    ? string.Empty
-                    : $" {preflightRejected} changed or failed full-byte verification before the command.";
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
                 await ShowAlertAsync(
                     "Some files weren't trashed",
-                    $"Trashed {result.Succeeded}; {totalFailed} failed or were rejected.{preflight}{detail}");
+                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                return;
             }
-            await ViewModel.RefreshAsync(CancellationToken.None);
         }
         catch (TimeoutException)
         {
             await ShowAlertAsync(
                 "Trash didn't confirm",
-                $"The engine didn't confirm the operation within {timeout.TotalMinutes:0.#} minutes. It may still be processing or the files may have moved — re-run the scan to check before retrying.");
+                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+            return;
         }
         catch (Exception ex)
         {
             await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
+            return;
         }
-    }
-
-    private async System.Threading.Tasks.Task<ExactCleanupProof?> BuildExactProofAsync(
-        IReadOnlyList<ExactCleanupGroupRequest> requests)
-    {
-        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
-        var progressText = new TextBlock { Text = "Preparing full-file verification…" };
-        var panel = new StackPanel { Spacing = 12 };
-        panel.Children.Add(new ProgressRing { IsActive = true, Width = 32, Height = 32 });
-        panel.Children.Add(progressText);
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Verifying exact copies",
-            Content = panel,
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        var verificationFinished = false;
-        dialog.Closed += (_, _) =>
-        {
-            if (!verificationFinished) cancellation.Cancel();
-        };
-        var progress = new Progress<ExactCleanupProgress>(value =>
-        {
-            if (!_unloaded)
-            {
-                progressText.Text = $"Verified {value.CompletedFiles:N0} of {value.TotalFiles:N0} files…";
-            }
-        });
-
-        Windows.Foundation.IAsyncOperation<ContentDialogResult> operation;
-        try { operation = dialog.ShowAsync(); }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Exact verification dialog failed: " + ex.Message);
-            return null;
-        }
-        ExactCleanupProof? proof = null;
-        string? failure = null;
-        var wasCancelled = false;
-        try
-        {
-            proof = await ExactCleanupProofBuilder.BuildAsync(requests, progress, cancellation.Token);
-            if (cancellation.IsCancellationRequested)
-            {
-                wasCancelled = true;
-                failure = "No Trash command was sent.";
-                proof = null;
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            wasCancelled = true;
-            failure = "No Trash command was sent.";
-        }
-        catch (Exception ex)
-        {
-            failure = ex.Message;
-        }
-        finally
-        {
-            verificationFinished = true;
-            try { dialog.Hide(); } catch { /* already closed */ }
-            try { await operation; } catch { /* teardown */ }
-        }
-        if (failure is not null && !_unloaded)
-        {
-            await ShowAlertAsync(
-                wasCancelled ? "Verification cancelled" : "Exact verification failed",
-                failure);
-        }
-        return proof;
+        await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
     // Dismissible alert mirroring SidebarProcessingControl.ShowAlertAsync —

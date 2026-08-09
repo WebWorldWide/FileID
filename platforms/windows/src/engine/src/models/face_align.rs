@@ -6,22 +6,6 @@
 
 const OUT: usize = 112;
 
-/// Reject the aligned crop when more than this fraction of its pixels sample
-/// OUTSIDE the source image. Those pixels are edge-clamp replication — long
-/// constant-color streaks that corrupt the SFace embedding (and look like a
-/// smear in the People card). A face this far off-frame, or one whose
-/// landmarks fit so badly the warp leaves the image, is better served by the
-/// bounds-clamped plain bbox crop the caller falls back to. Env-overridable.
-/// (audit 2026-07-15: found by inspecting real People-tab representative crops.)
-fn max_out_of_bounds_fraction() -> f32 {
-    std::env::var("FILEID_FACE_ALIGN_MAX_OOB")
-        .ok()
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite())
-        .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(0.20)
-}
-
 /// Template in FileID landmark order [left_eye, right_eye, nose, mouth_left,
 /// mouth_right] (the standard ArcFace 5-point template, reordered from
 /// OpenCV's native [re, le, nt, rcm, lcm]).
@@ -47,7 +31,6 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
         return None;
     }
     let mut out = vec![0u8; OUT * OUT * 3];
-    let mut oob = 0usize;
     for oy in 0..OUT {
         for ox in 0..OUT {
             // Inverse map (dst->src): src = L^-1·(dst - t), L = [[a,-b],[b,a]].
@@ -55,24 +38,12 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
             let dy = oy as f32 - ty;
             let sx = (a * dx + b * dy) / det;
             let sy = (-b * dx + a * dy) / det;
-            // A sample whose source center is outside the image is edge-clamp
-            // replication, not real face pixels. Count it so an over-warped or
-            // off-frame face can be rejected below.
-            if sx < 0.0 || sy < 0.0 || sx >= width as f32 || sy >= height as f32 {
-                oob += 1;
-            }
             let px = bilinear(rgb, width, height, sx, sy);
             let o = (oy * OUT + ox) * 3;
             out[o] = px[0];
             out[o + 1] = px[1];
             out[o + 2] = px[2];
         }
-    }
-    // Too much of the crop is replicated border smear — reject so the caller
-    // falls back to the bounds-clamped bbox crop, which is a real (if
-    // off-center) face rather than a streak that corrupts the SFace embedding.
-    if (oob as f32) / ((OUT * OUT) as f32) > max_out_of_bounds_fraction() {
-        return None;
     }
     Some(out)
 }
@@ -189,38 +160,5 @@ mod tests {
         let (a, b, tx, ty) = fit_similarity(&shifted, &TEMPLATE).unwrap();
         assert!((a - 1.0).abs() < 1e-3 && b.abs() < 1e-3);
         assert!((tx + 10.0).abs() < 1e-2 && (ty - 5.0).abs() < 1e-2, "tx={tx} ty={ty}");
-    }
-
-    /// A well-placed face (landmarks near the ArcFace template inside a large
-    /// image) aligns without hitting the border, so it is accepted.
-    #[test]
-    fn in_frame_face_aligns() {
-        let (w, h) = (160u32, 160u32);
-        let rgb = vec![128u8; (w * h * 3) as usize];
-        // TEMPLATE is authored in the 112×112 output frame; offset it well
-        // inside the 160×160 source so no sample lands out of bounds.
-        let mut lm = TEMPLATE;
-        for p in &mut lm {
-            p[0] += 24.0;
-            p[1] += 24.0;
-        }
-        assert!(align_112(&rgb, w, h, &lm).is_some());
-    }
-
-    /// Landmarks in the far corner of a tiny image force most of the 112×112
-    /// sampling grid off-frame; that crop is edge-clamp smear and must be
-    /// rejected so the caller falls back to the plain bbox crop. (audit)
-    #[test]
-    fn mostly_out_of_frame_face_is_rejected() {
-        let (w, h) = (60u32, 60u32);
-        let rgb = vec![90u8; (w * h * 3) as usize];
-        // Push the template landmarks past the bottom-right corner so the
-        // inverse-mapped source grid mostly falls outside [0,60)².
-        let mut lm = TEMPLATE;
-        for p in &mut lm {
-            p[0] += 90.0;
-            p[1] += 90.0;
-        }
-        assert!(align_112(&rgb, w, h, &lm).is_none());
     }
 }

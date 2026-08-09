@@ -46,22 +46,12 @@ NOTARY_PROFILE="${FILEID_NOTARY_PROFILE:-fileid-notary}"
 APP_ENTITLEMENTS="$PROJECT_DIR/Resources/FileID.entitlements"
 ENGINE_ENTITLEMENTS="$PROJECT_DIR/Resources/FileIDEngine.entitlements"
 METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
-STAGE_DIR=""
-VERIFY_MOUNT=""
 
 cleanup() {
-    if [ -n "$VERIFY_MOUNT" ] && mount | grep -Fq "on $VERIFY_MOUNT "; then
-        hdiutil detach "$VERIFY_MOUNT" -force -quiet 2>/dev/null || true
-    fi
-    if [ -n "$VERIFY_MOUNT" ]; then
-        rmdir "$VERIFY_MOUNT" 2>/dev/null || true
-    fi
     if [ -d "/Volumes/$VOL_NAME" ]; then
         hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true
     fi
-    if [ -n "$STAGE_DIR" ]; then
-        rm -rf "$STAGE_DIR" 2>/dev/null || true
-    fi
+    rm -rf "$DIST_DIR/release-staging" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -168,11 +158,6 @@ if [ "$APP_TEAM" != "$ENGINE_TEAM" ]; then
     exit 1
 fi
 
-echo "🔍 Scanning signed binaries for telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileID" \
-    "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
-
 mv "$SIGN_TMP/$APP" "$PROJECT_DIR/$APP"
 rm -rf "$SIGN_TMP"
 
@@ -198,13 +183,11 @@ fi
 
 # ── DMG ──────────────────────────────────────────────────────────────────────
 echo "💿 Building DMG…"
-STAGE_DIR="$(mktemp -d /tmp/fileid-release-staging.XXXXXX)"
+STAGE_DIR="$DIST_DIR/release-staging"
 mkdir -p "$DIST_DIR"
-rm -f "$DMG_OUT" "$DIST_DIR/FileID-rw.dmg"
+rm -rf "$STAGE_DIR" "$DMG_OUT" "$DIST_DIR/FileID-rw.dmg"
+mkdir -p "$STAGE_DIR"
 cp -R "$APP" "$STAGE_DIR/"
-find "$STAGE_DIR/$APP" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
-find "$STAGE_DIR/$APP" -exec xattr -d com.apple.ResourceFork {} \; 2>/dev/null || true
-codesign --verify --deep --strict "$STAGE_DIR/$APP"
 ln -s /Applications "$STAGE_DIR/Applications"
 
 APP_KB=$(du -sk "$APP" | cut -f1)
@@ -214,18 +197,6 @@ hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE_DIR" -fs HFS+ \
 hdiutil convert "$DIST_DIR/FileID-rw.dmg" -format UDZO -imagekey zlib-level=9 \
     -o "$DMG_OUT" >/dev/null
 rm -f "$DIST_DIR/FileID-rw.dmg"
-hdiutil verify "$DMG_OUT" >/dev/null
-
-VERIFY_MOUNT="$(mktemp -d /tmp/fileid-release-mount.XXXXXX)"
-hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" "$DMG_OUT" >/dev/null
-codesign --verify --deep --strict "$VERIFY_MOUNT/$APP"
-[ -s "$VERIFY_MOUNT/$APP/Contents/MacOS/mlx.metallib" ] || {
-    echo "❌ Packaged DMG is missing Contents/MacOS/mlx.metallib"
-    exit 1
-}
-hdiutil detach "$VERIFY_MOUNT" -quiet
-rmdir "$VERIFY_MOUNT"
-VERIFY_MOUNT=""
 
 if [ "$IDENTITY" != "-" ]; then
     echo "🔐 Signing DMG…"

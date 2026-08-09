@@ -19,7 +19,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
@@ -32,87 +31,40 @@
             <TextBlock x:Name="MemberCountText"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <CheckBox x:Name="IsUnknownCheckBox"
-                      Checked="OnUnknownChecked"
-                      Unchecked="OnUnknownUnchecked"
-                      Content="I don't know who this is"
-                      ToolTipService.ToolTip="Excludes this person from AI clustering and Deep Analyze captions."
-                      AutomationProperties.Name="I don't know who this is"
-                      AutomationProperties.HelpText="Excludes this person from AI clustering and Deep Analyze captions." />
         </StackPanel>
 
-        <Grid x:Name="NameFieldsPanel" Grid.Row="1" ColumnSpacing="10" RowSpacing="8">
+        <Grid Grid.Row="1" ColumnSpacing="10" RowSpacing="8">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="1*"/>
-                <ColumnDefinition Width="2*"/>
-                <ColumnDefinition Width="2*"/>
+                <ColumnDefinition Width="80"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="80"/>
             </Grid.ColumnDefinitions>
-            <TextBox Grid.Row="0" Grid.Column="0" x:Name="TitleBox" Header="Title" PlaceholderText="Uncle, Grandma…" TextChanged="OnNameFieldChanged" />
-            <TextBox Grid.Row="0" Grid.Column="1" x:Name="FirstBox" Header="First name" PlaceholderText="optional" TextChanged="OnNameFieldChanged" />
-            <TextBox Grid.Row="0" Grid.Column="2" x:Name="MiddleBox" Header="Middle" PlaceholderText="optional" TextChanged="OnNameFieldChanged" />
-            <TextBox Grid.Row="1" Grid.Column="1" x:Name="LastBox" Header="Last name" PlaceholderText="optional" TextChanged="OnNameFieldChanged" />
-            <TextBox Grid.Row="1" Grid.Column="2" x:Name="SuffixBox" Header="Suffix" PlaceholderText="Jr, III…" TextChanged="OnNameFieldChanged" />
+            <TextBox Grid.Row="0" Grid.Column="0" x:Name="TitleBox"  Header="Title"   PlaceholderText="Dr." />
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="FirstBox"  Header="First"   />
+            <TextBox Grid.Row="0" Grid.Column="2" x:Name="MiddleBox" Header="Middle"  />
+            <TextBox Grid.Row="0" Grid.Column="3" x:Name="LastBox"   Header="Last"    />
+            <TextBox Grid.Row="0" Grid.Column="4" x:Name="SuffixBox" Header="Suffix"  PlaceholderText="Jr." />
         </Grid>
 
-        <StackPanel x:Name="TagPersonPanel" Grid.Row="2" Spacing="4" Visibility="Collapsed">
-            <Button x:Name="TagAllPhotosButton"
-                    Click="OnTagAllPhotosClicked"
-                    Style="{StaticResource AccentButtonStyle}"
-                    AutomationProperties.Name="Tag all photos with this person's name">
-                <StackPanel Orientation="Horizontal" Spacing="7">
-                    <FontIcon Glyph="&#xE8EC;" FontSize="13" />
-                    <TextBlock x:Name="TagAllPhotosButtonText" Text="Tag all photos" />
-                    <ProgressRing x:Name="TagAllPhotosProgress" Width="14" Height="14" IsActive="False" Visibility="Collapsed" />
-                </StackPanel>
-            </Button>
-            <Button x:Name="ReplacePersonTagButton"
-                    Click="OnReplacePersonTagClicked"
-                    Visibility="Collapsed"
-                    AutomationProperties.Name="Replace the previous person-name tag">
-                <StackPanel Orientation="Horizontal" Spacing="7">
-                    <FontIcon Glyph="&#xE895;" FontSize="13" />
-                    <TextBlock x:Name="ReplacePersonTagButtonText" Text="Replace previous name tag" />
-                </StackPanel>
-            </Button>
-            <TextBlock Text="Adds this person’s full name as a searchable Windows file tag. If the name changes later, Replace removes only the old person-name tag; unrelated tags stay untouched."
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap" />
-            <TextBlock x:Name="TagAllPhotosStatus"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap"
-                       Visibility="Collapsed" />
-        </StackPanel>
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
+            <ItemsRepeater x:Name="FaceGrid">
+                <ItemsRepeater.Layout>
+                    <UniformGridLayout MinItemWidth="100"
+                                       MinItemHeight="100"
+                                       MinRowSpacing="8"
+                                       MinColumnSpacing="8"
+                                       ItemsStretch="Uniform" />
+                </ItemsRepeater.Layout>
+            </ItemsRepeater>
+        </ScrollViewer>
 
-        <Grid Grid.Row="3">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
-            <TextBlock Grid.Row="0"
-                       Text="Right-click any face crop to remove it from this person, split it into a new cluster, or move it to another person."
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       Margin="0,0,0,6" />
-            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">
-                <ItemsRepeater x:Name="FaceGrid">
-                    <ItemsRepeater.Layout>
-                        <UniformGridLayout MinItemWidth="108"
-                                           MinItemHeight="108"
-                                           MinRowSpacing="8"
-                                           MinColumnSpacing="8"
-                                           ItemsStretch="Uniform" />
-                    </ItemsRepeater.Layout>
-                </ItemsRepeater>
-            </ScrollViewer>
-        </Grid>
-
-        <TextBlock Grid.Row="4"
+        <TextBlock Grid.Row="3"
                    x:Name="StatusText"
                    Style="{StaticResource CaptionTextBlockStyle}"
                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"

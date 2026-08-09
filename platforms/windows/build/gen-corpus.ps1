@@ -43,8 +43,8 @@ $mix = @(
 
 function Get-LeafDir([int]$idx) {
     # 50K → 2 levels of base-26 directory (676 first level × 676 second = 456,976 slots)
-    $first  = [char]([byte][char]'A' + ([int][math]::Floor($idx / 676) % 26))
-    $second = [char]([byte][char]'A' + ([int][math]::Floor($idx / 26) % 26))
+    $first  = [char]([byte][char]'A' + ($idx / 676) % 26)
+    $second = [char]([byte][char]'A' + ($idx / 26)  % 26)
     return Join-Path $OutDir "$first$second"
 }
 

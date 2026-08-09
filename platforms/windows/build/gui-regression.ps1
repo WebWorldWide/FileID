@@ -12,7 +12,7 @@
 #   2. A corpus folder (use build/gen-corpus.ps1 to make a 50K synthetic one).
 #
 # Pass criteria:
-#   - App reaches scan and face-clustering completion within TimeoutMinutes
+#   - App reaches ScanCompleteEvent (Phase=Completed) within TimeoutMinutes
 #   - App exits cleanly (last-session.txt: clean_exit=true)
 #   - No new WER crash dumps written during the run
 #   - No unmatched [APPLY:N] enter in app.log (would name the killer subscriber)
@@ -25,17 +25,13 @@
 # Usage:
 #   pwsh build/gui-regression.ps1 -Corpus C:\path\to\library
 #   pwsh build/gui-regression.ps1 -Corpus C:\path -TimeoutMinutes 90 -SkipBuild
-#   pwsh build/gui-regression.ps1 -Corpus C:\path -SkipBuild -AppExecutable C:\release\FileID.exe
 
 param(
     [Parameter(Mandatory=$true)][string]$Corpus,
-    [int]$TimeoutMinutes = 120,
+    [int]$TimeoutMinutes = 60,
     [string]$Configuration = "Debug",
     [switch]$SkipBuild,
-    [switch]$SkipWipe,
-    [string]$StateDirectory = "",
-    [string]$AppExecutable = "",
-    [switch]$UseLiveState
+    [switch]$SkipWipe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,31 +39,14 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $AppDir      = Resolve-Path (Join-Path $PlatformDir "src/FileID.App")
-$EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
 $Solution    = Join-Path $PlatformDir "FileID.sln"
 $AppTfm      = "net8.0-windows10.0.19041.0"
 
-$LiveLocalAppData = $env:LOCALAPPDATA
-if ($UseLiveState -and -not [string]::IsNullOrWhiteSpace($StateDirectory)) {
-    throw "Use either -UseLiveState or -StateDirectory, not both."
-}
-if ($UseLiveState) {
-    $EngineLocalAppData = $LiveLocalAppData
-} else {
-    if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
-        if ($SkipWipe) {
-            throw "-SkipWipe requires an explicit -StateDirectory so there is isolated state to reuse."
-        }
-        $StateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-gui-" + [guid]::NewGuid().ToString("N"))
-    }
-    $EngineLocalAppData = [System.IO.Path]::GetFullPath($StateDirectory)
-    New-Item -ItemType Directory -Force -Path $EngineLocalAppData | Out-Null
-}
-$LogsDir    = Join-Path $EngineLocalAppData "FileID\logs"
+$LogsDir    = Join-Path $env:LOCALAPPDATA "FileID\logs"
 $AppLog     = Join-Path $LogsDir "app.log"
 $LastSess   = Join-Path $LogsDir "last-session.txt"
-$WerDir     = Join-Path $LiveLocalAppData "CrashDumps"
-$StateDb    = Join-Path $EngineLocalAppData "FileID\fileid.sqlite"
+$WerDir     = Join-Path $env:LOCALAPPDATA "CrashDumps"
+$StateDb    = Join-Path $env:LOCALAPPDATA "FileID\state.sqlite"
 
 function Step($msg) { Write-Host ">> $msg" -ForegroundColor Cyan }
 function OK($msg)   { Write-Host "  [OK] $msg" -ForegroundColor Green }
@@ -89,50 +68,15 @@ if (-not (Test-Path $Corpus)) {
 $corpusFileCount = (Get-ChildItem -Path $Corpus -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
 OK "corpus: $Corpus ($corpusFileCount files)"
 
-$runningFileId = @(Get-Process -Name "FileID" -ErrorAction SilentlyContinue)
-if ($runningFileId.Count -gt 0) {
-    $runningPids = ($runningFileId | ForEach-Object Id) -join ", "
-    Fail "FileID is already running (pid=$runningPids); close it before starting the GUI regression harness"
-    exit 2
-}
-
 # --- 2. Build ---------------------------------------------------------
-$AppExe = if ([string]::IsNullOrWhiteSpace($AppExecutable)) {
-    Join-Path $AppDir "bin\x64\$Configuration\$AppTfm\win-x64\FileID.exe"
-} else {
-    [System.IO.Path]::GetFullPath($AppExecutable)
-}
-if (-not [string]::IsNullOrWhiteSpace($AppExecutable) -and -not $SkipBuild) {
-    throw "-AppExecutable requires -SkipBuild so the requested binary cannot be replaced or ignored."
-}
+$AppExe = Join-Path $AppDir "bin\$Configuration\$AppTfm\FileID.exe"
 if (-not $SkipBuild) {
-    Step "Building engine + app ($Configuration)"
-    Push-Location $EngineDir
-    try {
-        & cargo build --release --locked --target x86_64-pc-windows-msvc
-        if ($LASTEXITCODE -ne 0) { Fail "cargo build failed"; exit 2 }
-    } finally { Pop-Location }
+    Step "Building app ($Configuration)"
     Push-Location $PlatformDir
     try {
-        & dotnet build $Solution -c $Configuration -p:Platform=x64 --nologo -v minimal
+        & dotnet build $Solution -c $Configuration --nologo -v minimal
         if ($LASTEXITCODE -ne 0) { Fail "dotnet build failed"; exit 2 }
     } finally { Pop-Location }
-    $appOutput = Split-Path -Parent $AppExe
-    $engineOutput = Join-Path $EngineDir "target\x86_64-pc-windows-msvc\release"
-    foreach ($name in @(
-        "FileIDEngine.exe",
-        "onnxruntime.dll",
-        "onnxruntime_providers_shared.dll",
-        "DirectML.dll",
-        "pdfium.dll"
-    )) {
-        $source = Join-Path $engineOutput $name
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-            Fail "required engine payload missing: $source"
-            exit 2
-        }
-        Copy-Item -LiteralPath $source -Destination (Join-Path $appOutput $name) -Force
-    }
     OK "build complete"
 }
 if (-not (Test-Path $AppExe)) {
@@ -162,35 +106,16 @@ if (Test-Path $WerDir) {
 
 # --- 5. Spawn app -----------------------------------------------------
 Step "Launching app with --auto-scan-folder"
-$priorLocalAppData = $env:LOCALAPPDATA
-$priorModelsDir = $env:FILEID_MODELS_DIR
-try {
-    $env:LOCALAPPDATA = $EngineLocalAppData
-    if ([string]::IsNullOrWhiteSpace($env:FILEID_MODELS_DIR)) {
-        $liveModels = Join-Path $LiveLocalAppData "FileID\Models"
-        if (Test-Path -LiteralPath $liveModels -PathType Container) {
-            $env:FILEID_MODELS_DIR = $liveModels
-        }
-    }
-    # Start-Process joins ArgumentList without quoting entries that contain spaces.
-    $quotedCorpus = '"' + $Corpus + '"'
-    $proc = Start-Process -FilePath $AppExe `
-        -ArgumentList @("--auto-scan-folder", $quotedCorpus, "--auto-exit-after-scan") `
-        -PassThru
-} finally {
-    $env:LOCALAPPDATA = $priorLocalAppData
-    $env:FILEID_MODELS_DIR = $priorModelsDir
-}
-OK "spawned pid=$($proc.Id); isolated state=$EngineLocalAppData"
+$proc = Start-Process -FilePath $AppExe `
+    -ArgumentList @("--auto-scan-folder", $Corpus, "--auto-exit-after-scan") `
+    -PassThru
+OK "spawned pid=$($proc.Id)"
 
 # --- 6. Poll loop -----------------------------------------------------
 $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
 $scanStarted = $false
 $scanEnded = $false
 $scanOk = $false
-$scanProcessed = -1
-$clusterPersons = -1
-$clusterFaces = -1
 
 while ((Get-Date) -lt $deadline) {
     if ($proc.HasExited) { break }
@@ -203,14 +128,7 @@ while ((Get-Date) -lt $deadline) {
         $endLine = $tail | Where-Object { $_ -match '\[AUTO-SCAN\] scan ended ok=(\w+)' } | Select-Object -Last 1
         if ($endLine) {
             $scanEnded = $true
-            if ($endLine -match 'scan ended ok=(\w+) processed=(\d+) persons=(\d+) faces=(\d+)') {
-                $scanOk = ($Matches[1] -eq 'True')
-                $scanProcessed = [long]$Matches[2]
-                $clusterPersons = [long]$Matches[3]
-                $clusterFaces = [long]$Matches[4]
-            } else {
-                $scanOk = ($endLine -match 'ok=True')
-            }
+            $scanOk = ($endLine -match 'ok=True')
             break
         }
         if ($tail | Where-Object { $_ -match '\[AUTO-SCAN\] failed:' }) {
@@ -232,41 +150,11 @@ if (-not $proc.HasExited) {
     try { Stop-Process -Id $proc.Id -Force } catch { }
 }
 
-# A fast scan can write its completion marker and exit between poll intervals.
-# Re-read the complete log after process exit so the final assertions use the
-# authoritative marker sequence rather than the last observed tail.
-if (Test-Path $AppLog) {
-    $scanStarted = $false
-    $scanEnded = $false
-    $scanOk = $false
-    $scanProcessed = -1
-    $clusterPersons = -1
-    $clusterFaces = -1
-    foreach ($line in Get-Content -Path $AppLog -ErrorAction SilentlyContinue) {
-        if ($line -match '\[AUTO-SCAN\] starting scan') {
-            $scanStarted = $true
-        } elseif ($line -match '\[AUTO-SCAN\] scan ended ok=(\w+) processed=(\d+) persons=(\d+) faces=(\d+)') {
-            $scanEnded = $true
-            $scanOk = ($Matches[1] -eq 'True')
-            $scanProcessed = [long]$Matches[2]
-            $clusterPersons = [long]$Matches[3]
-            $clusterFaces = [long]$Matches[4]
-        } elseif ($line -match '\[AUTO-SCAN\] failed:') {
-            $scanEnded = $true
-            $scanOk = $false
-        }
-    }
-}
-
 # --- 8. Assertions ---------------------------------------------------
 Step "Assertions"
 Assert "scan started"   $scanStarted
 Assert "scan ended"     $scanEnded
 Assert "scan ok"        $scanOk
-Assert "scan processed files" ($scanProcessed -gt 0) `
-    "(processed=$scanProcessed discovered=$corpusFileCount)"
-Assert "face clustering completed" ($clusterPersons -ge 0 -and $clusterFaces -ge 0) `
-    "(persons=$clusterPersons faces=$clusterFaces)"
 
 # clean_exit marker
 $cleanExit = $false

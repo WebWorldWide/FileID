@@ -11,7 +11,7 @@
 #   ./build.sh -windows --debug       # Debug build (faster iteration)
 #   ./build.sh -windows --no-run      # Build only, don't launch
 #   ./build.sh -mac                   # macOS dev launch (run.sh)
-#   ./build.sh -linux                 # Build + stage + run the GTK4 app
+#   ./build.sh -linux                 # Phase 5 — not yet supported
 #
 # Defaults for -windows:
 #   - Wipe: ON          (destructive: clears Desktop\FileID + %LOCALAPPDATA%\FileID)
@@ -36,6 +36,7 @@ RUN="true"
 RUN_TESTS="false"
 ARM64="false"
 SIGN="false"
+VLM_NATIVE="false"
 FAST="false"
 
 show_help() {
@@ -46,7 +47,7 @@ FileID — unified build dispatcher
                                  questions instead of flag soup)
   ./build.sh -windows [flags]    Build and launch on Windows
   ./build.sh -mac     [flags]    Build and launch on macOS
-  ./build.sh -linux   [flags]    Build + run the GTK4 + libadwaita app
+  ./build.sh -linux   [flags]    Linux (Phase 5 — deferred)
 
 Common flags (after the target):
   --no-wipe        Don't destructively clear prior install + user data
@@ -62,6 +63,7 @@ Common flags (after the target):
   --debug          Debug build instead of Release (faster iteration)
   --tests          Run cargo + dotnet tests
   --arm64          Cross-compile for ARM64 (Snapdragon WoA) — Windows only
+  --vlm-native     Build with native llama.cpp bindings — Windows only
   --fast           Iteration-friendly release: thin LTO + parallel codegen
                    (~40-60% faster Rust compile, small runtime delta).
                    Use during inner-loop iteration.
@@ -142,7 +144,7 @@ EOF
     plat=$(ask_choice "Where are we building?" 1 \
         "Windows" \
         "macOS" \
-        "Linux (GTK4 app)")
+        "Linux (Phase 5 — not yet supported)")
     case "$plat" in
         1) TARGET="windows" ;;
         2) TARGET="mac" ;;
@@ -150,9 +152,10 @@ EOF
     esac
     echo ""
 
-    # Linux + macOS run their own dedicated build scripts, so skip the
-    # Windows-specific preset wizard (wipe scope, arch, …) for them.
-    if [ "$TARGET" != "windows" ]; then return; fi
+    # Linux isn't wired up yet — short-circuit before the rest of the
+    # wizard so the user doesn't answer irrelevant questions just to be
+    # told the platform is deferred.
+    if [ "$TARGET" = "linux" ]; then return; fi
 
     local preset
     preset=$(ask_choice "What kind of build?" 2 \
@@ -208,6 +211,7 @@ EOF
             RUN_TESTS=$(ask_yes_no "Run cargo + dotnet tests after build?" "n")
             if [ "$TARGET" = "windows" ]; then
                 ARM64=$(ask_yes_no "Cross-compile for ARM64 (Snapdragon WoA)?" "n")
+                VLM_NATIVE=$(ask_yes_no "Native llama.cpp bindings (cmake required)?" "n")
                 FAST=$(ask_yes_no "Use --fast (thin LTO, faster Rust compile)?" "n")
                 SIGN=$(ask_yes_no "Authenticode-sign all binaries?" "n")
             fi
@@ -225,6 +229,7 @@ EOF
     [ "$RUN" = "false" ] && equiv="$equiv --no-run"
     [ "$RUN_TESTS" = "true" ] && equiv="$equiv --tests"
     [ "$ARM64" = "true" ] && equiv="$equiv --arm64"
+    [ "$VLM_NATIVE" = "true" ] && equiv="$equiv --vlm-native"
     [ "$FAST" = "true" ] && equiv="$equiv --fast"
     [ "$SIGN" = "true" ] && equiv="$equiv --sign"
 
@@ -255,6 +260,7 @@ while [ $# -gt 0 ]; do
         --no-run) RUN="false" ;;
         --tests) RUN_TESTS="true" ;;
         --arm64) ARM64="true" ;;
+        --vlm-native) VLM_NATIVE="true" ;;
         --fast) FAST="true" ;;
         --sign) SIGN="true" ;;
         --help|-h) show_help ;;
@@ -290,6 +296,7 @@ case "$TARGET" in
         $RUN        && ps_args+=("-Run")
         $RUN_TESTS  && ps_args+=("-RunTests")
         $ARM64      && ps_args+=("-Arm64")
+        $VLM_NATIVE && ps_args+=("-VlmNative")
         $FAST       && ps_args+=("-Fast")
         $SIGN       && ps_args+=("-Sign")
 
@@ -320,17 +327,12 @@ case "$TARGET" in
             echo "ERROR: macOS build script not found at $SCRIPT" >&2
             exit 1
         fi
-        mac_args=()
-        [ "$WIPE" = "false" ] && [ "$WIPE_DB_ONLY" = "false" ] && mac_args+=("--no-wipe")
-        [ "$WIPE_DB_ONLY" = "true" ] && mac_args+=("--wipe-db-only")
-        [ "$RELEASE" = "false" ] && mac_args+=("--debug")
-        [ "$RUN" = "false" ] && mac_args+=("--no-run")
-
+        # The macOS run.sh handles its own configuration; just dispatch.
         # If the user passed --tests, run the test suite first.
         if $RUN_TESTS; then
             ( cd "$REPO_ROOT/platforms/apple" && swift test )
         fi
-        "$SCRIPT" "${mac_args[@]}"
+        "$SCRIPT"
 
         # Mirror FileID.app to ~/Desktop for one-click access — matches
         # the Windows --desktop default. Wipe any prior copy + Finder's
@@ -351,29 +353,19 @@ case "$TARGET" in
         ;;
 
     linux)
-        # The GTK4 + libadwaita app ships. Delegate to its dedicated build
-        # script, which builds the shared engine + the app and stages a
-        # runnable dist/ (see platforms/linux/build/build.sh).
-        SCRIPT="$REPO_ROOT/platforms/linux/build/build.sh"
-        if [ ! -f "$SCRIPT" ]; then
-            echo "ERROR: Linux build script not found at $SCRIPT" >&2
-            exit 1
-        fi
-        if [ "$RUN_TESTS" = "true" ]; then
-            ( cd "$REPO_ROOT/platforms/linux" && cargo test --locked -p fileid-engine --lib )
-            ( cd "$REPO_ROOT/platforms/linux" && cargo test --locked -p fileid-linux )
-        fi
-        if [ "$RELEASE" = "true" ]; then
-            PROFILE=release bash "$SCRIPT"
-        else
-            PROFILE=debug bash "$SCRIPT"
-        fi
-        DIST="$REPO_ROOT/platforms/linux/dist/fileid/fileid-linux"
-        if [ "$RUN" = "true" ] && [ -x "$DIST" ]; then
-            echo "→ launching $DIST"
-            exec "$DIST"
-        else
-            echo "✅ Built + staged. Run: $DIST"
-        fi
+        cat <<'EOF' >&2
+Linux is deferred to Phase 5 (see shared/docs/SHIP.md).
+
+The Rust engine is cross-platform-clean and will build on Linux today
+(`cargo build --release` from platforms/windows/src/engine/ — works on
+any *nix). The blocker is the UI: WinUI 3 is Windows-only, so the
+Linux app needs an Avalonia or GTK4-Rust port.
+
+If you need the engine standalone for headless use, run:
+    cd platforms/windows/src/engine && cargo build --release
+
+For UI: cross that bridge when we get there.
+EOF
+        exit 1
         ;;
 esac

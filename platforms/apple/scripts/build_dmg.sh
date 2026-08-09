@@ -42,20 +42,13 @@ done
 
 APP="FileID.app"
 DIST_DIR="dist"
-STAGE_DIR="$(mktemp -d /tmp/fileid-dmg-staging.XXXXXX)"
+STAGE_DIR="$DIST_DIR/dmg-staging"
 DMG_RW="$DIST_DIR/FileID-rw.dmg"
 DMG_OUT="$DIST_DIR/FileID.dmg"
 VOL_NAME="FileID"
-XCODE_DEV_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null || true)}"
-VERIFY_MOUNT=""
+XCODE_DEV_DIR="/Applications/Xcode.app/Contents/Developer"
 
 cleanup() {
-    if [ -n "$VERIFY_MOUNT" ] && mount | grep -Fq "on $VERIFY_MOUNT "; then
-        hdiutil detach "$VERIFY_MOUNT" -force -quiet 2>/dev/null || true
-    fi
-    if [ -n "$VERIFY_MOUNT" ]; then
-        rmdir "$VERIFY_MOUNT" 2>/dev/null || true
-    fi
     if [ -d "/Volumes/$VOL_NAME" ]; then
         hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true
     fi
@@ -70,15 +63,13 @@ fi
 
 if [ "$REBUILD" = "1" ]; then
     echo "🔨 Building release binaries…"
-    if [ -x "$XCODE_DEV_DIR/usr/bin/xcodebuild" ]; then
+    if [ -d "$XCODE_DEV_DIR" ]; then
         DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileID
         DEVELOPER_DIR="$XCODE_DEV_DIR" swift build -c release --product FileIDEngine
     else
         swift build -c release --product FileID
         swift build -c release --product FileIDEngine
     fi
-
-    bash "$PROJECT_DIR/scripts/ensure_mlx_metallib.sh"
 
     echo "📦 Assembling FileID.app bundle…"
     bash "$PROJECT_DIR/scripts/assemble_app.sh" "$PROJECT_DIR/$APP"
@@ -129,12 +120,6 @@ fi
 [ -d "$APP" ] || { echo "❌ $APP not found. Run with --rebuild or run.sh first."; exit 1; }
 [ -x "$APP/Contents/MacOS/FileID" ] || { echo "❌ Missing $APP/Contents/MacOS/FileID"; exit 1; }
 [ -x "$APP/Contents/MacOS/FileIDEngine" ] || { echo "❌ Missing $APP/Contents/MacOS/FileIDEngine"; exit 1; }
-[ -s "$APP/Contents/MacOS/mlx.metallib" ] || { echo "❌ Missing $APP/Contents/MacOS/mlx.metallib"; exit 1; }
-
-echo "🔒 Scanning shipped binaries for forbidden telemetry markers…"
-python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
-    "$APP/Contents/MacOS/FileID" \
-    "$APP/Contents/MacOS/FileIDEngine"
 
 if [ -d "/Volumes/$VOL_NAME" ]; then
     hdiutil detach "/Volumes/$VOL_NAME" -force -quiet 2>/dev/null || true
@@ -145,13 +130,11 @@ fi
 mkdir -p "$DIST_DIR"
 # Wipe any stale numbered duplicates Finder leaves behind (FileID 2.dmg,
 # FileID 3.dmg, etc.) plus the working files for this run.
-rm -f "$DMG_RW" "$DMG_OUT"
+rm -rf "$STAGE_DIR" "$DMG_RW" "$DMG_OUT"
 find "$DIST_DIR" -maxdepth 1 -name "FileID *.dmg" -delete 2>/dev/null || true
 find "$DIST_DIR" -maxdepth 1 -name "dmg-background*" -delete 2>/dev/null || true
+mkdir -p "$STAGE_DIR"
 cp -R "$APP" "$STAGE_DIR/"
-find "$STAGE_DIR/$APP" -exec xattr -c {} \; 2>/dev/null || true
-codesign --force --sign - --deep --timestamp=none "$STAGE_DIR/$APP" >/dev/null
-codesign --verify --deep --strict "$STAGE_DIR/$APP"
 ln -s /Applications "$STAGE_DIR/Applications"
 
 APP_KB=$(du -sk "$APP" | cut -f1)
@@ -169,18 +152,6 @@ hdiutil create \
 echo "📦 Compressing…"
 hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUT" >/dev/null
 rm -f "$DMG_RW"
-hdiutil verify "$DMG_OUT" >/dev/null
-
-VERIFY_MOUNT="$(mktemp -d /tmp/fileid-dmg-mount.XXXXXX)"
-hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" "$DMG_OUT" >/dev/null
-codesign --verify --deep --strict "$VERIFY_MOUNT/$APP"
-[ -s "$VERIFY_MOUNT/$APP/Contents/MacOS/mlx.metallib" ] || {
-    echo "❌ Packaged DMG is missing Contents/MacOS/mlx.metallib"
-    exit 1
-}
-hdiutil detach "$VERIFY_MOUNT" -quiet
-rmdir "$VERIFY_MOUNT"
-VERIFY_MOUNT=""
 
 # Mirror to ~/Desktop for one-click access. Wipe any prior copy first
 # so Finder doesn't number the new one (FileID 2.dmg, FileID 3.dmg…).

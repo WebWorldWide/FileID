@@ -1,4 +1,4 @@
-﻿// ViewModel binding + event-routing tests.
+// ViewModel binding + event-routing tests.
 //
 // These exercise the C# logic that backs Settings/Performance, Welcome,
 // People, and Library bindings WITHOUT a running UI thread. The
@@ -117,9 +117,9 @@ public class WelcomeSheetModelSizeTests
     [InlineData("mistral_small_3_2", 15178)] // 14300+878 MB
     [InlineData("ram_plus", 926)]            // RAM++ ONNX fp16 ~882 MB + sidecars
     [InlineData("qwen2_5_vl_7b", 6100)]    // 4700+1400 MB
-    [InlineData("gemma_3_4b", 3351)]    // 2500+851 MB
+    [InlineData("gemma_3_4b",    3351)]    // 2500+851 MB
     [InlineData("mobileclip_s2", 352)]    // CLIP ViT-B/32 vision (~335 MB)
-    [InlineData("clip_text", 256)]     // 254+1+1 MB
+    [InlineData("clip_text",     256)]     // 254+1+1 MB
     [InlineData("cudnn_runtime_x64", 430)]
     public void GetDisplaySizeMB_MatchesEngineRegistrySum(string modelKind, int expectedMB)
     {
@@ -133,51 +133,6 @@ public class WelcomeSheetModelSizeTests
     {
         Assert.Equal(0, ModelDisplaySize.GetDisplaySizeMB("not_a_model"));
         Assert.Equal(0, ModelDisplaySize.GetDisplaySizeMB(""));
-    }
-}
-
-public class GenerationOwnedOperationSlotTests
-{
-    [Fact]
-    public void RetiringOneGenerationCannotReleaseItsReplacement()
-    {
-        var slot = new GenerationOwnedOperationSlot<object>();
-        Assert.True(slot.TryReserve(7, 11, new object(), out var first));
-        Assert.Same(first, slot.Current);
-        Assert.Same(first, slot.ReleaseGeneration(7));
-
-        Assert.True(slot.TryReserve(8, 12, new object(), out var replacement));
-        Assert.False(slot.Release(first));
-        Assert.Null(slot.ReleaseGeneration(7));
-        Assert.Same(replacement, slot.Current);
-        Assert.True(slot.Release(replacement));
-        Assert.Null(slot.Current);
-    }
-
-    [Fact]
-    public void SlotRejectsOverlapAndCarriesAttemptGenerationAndRevision()
-    {
-        var payload = new object();
-        var slot = new GenerationOwnedOperationSlot<object>();
-        Assert.True(slot.TryReserve(3, 19, payload, out var owner));
-        Assert.False(slot.TryReserve(3, 20, new object(), out _));
-        Assert.Equal(3, owner.Generation);
-        Assert.Equal(19, owner.Revision);
-        Assert.Same(payload, owner.Payload);
-        Assert.True(owner.AttemptId > 0);
-    }
-}
-
-public class EngineTerminalErrorRoutingTests
-{
-    [Fact]
-    public void MergeSuggestionWaiterRecognizesOnlyItsCommandError()
-    {
-        Assert.True(EngineClient.IsMergeSuggestionTerminalError(
-            new EngineError("find_merge_suggestions_failed", "failed", null)));
-        Assert.False(EngineClient.IsMergeSuggestionTerminalError(
-            new EngineError("db_unavailable", "other command", null)));
-        Assert.False(EngineClient.IsMergeSuggestionTerminalError(null));
     }
 }
 
@@ -240,67 +195,6 @@ public class ScanProgressPhaseTests
             FilesPerSecond: 10.0, EtaSeconds: 2.0,
             ResidentMb: 250, AvailableMb: 6000);
         Assert.True(evt.Processed <= evt.Total);
-    }
-
-    [Fact]
-    public void PipelineStageMarksPeopleCompleteAfterFaceClusteringFinishes()
-    {
-        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
-            ScanPhase.Completed,
-            peopleDone: true,
-            captionsRunning: false,
-            captionsDone: false,
-            dbDerivedIndex: -1);
-
-        Assert.Equal(-1, state.ActiveIndex);
-        Assert.Equal(2, state.CompletedThrough);
-    }
-
-    [Fact]
-    public void PipelineStageKeepsPeopleActiveUntilFaceClusteringFinishes()
-    {
-        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
-            ScanPhase.Completed,
-            peopleDone: false,
-            captionsRunning: false,
-            captionsDone: false,
-            dbDerivedIndex: -1);
-
-        Assert.Equal(2, state.ActiveIndex);
-        Assert.Equal(1, state.CompletedThrough);
-    }
-
-    [Fact]
-    public void PipelineStageMarksDoneCompleteAfterDeepAnalyzeTerminates()
-    {
-        var state = FileID.Views.Sidebar.SidebarPipelineProgress.ResolveStageState(
-            ScanPhase.Completed,
-            peopleDone: true,
-            captionsRunning: false,
-            captionsDone: true,
-            dbDerivedIndex: -1);
-
-        Assert.Equal(-1, state.ActiveIndex);
-        Assert.Equal(4, state.CompletedThrough);
-    }
-}
-
-public class SidebarQueuePresentationTests
-{
-    [Theory]
-    [InlineData(true, false, "RUNNING")]
-    [InlineData(true, true, "RUNNING + NEXT")]
-    [InlineData(false, true, "UP NEXT")]
-    public void QueueHeadingReflectsRunningAndPendingWork(
-        bool hasRunning,
-        bool hasPending,
-        string expected)
-    {
-        Assert.Equal(
-            expected,
-            FileID.Views.Sidebar.SidebarQueueList.QueueHeading(
-                hasRunning,
-                hasPending));
     }
 }
 
@@ -494,17 +388,6 @@ public class FileTileKindChipTests
             Tags = tags ?? Array.Empty<string>(),
             TopTwoTags = tags ?? Array.Empty<string>(),
         };
-
-    [Fact]
-    public void From_DeduplicatesDisplayTagsCaseInsensitively()
-    {
-        var tile = FileTile.From(new FileRow(
-            1, "C:/x.jpg", "image", 0, null, false, false,
-            ["favorite", "sunset", "Sunset", "cat", "CAT"], null));
-
-        Assert.Equal(["Favorite", "Sunset", "Cat"], tile.Tags);
-        Assert.Equal(["Favorite", "Sunset"], tile.TopTwoTags);
-    }
 
     [Theory]
     [InlineData("image", "Image")]
@@ -747,7 +630,6 @@ public class EngineWarningClassificationTests
     [Theory]
     [InlineData("face_clustering_busy")]
     [InlineData("deep_analyze_already_running")]
-    [InlineData("scan_already_running")]
     [InlineData("rescan_no_changes")]
     [InlineData("stages_skipped_missing_models")]
     [InlineData("discovery_partial")]
@@ -769,32 +651,6 @@ public class EngineWarningClassificationTests
     public void FatalOrUnknownKinds_RouteToError(string? kind)
     {
         Assert.False(EngineClient.IsNonFatalWarningKind(kind));
-    }
-
-    [Fact]
-    public void GpuRecoveryPolicyBlocksGpuCommandsAndAllowsRepresentativeControlCommands()
-    {
-        FileID.IpcSchema.CommandPayload[] blocked =
-        [
-            new FileID.IpcSchema.StartScanCommand("C:\\Library", null, false, null),
-            new FileID.IpcSchema.DeepAnalyzeFileCommand(1, "qwen2_5_vl_7b"),
-            new FileID.IpcSchema.DeepAnalyzeFolderCommand("C:\\Library", "qwen2_5_vl_7b"),
-            new FileID.IpcSchema.DeepAnalyzeAllCommand("qwen2_5_vl_7b", true, false, true),
-            new FileID.IpcSchema.EmbedTextQueryCommand("family", "q1"),
-        ];
-        Assert.All(blocked, command => Assert.True(EngineClient.RequiresHealthyGpu(command)));
-
-        FileID.IpcSchema.CommandPayload[] allowed =
-        [
-            new FileID.IpcSchema.RequestStatusCommand(),
-            new FileID.IpcSchema.ShutdownCommand(),
-            new FileID.IpcSchema.CancelScanCommand(),
-            new FileID.IpcSchema.CancelRestructureCommand(),
-            new FileID.IpcSchema.DeepAnalyzeCancelCommand(),
-            new FileID.IpcSchema.WipeLibraryCommand(),
-            new FileID.IpcSchema.EmbedImageQueryCommand(1, "q2"),
-        ];
-        Assert.All(allowed, command => Assert.False(EngineClient.RequiresHealthyGpu(command)));
     }
 }
 
@@ -855,136 +711,6 @@ public class PeopleSelectionReprojectTests
         Assert.True(items[0].IsSelected);
         Assert.False(items[1].IsSelected);
         Assert.True(items[2].IsSelected);
-    }
-}
-
-public class RestructureUndoAvailabilityTests
-{
-    [Fact]
-    public void ContentMutations_InvalidateCachedRestructurePlan()
-    {
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new PhaseChangedEvent(ScanPhase.Discovering)));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new PhaseChangedEvent(ScanPhase.Tagging)));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new PhaseChangedEvent(ScanPhase.PostScan)));
-        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
-            new PhaseChangedEvent(ScanPhase.Completed)));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new ScanCompleteEvent(new ScanComplete("scan", 3, 3, 0, 1))));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new FaceClusteringCompleteEvent(new FaceClusteringResult(1, 3, 0, 1))));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new DeepAnalyzeStartingEvent(
-                new DeepAnalyzeStarting("qwen", DeepAnalyzeStartingPhase.Queued, "Queued"))));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new DeepAnalyzeCompleteEvent(new DeepAnalyzeComplete(3, 0, 1, "qwen", false))));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new BulkActionResultEvent(new BulkActionResult("applyTags", 1, 0, []))));
-        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
-            new BulkActionResultEvent(new BulkActionResult("applyTags", 0, 1, []))));
-        Assert.True(EngineClient.MutationInvalidatesRestructurePlan(
-            new LibraryWipedEvent(new LibraryWiped(true))));
-        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(
-            new LibraryWipedEvent(new LibraryWiped(false))));
-        Assert.False(EngineClient.MutationInvalidatesRestructurePlan(null));
-    }
-
-    [Fact]
-    public void SourceChangingRestructureResult_InvalidatesButShortcutPreviewDoesNot()
-    {
-        var moved = new RestructureApplyResult(3, 0);
-        var empty = new RestructureApplyResult(0, 0);
-
-        Assert.True(EngineClient.RestructureResultInvalidatesPlan(
-            wasUndo: false, forwardRunWasUndoable: true, moved));
-        Assert.True(EngineClient.RestructureResultInvalidatesPlan(
-            wasUndo: true, forwardRunWasUndoable: false, moved));
-        Assert.False(EngineClient.RestructureResultInvalidatesPlan(
-            wasUndo: false, forwardRunWasUndoable: false, moved));
-        Assert.False(EngineClient.RestructureResultInvalidatesPlan(
-            wasUndo: false, forwardRunWasUndoable: true, empty));
-    }
-
-    [Fact]
-    public void RestructurePlanReply_IsAcceptedOnlyAtCapturedMutationRevision()
-    {
-        Assert.True(EngineClient.ShouldAcceptRestructurePlan(
-            requestedRevision: 8,
-            currentRevision: 8));
-        Assert.False(EngineClient.ShouldAcceptRestructurePlan(
-            requestedRevision: 8,
-            currentRevision: 9));
-        Assert.False(EngineClient.ShouldAcceptRestructurePlan(
-            requestedRevision: -1,
-            currentRevision: 0));
-    }
-
-    [Fact]
-    public void FreshApplyWithNoWork_PreservesExistingUndoState()
-    {
-        Assert.Null(EngineClient.NextCanUndoRestructure(
-            wasUndo: false, new RestructureApplyResult(0, 0)));
-    }
-
-    [Fact]
-    public void FailedOnlyApply_PreservesExistingUndoState()
-    {
-        Assert.Null(EngineClient.NextCanUndoRestructure(
-            wasUndo: false, new RestructureApplyResult(0, 1)));
-    }
-
-    [Fact]
-    public void ApplyThatMovedAFile_OffersRecoveryUndo()
-    {
-        Assert.True(EngineClient.NextCanUndoRestructure(
-            wasUndo: false, new RestructureApplyResult(1, 1)));
-    }
-
-    [Fact]
-    public void SymlinkApplyPreservesPriorMoveJournalUndo()
-    {
-        Assert.Null(EngineClient.NextCanUndoRestructure(
-            wasUndo: false,
-            new RestructureApplyResult(10, 0),
-            forwardRunWasUndoable: false));
-    }
-
-    [Fact]
-    public void ShortcutUndoPreservesPriorMoveJournalUndo()
-    {
-        Assert.Null(EngineClient.NextCanUndoRestructure(
-            wasUndo: true,
-            new RestructureApplyResult(10, 0),
-            wasShortcutUndo: true));
-    }
-
-    [Fact]
-    public void PartialUndo_RemainsRetryable()
-    {
-        Assert.True(EngineClient.NextCanUndoRestructure(
-            wasUndo: true, new RestructureApplyResult(3, 1)));
-    }
-
-    [Fact]
-    public void CompletedUndo_ClearsUndoAvailability()
-    {
-        Assert.False(EngineClient.NextCanUndoRestructure(
-            wasUndo: true, new RestructureApplyResult(3, 0)));
-    }
-
-    [Fact]
-    public void CancelledUndo_RemainsRetryable()
-    {
-        // restructure_apply.rs deliberately keeps the inverse-move journal on
-        // a cancelled undo (even with zero failures) so the user can re-run
-        // it and put the remaining files back. Before this fix, only
-        // result.Failed was consulted, so a cancelled-but-zero-failure undo
-        // hid the Undo button while the journal — and the still-relocated
-        // files — remained.
-        Assert.True(EngineClient.NextCanUndoRestructure(
-            wasUndo: true, new RestructureApplyResult(2, 0, Cancelled: true)));
     }
 }
 

@@ -23,7 +23,6 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("SidebarFolderHeader.OnAppViewModelChanged", () =>
     {
         if (e.PropertyName is nameof(AppViewModel.FolderPath)
                           or nameof(AppViewModel.FolderDisplay)
@@ -31,7 +30,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
-    });
+    }
 
     private void Sync()
     {
@@ -198,8 +197,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             try
             {
                 DebugLog.Info("[WIPE] engine-side wipeLibrary");
-                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(
-                    BulkActionTimeout.Maximum);
+                var wipeResult = await EngineClient.Instance.WipeLibraryAndWaitAsync(TimeSpan.FromSeconds(30));
                 if (wipeResult.Ok)
                 {
                     DebugLog.Info("[WIPE] engine confirmed libraryWiped");
@@ -221,24 +219,13 @@ public sealed partial class SidebarFolderHeader : UserControl
         DebugLog.Info("[WIPE] stage 2: shutdown engine");
         try
         {
-            if (!await EngineClient.Instance.StopAndWaitForExitAsync(
-                    TimeSpan.FromSeconds(10), restartAfterLateExit: true))
-            {
-                DebugLog.Warn("[WIPE] stage 2 timed out; refusing to delete a live engine's database");
-                await ShowAlertAsync(
-                    "Couldn't safely wipe the library",
-                    "The engine did not stop in time, so FileID left your database untouched. Close FileID and try again.");
-                return;
-            }
+            await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
             DebugLog.Info("[WIPE] stage 2 complete");
         }
         catch (Exception ex)
         {
-            DebugLog.Warn("[WIPE] stage 2 (shutdown) threw; wipe aborted: " + ex.Message);
-            await ShowAlertAsync(
-                "Couldn't safely wipe the library",
-                "The engine could not be stopped, so FileID left your database untouched. Close FileID and try again.");
-            return;
+            DebugLog.Warn("[WIPE] stage 2 (shutdown) threw: " + ex.Message);
+            // Continue anyway — engine may already be dead.
         }
 
         DebugLog.Info("[WIPE] stage 3: delete DB files");

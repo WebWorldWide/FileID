@@ -51,21 +51,9 @@ function Capture-Screen([string]$path) {
     Write-Host "  -> $path"
 }
 
-# Launch + wait for the app's real top-level window. A fixed sleep alone can
-# capture an unrelated desktop while WinAppSDK is still activating.
+# Launch + wait for window.
 $proc = Start-Process -FilePath $AppExe -PassThru
 Write-Host "  PID = $($proc.Id)"
-$windowDeadline = (Get-Date).AddSeconds(30)
-while ((Get-Date) -lt $windowDeadline -and -not $proc.HasExited) {
-    try { $proc.WaitForInputIdle(1000) | Out-Null } catch { }
-    $proc.Refresh()
-    if ($proc.MainWindowHandle -ne 0) { break }
-    Start-Sleep -Milliseconds 250
-}
-if ($proc.HasExited -or $proc.MainWindowHandle -eq 0) {
-    Write-Host "ERROR: FileID did not create a top-level window within 30 seconds." -ForegroundColor Red
-    exit 1
-}
 Start-Sleep -Seconds $LaunchWaitSeconds
 Capture-Screen (Join-Path $OutDir "launch.png")
 

@@ -90,11 +90,8 @@ public final class CLIPTokenizer: @unchecked Sendable {
         var enc: [String: Int32] = [:]
         enc.reserveCapacity(vocab.count)
         for (k, v) in vocab { enc[k] = Int32(v) }
-        // merges.txt: first line is a header, then "a b" per line. Split on
-        // \n / \r\n (matching the Rust engine's `.lines()`, not `.isNewline`) so a
-        // CRLF file doesn't leave a trailing \r glued to the second token of every
-        // pair, while staying byte-faithful across engines.
-        let lines = mergesText.split(whereSeparator: { $0 == "\n" || $0 == "\r\n" }).dropFirst()
+        // merges.txt: first line is a header, then "a b" per line
+        let lines = mergesText.split(separator: "\n").dropFirst()
         guard lines.count <= 50_000 else { return false }
         var ranks: [Pair: Int] = [:]
         ranks.reserveCapacity(lines.count)
@@ -261,10 +258,6 @@ public final class CLIPTokenizer: @unchecked Sendable {
 
     private func pairsFor(_ word: [String]) -> Set<Pair> {
         var out: Set<Pair> = []
-        // An empty word (e.g. a piece whose first grapheme exceeds the 256-byte
-        // truncation cap collapses to "") would make `word.count - 1` underflow
-        // to -1 and trap `0..<(-1)`. No pairs exist below 2 elements.
-        guard word.count >= 2 else { return out }
         for i in 0..<(word.count - 1) {
             out.insert(Pair(word[i], word[i + 1]))
         }

@@ -1,0 +1,19 @@
+﻿2026-05-06T10:39:32.700Z INFO  [tid 1] FileID launched. State dir: C:\Users\adamm\AppData\Local\FileID
+2026-05-06T10:39:32.785Z INFO  [tid 1] EngineClient: spawning ~\AppData\Local\FileID-App\FileIDEngine.exe
+2026-05-06T10:39:32.811Z WARN  [tid 1] EngineClient: engine is unsigned. OK in dev; ship builds must be signed.
+2026-05-06T10:39:32.872Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.871661Z  INFO FileIDEngine: FileIDEngine starting version="0.1.0"
+2026-05-06T10:39:32.883Z DEBUG [tid 4] [engine] 2026-05-06T10:39:32.882830Z  INFO FileIDEngine::db::migrations: applying migration migration="v1_core_tables"
+2026-05-06T10:39:32.884Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.884153Z  INFO FileIDEngine::db::migrations: applying migration migration="v2_clip_embeddings"
+2026-05-06T10:39:32.884Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.884336Z  INFO FileIDEngine::db::migrations: applying migration migration="v3_deep_analyze"
+2026-05-06T10:39:32.885Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.885081Z  INFO FileIDEngine::db::migrations: applying migration migration="v4_face_verifications"
+2026-05-06T10:39:32.885Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.885350Z  INFO FileIDEngine::db::migrations: applying migration migration="v5_person_naming_structured"
+2026-05-06T10:39:32.886Z DEBUG [tid 8] [engine] 2026-05-06T10:39:32.886292Z  INFO FileIDEngine::db::migrations: applying migration migration="v6_arcface_embeddings"
+2026-05-06T10:39:32.887Z DEBUG [tid 6] [engine] 2026-05-06T10:39:32.886875Z  INFO FileIDEngine::db::migrations: applying migration migration="v7_identity_anchors"
+2026-05-06T10:39:32.895Z INFO  [tid 1] [IPC OUT] RequestStatus (77 bytes)
+2026-05-06T10:39:32.896Z INFO  [tid 8] [IPC OUT] RequestStatus flushed to engine stdin.
+2026-05-06T10:39:32.906Z DEBUG [tid 6] [engine] 2026-05-06T10:39:32.906186Z  WARN FileIDEngine: ipc decode failed err=expected value at line 1 column 1
+2026-05-06T10:39:33.134Z WARN  [tid 1] [IPC IN] engine error: kind=ipc_decode_failed msg=could not parse command frame: expected value at line 1 column 1 path=<null>
+2026-05-06T10:39:33.181Z INFO  [tid 1] [INSTALL] MaybeShowWelcomeSheetAsync called.
+2026-05-06T10:39:33.184Z INFO  [tid 1] [INSTALL] sentinel state: clip=NotInstalled arcface=NotInstalled vlm=NotInstalled
+2026-05-06T10:39:33.184Z INFO  [tid 1] [INSTALL] constructing WelcomeSheet + ContentDialog.
+2026-05-06T10:39:33.196Z INFO  [tid 1] [INSTALL] dialog.ShowAsync awaiting...

@@ -1,4 +1,4 @@
-﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
+// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
 // LibraryView.swift:902-1112 preview sheet:
 //   image  → BitmapImage at 1024 px (shell IThumbnailProvider chain).
 //   video  → MediaPlayerElement with transport controls (in-app playback;
@@ -9,8 +9,9 @@
 //   other  → kind glyph + "Open in default app" affordance.
 //
 // Lifecycle: SetFile is called once on open and again on every prev/next
-// sibling navigation. The host calls CloseFromHost after ShowAsync returns
-// so media and file handles are released after every dismissal path.
+// sibling navigation. CloseInternal is invoked by the toolbar X button,
+// Esc key, or when the host dialog hides — it pauses the media player so
+// audio doesn't keep playing after the sheet closes.
 
 using System;
 using System.Collections.Generic;
@@ -44,33 +45,30 @@ public sealed partial class FilePreviewSheet : UserControl
         // tag TextBox is focused so typing still moves the cursor.
         PreviewKeyDown += OnPreviewKeyDown;
         Loaded += OnSheetLoaded;
+        Unloaded += (_, _) =>
+        {
+            _unloaded = true;
+            // Stop the deferred loading-ring timer so a queued tick can't touch
+            // the torn-down content tree.
+            try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
+            // Stop playback + fully dispose the MediaPlayer so audio can't keep
+            // playing and the file handle is released after the dialog dismisses.
+            StopAndClearMedia();
+            DisposeMediaPlayer();
+            // Clear the cross-tab "currently previewed" hint so the Deep
+            // Analyze tab's "Analyze current" button disables when the
+            // user closes the sheet.
+            FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
+        };
         IsTabStop = true;
-        // Auto-reset the Analyze/Cancel button when the engine finishes the
-        // run this sheet started. Detached in CloseFromHost.
-        ViewModels.EngineClient.Instance.PropertyChanged += OnEngineChangedForAnalyze;
     }
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
     {
-        _unloaded = false;
         // The host ContentDialog has no default button, so focus would otherwise
         // sit on the dialog chrome and the tunneling PreviewKeyDown would never
         // fire. Grab focus into the sheet so arrow keys navigate immediately.
         try { Focus(FocusState.Programmatic); } catch { /* best-effort */ }
-    }
-
-    // ContentDialog reparents its content through a transient Unloaded event
-    // while opening. Only ShowAsync completion is a terminal close signal.
-    internal void CloseFromHost()
-    {
-        if (_unloaded) return;
-        _unloaded = true;
-        try { ViewModels.EngineClient.Instance.PropertyChanged -= OnEngineChangedForAnalyze; }
-        catch { /* best-effort */ }
-        try { _loadingDelayTimer?.Stop(); } catch { }
-        StopAndClearMedia();
-        DisposeMediaPlayer();
-        FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
     }
 
     internal void SetSiblings(IReadOnlyList<FileID.ViewModels.FileTile> siblings, int currentIndex)
@@ -100,43 +98,6 @@ public sealed partial class FilePreviewSheet : UserControl
     private void OnPreviewKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
         => HandleKeyDown(e);
 
-    // Accelerator path (see the XAML comment): fires even when the routed
-    // KeyDown never reaches the dialog handler. Accelerators are evaluated
-    // BEFORE routed key events, so when we handle one here the routed path
-    // never fires (no double-navigation); when we decline (TextBox focused),
-    // the key continues to the routed pipeline where HandleKeyDown's own
-    // typing guard also declines and the caret key reaches the TextBox.
-    private void OnLeftAccelerator(
-        Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
-        Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-        => args.Handled = TryNavigateFromAccelerator(-1);
-
-    private void OnRightAccelerator(
-        Microsoft.UI.Xaml.Input.KeyboardAccelerator sender,
-        Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-        => args.Handled = TryNavigateFromAccelerator(+1);
-
-    // Set when an accelerator navigates, so the routed pass for the SAME
-    // keystroke (the dialog handler runs with handledEventsToo:true and
-    // deliberately ignores e.Handled — see HandleKeyDown) can't navigate a
-    // second time. Both passes run within one input dispatch, so a short
-    // wall-clock window is a reliable same-keystroke discriminator.
-    private long _acceleratorNavTick;
-
-    private bool TryNavigateFromAccelerator(int delta)
-    {
-        var focused = XamlRoot is null
-            ? null
-            : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
-        if (focused is TextBox) return false; // typing — give the caret key back
-        _acceleratorNavTick = Environment.TickCount64;
-        NavigateSibling(delta);
-        return true;
-    }
-
-    private bool AcceleratorAlreadyNavigated()
-        => Environment.TickCount64 - _acceleratorNavTick < 100;
-
     /// <summary>Arrow-key sibling nav + Space play/pause + Esc close. Public
     /// because the host wires it on the ContentDialog via
     /// AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true): once the
@@ -146,14 +107,7 @@ public sealed partial class FilePreviewSheet : UserControl
     /// Button consumes Space — letting us intercept it for play/pause.</summary>
     internal void HandleKeyDown(Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
     {
-        // Do NOT bail on e.Handled here. The host wires this on the ContentDialog
-        // via AddHandler(PreviewKeyDownEvent, …, handledEventsToo:true) *because*
-        // the dialog's own tunneling key handling marks Left/Right/Space/Esc as
-        // Handled before the tunnel reaches us — an early `if (e.Handled) return;`
-        // swallowed every sibling navigation. We set e.Handled after acting, and
-        // the sheet's own (non-handledEventsToo) PreviewKeyDown subscription is
-        // still gated by Handled, so acting here can't double-navigate.
-        // While typing in the tag box, let Left/Right/Space act as text input.
+        // While typing in the tag box, let Left/Right/Up/Down/Space act as text input.
         var focused = XamlRoot is null
             ? null
             : Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(XamlRoot);
@@ -161,13 +115,15 @@ public sealed partial class FilePreviewSheet : UserControl
         switch (e.Key)
         {
             case Windows.System.VirtualKey.Left:
+            case Windows.System.VirtualKey.Up:
                 if (typing) return;
-                if (!AcceleratorAlreadyNavigated()) NavigateSibling(-1);
+                NavigateSibling(-1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Right:
+            case Windows.System.VirtualKey.Down:
                 if (typing) return;
-                if (!AcceleratorAlreadyNavigated()) NavigateSibling(+1);
+                NavigateSibling(+1);
                 e.Handled = true;
                 break;
             case Windows.System.VirtualKey.Space:
@@ -235,9 +191,6 @@ public sealed partial class FilePreviewSheet : UserControl
 
         TagInput.Text = string.Empty;
         TagStatusText.Visibility = Visibility.Collapsed;
-        // Navigation resets the Analyze button for the NEW file; a run already
-        // in flight keeps going (the Deep Analyze tab shows its progress).
-        if (_analyzeRunning) SetAnalyzeIdle();
         // Refresh the proposed-rename card from the DB (separate query
         // because the sheet may be opened for a file the LibraryView
         // hasn't loaded yet).
@@ -373,7 +326,6 @@ public sealed partial class FilePreviewSheet : UserControl
     /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
     /// only ever read/written from the dispatcher-marshaled paths below.</summary>
     private const int PreviewCacheCap = 4;
-    private const long MaxDirectPreviewEncodedBytes = 256L * 1024 * 1024;
     private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
 
     private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
@@ -400,8 +352,43 @@ public sealed partial class FilePreviewSheet : UserControl
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
             if (thumb is { Size: > 0 } && dispatcher != null)
             {
-                var bytes = await ReadThumbnailBytesAsync(thumb);
-                if (await TryRenderPreviewBytesAsync(bytes, cacheKey, dispatcher, navGen, kind))
+                var captured = thumb;
+                thumb = null;
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var enqueued = dispatcher.TryEnqueue(async () =>
+                {
+                    try
+                    {
+                        // Stale navigation — don't overwrite a newer file's preview. (audit A9)
+                        if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
+                        // Cap the decoded surface at the displayed 1024 px edge
+                        // regardless of what the shell hands back, so the 4-entry
+                        // preview cache stays within its ~16 MB budget instead of
+                        // holding native-resolution (e.g. 48 MP) decodes. (audit P6)
+                        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
+                        await bmp.SetSourceAsync(captured);
+                        PreviewImage.Source = bmp;
+                        PreviewImage.Visibility = Visibility.Visible;
+                        // On the UI thread here — safe to populate the DispatcherObject cache.
+                        StorePreview(cacheKey, bmp);
+                        tcs.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        Services.DebugLog.Warn($"FilePreviewSheet UI render ({kind}): {ex.Message}");
+                        tcs.TrySetResult(false);
+                    }
+                    finally
+                    {
+                        try { captured.Dispose(); } catch { }
+                    }
+                });
+                if (!enqueued)
+                {
+                    Services.DebugLog.Warn("FilePreviewSheet: dispatcher.TryEnqueue returned false.");
+                    try { captured.Dispose(); } catch { }
+                }
+                else if (await tcs.Task)
                 {
                     return;
                 }
@@ -414,11 +401,6 @@ public sealed partial class FilePreviewSheet : UserControl
         finally
         {
             try { thumb?.Dispose(); } catch { }
-        }
-        if (kind == "image" && dispatcher != null && !_unloaded && _navGen == navGen
-            && await TryDirectImageDecodeAsync(path, cacheKey, dispatcher, navGen))
-        {
-            return;
         }
         // Don't show the failure placeholder if we navigated away (or the stale
         // guard above set tcs=false for a superseded nav) — otherwise the prior
@@ -437,180 +419,6 @@ public sealed partial class FilePreviewSheet : UserControl
     /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
     /// onto PreviewImage and bump it to most-recently-used. Returns true when a
     /// cached preview was shown (caller skips the shell extract + decode).</summary>
-    private static async Task<byte[]> ReadThumbnailBytesAsync(
-        Windows.Storage.FileProperties.StorageItemThumbnail thumbnail)
-    {
-        thumbnail.Seek(0);
-        var size = checked((uint)thumbnail.Size);
-        using var reader = new Windows.Storage.Streams.DataReader(thumbnail.GetInputStreamAt(0));
-        var loaded = await reader.LoadAsync(size);
-        if (loaded != size)
-        {
-            throw new EndOfStreamException($"Shell thumbnail ended after {loaded} of {size} bytes.");
-        }
-        var bytes = new byte[size];
-        reader.ReadBytes(bytes);
-        return bytes;
-    }
-
-    private async Task<bool> TryDirectImageDecodeAsync(
-        string path, string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
-    {
-        Windows.Storage.Streams.IRandomAccessStream? stream = null;
-        try
-        {
-            var length = new FileInfo(path).Length;
-            if (length <= 0 || length > MaxDirectPreviewEncodedBytes)
-            {
-                Services.DebugLog.Warn($"FilePreviewSheet direct decode skipped encodedBytes={length}.");
-                return false;
-            }
-            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
-            stream = await file.OpenReadAsync();
-            if (stream.Size == 0 || stream.Size > (ulong)MaxDirectPreviewEncodedBytes)
-            {
-                Services.DebugLog.Warn($"FilePreviewSheet direct decode skipped openedBytes={stream.Size}.");
-                return false;
-            }
-            var accepted = await TryRenderPreviewStreamAsync(stream, cacheKey, dispatcher, navGen, "image-direct");
-            if (accepted) stream = null;
-            return accepted;
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn($"FilePreviewSheet direct decode open failed for {Services.PathRedactor.Redact(path)}: {ex.Message}");
-            return false;
-        }
-        finally
-        {
-            try { stream?.Dispose(); } catch { }
-        }
-    }
-
-    private async Task<bool> TryRenderPreviewStreamAsync(
-        Windows.Storage.Streams.IRandomAccessStream stream,
-        string cacheKey,
-        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
-        int navGen,
-        string source)
-    {
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var enqueued = dispatcher.TryEnqueue(() => _ = RenderPreviewStreamOnUiAsync(
-            stream, cacheKey, navGen, source, tcs));
-        if (!enqueued)
-        {
-            Services.DebugLog.Warn($"FilePreviewSheet dispatcher rejected {source} render.");
-            return false;
-        }
-        return await tcs.Task;
-    }
-
-    private async Task<bool> TryRenderPreviewBytesAsync(
-        byte[] bytes,
-        string cacheKey,
-        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
-        int navGen,
-        string source)
-    {
-        if (bytes.Length == 0) return false;
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var enqueued = dispatcher.TryEnqueue(() => _ = RenderPreviewBytesOnUiAsync(
-            bytes, cacheKey, navGen, source, tcs));
-        if (!enqueued)
-        {
-            Services.DebugLog.Warn($"FilePreviewSheet dispatcher rejected {source} render.");
-            return false;
-        }
-        return await tcs.Task;
-    }
-
-    private async Task RenderPreviewBytesOnUiAsync(
-        byte[] bytes,
-        string cacheKey,
-        int navGen,
-        string source,
-        TaskCompletionSource<bool> completion)
-    {
-        Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
-        try
-        {
-            if (_unloaded || _navGen != navGen)
-            {
-                completion.TrySetResult(false);
-                return;
-            }
-            stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
-            using (var writer = new Windows.Storage.Streams.DataWriter(stream.GetOutputStreamAt(0)))
-            {
-                writer.WriteBytes(bytes);
-                await writer.StoreAsync();
-                await writer.FlushAsync();
-                writer.DetachStream();
-            }
-            stream.Seek(0);
-            await RenderPreviewStreamCoreAsync(stream, cacheKey, navGen, source, completion, (ulong)bytes.Length);
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn($"FilePreviewSheet render failed source={source}: {ex.GetType().Name}: {ex.Message}");
-            completion.TrySetResult(false);
-        }
-        finally
-        {
-            try { stream?.Dispose(); } catch { }
-        }
-    }
-
-    private async Task RenderPreviewStreamOnUiAsync(
-        Windows.Storage.Streams.IRandomAccessStream stream,
-        string cacheKey,
-        int navGen,
-        string source,
-        TaskCompletionSource<bool> completion)
-    {
-        try
-        {
-            stream.Seek(0);
-            await RenderPreviewStreamCoreAsync(stream, cacheKey, navGen, source, completion, stream.Size);
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn($"FilePreviewSheet render failed source={source}: {ex.GetType().Name}: {ex.Message}");
-            completion.TrySetResult(false);
-        }
-        finally
-        {
-            try { stream.Dispose(); } catch { }
-        }
-    }
-
-    private async Task RenderPreviewStreamCoreAsync(
-        Windows.Storage.Streams.IRandomAccessStream stream,
-        string cacheKey,
-        int navGen,
-        string source,
-        TaskCompletionSource<bool> completion,
-        ulong encodedBytes)
-    {
-        if (_unloaded || _navGen != navGen)
-        {
-            completion.TrySetResult(false);
-            return;
-        }
-        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
-        await bmp.SetSourceAsync(stream);
-        if (_unloaded || _navGen != navGen)
-        {
-            completion.TrySetResult(false);
-            return;
-        }
-        PreviewImage.Source = bmp;
-        PreviewImage.Visibility = Visibility.Visible;
-        StorePreview(cacheKey, bmp);
-        Services.DebugLog.Debug($"FilePreviewSheet render completed source={source} bytes={encodedBytes} pixel={bmp.PixelWidth}x{bmp.PixelHeight}");
-        completion.TrySetResult(true);
-    }
-
     private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
     {
         for (var node = _previewCache.First; node != null; node = node.Next)
@@ -619,17 +427,13 @@ public sealed partial class FilePreviewSheet : UserControl
             var bmp = node.Value.Value;
             _previewCache.Remove(node);
             _previewCache.AddFirst(node);
-            var enqueued = dispatcher.TryEnqueue(() =>
+            dispatcher.TryEnqueue(() =>
             {
                 if (_unloaded || _navGen != navGen) return; // stale navigation (audit A9)
                 PreviewImage.Source = bmp;
                 PreviewImage.Visibility = Visibility.Visible;
             });
-            if (!enqueued)
-            {
-                Services.DebugLog.Warn("FilePreviewSheet dispatcher rejected cached preview render.");
-            }
-            return enqueued;
+            return true;
         }
         return false;
     }
@@ -690,17 +494,10 @@ public sealed partial class FilePreviewSheet : UserControl
             // The prior image frame is kept on screen until a new surface binds
             // (deferred-loading); collapse it now that the media surface is up.
             PreviewImage.Visibility = Visibility.Collapsed;
-            // Ensure a MediaPlayer exists BEFORE binding the source: the
-            // element creates one lazily, so `MediaPlayer is { }` could still
-            // be null here — skipping the MediaFailed attach and leaving a
-            // codec/DRM failure as a silent black surface with no message.
-            if (PreviewMedia.MediaPlayer is null)
-            {
-                PreviewMedia.SetMediaPlayer(new Windows.Media.Playback.MediaPlayer());
-            }
             PreviewMedia.Source = src;
             PreviewMedia.Visibility = Visibility.Visible;
-            // Detach first so rapid sibling navigation can't multi-subscribe.
+            // Attach failure handler on the (lazily-created) MediaPlayer; detach
+            // first so rapid sibling navigation can't multi-subscribe.
             if (PreviewMedia.MediaPlayer is { } mp)
             {
                 mp.MediaFailed -= OnMediaPlayerFailed;
@@ -782,7 +579,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     /// <summary>Fully tear down the MediaPlayerElement's auto-created MediaPlayer
     /// on close — pausing + nulling the source isn't always enough to stop audio
-    /// or release the file handle. Only call on host close, not on sibling
+    /// or release the file handle. Only call on close (Unloaded), not on sibling
     /// navigation (the element reuses its MediaPlayer for the next source).</summary>
     private void DisposeMediaPlayer()
     {
@@ -895,10 +692,11 @@ public sealed partial class FilePreviewSheet : UserControl
         catch { name = null; }
 
         if (string.IsNullOrWhiteSpace(name)) return;
-        // Defensive: sheet may have closed or navigated during the async query.
-        // Reject the stale result before changing either backing state or XAML.
-        if (_unloaded || _navGen != navGen) return;
         _pendingProposedName = name;
+        // Defensive: sheet may have closed during the async query. Bail before
+        // touching XAML, then wrap the UI mutation so a torn-down dialog
+        // content tree doesn't fast-fail the dispatcher.
+        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             ProposedRenameText.Text = name;
@@ -915,15 +713,6 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             var name = _pendingProposedName;
             if (FileId <= 0 || string.IsNullOrWhiteSpace(name)) return;
-            // Capture the pre-rename name NOW for the session change log's
-            // inverse action (renaming back is just another renameFiles).
-            // Also capture the file id + navigation generation at CLICK time: a
-            // quick navigate-to-next while the 30 s rename await is pending must
-            // not let this completion hide/clear the NEWLY-displayed file's
-            // proposed-rename card. (audit A9 — rename vs quick-navigate)
-            var fileId = FileId;
-            var navGenAtClick = _navGen;
-            var oldName = System.IO.Path.GetFileName(FilePath);
             try
             {
                 // Await the engine's BulkActionResult instead of fire-and-forget:
@@ -936,7 +725,7 @@ public sealed partial class FilePreviewSheet : UserControl
                     "renameFiles",
                     () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
                     {
-                        new IpcSchema.RenameEntry(fileId, name!),
+                        new IpcSchema.RenameEntry(FileId, name!),
                     }),
                     TimeSpan.FromSeconds(30));
                 // Succeeded==0 (with Failed==0) is the engine's wholesale-error
@@ -949,41 +738,8 @@ public sealed partial class FilePreviewSheet : UserControl
                     Services.DebugLog.Warn("Apply rename reported failure; leaving card open");
                     return;
                 }
-                if (!string.IsNullOrEmpty(oldName))
-                {
-                    Services.UndoStack.Instance.Push(
-                        $"rename “{oldName}”",
-                        Services.ChangeKind.Rename,
-                        async () =>
-                        {
-                            try
-                            {
-                                var undoResult = await ViewModels.EngineClient.Instance
-                                    .WaitForBulkActionResultAsync(
-                                        "renameFiles",
-                                        () => ViewModels.EngineClient.Instance.RenameFilesAsync(new[]
-                                        {
-                                            new IpcSchema.RenameEntry(fileId, oldName),
-                                        }),
-                                        TimeSpan.FromSeconds(30));
-                                return undoResult.Failed == 0 && undoResult.Succeeded > 0;
-                            }
-                            catch (Exception ex)
-                            {
-                                Services.DebugLog.Warn("Undo single rename failed: " + ex.Message);
-                                return false;
-                            }
-                        });
-                }
-                // Only collapse the card / clear the pending name if the SAME
-                // file is still displayed. If the user navigated to the next file
-                // while the rename was in flight, that file's own proposed-rename
-                // card (loaded by LoadProposedNameAsync) must be left intact.
-                if (!_unloaded && _navGen == navGenAtClick && FileId == fileId)
-                {
-                    ProposedRenameCard.Visibility = Visibility.Collapsed;
-                    _pendingProposedName = null;
-                }
+                ProposedRenameCard.Visibility = Visibility.Collapsed;
+                _pendingProposedName = null;
             }
             catch (TimeoutException ex)
             {
@@ -1031,18 +787,14 @@ public sealed partial class FilePreviewSheet : UserControl
                     using var cmd = conn.CreateCommand();
                     cmd.CommandText = """
                         SELECT tag FROM tags
-                        WHERE file_id = $id AND source IN ('auto','user','vlm')
-                        ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,
-                                 score DESC,
-                                 rowid
+                        WHERE file_id = $id AND source IN ('auto','user')
+                        ORDER BY source DESC, rowid
                         """;
                     cmd.Parameters.AddWithValue("$id", fileId);
                     using var rdr = cmd.ExecuteReader();
-                    var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
                     while (rdr.Read())
                     {
-                        var tag = rdr.GetString(0).Trim();
-                        if (tag.Length > 0 && seen.Add(tag)) list.Add(tag);
+                        list.Add(rdr.GetString(0));
                     }
                 }
                 catch { /* DB unavailable; return empty list */ }
@@ -1111,63 +863,23 @@ public sealed partial class FilePreviewSheet : UserControl
         return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
     }
 
-    // While a run started from THIS sheet is in flight the button becomes
-    // "Cancel analysis" — an accidental click must never cost a multi-minute
-    // VLM run with no way out. Reset to idle by DeepAnalyzeComplete (see
-    // OnEngineChangedForAnalyze), by navigation, or by the cancel itself.
-    private bool _analyzeRunning;
-
     private async void OnAnalyzeClicked(object sender, RoutedEventArgs e)
     {
         if (FileId <= 0) return;
-        if (_analyzeRunning)
-        {
-            try { await ViewModels.EngineClient.Instance.DeepAnalyzeCancelAsync(); }
-            catch (Exception ex) { Services.DebugLog.Warn("Analyze cancel failed: " + ex); }
-            SetAnalyzeIdle();
-            return;
-        }
         try
         {
-            SetAnalyzeRunning();
+            AnalyzeButton.IsEnabled = false;
             await ViewModels.EngineClient.Instance.DeepAnalyzeFileAsync(FileId, ViewModels.AppViewModel.Instance.Settings.SelectedVlmModelKind);
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("Analyze failed: " + ex);
-            SetAnalyzeIdle();
+        }
+        finally
+        {
+            AnalyzeButton.IsEnabled = true;
         }
     }
-
-    private void SetAnalyzeRunning()
-    {
-        _analyzeRunning = true;
-        AnalyzeGlyph.Glyph = "\uE711"; // Cancel (X)
-        AnalyzeLabel.Text = "Cancel analysis";
-        ToolTipService.SetToolTip(AnalyzeButton, "Stop the Deep Analyze run for this file");
-    }
-
-    private void SetAnalyzeIdle()
-    {
-        _analyzeRunning = false;
-        AnalyzeGlyph.Glyph = "\uE945";
-        AnalyzeLabel.Text = "Analyze";
-        ToolTipService.SetToolTip(AnalyzeButton, "Run Deep Analyze (VLM) on this file");
-    }
-
-    private void OnEngineChangedForAnalyze(object? s, System.ComponentModel.PropertyChangedEventArgs e)
-        => Services.DebugLog.SafeRun("FilePreviewSheet.OnEngineChangedForAnalyze", () =>
-        {
-            if (e.PropertyName != nameof(ViewModels.EngineClient.DeepAnalyzeComplete)) return;
-            Services.DebugLog.Debug($"[ENGINE-SUB:FilePreviewSheet] {e.PropertyName}");
-            // Nominally already the UI thread (Apply dispatches there), but per
-            // the platform rule treat that as untrusted: post XAML writes
-            // through the captured dispatcher.
-            DispatcherQueue?.TryEnqueue(() =>
-            {
-                if (_analyzeRunning) SetAnalyzeIdle();
-            });
-        });
 
     private void OnRevealClicked(object sender, RoutedEventArgs e)
         => Services.DebugLog.SafeRun(nameof(OnRevealClicked), () => Services.SafeOpen.Reveal(FilePath));
@@ -1200,12 +912,6 @@ public sealed partial class FilePreviewSheet : UserControl
             ShowTagStatus("Reopen the preview before tagging — no file id.");
             return;
         }
-        // Capture the file id + navigation generation at CLICK time so a quick
-        // navigate-to-next during the 30 s tag await doesn't render this file's
-        // status message (or clear the input) under the newly-displayed file.
-        var fileId = FileId;
-        var navGenAtClick = _navGen;
-        bool StillCurrent() => !_unloaded && _navGen == navGenAtClick && FileId == fileId;
         var raw = (TagInput.Text ?? string.Empty).Trim();
         if (raw.Length == 0) return;
         var tags = raw
@@ -1221,29 +927,14 @@ public sealed partial class FilePreviewSheet : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = false;
-            var priorUserTags = await Services.TagChangeJournal
-                .CapturePriorUserTagsAsync(new[] { fileId });
             // Await the engine's BulkActionResult instead of fire-and-forget:
             // declaring success on the IPC send alone told the user the tags
             // applied even when the engine reported failure (the silent-failure
             // class). Mirrors OnApplyRenameClicked above.
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "applyTags",
-                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { fileId }, tags, mode: "add"),
+                () => ViewModels.EngineClient.Instance.ApplyTagsAsync(new long[] { FileId }, tags, mode: "add"),
                 TimeSpan.FromSeconds(30));
-            var confirmedFileIds = Services.BulkActionResultTruth
-                .ConfirmedSuccessfulFileIds(result, new[] { fileId });
-            if (confirmedFileIds.Count > 0)
-            {
-                Services.TagChangeJournal.PushUndo(
-                    Services.TagChangeJournal.FormatLabel("add", confirmedFileIds.Count),
-                    confirmedFileIds,
-                    priorUserTags);
-            }
-            // Navigated away while tagging was in flight — the tags still applied
-            // to the captured file, but its status/input mutations would land on
-            // the wrong (now-displayed) file. Skip the UI update.
-            if (!StillCurrent()) return;
             // Also guard Succeeded==0 (the engine's wholesale-error shape, e.g. a
             // busy/locked DB), so a total failure isn't reported as "Added N tags".
             if (result.Failed > 0 || result.Succeeded == 0)
@@ -1254,17 +945,16 @@ public sealed partial class FilePreviewSheet : UserControl
             }
             ShowTagStatus($"Added {tags.Length} tag" + (tags.Length == 1 ? string.Empty : "s") + ".");
             TagInput.Text = string.Empty;
-            _ = LoadVisionTagsAsync(fileId, navGenAtClick);
         }
         catch (TimeoutException ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags timed out: " + ex.Message);
-            if (StillCurrent()) ShowTagStatus("Tagging didn't confirm — try again.");
+            ShowTagStatus("Tagging didn't confirm — try again.");
         }
         catch (Exception ex)
         {
             Services.DebugLog.Warn("FilePreviewSheet.ApplyDraftTags failed: " + ex);
-            if (StillCurrent()) ShowTagStatus("Failed: " + ex.Message);
+            ShowTagStatus("Failed: " + ex.Message);
         }
         finally
         {

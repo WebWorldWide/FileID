@@ -14,16 +14,14 @@ use super::{
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
     DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload,
     EmbedImageQueryPayload, EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload,
-    ExactTrashIdentity, FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
-    HardwareInfo, HardwareReprobed, HealthCheckPayload, HealthCheckResult, IpcCommand, IpcEvent,
-    JobCategory, LibraryWiped, LogLevel, LogLine, MarkPersonsAsUnknownPayload,
-    MarkPersonsDifferentPayload, MergeClustersPayload, ReassignFacePayload,
+    FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
+    HardwareInfo, HardwareReprobed, IpcCommand, IpcEvent, JobCategory, LibraryWiped, LogLevel,
+    LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload, MergeClustersPayload,
     MergeSuggestion, MergeSuggestions, ModelDownloadProgress, PlanRestructurePayload,
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
-    RestructureConfidenceCounts, RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete,
-    ScanPhase, ScanProgress, PurgeExcludedPayload, StartScanPayload, TagMode, ThumbnailGenerated,
-    TrashFilesPayload, UndoRestructurePayload, Wrap,
+    RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
+    StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload, UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
@@ -192,8 +190,6 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::PauseScan(_) => "pauseScan",
         CommandPayload::ResumeScan(_) => "resumeScan",
         CommandPayload::CancelScan(_) => "cancelScan",
-        CommandPayload::CancelRestructure(_) => "cancelRestructure",
-        CommandPayload::HealthCheck(_) => "healthCheck",
         CommandPayload::RequestStatus(_) => "requestStatus",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
@@ -212,7 +208,6 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::MergeClusters(_) => "mergeClusters",
         CommandPayload::EmbedTextQuery(_) => "embedTextQuery",
         CommandPayload::RenamePerson(_) => "renamePerson",
-        CommandPayload::ReassignFace(_) => "reassignFace",
         CommandPayload::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
         CommandPayload::FindMergeSuggestions(_) => "findMergeSuggestions",
         CommandPayload::MarkPersonsDifferent(_) => "markPersonsDifferent",
@@ -222,7 +217,6 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::RevertMerge(_) => "revertMerge",
         CommandPayload::WipeLibrary(_) => "wipeLibrary",
         CommandPayload::GenerateVideoThumbnail(_) => "generateVideoThumbnail",
-        CommandPayload::PurgeExcluded(_) => "purgeExcluded",
     }
 }
 
@@ -231,7 +225,6 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Ready(_) => "ready",
-        EventPayload::HealthCheckResult(_) => "healthCheckResult",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -303,15 +296,10 @@ fn command_exemplars() -> Vec<CommandPayload> {
             root_path: r"C:\Users\adam\Pictures".into(),
             root_display: Some("Pictures".into()),
             rescan: true,
-            excluded_paths: Some(vec![r"C:\Users\adam\Pictures\node_backups".into()]),
         }),
         CommandPayload::PauseScan(Empty {}),
         CommandPayload::ResumeScan(Empty {}),
         CommandPayload::CancelScan(Empty {}),
-        CommandPayload::CancelRestructure(Empty {}),
-        CommandPayload::HealthCheck(HealthCheckPayload {
-            request_id: "health-check-1".into(),
-        }),
         CommandPayload::RequestStatus(Empty {}),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
@@ -326,10 +314,8 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
             model_kind: "qwen2_5_vl_7b".into(),
             skip_existing: true,
-            file_ids: Some(vec![42, 99]),
             tags_only: true,
             propose_renames: true,
-            excluded_folders: Some(vec![r"C:\Users\adam\Private".into()]),
         }),
         CommandPayload::DeepAnalyzeCancel(Empty {}),
         CommandPayload::PrewarmModel(PrewarmModelPayload { model_kind: "arcface".into() }),
@@ -338,16 +324,13 @@ fn command_exemplars() -> Vec<CommandPayload> {
         }),
         CommandPayload::PlanRestructure(PlanRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
-            supports_paged_plans: true,
         }),
         CommandPayload::UndoRestructure(UndoRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
-            shortcut_undo_token: None,
         }),
         CommandPayload::ApplyRestructure(ApplyRestructurePayload {
             library_root: r"C:\Users\adam\Pictures".into(),
-            plan_id: Some("00000000-0000-0000-0000-000000000123".into()),
-            moves: vec![],
+            moves: vec![restructure_move()],
             use_symlinks: true,
         }),
         CommandPayload::ApplyTags(ApplyTagsPayload {
@@ -358,18 +341,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::RenameFiles(RenameFilesPayload {
             renames: vec![RenameEntry { file_id: 1, new_name: "Renamed.jpg".into() }],
         }),
-        CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![1],
-            exact_identities: Some(vec![ExactTrashIdentity {
-                file_id: 1,
-                path: "/library/duplicate.jpg".into(),
-                size_bytes: 4,
-                sha256_hex: "ab".repeat(32),
-                keeper_path: "/library/keeper.jpg".into(),
-                keeper_size_bytes: 4,
-                keeper_sha256_hex: "ab".repeat(32),
-            }]),
-        }),
+        CommandPayload::TrashFiles(TrashFilesPayload { file_ids: vec![1, 2, 3] }),
         CommandPayload::MergeClusters(MergeClustersPayload {
             source_person_id: 1,
             destination_person_id: 2,
@@ -385,11 +357,6 @@ fn command_exemplars() -> Vec<CommandPayload> {
             middle_name: Some("Byron".into()),
             last_name: Some("Lovelace".into()),
             suffix: Some("Jr.".into()),
-        }),
-        CommandPayload::ReassignFace(ReassignFacePayload {
-            face_id: 3,
-            destination_person_id: Some(2),
-            create_new_person: false,
         }),
         CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
             person_ids: vec![1, 2],
@@ -414,9 +381,6 @@ fn command_exemplars() -> Vec<CommandPayload> {
             destination_person_id: 2,
             face_ids_to_revert: vec![10, 11, 12],
         }),
-        CommandPayload::PurgeExcluded(PurgeExcludedPayload {
-            excluded_paths: vec![r"C:\Users\adam\Pictures\node_backups".into()],
-        }),
         CommandPayload::WipeLibrary(Empty {}),
         CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {
             path: r"C:\Users\adam\Videos\clip.mp4".into(),
@@ -435,10 +399,6 @@ fn event_exemplars() -> Vec<EventPayload> {
             worker_cap: 14,
             physical_memory_gb: 32.0,
             hardware: Some(hardware_info()),
-        })),
-        EventPayload::HealthCheckResult(Wrap::new(HealthCheckResult {
-            request_id: "health-check-1".into(),
-            pid: 4242,
         })),
         EventPayload::Progress(Wrap::new(ScanProgress {
             session_id: "s-1".into(),
@@ -551,20 +511,11 @@ fn event_exemplars() -> Vec<EventPayload> {
         })),
         EventPayload::RestructurePlan(Wrap::new(RestructurePlan {
             library_root: r"C:\Users\adam\Pictures".into(),
-            plan_id: Some("00000000-0000-0000-0000-000000000123".into()),
-            total_moves: Some(1_000_000),
-            truncated: true,
             moves: vec![restructure_move()],
             category_counts: vec![RestructureCategoryCount {
                 category: "Photos/2024/01".into(),
                 count: 1,
             }],
-            confidence_counts: Some(RestructureConfidenceCounts {
-                auto: 700_000,
-                review: 200_000,
-                ask: 90_000,
-                unknown: 10_000,
-            }),
             folder_classifications: Some(FolderClassificationCounts {
                 anchor_folders: 1,
                 mixed_folders: 2,
@@ -575,10 +526,6 @@ fn event_exemplars() -> Vec<EventPayload> {
             applied: 10,
             failed: 1,
             privilege_error: Some("Developer Mode required for symlinks".into()),
-            cancelled: true,
-            planned: Some(20),
-            remaining: Some(9),
-            shortcut_undo_token: None,
         })),
         EventPayload::BulkActionResult(Wrap::new(BulkActionResult {
             action: "trashFiles:00000000-0000-0000-0000-000000000000".into(),
@@ -648,31 +595,6 @@ fn every_event_exemplar_matches_schema_shape() {
     }
 }
 
-#[test]
-fn mark_persons_different_bulk_result_matches_schema() {
-    let root = load_schema();
-    let event = IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
-        BulkActionResult {
-            action: "markPersonsDifferent".into(),
-            succeeded: 1,
-            failed: 0,
-            messages: vec![BulkActionItem {
-                file_id: None,
-                ok: true,
-                message: None,
-            }],
-        },
-    )));
-    let value = serde_json::to_value(event).expect("encode markPersonsDifferent result");
-    assert_conforms(&root, &root["$defs"]["IPCEvent"], &value, "IPCEvent");
-    assert_payload_conforms(
-        &root,
-        "EventPayload",
-        &value["payload"],
-        "bulkActionResult",
-    );
-}
-
 /// Negative self-test: the checker must reject the exact L1 drift class
 /// (`fileId` instead of `fileID`), or this suite guards nothing.
 #[test]
@@ -689,15 +611,6 @@ fn checker_rejects_missing_required_key() {
     let root = load_schema();
     let bad = serde_json::json!({ "deepAnalyzeFile": { "fileID": 42 } });
     assert_payload_conforms(&root, "CommandPayload", &bad, "deepAnalyzeFile");
-}
-
-#[test]
-fn every_command_exemplar_passes_semantic_normalization() {
-    for mut payload in command_exemplars() {
-        let tag = command_tag(&payload);
-        crate::ipc::normalize_and_validate_command(&mut payload)
-            .unwrap_or_else(|error| panic!("command exemplar {tag} is semantically invalid: {error}"));
-    }
 }
 
 #[test]

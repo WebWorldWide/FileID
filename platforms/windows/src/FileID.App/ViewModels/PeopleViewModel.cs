@@ -1,4 +1,4 @@
-﻿// PeopleViewModel — backs the People tab cluster grid.
+// PeopleViewModel — backs the People tab cluster grid.
 //
 // Each cluster has a representative face image, a member count, an
 // optional person name (set by the user), and a list of file IDs that
@@ -23,7 +23,6 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly string _dbPath;
     private readonly DispatcherQueue _ui;
-    private readonly Func<bool> _hideUnknown;
     private bool _isLoading;
     private string? _errorMessage;
     // FEAT-CRIT-1: multi-select mode for bulk merge / mark-as-unknown.
@@ -42,14 +41,10 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     private long _refreshGen;
     private int _activeLoads;
 
-    public PeopleViewModel(
-        string dbPath,
-        DispatcherQueue ui,
-        Func<bool>? hideUnknown = null)
+    public PeopleViewModel(string dbPath, DispatcherQueue ui)
     {
         _dbPath = dbPath;
         _ui = ui;
-        _hideUnknown = hideUnknown ?? (() => false);
     }
 
     public void Dispose()
@@ -140,9 +135,9 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
             OnUi(() => { IsLoading = true; ErrorMessage = null; });
-            var result = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
+            var clusters = await Task.Run(() => LoadClusters(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
-            ApplyOnUi(result, myGen);
+            ApplyOnUi(clusters, myGen);
         }
         catch (OperationCanceledException) { /* expected */ }
         catch (ObjectDisposedException) { /* expected during teardown */ }
@@ -153,11 +148,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so they
             // must be marshaled to the captured UI thread — else a native fast-fail
             // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-            //
-            // Guard the write with the generation token: a slow FAILING refresh
-            // must not overwrite a newer SUCCESSFUL refresh's cleared (null) error
-            // with a stale banner.
-            OnUi(() => { if (!_disposed && Interlocked.Read(ref _refreshGen) == myGen) ErrorMessage = ex.Message; });
+            OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; });
         }
         finally
         {
@@ -182,21 +173,18 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         conn.Open();
         using var cmd = conn.CreateCommand();
         // Cluster shape: face_prints (one row per detected face) joins
-        // persons (one row per cluster). Display name = structured name
-        // components → legacy free-form `name` → fallback "Person N".
-        // Anchor face = the face_prints row with the highest
+        // persons (one row per cluster). Display name = explicit `name`
+        // (legacy free-form) → `first_name` (v5 structured) → fallback
+        // "Person N". Anchor face = the face_prints row with the highest
         // quality score in the cluster — picked via subquery so it's stable.
-        cmd.CommandText = """
+        bool hideUnknown = false;
+        try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
+        string whereClause = hideUnknown ? "WHERE COALESCE(p.is_unknown, 0) = 0" : "";
+
+        cmd.CommandText = $"""
             SELECT
                 p.id                                                    AS cluster_id,
-                COALESCE(
-                    NULLIF(TRIM(COALESCE(p.title, '') || ' ' ||
-                               COALESCE(p.first_name, '') || ' ' ||
-                               COALESCE(p.middle_name, '') || ' ' ||
-                               COALESCE(p.last_name, '') || ' ' ||
-                               COALESCE(p.suffix, '')), ''),
-                    NULLIF(TRIM(p.name), ''),
-                    'Person ' || p.id)                                  AS display_name,
+                COALESCE(p.name, p.first_name, 'Person ' || p.id)       AS display_name,
                 COUNT(fp.id)                                            AS member_count,
                 COALESCE(
                     p.representative_face_id,
@@ -206,12 +194,10 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 )                                                       AS anchor_face_id
             FROM persons p
             JOIN face_prints fp ON fp.person_id = p.id
-                 AND COALESCE(fp.excluded, 0) = 0
-            WHERE ($hide_unknown = 0 OR COALESCE(p.is_unknown, 0) = 0)
+            {whereClause}
             GROUP BY p.id
             ORDER BY member_count DESC
             """;
-        cmd.Parameters.AddWithValue("$hide_unknown", _hideUnknown() ? 1 : 0);
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -228,23 +214,23 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         return rows;
     }
 
-    private void ApplyOnUi(List<PersonCluster> result, long gen)
+    private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
         // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi (audit A4).
-        void ApplySafely() => DebugLog.SafeRun("PeopleViewModel.ApplyOnUi", () =>
+        void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
-            Replace(result);
-        });
+            Replace(rows);
+        }
         if (_ui.HasThreadAccess)
         {
-            ApplySafely();
+            Apply();
         }
         else
         {
-            _ui.TryEnqueue(ApplySafely);
+            _ui.TryEnqueue(Apply);
         }
     }
 
@@ -358,19 +344,11 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     public required int ClusterId { get; init; }
     public required long AnchorFaceId { get; init; }
     public required int MemberCount { get; init; }
+    public string? DisplayName { get; init; }
 
-    private string? _displayName;
-    public string? DisplayName
-    {
-        get => _displayName;
-        set
-        {
-            if (_displayName == value) return;
-            _displayName = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DisplayName)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Caption)));
-        }
-    }
+    public string DisplayNameWithCount => string.IsNullOrEmpty(DisplayName)
+        ? $"Person #{ClusterId} ({MemberCount} faces)"
+        : $"{DisplayName} ({MemberCount} faces)";
 
     // FEAT-CRIT-1: per-card selection state for People multi-select.
     private bool _isSelected;
@@ -457,10 +435,9 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
     public long SourceAnchorFaceId => Model.SourceAnchorFaceId;
     public long DestinationAnchorFaceId => Model.DestinationAnchorFaceId;
 
-    public string Title =>
-        $"#{Model.SourcePersonId} ({Model.SourceMemberCount}) ↔ #{Model.DestinationPersonId} ({Model.DestinationMemberCount})";
+    public string Title => $"Person #{Model.SourcePersonId} ({Model.SourceMemberCount} faces) & Person #{Model.DestinationPersonId} ({Model.DestinationMemberCount} faces)";
 
-    public string SimilarityText => $"Similarity {Model.Similarity:F2}";
+    public string SimilarityText => $"{Math.Min(100, Math.Max(0, (int)Math.Round(Model.Similarity * 100)))}% similarity match";
 
     private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _sourceFaceImage;
     private bool _sourceFaceResolved;

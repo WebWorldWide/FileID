@@ -16,42 +16,39 @@ pub(crate) async fn handle_wipe_library(
     sink: Sink,
     db: Arc<Mutex<Connection>>,
     scan_state: Arc<Mutex<Option<crate::coordinator::ScanCoordinator>>>,
-    scan_cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: Arc<std::sync::atomic::AtomicBool>,
-    deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool>,
-    deep_analyze_active: Arc<std::sync::atomic::AtomicBool>,
-    restructure_active: Arc<std::sync::atomic::AtomicBool>,
-    mutation_gate: Arc<tokio::sync::Mutex<()>>,
 ) {
-    scan_cancel_requested.store(true, std::sync::atomic::Ordering::Release);
+    // Cancel any in-flight scan and wait (bounded) for it to release the single
+    // writer before truncating. Otherwise the running DbWriter keeps committing
+    // batches into the just-wiped DB between truncate and scan-end — both
+    // serialize on the same mutex (no corruption), but the library ends up
+    // half-populated, contradicting the "wiped" confirmation, and the
+    // scan_sessions 'running' row survives the wipe. The engine is the sole DB
+    // owner, so enforce this interlock here regardless of what the app sends.
     if let Some(coord) = scan_state.lock().clone() {
         coord.request_cancel();
     }
-    deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut waited = 0u32;
+    while scan_state.lock().is_some() && waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        waited += 1;
+    }
 
-    let _exclusive = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        mutation_gate.lock_owned(),
-    )
-    .await
-    {
-        Ok(permit) => permit,
-        Err(_) => {
-            let message = format!(
-                "Timed out waiting for library operations to stop (scan={}, faces={}, deepAnalyze={}, restructure={}). Nothing was wiped.",
-                scan_state.lock().is_some(),
-                face_cluster_active.load(std::sync::atomic::Ordering::Acquire),
-                deep_analyze_active.load(std::sync::atomic::Ordering::Acquire),
-                restructure_active.load(std::sync::atomic::Ordering::Acquire),
-            );
-            tracing::warn!("{message}");
-            sink.send(IpcEvent::now(EventPayload::LibraryWiped(Wrap::new(
-                LibraryWiped { ok: false, message: Some(message) },
-            ))))
-            .await;
-            return;
-        }
-    };
+    // Also wait (bounded) for an in-flight face-clustering pass. Clustering now
+    // drops the writer lock during cluster()+consolidate() and re-acquires it
+    // only to persist (commands/face_clustering.rs three-phase split), so a wipe
+    // that lands during that lock-free window would commit, and the clustering
+    // persist would then re-INSERT phantom `persons` rows — built from its
+    // pre-wipe in-memory anchors, pointing at now-deleted faces — into the
+    // just-wiped DB, leaving ghost People cards after a "wipe" that reported
+    // success. The single-flight FaceClusterActiveGuard clears this flag on the
+    // pass's completion/error/panic, so the wait always terminates. Mirrors the
+    // scan interlock above; enforced here per the engine's single-DB-owner rule.
+    let mut cluster_waited = 0u32;
+    while face_cluster_active.load(std::sync::atomic::Ordering::Acquire) && cluster_waited < 100 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cluster_waited += 1;
+    }
 
     let wiped = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
         let conn = db.lock();
@@ -97,29 +94,5 @@ fn clear_dir_contents(dir: Option<std::path::PathBuf>) {
         } else {
             std::fs::remove_file(&path)
         };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn exclusive_gate_times_out_while_a_mutation_is_active() {
-        let gate = Arc::new(tokio::sync::Mutex::new(()));
-        let read = gate.clone().lock_owned().await;
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            gate.clone().lock_owned(),
-        )
-        .await;
-        assert!(result.is_err());
-        drop(read);
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            gate.lock_owned(),
-        )
-        .await
-        .is_ok());
     }
 }

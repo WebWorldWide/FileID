@@ -10,15 +10,8 @@ struct SettingsTab: View {
     let engine: EngineClient
     let store: ReadStore
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
-    @AppStorage(AppSettings.detailedScanTagsKey) private var detailedScanTags: Bool = AppSettings.detailedScanTagsDefault
-    @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
-    @State private var confirmFactoryReset = false
-    @State private var confirmRemoveAllModels = false
-    @State private var confirmUninstallApp = false
-    @State private var maintenanceInFlight = false
-    @State private var maintenanceMessage: (text: String, isError: Bool)?
 
     var body: some View {
         ScrollView {
@@ -27,61 +20,36 @@ struct SettingsTab: View {
 
                 // ─── User-facing settings (always visible) ───────────────
 
-                GlassCard(fillsWidth: true) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Scan performance").font(.headline)
-                        SettingToggleRow(
-                            "Detailed RAM++ tags during scans",
-                            subtitle: "Off keeps scans fast with Apple's built-in on-device classifier. Turn on for the richer 4,585-label RAM++ model; it uses substantially more memory and can make large photo scans much slower. Takes effect after restarting the engine.",
-                            isOn: $detailedScanTags
-                        )
-                    }
-                }
-
-                GlassCard(fillsWidth: true) {
+                GlassCard {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Cleanup").font(.headline)
-                        SettingToggleRow(
-                            "Tag kept files after Cleanup",
-                            subtitle: "When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.",
-                            isOn: $cleanupAutoTag
-                        )
-                    }
-                }
-
-                GlassCard(fillsWidth: true) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Restructure").font(.headline)
-                        Picker("Folder granularity", selection: $restructureGranularity) {
-                            Text("Looser").tag("loose")
-                            Text("Balanced").tag("normal")
-                            Text("Tighter").tag("tight")
+                        Toggle(isOn: $cleanupAutoTag) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Tag kept files after Cleanup")
+                                    .font(.callout)
+                                Text("When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        .pickerStyle(.segmented)
-                        Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        .toggleStyle(.switch)
                     }
                 }
-
-                DeepAnalyzeExclusionsCard()
 
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
                 CLIPSemanticSearchCard()
                 RamPlusTaggerCard()
-                BGEDocCard()
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 FaceEmbedderCard(engine: engine, store: store)
-                storageAndUninstallCard
 
                 // ─── Advanced (collapsed by default) ─────────────────────
                 // Engine PIDs, DB paths, log files. Power-user info that
                 // doesn't help a casual user choose anything; hiding it
                 // declutters the page.
 
-                GlassCard(fillsWidth: true) {
+                GlassCard {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
                             Divider().opacity(0.3)
@@ -115,8 +83,8 @@ struct SettingsTab: View {
                                 Text("Storage").font(.subheadline.bold())
                                 infoRow("Total files",   "\(store.totalFiles)")
                                 infoRow("Images tagged", "\(store.totalImages)")
-                                infoRow("Stored duplicate hints", "\(store.totalDuplicateGroups)")
-                                infoRow("Hint reclaimable", String(format: "%.1f MB", store.totalReclaimableMB))
+                                infoRow("Duplicate groups", "\(store.totalDuplicateGroups)")
+                                infoRow("Reclaimable",   String(format: "%.1f MB", store.totalReclaimableMB))
                                 infoRow("Database", ReadStore.defaultDBURL.path)
                                 Button("Show database in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
@@ -161,7 +129,6 @@ struct SettingsTab: View {
                                     .buttonStyle(.bordered)
                                 }
                             }
-
                         }
                         .padding(.top, 8)
                     } label: {
@@ -179,142 +146,10 @@ struct SettingsTab: View {
             .padding(24)
         }
         .onAppear {
-            Task { sessions = store.recentSessions() }
+            sessions = store.recentSessions()
         }
         .onChange(of: showAdvanced) { _, expanded in
-            if expanded { Task { sessions = store.recentSessions() } }
-        }
-    }
-
-    private var storageAndUninstallCard: some View {
-        GlassCard(fillsWidth: true) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Storage & uninstall").font(.headline)
-                Text("Remove downloaded models without touching your library, reset all FileID data, or move the app itself to Trash.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-
-                if let maintenanceMessage {
-                    Label(
-                        maintenanceMessage.text,
-                        systemImage: maintenanceMessage.isError
-                            ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(maintenanceMessage.isError ? .red : .green)
-                }
-
-                HStack(spacing: 8) {
-                    Button("Remove All AI Models…", role: .destructive) {
-                        confirmRemoveAllModels = true
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Factory Reset & Quit…", role: .destructive) {
-                        confirmFactoryReset = true
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Uninstall FileID…", role: .destructive) {
-                        confirmUninstallApp = true
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                }
-                .disabled(maintenanceInFlight)
-
-                if maintenanceInFlight {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Removing files safely…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .confirmationDialog(
-            "Remove every downloaded AI model?",
-            isPresented: $confirmRemoveAllModels,
-            titleVisibility: .visible
-        ) {
-            Button("Remove All Models", role: .destructive) {
-                Task { await removeAllModels(restartEngine: true) }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Deletes CLIP, RAM++, BGE, face recognition, and all downloaded Deep Analyze LLM weights. Your library, tags, people, and settings stay intact. Models can be downloaded again later.")
-        }
-        .confirmationDialog(
-            "Erase all FileID data and quit?",
-            isPresented: $confirmFactoryReset,
-            titleVisibility: .visible
-        ) {
-            Button("Erase Everything and Quit", role: .destructive) {
-                Task {
-                    let success = await removeAllModels(restartEngine: false)
-                    if success { engine.factoryResetAndQuit() }
-                }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Permanently deletes the library database, tags, faces, settings, caches, every FileID-managed model, and all downloaded Deep Analyze LLMs. Your original files are not changed.")
-        }
-        .confirmationDialog(
-            "Uninstall FileID completely?",
-            isPresented: $confirmUninstallApp,
-            titleVisibility: .visible
-        ) {
-            Button("Uninstall FileID", role: .destructive) {
-                Task { await uninstallApplication() }
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Moves this FileID app to Trash and permanently deletes its library database, tags, faces, settings, caches, and every downloaded AI model. Your original files are not changed.")
-        }
-    }
-
-    private func removeAllModels(restartEngine: Bool) async -> Bool {
-        maintenanceInFlight = true
-        maintenanceMessage = nil
-        engine.stopForMaintenance()
-        await CLIPModelInstaller.shared.uninstall()
-        await RamPlusModelInstaller.shared.uninstall()
-        await BGEModelInstaller.shared.uninstall()
-        for kind in FaceEmbedderKind.allCases {
-            await ArcFaceModelInstaller.shared.uninstall(kind)
-        }
-        let report = await Task.detached(priority: .userInitiated) {
-            ModelStorage.removeAllModels()
-        }.value
-        CLIPTextEncoder.shared.unload()
-        CLIPModelInstaller.shared.refreshStatus()
-        RamPlusModelInstaller.shared.refreshStatus()
-        BGEModelInstaller.shared.refreshStatus()
-        ArcFaceModelInstaller.shared.refreshStatus()
-        maintenanceInFlight = false
-        if let failure = report.failureMessage {
-            maintenanceMessage = (failure, true)
-            engine.start()
-            return false
-        }
-        maintenanceMessage = (
-            report.removedCount == 0
-                ? "No downloaded AI models were found."
-                : "All downloaded AI models were removed.",
-            false
-        )
-        if restartEngine { engine.start() }
-        return true
-    }
-
-    private func uninstallApplication() async {
-        guard await removeAllModels(restartEngine: false) else { return }
-        maintenanceInFlight = true
-        if let error = await engine.uninstallApplicationAndQuit() {
-            maintenanceInFlight = false
-            maintenanceMessage = ("Couldn't move FileID to Trash: \(error)", true)
-            engine.start()
+            if expanded { sessions = store.recentSessions() }
         }
     }
 
@@ -367,87 +202,6 @@ struct SettingsTab: View {
     }
 }
 
-// MARK: - Deep Analyze exclusions card
-
-/// Folders to skip during a whole-library Deep Analyze pass — separate from
-/// the (currently unsurfaced) scan-exclusion list: a folder can be fine to
-/// catalog/tag/search but too slow or private to run the VLM over. Nothing
-/// is removed from the library, so unlike the model-install cards above
-/// there's no purge-in-flight state to track — just persist the list; it
-/// takes effect starting with the next whole-library Deep Analyze run.
-struct DeepAnalyzeExclusionsCard: View {
-    @State private var settings = DeepAnalyzeSettings.shared
-    @State private var message: (text: String, isError: Bool)?
-
-    var body: some View {
-        GlassCard(fillsWidth: true) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Deep Analyze exclusions").font(.headline)
-                Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Divider().opacity(0.3)
-
-                if let message {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                            .foregroundStyle(message.isError ? .red : .green)
-                        Text(message.text)
-                            .font(.caption)
-                            .foregroundStyle(message.isError ? .red : .secondary)
-                        Spacer()
-                    }
-                }
-
-                if settings.excludedFolders.isEmpty {
-                    Text("No folders are excluded from Deep Analyze.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                } else {
-                    ForEach(settings.excludedFolders, id: \.self) { folder in
-                        HStack(spacing: 8) {
-                            Text(folder)
-                                .font(.caption.monospaced())
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer()
-                            Button {
-                                settings.removeExcludedFolder(folder)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                            }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .help("Stop excluding \(folder) from Deep Analyze")
-                        }
-                    }
-                }
-
-                Button("Add folder…") { pickExcludedFolder() }
-                    .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private func pickExcludedFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose a folder to exclude from Deep Analyze"
-        panel.prompt = "Exclude"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        switch settings.addExcludedFolder(url.path) {
-        case .added:
-            message = ("Excluded. Deep Analyze will skip this folder starting with the next whole-library run.", false)
-        case .alreadyExcluded:
-            message = ("That folder is already excluded from Deep Analyze.", false)
-        case .invalid:
-            message = ("Couldn't exclude that folder — pick a folder on this Mac.", true)
-        }
-    }
-}
-
 // MARK: - CLIP semantic-search card
 
 /// Settings card for the CLIP semantic-search tier. State-driven —
@@ -457,14 +211,8 @@ struct CLIPSemanticSearchCard: View {
     @State private var installer = CLIPModelInstaller.shared
     @State private var confirmUninstall = false
 
-    private var downloadSizeLabel: String {
-        ByteCountFormatter.string(
-            fromByteCount: CLIPModelInstaller.approxDownloadBytes,
-            countStyle: .file)
-    }
-
     var body: some View {
-        GlassCard(fillsWidth: true) {
+        GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — semantic search (CLIP)").font(.headline)
                 Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
@@ -502,17 +250,15 @@ struct CLIPSemanticSearchCard: View {
             titleVisibility: .visible
         ) {
             Button("Remove", role: .destructive) {
-                Task {
-                    await installer.uninstall()
-                    // Drop the in-memory text encoder too — otherwise semantic
-                    // search keeps running against the model we just deleted until
-                    // the next app launch, with no fallback. (F-C4-017)
-                    CLIPTextEncoder.shared.unload()
-                }
+                installer.uninstall()
+                // Drop the in-memory text encoder too — otherwise semantic
+                // search keeps running against the model we just deleted until
+                // the next app launch, with no fallback. (F-C4-017)
+                CLIPTextEncoder.shared.unload()
             }
             Button("Keep", role: .cancel) {}
         } message: {
-            Text("Frees approximately \(downloadSizeLabel). Semantic search will revert to keyword search until you reinstall.")
+            Text("Frees ~350 MB. Semantic search will revert to keyword search until you reinstall.")
         }
     }
 
@@ -527,7 +273,7 @@ struct CLIPSemanticSearchCard: View {
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(reason).font(.caption2).foregroundStyle(.secondary)
-                    Text("Approximately \(downloadSizeLabel) from huggingface.co (Xenova CLIP ViT-B/32 + OpenAI BPE vocabulary).")
+                    Text("~210 MB download from huggingface.co (Apple's MobileCLIP repo + OpenAI's BPE vocabulary).")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -667,8 +413,8 @@ struct CLIPSemanticSearchCard: View {
 /// state with Download/Uninstall buttons. The engine picks up whichever
 /// .mlpackage is on disk the next time face clustering runs.
 // AI Models — RAM++ tagger (macOS lockstep). Single-model card; the engine's
-// RamPlusService reads whatever this installs when detailed scan tags are on
-// and otherwise uses the lighter Vision classifier.
+// RamPlusService reads whatever this installs and falls back to Vision tags if
+// absent, so installing is purely an upgrade.
 struct RamPlusTaggerCard: View {
     @State private var installer = RamPlusModelInstaller.shared
     @State private var confirmUninstall = false
@@ -678,10 +424,10 @@ struct RamPlusTaggerCard: View {
     }
 
     var body: some View {
-        GlassCard(fillsWidth: true) {
+        GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — image tagging").font(.headline)
-                Text("RAM++ recognizes 4,585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Enable Detailed RAM++ tags under Scan performance to use it during scans.")
+                Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 HStack(alignment: .top, spacing: 8) {
@@ -704,10 +450,7 @@ struct RamPlusTaggerCard: View {
             isPresented: $confirmUninstall,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) {
-                Task { await installer.uninstall() }
-                confirmUninstall = false
-            }
+            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
             Button("Keep", role: .cancel) { confirmUninstall = false }
         } message: {
             Text("Frees ~450 MB. Tagging falls back to the lighter built-in classifier.")
@@ -756,95 +499,6 @@ struct RamPlusTaggerCard: View {
     }
 }
 
-// AI Models — BGE document embedder. The engine's restructure clusters documents by
-// content when this is installed, else by filename — so installing is purely an upgrade.
-struct BGEDocCard: View {
-    @State private var installer = BGEModelInstaller.shared
-    @State private var confirmUninstall = false
-
-    private var modelPath: String {
-        BGEModelInstaller.modelsRoot.appendingPathComponent("bge_text/bge_small.onnx").path
-    }
-
-    var body: some View {
-        GlassCard(fillsWidth: true) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("AI Models — document understanding").font(.headline)
-                Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
-                    .font(.callout).foregroundStyle(.secondary)
-                Divider().opacity(0.3)
-                HStack(alignment: .top, spacing: 8) {
-                    statusIcon.padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("BGE-small-en-v1.5").font(.callout.bold())
-                        Text("384-d BERT text embedder · runs on the Neural Engine").font(.caption).foregroundStyle(.secondary)
-                        Text(modelPath)
-                            .font(.caption2.monospaced()).foregroundStyle(.tertiary)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                footer.padding(.leading, 24)
-            }
-        }
-        .onAppear { installer.refreshStatus() }
-        .confirmationDialog(
-            "Remove document understanding?",
-            isPresented: $confirmUninstall,
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) {
-                Task { await installer.uninstall() }
-                confirmUninstall = false
-            }
-            Button("Keep", role: .cancel) { confirmUninstall = false }
-        } message: {
-            Text("Frees ~135 MB. Documents fall back to filename-based grouping in Restructure.")
-        }
-    }
-
-    @ViewBuilder private var statusIcon: some View {
-        switch installer.status {
-        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
-        case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-        default: Image(systemName: "xmark.circle").foregroundStyle(.orange)
-        }
-    }
-
-    @ViewBuilder private var footer: some View {
-        switch installer.status {
-        case .unknown:
-            EmptyView()
-        case .missing:
-            Button { installer.install() } label: {
-                Label("Install (~135 MB)", systemImage: "arrow.down.circle.fill")
-            }
-            .buttonStyle(.borderedProminent)
-        case .downloading(let fraction, let message, _, _):
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressView(value: fraction).frame(maxWidth: 280)
-                HStack {
-                    Text(message).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Cancel") { installer.cancel() }.font(.caption)
-                }
-            }
-        case .installed(let sizeBytes):
-            HStack(spacing: 8) {
-                Text("Installed · \(sizeBytes / 1_048_576) MB").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Remove", role: .destructive) { confirmUninstall = true }.font(.caption)
-            }
-        case .installFailed(let msg):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(msg).font(.caption).foregroundStyle(.red)
-                Button("Retry") { installer.install() }.buttonStyle(.bordered)
-            }
-        }
-    }
-}
-
 struct FaceEmbedderCard: View {
     let engine: EngineClient
     let store: ReadStore
@@ -852,10 +506,10 @@ struct FaceEmbedderCard: View {
     @State private var confirmUninstall: FaceEmbedderKind?
 
     var body: some View {
-        GlassCard(fillsWidth: true) {
+        GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(.headline)
-                Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
+                Text("On-device face embedder for clustering people. Pre-converted from Buffalo (Immich) ONNX — install with one click, no Python required.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in
@@ -877,7 +531,7 @@ struct FaceEmbedderCard: View {
             presenting: confirmUninstall
         ) { kind in
             Button("Remove", role: .destructive) {
-                Task { await installer.uninstall(kind) }
+                installer.uninstall(kind)
                 confirmUninstall = nil
             }
             Button("Keep", role: .cancel) { confirmUninstall = nil }

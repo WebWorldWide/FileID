@@ -31,7 +31,7 @@ impl Point for Embedding {
 
 /// Build an HNSW index from `(embedding, value)` pairs. `value` is whatever
 /// the caller wants to recover at search time (e.g. a `file_id` or `face_id`).
-pub(crate) fn build<V: Clone + Send>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
+pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) =
         points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
     // Fixed seed: instant-distance's Builder::default() seeds its layer-shuffle
@@ -39,27 +39,7 @@ pub(crate) fn build<V: Clone + Send>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embe
     // kNN neighbour sets — would differ run-to-run. Face clustering derives
     // cluster IDs and inherited People names from those neighbours, so an
     // entropy seed makes identities hop on every re-cluster. Pin it. (audit E0)
-    //
-    // The seed alone is NOT sufficient. instant-distance inserts nodes with
-    // rayon, so thread scheduling decides insertion order and therefore the
-    // graph topology. Measured on the 129k-face Adlon catalog, repeat runs of
-    // the identical input drifted 1,071–1,082 persons and the largest cluster
-    // swung 17,226–26,439 faces; pinning the whole process to one rayon thread
-    // made repeat runs byte-identical but cost 4x wall-clock (70s → 286s).
-    // Confining just the build to a one-thread pool buys the reproducibility
-    // without serializing the rest of the pipeline. (2026-07-29)
-    let single = rayon::ThreadPoolBuilder::new().num_threads(1).build();
-    match single {
-        Ok(pool) => pool.install(move || Builder::default().seed(0xF11E_1D00).build(embeds, values)),
-        // A pool is a thread-spawn away from the OS; if it cannot be had, an
-        // approximate index built on the ambient pool still beats no index.
-        Err(err) => {
-            tracing::warn!(
-                "single-threaded HNSW pool unavailable ({err}); index build is not reproducible"
-            );
-            Builder::default().seed(0xF11E_1D00).build(embeds, values)
-        }
-    }
+    Builder::default().seed(0xF11E_1D00).build(embeds, values)
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a

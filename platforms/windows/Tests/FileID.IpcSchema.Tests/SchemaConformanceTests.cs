@@ -1,4 +1,4 @@
-﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
+// Schema-conformance suite — C# twin of the Rust engine's variant coverage
 // tests, checked against the canonical contract itself. For every
 // CommandPayload / EventPayload variant we keep an exemplar instance,
 // serialize it through IpcCoder (the exact wire path), and assert against
@@ -44,12 +44,6 @@ public class SchemaConformanceTests
     private static readonly long[] _exampleFaceIds = { 10, 11, 12 };
     private static readonly string[] _exampleSkippedStages = { "ocr" };
     private static readonly float[] _embedding512 = new float[512];
-
-    [Fact]
-    public void SchemaVersion_ReflectsCorrelatedHealthCheckAddition()
-    {
-        Assert.Equal("1.3.0", _schema.RootElement.GetProperty("version").GetString());
-    }
 
     [Fact]
     public void CommandExemplars_CoverEveryVariantType()
@@ -139,53 +133,34 @@ public class SchemaConformanceTests
     // app constructs them. Optional fields are set so the serialized keys
     // exercise the variant's full schema property surface.
 
-    private static readonly string[] s_exemplarExcludedPaths =
-        { @"C:\Users\adam\Pictures\node_backups" };
-
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
-        new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true,
-            ExcludedPaths: s_exemplarExcludedPaths),
+        new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
         new PauseScanCommand(),
         new ResumeScanCommand(),
         new CancelScanCommand(),
-        new CancelRestructureCommand(),
-        new HealthCheckCommand("health-check-1"),
         new RequestStatusCommand(),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
         new VerifyCudaPackCommand(),
         new DeepAnalyzeFileCommand(42, "qwen2_5_vl_7b"),
         new DeepAnalyzeFolderCommand(@"C:\Users\adam\Pictures\2024", "qwen2_5_vl_7b"),
-        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true,
-            ProposeRenames: true, FileIds: new long[] { 42, 99 }),
+        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true, ProposeRenames: true),
         new DeepAnalyzeCancelCommand(),
         new PrewarmModelCommand("clip_text"),
         new CancelPrewarmCommand("clip_text"),
-        new PlanRestructureCommand(@"C:\Users\adam\Pictures", SupportsPagedPlans: true),
+        new PlanRestructureCommand(@"C:\Users\adam\Pictures"),
         new UndoRestructureCommand(@"C:\Users\adam\Pictures"),
         new ApplyRestructureCommand(
             @"C:\Users\adam\Pictures",
-            Array.Empty<RestructureMove>(),
-            UseSymlinks: false,
-            PlanId: "00000000-0000-0000-0000-000000000123"),
+            new[] { ExampleMove() },
+            UseSymlinks: false),
         new ApplyTagsCommand(_exampleFileIds, _exampleTags, "replace"),
         new RenameFilesCommand(new[] { new RenameEntry(1, "Renamed.jpg") }),
-        new TrashFilesCommand(new long[] { 1 }, new[]
-        {
-            new ExactTrashIdentity(
-                1,
-                @"C:\Users\adam\Pictures\duplicate.jpg",
-                4,
-                new string('a', 64),
-                @"C:\Users\adam\Pictures\keeper.jpg",
-                4,
-                new string('a', 64))
-        }),
+        new TrashFilesCommand(_exampleFileIds),
         new MergeClustersCommand(1, 2),
         new EmbedTextQueryCommand("sunset at the beach", "q-1"),
         new RenamePersonCommand(1, Title: "Dr", FirstName: "Mary", MiddleName: "Q", LastName: "Smith", Suffix: "Jr"),
-        new ReassignFaceCommand(10, DestinationPersonId: 2),
         new MarkPersonsAsUnknownCommand(_examplePersonIds),
         new FindMergeSuggestionsCommand(),
         new MarkPersonsDifferentCommand(1, 2, 10, 20),
@@ -194,13 +169,11 @@ public class SchemaConformanceTests
         new RestoreFromTrashCommand("00000000-0000-0000-0000-000000000000"),
         new RevertMergeCommand(1, 2, _exampleFaceIds),
         new WipeLibraryCommand(),
-        new PurgeExcludedCommand(s_exemplarExcludedPaths),
     };
 
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
-        new HealthCheckResultEvent(new HealthCheckResult("health-check-1", 1234)),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),
         new DiscoveryCompleteEvent(50_000),
@@ -223,17 +196,11 @@ public class SchemaConformanceTests
             @"C:\Users\adam\Pictures",
             new[] { ExampleMove() },
             new[] { new RestructureCategoryCount("Photos/2024", 1) },
-            new FolderClassificationCounts(3, 2, 1),
-            PlanId: "00000000-0000-0000-0000-000000000123",
-            TotalMoves: 1_000_000,
-            Truncated: true)),
+            new FolderClassificationCounts(3, 2, 1))),
         new RestructureApplyResultEvent(new RestructureApplyResult(5, 1, "Developer Mode required for symlinks")),
         new BulkActionResultEvent(new BulkActionResult(
             "trashFiles:00000000-0000-0000-0000-000000000000", 2, 1,
             new[] { new BulkActionItem(1, true, null), new BulkActionItem(2, false, "file locked") })),
-        new BulkActionResultEvent(new BulkActionResult(
-            "markPersonsDifferent", 1, 0,
-            new[] { new BulkActionItem(null, true, null) })),
         new ClipTextEmbeddingEvent(new ClipTextEmbedding("q-1", "sunset at the beach", _embedding512)),
         new MergeSuggestionsEvent(new MergeSuggestions(new[] { new MergeSuggestion(1, 2, 0.93f, 10, 20, 4, 7) })),
         new HardwareReprobedEvent(new HardwareReprobed(ExampleHardware(), "cuDNN missing from PATH")),

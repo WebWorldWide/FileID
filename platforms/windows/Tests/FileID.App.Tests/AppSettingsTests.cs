@@ -16,19 +16,6 @@ public class AppSettingsTests
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private static readonly string[] s_excludedFoldersWithMalformed =
-    [
-        @"C:\Pics\Raw\",
-        @"c:\pics\raw",
-        "relative\\path",
-        "   ",
-        @"C:\Pics\Other",
-    ];
-
-    private static readonly string[] s_sanitizedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
-
-    private static readonly string[] s_cloneExpectedExcludedFolders = [@"C:\Pics\Raw", @"C:\Pics\Other"];
-
     [Fact]
     public void NewInstance_HasDocumentedDefaults()
     {
@@ -41,19 +28,14 @@ public class AppSettingsTests
         Assert.True(s.CleanupAutoTagKept);
         Assert.False(s.RestructureTreeMode);
         Assert.Equal("all", s.LibraryKindFilter);
-        Assert.True(s.PeopleHideUnknown);
-        Assert.Empty(s.PersonTagHistory);
+        Assert.False(s.PeopleHideUnknown);
         Assert.Null(s.GpuExecutionProviderOverride);
         Assert.False(s.WelcomeSheetSeen);
         Assert.False(s.DisableAutoInstallCuda);
         Assert.False(s.DisableAutoInstallVulkanRuntime);
         Assert.False(s.DisableAutoInstallCudnn);
         Assert.Equal("qwen2_5_vl_7b", s.SelectedVlmModelKind);
-        Assert.False(s.SelectedVlmModelWasUserChosen);
-        Assert.Empty(s.ExcludedFolders);
-        Assert.True(s.ConfirmCloseOnPendingChanges);
-        Assert.Empty(s.DeepAnalyzeExcludedFolders);
-        Assert.Equal(7, s.SchemaVersion);
+        Assert.Equal(5, s.SchemaVersion);
     }
 
     [Fact]
@@ -74,12 +56,6 @@ public class AppSettingsTests
             DisableAutoInstallCuda = true,
             DisableAutoInstallVulkanRuntime = true,
             DisableAutoInstallCudnn = true,
-            SelectedVlmModelKind = "mistral_small_3_2",
-            SelectedVlmModelWasUserChosen = true,
-            PersonTagHistory = new Dictionary<string, string>
-            {
-                ["42"] = "Dr Alex Morgan Jr",
-            },
             SchemaVersion = 1,
         };
 
@@ -100,9 +76,6 @@ public class AppSettingsTests
         Assert.Equal(original.DisableAutoInstallCuda, decoded.DisableAutoInstallCuda);
         Assert.Equal(original.DisableAutoInstallVulkanRuntime, decoded.DisableAutoInstallVulkanRuntime);
         Assert.Equal(original.DisableAutoInstallCudnn, decoded.DisableAutoInstallCudnn);
-        Assert.Equal(original.SelectedVlmModelKind, decoded.SelectedVlmModelKind);
-        Assert.Equal(original.SelectedVlmModelWasUserChosen, decoded.SelectedVlmModelWasUserChosen);
-        Assert.Equal(original.PersonTagHistory, decoded.PersonTagHistory);
         Assert.Equal(original.SchemaVersion, decoded.SchemaVersion);
     }
 
@@ -169,130 +142,7 @@ public class AppSettingsTests
         Assert.NotNull(decoded);
         Assert.Equal("library", decoded!.ActiveTab);
         Assert.True(decoded.SidebarVisible);
-        // "{}" carries no schemaVersion → property default (current schema, v7).
-        Assert.Equal(7, decoded.SchemaVersion);
-        // Fields absent from an old settings.json take their safe defaults.
-        Assert.Empty(decoded.ExcludedFolders);
-        Assert.True(decoded.ConfirmCloseOnPendingChanges);
-        Assert.Empty(decoded.DeepAnalyzeExcludedFolders);
-        Assert.Empty(decoded.PersonTagHistory);
-    }
-
-    [Fact]
-    public void SanitizeExcludedFolders_DropsMalformedAndDedupes()
-    {
-        var result = AppSettings.SanitizeExcludedFolders(s_excludedFoldersWithMalformed);
-        Assert.Equal(s_sanitizedExcludedFolders, result);
-    }
-
-    [Fact]
-    public void SanitizeExcludedFolders_CapsAtBound()
-    {
-        var many = new List<string>();
-        for (int i = 0; i < 400; i++) many.Add($@"C:\x\{i}");
-        var result = AppSettings.SanitizeExcludedFolders(many);
-        Assert.Equal(256, result.Count);
-    }
-
-    [Fact]
-    public void SanitizeExcludedFolders_NullInput_ReturnsEmpty()
-    {
-        Assert.Empty(AppSettings.SanitizeExcludedFolders(null));
-    }
-
-    [Fact]
-    public void CloneForWrite_SnapshotsExcludedFoldersList()
-    {
-        // The debounced Save() serializes a clone on a worker; a mid-debounce
-        // Add on the UI thread must not mutate the snapshot being written.
-        var s = new AppSettings();
-        s.ExcludedFolders.Add(@"C:\Pics\Raw");
-        var clone = (AppSettings)typeof(AppSettings)
-            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .Invoke(s, null)!;
-        s.ExcludedFolders.Add(@"C:\Pics\Other");
-        Assert.Single(clone.ExcludedFolders);
-        Assert.Equal(s_cloneExpectedExcludedFolders, s.ExcludedFolders);
-    }
-
-    [Fact]
-    public void DeepAnalyzeExcludedFolders_IsSeparateFromScanExcludedFolders()
-    {
-        // The two lists are deliberately independent — excluding a folder
-        // from scanning does not exclude it from Deep Analyze, and vice
-        // versa (see the field doc comments).
-        var s = new AppSettings();
-        s.ExcludedFolders.Add(@"C:\Pics\Raw");
-        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
-        Assert.Equal(new List<string> { @"C:\Pics\Raw" }, s.ExcludedFolders);
-        Assert.Equal(new List<string> { @"C:\Pics\Private" }, s.DeepAnalyzeExcludedFolders);
-    }
-
-    [Fact]
-    public void DeepAnalyzeExcludedFolders_RoundTripsThroughJsonAsCamelCase()
-    {
-        var original = new AppSettings();
-        original.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
-        var json = JsonSerializer.Serialize(original, s_options);
-        Assert.Contains("\"deepAnalyzeExcludedFolders\"", json);
-        var decoded = JsonSerializer.Deserialize<AppSettings>(json, s_options);
-        Assert.NotNull(decoded);
-        Assert.Equal(original.DeepAnalyzeExcludedFolders, decoded!.DeepAnalyzeExcludedFolders);
-    }
-
-    [Fact]
-    public void CloneForWrite_SnapshotsDeepAnalyzeExcludedFoldersList()
-    {
-        var s = new AppSettings();
-        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Private");
-        var clone = (AppSettings)typeof(AppSettings)
-            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .Invoke(s, null)!;
-        s.DeepAnalyzeExcludedFolders.Add(@"C:\Pics\Other");
-        Assert.Single(clone.DeepAnalyzeExcludedFolders);
-    }
-
-    [Fact]
-    public void PersonTagHistory_RecordsAndFindsOnlyTheRequestedPerson()
-    {
-        var s = new AppSettings();
-        s.RecordPersonTag(42, "  Dr Alex Morgan Jr  ");
-
-        Assert.Equal("Dr Alex Morgan Jr", s.LastPersonTag(42));
-        Assert.Null(s.LastPersonTag(43));
-    }
-
-    [Fact]
-    public void SanitizePersonTagHistory_DropsInvalidEntriesAndCanonicalizesKeys()
-    {
-        var raw = new Dictionary<string, string>
-        {
-            ["0042"] = "  Alex Morgan  ",
-            ["0"] = "Nobody",
-            ["-1"] = "Invalid",
-            ["not-a-number"] = "Invalid",
-            ["43"] = "   ",
-        };
-
-        var sanitized = AppSettings.SanitizePersonTagHistory(raw);
-
-        var pair = Assert.Single(sanitized);
-        Assert.Equal("42", pair.Key);
-        Assert.Equal("Alex Morgan", pair.Value);
-    }
-
-    [Fact]
-    public void CloneForWrite_SnapshotsPersonTagHistory()
-    {
-        var s = new AppSettings();
-        s.RecordPersonTag(42, "Alex");
-        var clone = (AppSettings)typeof(AppSettings)
-            .GetMethod("CloneForWrite", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .Invoke(s, null)!;
-
-        s.RecordPersonTag(42, "Alex Morgan");
-
-        Assert.Equal("Alex", clone.LastPersonTag(42));
-        Assert.Equal("Alex Morgan", s.LastPersonTag(42));
+        // "{}" carries no schemaVersion → property default (current schema, v5).
+        Assert.Equal(5, decoded.SchemaVersion);
     }
 }

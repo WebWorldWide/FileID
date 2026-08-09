@@ -155,10 +155,6 @@ final class LineBuffer: @unchecked Sendable {
             let line = buffer.subdata(in: buffer.startIndex..<nl)
             buffer.removeSubrange(buffer.startIndex...nl)
             scannedPrefix = 0
-            if line.count > Self.maxLineBytes {
-                buffer.removeAll(keepingCapacity: false)
-                throw LineOverflowError(capBytes: Self.maxLineBytes)
-            }
             if !line.isEmpty { lines.append(line) }
         }
         if buffer.count > Self.maxLineBytes {

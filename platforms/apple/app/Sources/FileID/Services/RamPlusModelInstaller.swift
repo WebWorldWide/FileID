@@ -30,7 +30,6 @@ public final class RamPlusModelInstaller {
     public private(set) var status: Status = .unknown
 
     private var task: Task<Void, Never>?
-    private var uninstalling = false
     /// True only while a download is actually in flight — gates progress ticks
     /// that can be scheduled after a terminal status (phantom "Downloading…"
     /// guard, mirrors ArcFaceModelInstaller.active / CLIPModelInstaller).
@@ -67,25 +66,17 @@ public final class RamPlusModelInstaller {
     }
 
     public func install() {
-        guard task == nil, !uninstalling else { return }
+        guard task == nil else { return }
         task = Task { [weak self] in
-            await AppSleepActivity.run(reason: "Install RAM++ model") {
-                await self?.runInstall()
-            }
+            await self?.runInstall()
             self?.task = nil
         }
     }
 
     public func cancel() { task?.cancel() }
 
-    public func uninstall() async {
-        guard !uninstalling else { return }
-        uninstalling = true
-        defer { uninstalling = false }
-        let activeTask = task
-        activeTask?.cancel()
-        await activeTask?.value
-        task = nil
+    public func uninstall() {
+        cancel()
         try? FileManager.default.removeItem(at: Self.dir)
         refreshStatus()
     }

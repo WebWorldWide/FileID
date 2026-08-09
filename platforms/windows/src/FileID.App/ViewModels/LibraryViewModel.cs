@@ -65,7 +65,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnServiceErrorChanged(object? sender, PropertyChangedEventArgs e)
-        => FileID.Services.DebugLog.SafeRun("LibraryViewModel.OnServiceErrorChanged", () =>
     {
         if (e.PropertyName is not (nameof(ReadStore.LastOpenError) or nameof(ClipSearchService.LastSearchError)))
             return;
@@ -73,7 +72,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         var msg = !string.IsNullOrEmpty(_store.LastOpenError) ? _store.LastOpenError : _clip.LastSearchError;
         if (string.IsNullOrEmpty(msg)) return;
         _ui.TryEnqueue(() => { if (!_disposed) ErrorMessage = msg; });
-    });
+    }
 
     public void Dispose()
     {
@@ -184,7 +183,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnTilePropertyChanged(object? sender, PropertyChangedEventArgs e)
-        => FileID.Services.DebugLog.SafeRun("LibraryViewModel.OnTilePropertyChanged", () =>
     {
         if (e.PropertyName != nameof(FileTile.IsSelected)) return;
         if (sender is not FileTile t) return;
@@ -199,7 +197,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(SelectedItems));
         PublishSelectionToRegistry();
-    });
+    }
 
     private void PublishSelectionToRegistry()
     {
@@ -591,8 +589,12 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         if (prior != null)
         {
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
         }
-        // Snapshot the token while `cts` is guaranteed alive.
+        // Snapshot the token while `cts` is guaranteed alive. Reading
+        // `cts.Token` INSIDE the task could race a newer ScheduleRefresh that
+        // already disposed this cts, throwing ObjectDisposedException as an
+        // unobserved task exception (process-level crash under strict modes).
         var token = cts.Token;
         _ = Task.Run(async () =>
         {
@@ -603,10 +605,6 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
             catch (OperationCanceledException) { /* expected */ }
             catch (ObjectDisposedException) { /* cts disposed by a newer refresh */ }
-            finally
-            {
-                cts.Dispose();
-            }
         });
     }
 
@@ -623,6 +621,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         if (prior != null)
         {
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
         }
     }
 
@@ -891,12 +890,9 @@ internal sealed class FileTile : INotifyPropertyChanged
     {
         var rawTags = r.Tags ?? (System.Collections.Generic.IReadOnlyList<string>)System.Array.Empty<string>();
         var formattedTags = new System.Collections.Generic.List<string>(rawTags.Count);
-        var seenTags = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
         foreach (var t in rawTags)
         {
-            var trimmed = t.Trim();
-            if (trimmed.Length > 0 && seenTags.Add(trimmed))
-                formattedTags.Add(FileID.Theme.Controls.TagChip.FormatTag(trimmed));
+            formattedTags.Add(FileID.Theme.Controls.TagChip.FormatTag(t));
         }
         var tags = (System.Collections.Generic.IReadOnlyList<string>)formattedTags;
 

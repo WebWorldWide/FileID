@@ -12,23 +12,16 @@
     installing the new one — but as a safety net, MajorUpgrade element
     declares any older version is replaceable in-place.
 
-    Upgrade-while-running: RestartManager sees FileID.exe (it has a window)
-    but NOT FileIDEngine.exe — a windowless child process holding the SQLite
-    WAL. The engine is kill-tolerant by design (journaled restructure apply,
-    WAL recovery, parent-PID watchdog), so a mid-scan upgrade is safe, but
-    expect a files-in-use prompt; the clean-VM matrix (NEXT.md) covers this
-    case explicitly.
-
     Components:
       - PublishedFiles: every file from `dotnet publish` (auto-harvested by
         wixproj's HarvestDirectory). Includes FileID.exe, FileIDEngine.exe
-        (staged into publish/ by publish-bundle.ps1), the self-contained .NET
-        runtime, Win2D, etc. The framework-dependent Windows App Runtime is a
-        prerequisite in the Burn bundle, not duplicated inside this MSI.
+        (staged into publish/ by publish-bundle.ps1), the entire .NET
+        runtime, WinAppSDK runtime, Win2D, etc.
       - StartMenuShortcut: one shortcut under "FileID".
 
     Properties:
-      - Native maintenance mode remains available for repair/uninstall.
+      - ARPNOMODIFY=1: hides the "Modify" button in Apps & Features
+        (we don't ship optional features that could be added/removed).
       - ARPHELPLINK / ARPURLINFOABOUT: documented in MODELS.md / PRIVACY.md.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -46,12 +39,9 @@
     <!-- Single .cab, embedded in the .msi so the artifact is one file. -->
     <Media Id="1" Cabinet="FileID.cab" EmbedCab="yes" />
 
-    <!-- Replace older versions and the same-version package of the other
-         architecture. Removal runs after InstallInitialize, before new files
-         are laid down: x64 and ARM64 intentionally use different component
-         GUIDs, so removing the old product after copying the new one could
-         otherwise delete paths the new architecture just installed. This
-         schedule remains inside the rollback boundary.
+    <!-- Replace any older version. Schedule afterInstallExecute so files
+         from the new install land before old files come out — minimizes
+         flicker if the user has the app open.
 
          A single MSI's install is already an atomic Windows Installer
          transaction (it rolls back wholesale on failure), so there is no
@@ -61,8 +51,7 @@
          MSI doesn't unwind packages that already committed past the
          checkpoint. -->
     <MajorUpgrade
-        Schedule="afterInstallInitialize"
-        AllowSameVersionUpgrades="yes"
+        Schedule="afterInstallExecute"
         DowngradeErrorMessage="A newer version of FileID is already installed." />
 
     <!-- Per-machine install with arch-aware Program Files target. -->
@@ -74,8 +63,9 @@
     </StandardDirectory>
 
     <!-- Apps & Features metadata. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPPRODUCTICON" Value="FileIDIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/WebWorldWide/FileID/issues" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/anthropics/claude-code/issues" />
     <Property Id="ARPURLINFOABOUT" Value="https://fileid.app" />
     <!-- Privacy posture is a product feature; surface it in Apps & Features. -->
     <Property Id="ARPCOMMENTS" Value="On-device AI file organizer. No telemetry. No cloud." />
@@ -84,13 +74,6 @@
          References the source .ico directly (not extracted from .exe)
          so Add/Remove Programs gets the multi-resolution version. -->
     <Icon Id="FileIDIcon" SourceFile="$(var.AssetsRoot)\FileID.ico" />
-
-    <!-- The EXE bundle is the canonical consumer installer; the MSI remains a
-         polished standalone option for IT admins and direct double-click use. -->
-    <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUILicenseRtf" Value="$(var.BundleThemeRoot)\license.rtf" />
-    <WixVariable Id="WixUIBannerBmp" Value="$(var.MsiThemeRoot)\banner.bmp" />
-    <WixVariable Id="WixUIDialogBmp" Value="$(var.MsiThemeRoot)\dialog.bmp" />
 
     <!-- Start Menu shortcut. -->
     <DirectoryRef Id="StartMenuDir">
@@ -102,12 +85,6 @@
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="FileIDIcon" />
         <RemoveFolder Id="RemoveStartMenuDir" Directory="StartMenuDir" On="uninstall" />
-        <!-- HKCU is REQUIRED here, not a bug: ICE38/ICE43/ICE57 (enforced by
-             the WiX v4 build) treat a ProgramMenuFolder shortcut component as
-             user-profile data and hard-fail an HKLM keypath (proven by the
-             2026-07-17 v0.1.1 tag run). The stranded-HKCU-value-on-multi-user-
-             uninstall is the documented, accepted trade-off of the canonical
-             shortcut pattern — do not "fix" this to HKLM again. -->
         <RegistryValue Root="HKCU"
                        Key="Software\FileID\Installed"
                        Name="StartMenuShortcut"
@@ -118,11 +95,10 @@
     </DirectoryRef>
 
     <!-- Feature: bundles every component above into the only feature the
-         installer offers. -->
+         installer offers. We don't expose optional features (per ARPNOMODIFY). -->
     <Feature Id="MainFeature" Title="FileID" Level="1" AllowAdvertise="no" Display="expand">
       <ComponentGroupRef Id="PublishedFiles" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
-
   </Package>
 </Wix>

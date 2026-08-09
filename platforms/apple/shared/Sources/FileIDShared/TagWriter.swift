@@ -259,20 +259,16 @@ public enum TagWriter {
             // Identity guard: if the file at this path no longer matches the
             // size/mtime captured at apply time, a DIFFERENT file occupies it —
             // stripping tags would mangle an unrelated file. Skip it. (F-C3-034)
-            // Entries with no identity data (written by older builds) are skipped
-            // too — we cannot verify them, so stripping is unsafe.
-            guard let size = outcome.fileSize, let mtime = outcome.modifiedAt else {
-                skipped += 1
-                continue
-            }
-            let attrs = try? fm.attributesOfItem(atPath: outcome.path)
-            guard let curSize = attrs?[.size] as? Int64,
-                  let curMtime = attrs?[.modificationDate] as? Date,
-                  curSize == size,
-                  abs(curMtime.timeIntervalSince(mtime)) < 1
-            else {
-                skipped += 1
-                continue
+            if let size = outcome.fileSize, let mtime = outcome.modifiedAt {
+                let attrs = try? fm.attributesOfItem(atPath: outcome.path)
+                guard let curSize = attrs?[.size] as? Int64,
+                      let curMtime = attrs?[.modificationDate] as? Date,
+                      curSize == size,
+                      abs(curMtime.timeIntervalSince(mtime)) < 1
+                else {
+                    skipped += 1
+                    continue
+                }
             }
             do {
                 try removeTags(outcome.addedTags,
@@ -295,11 +291,11 @@ public enum TagWriter {
     /// "mom", the result keeps "Mom".
     public static func mergeTags(existing: [String], adding new: [String]) -> [String] {
         var out = existing
-        var lowerSeen = Set(existing.map { $0.lowercased() })
+        let lowerExisting = Set(existing.map { $0.lowercased() })
         for tag in new {
             let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            if lowerSeen.insert(trimmed.lowercased()).inserted {
+            if !lowerExisting.contains(trimmed.lowercased()) {
                 out.append(trimmed)
             }
         }

@@ -55,9 +55,6 @@ public func streamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
-    guard TLSPinning.allowsExternalRequest(to: remote) else {
-        throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
-    }
     // Single-stream transits the system temp dir then atomic-moves onto the
     // destination volume — peak destination use is ~1×, not the parallel 2×.
     try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 1)
@@ -198,9 +195,6 @@ public func parallelStreamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
-    guard TLSPinning.allowsExternalRequest(to: remote) else {
-        throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
-    }
     // Parallel staging keeps every part plus the concat'd final on the
     // destination volume → peak transient use is ~2× the file.
     try preflightDiskSpace(dest: dest, approxBytes: approxBytes, peakMultiplier: 2)
@@ -870,7 +864,7 @@ extension StreamingDownloadError: LocalizedError {
         case .pinningFailed:
             return "Secure connection rejected: the server's certificate chain doesn't match FileID's pinned certificate authorities. Your network may be intercepting TLS — try a trusted connection."
         case .redirectBlocked(let url):
-            return "Download blocked: the server tried to redirect to an unexpected or insecure location (\(url)). FileID only follows HTTPS redirects within Hugging Face. Your network may be intercepting the connection."
+            return "Download blocked: the server tried to redirect to an unexpected or insecure location (\(url)). FileID only follows https redirects to HuggingFace, GitHub, and NVIDIA. Your network may be intercepting the connection."
         case .insufficientDiskSpace(let needed, let available):
             let neededMB = needed / 1_048_576
             let availMB = available / 1_048_576

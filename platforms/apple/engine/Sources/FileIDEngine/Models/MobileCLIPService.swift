@@ -22,19 +22,10 @@ public final class MobileCLIPService: @unchecked Sendable {
     private var session: ORTSession?
     private var inputName: String?
     private var isImageLoaded = false
-    // Defaults to 4 (ANE-thrash cap); raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
-    private static let inferenceConcurrency: Int =
-        ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
-            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
-    private let inferenceSem = DispatchSemaphore(value: MobileCLIPService.inferenceConcurrency)
+    private let inferenceSem = DispatchSemaphore(value: 4)
 
     // CLIP (OpenAI) preprocessing constants — identical to the Windows engine.
     private static let inputSize = 224
-    /// Expected image-embedding width. ViT-B/32 emits 512-d; a model whose output
-    /// width differs is wrong/substituted and must be rejected, not persisted as an
-    /// off-dimension `clip_embeddings` blob (mirrors the SFace dim guard,
-    /// ArcFaceService.embed / Windows sface.rs ENG-69).
-    private static let embeddingDim = 512
     private static let mean: [Float] = [0.481_454_66, 0.457_827_5, 0.408_210_73]
     private static let std: [Float] = [0.268_629_54, 0.261_302_58, 0.275_777_11]
 
@@ -75,17 +66,10 @@ public final class MobileCLIPService: @unchecked Sendable {
             return false
         }
         do {
-            lock.lock()
-            let cachedEnv = self.env
-            lock.unlock()
-            let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
+            let env = try self.env ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
             let opts = try ORTSessionOptions()
             // CoreML EP for ANE acceleration; ORT falls back to CPU if it
-            // can't place a node. Bare options = NeuralNetwork format with
-            // MLComputeUnits = All. We deliberately do NOT use MLProgram: on
-            // CLIP ViT-B/32 it fails to build the CoreML plan on-hardware
-            // ("ios17.conv: output size is too small"), which throws at session
-            // creation and would disable CLIP embeddings entirely.
+            // can't place a node. Mirrors ArcFaceService's posture.
             try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
             let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
             let name = try session.inputNames().first
@@ -134,17 +118,7 @@ public final class MobileCLIPService: @unchecked Sendable {
             guard let first = outputs.values.first else { return nil }
             let outData = try first.tensorData() as Data
             let count = outData.count / MemoryLayout<Float>.stride
-            // Reject a wrong/substituted model rather than persist an
-            // off-dimension blob that would poison semantic search + restructure
-            // clustering (symmetric with the SFace dim guard).
-            guard count == Self.embeddingDim else {
-                if count != 0 {
-                    JSONLog.shared.error(
-                        ev: "clip_embedding_dim_mismatch",
-                        error: "expected \(Self.embeddingDim), got \(count)")
-                }
-                return nil
-            }
+            guard count > 0 else { return nil }
             var out = [Float](repeating: 0, count: count)
             outData.withUnsafeBytes { raw in
                 let src = raw.baseAddress!.assumingMemoryBound(to: Float.self)

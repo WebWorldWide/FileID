@@ -10,7 +10,7 @@
 param(
     [string]$Batched = "C:\Users\adamm\AppData\Local\Temp\ram_plus_batched\ram_plus.onnx",
     [int]$BatchN = 4,
-    [string]$Corpus = "F:\TrueNAS\iMac Documents"
+    [string]$Corpus = "G:\TrueNAS\iMac Documents"
 )
 $ErrorActionPreference = 'Stop'
 $real = Join-Path $env:LOCALAPPDATA "FileID\Models\ram_plus\ram_plus.onnx"
@@ -57,7 +57,7 @@ finally {
     Copy-Item -LiteralPath $bak -Destination $real -Force
     Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
     $restMB = [math]::Round((Get-Item $real).Length / 1MB, 1)
-    Write-Host "   restored ($restMB MB; expected $realMB MB) - match: $($restMB -eq $realMB)"
+    Write-Host "   restored ($restMB MB; expected $realMB MB) — match: $($restMB -eq $realMB)"
     Remove-Item Env:\FILEID_RAMPLUS_BATCH_SIZE -ErrorAction SilentlyContinue
 }
 

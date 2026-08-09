@@ -218,9 +218,6 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                        WHERE p.name LIKE $like ESCAPE '\'
                           OR p.first_name LIKE $like ESCAPE '\'
                           OR p.last_name LIKE $like ESCAPE '\'
-                          OR p.middle_name LIKE $like ESCAPE '\'
-                          OR p.title LIKE $like ESCAPE '\'
-                          OR p.suffix LIKE $like ESCAPE '\'
                    )
               )
             ORDER BY f.scanned_at DESC, f.id DESC
@@ -308,80 +305,57 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         try
         {
             if (_connection == null) return Array.Empty<FileRowWithScore>();
-            var heap = new PriorityQueue<long, float>(limit);
-            var scores = new Dictionary<long, float>();
-            using (var cmd = _connection.CreateCommand())
+            var heap = new PriorityQueue<FileRowWithScore, float>(limit);
+            using var cmd = _connection.CreateCommand();
+            // PAR-117: exclude failed files — a corrupt file with a stale CLIP
+            // embedding must not surface in semantic results. PAR-116: filter by
+            // kind in SQL so a kind-restricted grid isn't under-filled by the
+            // post-fetch C# filter.
+            var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
+            cmd.CommandText = $"""
+            SELECT f.id, f.path_text, f.kind, f.size_bytes, f.modified_at,
+                   f.has_faces, f.has_text,
+                   (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
+                   f.vlm_proposed_name,
+                   e.embedding
+            FROM clip_embeddings e
+            JOIN files f ON f.id = e.file_id
+            WHERE f.failed = 0{kindClause}
+            """;
+            if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {
-                // Score only IDs + embeddings. Fetching tags here would execute
-                // the correlated ordered GROUP_CONCAT once for every embedding
-                // even though only `limit` rows survive the heap.
-                var kindClause = string.IsNullOrEmpty(kind) || kind == "all" ? "" : " AND f.kind = $kind";
-                cmd.CommandText = $"""
-                    SELECT f.id, e.embedding
-                    FROM clip_embeddings e
-                    JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0{kindClause}
-                    """;
-                if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
-                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                var blob = (byte[])reader.GetValue(9);
+                // Skip dimension-mismatched/corrupt embeddings instead of
+                // scoring them 0 and occupying a result slot — parity with the
+                // macOS reference guard (#15).
+                if (blob.Length != queryEmbedding.Length * 4) continue;
+                float score = DotProduct(queryEmbedding, blob);
+                // Materialize the FileRow (GROUP_CONCAT split + List + record)
+                // only for rows the bounded top-K heap actually retains — the
+                // vast majority of embedding rows are discarded, so ReadRow on
+                // every row was pure Gen0 churn. SimilarFilesAsync already heaps
+                // ids and fetches survivors afterward; mirror that here. Reading
+                // by column index stays valid until the next ReadAsync, so a lazy
+                // materialize inside the enqueue branches is byte-identical.
+                if (heap.Count < limit)
                 {
-                    var fileId = reader.GetInt64(0);
-                    var blob = (byte[])reader.GetValue(1);
-                    if (blob.Length != queryEmbedding.Length * 4) continue;
-                    float score = DotProduct(queryEmbedding, blob);
-                    if (heap.Count < limit)
-                    {
-                        heap.Enqueue(fileId, score);
-                        scores[fileId] = score;
-                    }
-                    else if (heap.TryPeek(out var removedId, out var minScore) && score > minScore)
-                    {
-                        heap.Dequeue();
-                        scores.Remove(removedId);
-                        heap.Enqueue(fileId, score);
-                        scores[fileId] = score;
-                    }
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
+                }
+                else if (heap.TryPeek(out _, out var minScore) && score > minScore)
+                {
+                    heap.Dequeue();
+                    heap.Enqueue(new FileRowWithScore(ReadRow(reader), score), score);
                 }
             }
-
-            var topIds = new List<long>(heap.Count);
-            while (heap.Count > 0) topIds.Add(heap.Dequeue());
-            topIds.Reverse();
-            if (topIds.Count == 0) return Array.Empty<FileRowWithScore>();
-
-            var placeholders = new List<string>(topIds.Count);
-            using var detail = _connection.CreateCommand();
-            for (int i = 0; i < topIds.Count; i++)
+            // Heap holds best `limit` ordered worst→best; reverse to best→worst.
+            var sorted = new List<FileRowWithScore>(heap.Count);
+            while (heap.Count > 0)
             {
-                var parameter = $"$id{i}";
-                placeholders.Add(parameter);
-                detail.Parameters.AddWithValue(parameter, topIds[i]);
+                sorted.Add(heap.Dequeue());
             }
-            detail.CommandText = $"""
-                SELECT id, path_text, kind, size_bytes, modified_at, has_faces, has_text,
-                       (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
-                       vlm_proposed_name
-                FROM files
-                WHERE id IN ({string.Join(",", placeholders)}) AND failed = 0
-                """;
-            var byId = new Dictionary<long, FileRow>();
-            using (var reader = await detail.ExecuteReaderAsync(ct).ConfigureAwait(false))
-            {
-                while (await reader.ReadAsync(ct).ConfigureAwait(false))
-                {
-                    var row = ReadRow(reader);
-                    byId[row.Id] = row;
-                }
-            }
-            var sorted = new List<FileRowWithScore>(topIds.Count);
-            foreach (var id in topIds)
-            {
-                if (byId.TryGetValue(id, out var row))
-                {
-                    sorted.Add(new FileRowWithScore(row, scores[id]));
-                }
-            }
+            sorted.Reverse();
             return sorted;
         }
         finally { _gate.Release(); }
@@ -521,8 +495,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             cmd.CommandText = """
                 SELECT id, path_text, vlm_proposed_name
                 FROM files
-                WHERE failed = 0
-                  AND vlm_proposed_name IS NOT NULL
+                WHERE vlm_proposed_name IS NOT NULL
                   AND vlm_proposed_name != ''
                 ORDER BY vlm_analyzed_at DESC
                 LIMIT $limit
@@ -579,12 +552,12 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// first, else title, else legacy name).</summary>
     public async Task<IReadOnlyDictionary<string, List<long>>> NamedPersonFileIdsAsync(CancellationToken ct)
     {
-        var sets = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
-        if (_connection == null) return new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        var map = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+        if (_connection == null) return map;
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_connection == null) return new Dictionary<string, List<long>>(StringComparer.Ordinal);
+            if (_connection == null) return map;
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT face_prints.file_id, persons.title, persons.first_name,
@@ -609,47 +582,10 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6));
                 if (name.Length == 0) continue;
-                if (!sets.TryGetValue(name, out var ids))
-                {
-                    ids = new HashSet<long>();
-                    sets[name] = ids;
-                }
-                ids.Add(fileId);
+                if (!map.TryGetValue(name, out var ids)) { ids = new List<long>(); map[name] = ids; }
+                if (!ids.Contains(fileId)) ids.Add(fileId);
             }
-            return sets
-                .OrderBy(entry => entry.Key, StringComparer.Ordinal)
-                .ToDictionary(
-                    entry => entry.Key,
-                    entry => entry.Value.OrderBy(id => id).ToList(),
-                    StringComparer.Ordinal);
-        }
-        finally { _gate.Release(); }
-    }
-
-    public async Task<IReadOnlyList<long>> PersonFileIdsAsync(long personId, CancellationToken ct)
-    {
-        if (_connection == null) return Array.Empty<long>();
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            if (_connection == null) return Array.Empty<long>();
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = """
-                SELECT DISTINCT face_prints.file_id
-                FROM face_prints
-                INNER JOIN files ON files.id = face_prints.file_id
-                WHERE face_prints.person_id = $personId
-                  AND files.failed = 0
-                ORDER BY face_prints.file_id
-                """;
-            cmd.Parameters.AddWithValue("$personId", personId);
-            var ids = new List<long>();
-            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            while (await reader.ReadAsync(ct).ConfigureAwait(false))
-            {
-                ids.Add(reader.GetInt64(0));
-            }
-            return ids;
+            return map;
         }
         finally { _gate.Release(); }
     }
@@ -658,8 +594,8 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// [title, first, middle, last, suffix] joined by single spaces, else the legacy
     /// `name`. Byte-faithful with the macOS `ReadStore.personTagName` so a person is
     /// tagged identically on both platforms.</summary>
-    internal static string FormatPersonTagName(string? title, string? first, string? middle,
-                                               string? last, string? suffix, string? legacy)
+    private static string FormatPersonTagName(string? title, string? first, string? middle,
+                                              string? last, string? suffix, string? legacy)
     {
         var parts = new List<string>(5);
         foreach (var s in new[] { title, first, middle, last, suffix })
@@ -683,9 +619,9 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return 0;
             using var cmd = _connection.CreateCommand();
             cmd.CommandText =
-                "SELECT COUNT(*) FROM files WHERE failed = 0 AND vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
+                "SELECT COUNT(*) FROM files WHERE vlm_proposed_name IS NOT NULL AND vlm_proposed_name != ''";
             var result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-            return result is null ? 0 : (int)Math.Min(Convert.ToInt64(result), int.MaxValue);
+            return result is null ? 0 : Convert.ToInt32(result);
         }
         finally { _gate.Release(); }
     }
@@ -703,7 +639,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             if (_connection == null) return new Dictionary<string, int>();
             var dict = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "SELECT kind, COUNT(*) FROM files WHERE failed = 0 GROUP BY kind";
+            cmd.CommandText = "SELECT kind, COUNT(*) FROM files GROUP BY kind";
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))
             {

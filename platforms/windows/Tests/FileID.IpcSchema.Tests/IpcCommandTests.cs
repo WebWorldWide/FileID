@@ -1,4 +1,4 @@
-﻿// Round-trip tests for IpcCommand. Asserts:
+// Round-trip tests for IpcCommand. Asserts:
 //   1. Each variant survives encode → decode → encode without semantic loss
 //      (the resulting payload's structure matches).
 //   2. The wire bytes for empty-payload variants are `{"variantName": {}}`,
@@ -48,51 +48,15 @@ public class IpcCommandTests
         Assert.Null(p.RootDisplay);
     }
 
-    private static readonly string[] s_excludedPair = { @"C:\pics\raw", @"C:\pics\tmp" };
-    private static readonly string[] s_excludedSingle = { @"C:\pics\raw" };
-
-    [Fact]
-    public void StartScan_ExcludedPaths_RoundTripsAndLegacyJsonDecodes()
-    {
-        // Populated list round-trips verbatim.
-        var cmd = new IpcCommand("t-ex", new StartScanCommand(
-            @"C:\pics", null, Rescan: true, ExcludedPaths: s_excludedPair));
-        var json = IpcCoder.Encode(cmd);
-        Assert.Contains("\"excludedPaths\":[", json);
-        var rt = IpcCoder.Decode<IpcCommand>(json);
-        var p = Assert.IsType<StartScanCommand>(rt.Payload);
-        Assert.NotNull(p.ExcludedPaths);
-        Assert.Equal(s_excludedPair, p.ExcludedPaths);
-
-        // Legacy JSON without the key (pre-exclusions engine/app) decodes to null.
-        const string legacy = "{\"id\":\"t-old\",\"payload\":{\"startScan\":{\"rootPath\":\"C:\\\\pics\",\"rootDisplay\":null,\"rescan\":false}}}";
-        var old = IpcCoder.Decode<IpcCommand>(legacy);
-        var op = Assert.IsType<StartScanCommand>(old.Payload);
-        Assert.Null(op.ExcludedPaths);
-    }
-
-    [Fact]
-    public void PurgeExcluded_RoundTrips()
-    {
-        var cmd = new IpcCommand("t-purge", new PurgeExcludedCommand(s_excludedSingle));
-        var json = IpcCoder.Encode(cmd);
-        Assert.Contains("\"purgeExcluded\"", json);
-        Assert.Contains("\"excludedPaths\":[\"C:\\\\pics\\\\raw\"]", json);
-        var rt = IpcCoder.Decode<IpcCommand>(json);
-        var p = Assert.IsType<PurgeExcludedCommand>(rt.Payload);
-        Assert.Equal(s_excludedSingle, p.ExcludedPaths);
-    }
-
     [Theory]
-    [InlineData(typeof(PauseScanCommand), "pauseScan")]
-    [InlineData(typeof(ResumeScanCommand), "resumeScan")]
-    [InlineData(typeof(CancelScanCommand), "cancelScan")]
-    [InlineData(typeof(CancelRestructureCommand), "cancelRestructure")]
-    [InlineData(typeof(RequestStatusCommand), "requestStatus")]
-    [InlineData(typeof(ShutdownCommand), "shutdown")]
+    [InlineData(typeof(PauseScanCommand),         "pauseScan")]
+    [InlineData(typeof(ResumeScanCommand),        "resumeScan")]
+    [InlineData(typeof(CancelScanCommand),        "cancelScan")]
+    [InlineData(typeof(RequestStatusCommand),     "requestStatus")]
+    [InlineData(typeof(ShutdownCommand),          "shutdown")]
     [InlineData(typeof(RunFaceClusteringCommand), "runFaceClustering")]
     [InlineData(typeof(DeepAnalyzeCancelCommand), "deepAnalyzeCancel")]
-    [InlineData(typeof(VerifyCudaPackCommand), "verifyCudaPack")]
+    [InlineData(typeof(VerifyCudaPackCommand),    "verifyCudaPack")]
     public void EmptyPayloadVariants_EncodeAsObjectNotString(Type t, string expectedKey)
     {
         var payload = (CommandPayload)Activator.CreateInstance(t)!;
@@ -120,40 +84,6 @@ public class IpcCommandTests
         Assert.Contains("\"modelKind\":\"clip_text\"", oneJson);
         var oneCmd = Assert.IsType<CancelPrewarmCommand>(IpcCoder.Decode<IpcCommand>(oneJson).Payload);
         Assert.Equal("clip_text", oneCmd.ModelKind);
-    }
-
-    [Fact]
-    public void HealthCheck_RoundTripsWithExactRequestIDCasing()
-    {
-        var cmd = new IpcCommand("health-envelope", new HealthCheckCommand("health-request"));
-        var json = IpcCoder.Encode(cmd);
-
-        Assert.Contains("\"healthCheck\":{\"requestID\":\"health-request\"}", json);
-        Assert.DoesNotContain("\"requestId\"", json);
-
-        var payload = Assert.IsType<HealthCheckCommand>(IpcCoder.Decode<IpcCommand>(json).Payload);
-        Assert.Equal("health-request", payload.RequestId);
-    }
-
-    [Fact]
-    public void UndoRestructure_ShortcutTokenRoundTripsWithoutChangingLegacyShape()
-    {
-        const string token = "6f5ed615-fbb2-41e2-86e5-d4bb9d84d851";
-        var tokenized = new IpcCommand(
-            "undo-shortcuts",
-            new UndoRestructureCommand(@"F:\Adlon Drive", token));
-        var tokenizedJson = IpcCoder.Encode(tokenized);
-        Assert.Contains("\"shortcutUndoToken\":\"" + token + "\"", tokenizedJson);
-        var payload = Assert.IsType<UndoRestructureCommand>(
-            IpcCoder.Decode<IpcCommand>(tokenizedJson).Payload);
-        Assert.Equal(token, payload.ShortcutUndoToken);
-
-        var legacyJson = IpcCoder.Encode(new IpcCommand(
-            "undo-moves",
-            new UndoRestructureCommand(@"F:\Adlon Drive")));
-        Assert.DoesNotContain("shortcutUndoToken", legacyJson);
-        Assert.Null(Assert.IsType<UndoRestructureCommand>(
-            IpcCoder.Decode<IpcCommand>(legacyJson).Payload).ShortcutUndoToken);
     }
 
     [Fact]

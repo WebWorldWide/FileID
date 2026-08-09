@@ -15,7 +15,8 @@
 // classifier. `requestPlan()` sends `planRestructure`; the engine's
 // `restructurePlan` event is mapped onto the view's `Proposal`/`AssistantSummary`
 // model in `applyPlan()` and drives the Sankey + TreeDiff + recommendation rows.
-// Apply sends `applyRestructure` and reacts to `restructureApplyResult`.
+// Apply sends `applyRestructure` and reacts to `restructureApplyResult`. The
+// app-side `RestructureEngine` below is retained (unreferenced) for reference.
 import SwiftUI
 import AppKit
 import GRDB
@@ -24,7 +25,6 @@ import FileIDShared
 struct RestructureView: View {
     let store: ReadStore
     let engine: EngineClient
-    let selectedRoot: URL?
 
     @State private var libraryRoot: URL?
     @State private var proposals: [Proposal] = []
@@ -37,7 +37,7 @@ struct RestructureView: View {
     @State private var selectedIDs: Set<Int64> = []
     @State private var loading = false
     @State private var status: String?
-    @State private var statusIsError = false
+    @State private var showingPicker = false
     @State private var staysPutExpanded: Bool = false
     @State private var confirmApply: Bool = false
     /// Single-flight guard for the apply / convert paths. A real move is
@@ -50,14 +50,6 @@ struct RestructureView: View {
     /// stays open; the confirm action must apply exactly what the user reviewed,
     /// not the re-planned set (TOCTOU → unreviewed irreversible moves).
     @State private var pendingMoves: [RestructureMove] = []
-    @State private var pendingPlanID: String?
-    @State private var pendingApplyCount = 0
-    @State private var storedPlanID: String?
-    @State private var storedPlanMoveCount = 0
-    /// Full-plan confidence tallies for the active stored plan — the auto-tier
-    /// count is what actually applies (see `applyStoredPlan`'s Auto-only
-    /// filter); review/ask/unknown stay put. Nil until a truncated plan lands.
-    @State private var storedPlanConfidenceCounts: RestructureConfidenceCounts?
 
     @AppStorage("restructure.viewMode") private var viewModeRaw: String = ViewMode.cards.rawValue
     private var viewMode: ViewMode { ViewMode(rawValue: viewModeRaw) ?? .cards }
@@ -77,13 +69,7 @@ struct RestructureView: View {
     @State private var hasPulsed = false
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
-    @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false
-    /// (clip, text) embedding counts at plan time. nil = not yet measured. When both are
-    /// 0 the scan ran without the CLIP/BGE models, so the plan is date/name-only — we tell
-    /// the user to install the models + rescan for content-based grouping.
-    @State private var embeddingCounts: (clip: Int, text: Int)?
-    /// Lets the missing-models banner jump the user to Settings → AI Models.
-    @AppStorage("activeTabRawValue") private var activeTabRaw: String = MainWindow.Tab.library.rawValue
+    @State private var dismissedDeepAnalyzeHint = false
     /// Per-file deselections captured at `requestPlan()` time and re-applied in
     /// `applyPlan()`, so an engine re-plan (e.g. after Deep Analyze finishes
     /// mid-review) doesn't silently re-check rows the user unchecked.
@@ -127,9 +113,6 @@ struct RestructureView: View {
         let newPath: String
         let bucket: String        // destination bucket (e.g. "People/Marie Curie")
         let sourceFolder: String  // current parent folder (for "from X" display)
-        // Precomputed display strings — avoids re-parsing the path on every row render.
-        let filename: String
-        let sourceName: String
         let kind: ProposalKind
         // Butler confidence band ("auto"/"review"/"ask", "" when unstamped) + the
         // engine's plain-language "why filed here". Surfaced per the deep-research
@@ -171,53 +154,71 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        // Prominence: the apply bar now lives in normal flow at the TOP of the
-        // tab — a persistent bar above the plan content — instead of floating
-        // over the bottom of the scroll view, so the primary action is visible
-        // the moment a plan lands, with no scrolling required. (owner request)
-        VStack(alignment: .leading, spacing: 0) {
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    if libraryRoot == nil
+                        || (!summary.hasContent && proposals.isEmpty) {
+                        emptyState
+                    } else {
+                        if !proposals.isEmpty || summary.hasContent {
+                            RestructureStatHero(summary: summary,
+                                                  hoverBus: hoverBus)
+                            if shouldShowDeepAnalyzeHint {
+                                deepAnalyzeHintBanner
+                            }
+                            HStack {
+                                viewModeToggle
+                                Spacer()
+                            }
+                        }
+                        if !proposals.isEmpty {
+                            if viewMode == .cards {
+                                unifiedHeroSurface
+                            } else {
+                                treeCard
+                            }
+                        } else if summary.hasContent {
+                            nothingToMoveCard
+                        }
+                        if summary.staysPutFiles > 0 {
+                            staysPutSection
+                        }
+                    }
+                    if let s = status {
+                        statusBanner(s)
+                    }
+                    // Reserve room for the floating apply bar.
+                    Color.clear.frame(height: applyBarVisible ? 96 : 0)
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+            }
             if applyBarVisible {
                 RestructureApplyBar(
-                    selectedCount: storedPlanMoveCount > 0
-                        ? (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount)
-                        : selectedIDs.count,
-                    totalCount: storedPlanMoveCount > 0
-                        ? storedPlanMoveCount : proposals.count,
-                    canApply: (storedPlanMoveCount > 0
-                        && (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount) > 0)
-                        || !selectedIDs.isEmpty,
+                    selectedCount: selectedIDs.count,
+                    totalCount: proposals.count,
+                    canApply: !selectedIDs.isEmpty,
                     isApplying: applying,
                     onApply: {
                         guard !applying else { return }
-                        if storedPlanMoveCount > 0 {
-                            pendingMoves = []
-                            pendingPlanID = storedPlanID
-                            // Only the Auto tier actually applies from a stored
-                            // plan (applyStoredPlan filters to auto-only) — the
-                            // confirmation must promise exactly that, not the
-                            // full stored count. (audit R1)
-                            pendingApplyCount = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
-                        } else {
-                            pendingMoves = eligibleMoves() // R6-01: freeze reviewed set
-                            pendingPlanID = nil
-                            pendingApplyCount = pendingMoves.count
-                        }
-                        guard pendingApplyCount > 0 else { return }
+                        pendingMoves = eligibleMoves()   // R6-01: freeze the reviewed set
+                        guard !pendingMoves.isEmpty else { return }
                         confirmApply = true
-                    },
-                    onCancel: { engine.cancelRestructure() }
+                    }
                 )
                 .padding(.horizontal, 18)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
-                .transition(.move(edge: .top).combined(with: .opacity))
+                .padding(.bottom, 14)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
                 // F-C3-021-app: the apply action routes through the engine
                 // butler, which performs real on-disk moves (it has no macOS
                 // symlink-preview mode). The apply bar is now a single honest
                 // "Apply moves" action; this confirmation states the real,
                 // irreversible behavior so the user always confirms first.
                 .confirmationDialog(
-                    "Apply \(pendingApplyCount) move\(pendingApplyCount == 1 ? "" : "s")?",
+                    "Apply \(pendingMoves.count) move\(pendingMoves.count == 1 ? "" : "s")?",
                     isPresented: $confirmApply,
                     titleVisibility: .visible
                 ) {
@@ -229,84 +230,34 @@ struct RestructureView: View {
                     Text("FileID will move the selected files into the new structure on disk and update its library. You can reverse the whole run with “Undo last run” right afterward — but review the structure first.")
                 }
             }
-            ZStack(alignment: .bottom) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        header
-                        if storedPlanMoveCount > 0 {
-                            largePlanCard
-                        } else if libraryRoot == nil
-                            || (!summary.hasContent && proposals.isEmpty) {
-                            emptyState
-                        } else {
-                            if !proposals.isEmpty || summary.hasContent {
-                                RestructureStatHero(summary: summary,
-                                                      hoverBus: hoverBus)
-                                if shouldShowMissingContentModels {
-                                    missingContentModelsBanner
-                                } else if shouldShowDeepAnalyzeHint {
-                                    deepAnalyzeHintBanner
-                                }
-                                HStack {
-                                    viewModeToggle
-                                    Spacer()
-                                }
-                            }
-                            if !proposals.isEmpty {
-                                if viewMode == .cards {
-                                    unifiedHeroSurface
-                                } else {
-                                    treeCard
-                                }
-                            } else if summary.hasContent {
-                                nothingToMoveCard
-                            }
-                            if summary.staysPutFiles > 0 {
-                                staysPutSection
-                            }
+            // R2: after an apply that moved files, offer a one-click reversal. The
+            // engine replays its on-disk undo journal to put every file back.
+            if engine.canUndoRestructure {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .foregroundStyle(Theme.gold)
+                    Text("Files were moved on disk — you can put them back.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Undo last run") {
+                        guard let root = libraryRoot, !applying else { return }
+                        applying = true
+                        status = "Undoing the last restructure…"
+                        // A failed send (engine respawning) would otherwise wedge
+                        // `applying` true forever — no result event ever arrives to
+                        // clear it, leaving the button permanently disabled. (audit R2-app)
+                        if !engine.undoRestructure(libraryRoot: root.path) {
+                            applying = false
+                            status = "Engine is unavailable — try again in a moment."
                         }
-                        if let s = status {
-                            statusBanner(s, isError: statusIsError)
-                        }
-                        // Reserve room for the floating "Undo last run" bar —
-                        // the apply bar itself no longer floats over content.
-                        Color.clear.frame(height: engine.canUndoRestructure ? 72 : 0)
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 18)
-                    .padding(.bottom, 12)
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.gold)
+                    .disabled(applying)
                 }
-                // R2: after an apply that moved files, offer a one-click reversal. The
-                // engine replays its on-disk undo journal to put every file back.
-                if engine.canUndoRestructure {
-                    HStack(spacing: 10) {
-                        Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundStyle(Theme.gold)
-                        Text("Files were moved on disk — you can put them back.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Undo last run") {
-                            guard let root = libraryRoot, !applying else { return }
-                            applying = true
-                            status = "Undoing the last restructure…"
-                            statusIsError = false
-                            // A failed send (engine respawning) would otherwise wedge
-                            // `applying` true forever — no result event ever arrives to
-                            // clear it, leaving the button permanently disabled. (audit R2-app)
-                            if !engine.undoRestructure(libraryRoot: root.path) {
-                                applying = false
-                                status = "Engine is unavailable — try again in a moment."
-                                statusIsError = true
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.gold)
-                        .disabled(applying)
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 14)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 14)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: applyBarVisible)
@@ -314,15 +265,31 @@ struct RestructureView: View {
         .sheet(item: $drillDown) { scope in
             drillDownSheet(scope)
         }
-        .task(id: selectedRoot?.standardizedFileURL.path) {
-            guard libraryRoot?.standardizedFileURL.path
-                    != selectedRoot?.standardizedFileURL.path else { return }
-            libraryRoot = selectedRoot
-            proposals = []
-            groups = []
-            selectedIDs = []
-            summary = .empty
-            if selectedRoot != nil { requestPlan() }
+        .fileImporter(isPresented: $showingPicker,
+                       allowedContentTypes: [.folder],
+                       allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    libraryRoot = url
+                    requestPlan()
+                }
+            case .failure: break
+            }
+        }
+        .task {
+            // Auto-default the destination root to the most recently scanned
+            // folder so proposals load immediately. User can still override
+            // via "Change destination…" but the upfront blocker is gone —
+            // they see what the assistant proposes the moment they open
+            // the tab.
+            if libraryRoot == nil, let session = store.recentSessions(limit: 1).first {
+                let url = URL(fileURLWithPath: session.rootPath)
+                if FileManager.default.fileExists(atPath: url.path) {
+                    libraryRoot = url
+                    requestPlan()
+                }
+            }
         }
         // Re-request a plan only on Deep Analyze terminal events
         // (`.deepAnalyzeComplete`). The previous per-file 3-s throttle
@@ -349,13 +316,8 @@ struct RestructureView: View {
             applying = false
             if let priv = result.privilegeError, !priv.isEmpty {
                 status = priv
-                statusIsError = true
-            } else if result.cancelled {
-                status = "Stopped — \(result.applied) file\(result.applied == 1 ? "" : "s") already moved, still undoable."
-                statusIsError = false
             } else {
                 status = "\(result.applied) moved · \(result.failed) failed"
-                statusIsError = false
             }
             store.notifyChanged()
             requestPlan()
@@ -366,7 +328,6 @@ struct RestructureView: View {
             if applying {
                 applying = false
                 status = "Engine restarted — apply interrupted. Recheck your library and try again."
-                statusIsError = true
             }
             loading = false
         }
@@ -387,18 +348,15 @@ struct RestructureView: View {
             if applying, kind == "db_unavailable" {
                 applying = false
                 status = "The engine isn't ready — try again in a moment."
-                statusIsError = true
             }
             guard loading else { return }
             switch kind {
             case "plan_restructure_failed", "db_unavailable":
                 loading = false
                 status = "Couldn't compute a plan. Please try again."
-                statusIsError = true
             case "ipc_frame_too_large":
                 loading = false
                 status = "This library's plan is too large to display. Try restructuring a smaller folder."
-                statusIsError = true
             default:
                 break
             }
@@ -413,7 +371,7 @@ struct RestructureView: View {
     // MARK: - Unified surface
 
     private var applyBarVisible: Bool {
-        libraryRoot != nil && (storedPlanMoveCount > 0 || !proposals.isEmpty)
+        libraryRoot != nil && !proposals.isEmpty
     }
 
     private var shouldShowDeepAnalyzeHint: Bool {
@@ -422,54 +380,6 @@ struct RestructureView: View {
         guard !engine.deepAnalyzeInFlight else { return false }
         guard totalAnalyzableFiles > 0 else { return false }
         return captionedFraction < 0.4
-    }
-
-    /// The scan produced NO content embeddings (CLIP + BGE both absent / not installed),
-    /// so the plan can only sort by date + name. This is the #1 cause of a plan that
-    /// "just dumps everything into year folders" — surface it loudly with a fix.
-    private var shouldShowMissingContentModels: Bool {
-        guard let c = embeddingCounts else { return false }   // not measured yet
-        guard totalAnalyzableFiles > 0 else { return false }
-        return c.clip == 0 && c.text == 0
-    }
-
-    private var missingContentModelsBanner: some View {
-        HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.orange.opacity(0.18))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "wand.and.stars.inverse")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.orange)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Organizing by date only — AI models aren't installed")
-                    .font(.callout.weight(.semibold))
-                Text("Without the image (CLIP) + document (BGE) models, the butler can't read what your files ARE, so it falls back to year/month folders. Install them in Settings → AI Models, then rescan, and photos group by what's in them and documents by their content.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            Button {
-                activeTabRaw = MainWindow.Tab.settings.rawValue
-            } label: {
-                Label("Open Settings", systemImage: "gearshape")
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Capsule().fill(Color.orange.opacity(0.85)))
-                    .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.m)
-                .fill(Color.orange.opacity(0.08))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m)
-                    .stroke(Color.orange.opacity(0.25), lineWidth: 1))
-        )
     }
 
     @ViewBuilder
@@ -679,10 +589,10 @@ struct RestructureView: View {
     /// at the bottom of the page — replaces the prior GlassCard so
     /// it doesn't compete with the unified surface above.
     @ViewBuilder
-    private func statusBanner(_ message: String, isError: Bool = false) -> some View {
+    private func statusBanner(_ message: String) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isError ? .orange : Theme.gold)
+            Image(systemName: "checkmark.seal.fill")
+                .foregroundStyle(Theme.gold)
             Text(message)
                 .font(.callout)
             Spacer()
@@ -713,13 +623,20 @@ struct RestructureView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
+                Button {
+                    showingPicker = true
+                } label: {
+                    Label(libraryRoot == nil ? "Pick destination root…" : "Change destination…",
+                          systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
             }
             if let root = libraryRoot {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.fill")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Library root: \(root.path)")
+                    Text("Destination: \(root.path)")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
@@ -738,35 +655,6 @@ struct RestructureView: View {
                     Text("Nothing to move").font(.headline)
                     Text("Your library is already organized — every folder is a recognized anchor.")
                         .font(.callout).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-        }
-    }
-
-    private var largePlanCard: some View {
-        GlassCard {
-            HStack(spacing: 12) {
-                Image(systemName: "externaldrive.badge.checkmark")
-                    .font(.title2)
-                    .foregroundStyle(Theme.gold)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Large plan ready").font(.headline)
-                    // The engine's stored-plan apply only ever moves the "auto"
-                    // confidence tier — most rows in a plan this size were never
-                    // shown to the user, so Review/Ask/unknown-confidence rows
-                    // stay put for individual review rather than being applied
-                    // sight-unseen. (audit R1)
-                    if let counts = storedPlanConfidenceCounts {
-                        let heldBack = counts.review + counts.ask + counts.unknown
-                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Ready to apply \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) Review, Needs approval, or unknown-confidence move\(heldBack == 1 ? "" : "s") stay put for you to review first.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams only the confident (Auto) moves without loading every file path into the app.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
                 }
                 Spacer()
             }
@@ -845,8 +733,8 @@ struct RestructureView: View {
         if libraryRoot == nil {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
-                title: "Pick a folder to scan",
-                message: "Choose a library folder in the sidebar and scan it first. Restructure proposes a cleaner hierarchy inside that same root, and nothing moves until you review and apply it."
+                title: "Pick a destination root",
+                message: "Choose where the proposed folder hierarchy should live. Nothing moves until you review the proposed structure and choose Apply — then the selected files are moved on disk."
             )
         } else if loading {
             // Computing state lives on a clipped LavaLamp surface so
@@ -953,8 +841,8 @@ struct RestructureView: View {
 
     private func proposalRow(_ p: Proposal) -> some View {
         let on = selectedIDs.contains(p.fileID)
-        let filename = p.filename
-        let sourceName = p.sourceName
+        let filename = URL(fileURLWithPath: p.oldPath).lastPathComponent
+        let sourceName = (p.sourceFolder as NSString).lastPathComponent
         let icon = Self.fileIcon(forFilename: filename)
         return HStack(spacing: 8) {
             Image(systemName: on ? "checkmark.square.fill" : "square")
@@ -1063,15 +951,11 @@ struct RestructureView: View {
         // (e.g. after Deep Analyze finishes mid-review) doesn't re-check rows
         // the user unchecked. Re-applied in applyPlan().
         priorDeselectedIDs = Set(proposals.map(\.fileID)).subtracting(selectedIDs)
-        storedPlanID = nil
-        storedPlanMoveCount = 0
-        storedPlanConfidenceCounts = nil
         loading = true
         status = nil
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
             status = "Engine is starting — reopen the tab to load your plan."
-            statusIsError = true
         }
     }
 
@@ -1084,47 +968,15 @@ struct RestructureView: View {
         // have switched folders while a plan was in flight).
         guard Self.pathsMatch(plan.libraryRoot, root.path) else { return }
 
-        if plan.truncated {
-            guard let planID = plan.planID,
-                  let totalMoves = plan.totalMoves, totalMoves > 0 else {
-                loading = false
-                status = "The stored plan is unavailable. Generate it again."
-                statusIsError = true
-                return
-            }
-            storedPlanID = planID
-            storedPlanMoveCount = totalMoves
-            storedPlanConfidenceCounts = plan.confidenceCounts
-            proposals = []
-            groups = []
-            selectedIDs = []
-            summary = .empty
-            inlineGroupsByOutcome = [:]
-            inlineMatchedCountByOutcome = [:]
-            loading = false
-            status = nil
-            statusIsError = false
-            return
-        }
-        storedPlanID = nil
-        storedPlanMoveCount = 0
-        storedPlanConfidenceCounts = nil
-
         let mapped = Self.mapProposals(from: plan)
         proposals = mapped
         summary = Self.makeSummary(from: plan, proposals: mapped)
 
         let by = Dictionary(grouping: mapped, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
-            .sorted { a, b in a.proposals.count != b.proposals.count ? a.proposals.count > b.proposals.count : a.bucket < b.bucket }
+            .sorted { $0.proposals.count > $1.proposals.count }
 
         selectedIDs = Set(mapped.map(\.fileID))
-        // Ask-confidence moves start deselected — "No clear signal, the decision
-        // is yours." The user must explicitly check them before applying.
-        // (RESTRUCTURE.md §6 — confidence-tier autonomy)
-        for p in mapped where p.confidence.lowercased() == "ask" {
-            selectedIDs.remove(p.fileID)
-        }
         // Re-apply per-file deselections that carried into the fresh set.
         selectedIDs.subtract(priorDeselectedIDs)
         // Preserve the user's "Skip these" choices: re-exclude any persisted
@@ -1163,7 +1015,6 @@ struct RestructureView: View {
         let (total, captioned) = store.filesAnalysisStats()
         totalAnalyzableFiles = total
         captionedFraction = total > 0 ? Double(captioned) / Double(total) : 0
-        embeddingCounts = store.contentEmbeddingCounts()
 
         loading = false
     }
@@ -1189,25 +1040,20 @@ struct RestructureView: View {
         guard !applying else { return }
         guard let root = libraryRoot else {
             status = "Pick a library folder before applying."
-            statusIsError = true
             return
         }
         // R6-01: apply exactly the set frozen when the dialog was presented, not
         // a set a mid-dialog re-plan may have rewritten.
         let moves = pendingMoves
-        guard pendingPlanID != nil || !moves.isEmpty else {
+        guard !moves.isEmpty else {
             status = "Nothing selected to apply."
-            statusIsError = true
             return
         }
         applying = true
         status = nil
-        if !engine.applyRestructure(
-            libraryRoot: root.path, moves: moves, planID: pendingPlanID)
-        {
+        if !engine.applyRestructure(libraryRoot: root.path, moves: moves) {
             applying = false
             status = "Engine is unavailable — try again in a moment."
-            statusIsError = true
         }
     }
 
@@ -1227,8 +1073,6 @@ struct RestructureView: View {
                 bucket: bucketLabel(destination: m.destination,
                                     root: plan.libraryRoot, fallback: m.category),
                 sourceFolder: (m.source as NSString).deletingLastPathComponent,
-                filename: URL(fileURLWithPath: m.source).lastPathComponent,
-                sourceName: ((m.source as NSString).deletingLastPathComponent as NSString).lastPathComponent,
                 kind: kind(forTier: m.tier),
                 confidence: m.confidence,
                 reason: m.reason)
@@ -1546,5 +1390,457 @@ struct RestructureView: View {
         case .sourceFolders:             return "rectangle.3.offgrid.fill"
         case .destBuckets:               return "rectangle.3.offgrid.fill"
         }
+    }
+}
+
+// MARK: - Engine (app-side)
+
+enum RestructureEngine {
+
+    /// Result of a `compute` call: proposals + an at-a-glance summary
+    /// of what the assistant did.
+    struct ComputeResult: Sendable {
+        let proposals: [RestructureView.Proposal]
+        let summary: RestructureView.AssistantSummary
+    }
+
+    /// Walk every file in the library, group by current parent folder,
+    /// classify each folder as Anchor / Mixed / Junk via FolderClassifier,
+    /// and emit move proposals only for outliers (Mixed) or for every
+    /// file (Junk). Files inside Anchor folders stay put — no proposals.
+    static func compute(store: ReadStore, libraryRoot: URL?) -> ComputeResult {
+        guard let root = libraryRoot else {
+            return ComputeResult(proposals: [], summary: .empty)
+        }
+        // 1. Pull every file via the paged accessor.
+        var all: [FileRow] = []
+        let page = 5000
+        var offset = 0
+        while true {
+            let batch = store.files(offset: offset, limit: page, search: "", kindFilter: nil)
+            if batch.isEmpty { break }
+            all.append(contentsOf: batch)
+            offset += batch.count
+            if batch.count < page { break }
+        }
+
+        // 2. Build the helper maps the classifier consumes.
+        let nameMap = Self.fileToPersonNames(store: store)
+        let knownPersons: [KnownPerson] = store.persons()
+            .filter { $0.hasAnyName && !$0.isUnknown }
+            .map { KnownPerson(id: $0.id, displayName: $0.displayName) }
+
+        // 3. Group files by their current parent folder.
+        var byFolder: [String: [FileRow]] = [:]
+        for f in all {
+            let parent = (f.pathText as NSString).deletingLastPathComponent
+            byFolder[parent, default: []].append(f)
+        }
+
+        // 4. Run the classifier.
+        let folderMetas: [String: [FileMeta]] = byFolder.mapValues { rows in
+            rows.map { FileMeta(id: $0.id, date: $0.displayDate) }
+        }
+        let classifications = FolderClassifier.classifyAll(
+            byFolder: folderMetas,
+            knownPersons: knownPersons,
+            personLookup: nameMap
+        )
+        let tierByFolder: [String: FolderClassifier.Tier] =
+            Dictionary(uniqueKeysWithValues: classifications.map { ($0.folderPath, $0.tier) })
+
+        // 5. Generate proposals based on each file's enclosing tier.
+        let cal = Calendar(identifier: .gregorian)
+        var out: [RestructureView.Proposal] = []
+        out.reserveCapacity(all.count)
+        var anchorFolders = 0, mixedFolders = 0, junkFolders = 0
+        var staysPut = 0, movedOut = 0, dissolved = 0
+        // Per-anchor folder breakdown for the "Staying put" disclosure.
+        var staysPutBreakdown: [(folder: String, count: Int)] = []
+
+        for c in classifications {
+            switch c.tier {
+            case .anchor:
+                anchorFolders += 1
+                staysPut += c.fileCount
+                staysPutBreakdown.append((folder: c.folderName, count: c.fileCount))
+            case .mixed:         mixedFolders  += 1
+            case .junk:          junkFolders   += 1
+            }
+        }
+        staysPutBreakdown.sort { $0.folder.localizedCaseInsensitiveCompare($1.folder) == .orderedAscending }
+
+        for f in all {
+            let parent = (f.pathText as NSString).deletingLastPathComponent
+            let tier = tierByFolder[parent] ?? .junk
+
+            // Decide whether this file moves and what kind of move.
+            let kind: RestructureView.ProposalKind?
+            switch tier {
+            case .anchor:
+                kind = nil   // stays put, no proposal
+            case .mixed(_, _, let outlierIDs):
+                if outlierIDs.contains(f.id) {
+                    kind = .movedOutAsOutlier
+                    movedOut += 1
+                } else {
+                    kind = nil   // matches the folder's intent; stays put
+                    staysPut += 1
+                }
+            case .junk:
+                kind = .dissolved
+                dissolved += 1
+            }
+            guard let proposalKind = kind else { continue }
+
+            // Sanitize bucket + baseName so a malicious vlm_proposed_name
+            // (e.g. "../../etc/passwd") can't escape the library root.
+            let bucket = sanitizePathSegment(
+                Self.bucketForFile(f, nameMap: nameMap, cal: cal)
+            )
+            let oldURL = f.url
+            let ext = oldURL.pathExtension
+            let rawBase: String
+            if let p = f.vlmProposedName, !p.isEmpty {
+                rawBase = ext.isEmpty ? p : "\(p).\(ext)"
+            } else {
+                rawBase = oldURL.lastPathComponent
+            }
+            let baseName = sanitizeFilename(rawBase)
+            let target = root
+                .appendingPathComponent(bucket, isDirectory: true)
+                .appendingPathComponent(baseName)
+
+            // Containment check: even with sanitization, verify the
+            // resolved target sits inside the library root before we
+            // record a proposal. Drop anything that doesn't.
+            let resolvedTarget = target.standardizedFileURL.path
+            let resolvedRoot = root.standardizedFileURL.path
+            guard resolvedTarget.hasPrefix(resolvedRoot + "/") else {
+                continue
+            }
+
+            // Skip if the destination is identical to the source (file
+            // already lives where the heuristic would put it).
+            guard resolvedTarget != f.pathText else {
+                if proposalKind == .movedOutAsOutlier { movedOut -= 1; staysPut += 1 }
+                if proposalKind == .dissolved        { dissolved -= 1; staysPut += 1 }
+                continue
+            }
+            out.append(RestructureView.Proposal(
+                fileID: f.id,
+                oldPath: f.pathText,
+                newPath: resolvedTarget,
+                bucket: bucket,
+                sourceFolder: parent,
+                kind: proposalKind
+            ))
+        }
+
+        let summary = RestructureView.AssistantSummary(
+            anchorFolders: anchorFolders,
+            mixedFolders:  mixedFolders,
+            junkFolders:   junkFolders,
+            staysPutFiles: staysPut,
+            movedOutFiles: movedOut,
+            dissolvedFiles: dissolved,
+            staysPutBreakdown: staysPutBreakdown
+        )
+        return ComputeResult(proposals: out, summary: summary)
+    }
+
+    /// Pure-heuristic destination bucket for a file. Same logic the
+    /// previous flat compute() used; isolated so the new tier-aware
+    /// compute() can call it for files in Junk / Mixed-outlier contexts.
+    private static func bucketForFile(
+        _ f: FileRow,
+        nameMap: [Int64: [String]],
+        cal: Calendar
+    ) -> String {
+        let date = f.displayDate
+        let year = date.map { String(cal.component(.year, from: $0)) }
+        let month = date.map { Self.monthName(cal.component(.month, from: $0)) }
+        // VLM-driven document subcategory wins over the
+        // people/places/year heuristics when DA has captioned the
+        // file — keeps a screenshot or receipt out of People/<face>.
+        if let vlmSubcategory = vlmDocumentSubcategory(for: f) {
+            return "Documents/" + vlmSubcategory + (year.map { "/\($0)" } ?? "")
+        }
+        if let names = nameMap[f.id], let first = names.first, !first.isEmpty {
+            return "People/\(first)" + (year.map { "/\($0)" } ?? "")
+        } else if let lat = f.locationLat, let lon = f.locationLon {
+            let latB = (lat * 2).rounded() / 2
+            let lonB = (lon * 2).rounded() / 2
+            return "Places/" + String(format: "%.1f_%.1f", latB, lonB) + (year.map { "/\($0)" } ?? "")
+        } else if f.hasText || f.kind == "pdf" || f.kind == "doc" {
+            return "Documents" + (year.map { "/\($0)" } ?? "")
+        } else if let y = year {
+            return "Photos/\(y)" + (month.map { "/\($0)" } ?? "")
+        } else {
+            return "Misc"
+        }
+    }
+
+    /// If the VLM caption strongly identifies this image as a kind of
+    /// document (receipt, screenshot, diagram, scanned form, etc.),
+    /// return the appropriate Documents subcategory. Otherwise nil and
+    /// the original heuristic takes over.
+    private static func vlmDocumentSubcategory(for f: FileRow) -> String? {
+        guard let desc = f.vlmDescription?.lowercased(), !desc.isEmpty else {
+            return nil
+        }
+        // Receipt / invoice / bill / order
+        if desc.contains("receipt") || desc.contains("invoice")
+            || desc.contains("bill") || desc.contains("order confirmation") {
+            return "Receipts"
+        }
+        // Screenshot
+        if desc.contains("screenshot") || desc.contains("screen capture")
+            || desc.contains("screen recording") {
+            return "Screenshots"
+        }
+        // Forms / contracts / official paperwork
+        if desc.contains("form") || desc.contains("contract")
+            || desc.contains("agreement") || desc.contains("application")
+            || desc.contains("license") {
+            return "Forms"
+        }
+        // Tickets / boarding passes / itineraries
+        if desc.contains("ticket") || desc.contains("boarding pass")
+            || desc.contains("itinerary") {
+            return "Travel"
+        }
+        // ID cards / passport / driver's license
+        if desc.contains("passport") || desc.contains("driver's license")
+            || desc.contains("id card") || desc.contains("identification") {
+            return "ID"
+        }
+        // Diagrams / charts / whiteboards
+        if desc.contains("whiteboard") || desc.contains("diagram")
+            || desc.contains("chart") || desc.contains("flowchart")
+            || desc.contains("mind map") {
+            return "Diagrams"
+        }
+        return nil
+    }
+
+    private static func fileToPersonNames(store: ReadStore) -> [Int64: [String]] {
+        var out: [Int64: [String]] = [:]
+        for person in store.persons() {
+            guard person.hasAnyName, !person.isUnknown else { continue }
+            let name = person.displayName
+            for f in store.files(forPersonID: person.id, limit: 5000) {
+                out[f.id, default: []].append(name)
+            }
+        }
+        return out
+    }
+
+    private static func monthName(_ m: Int) -> String {
+        let names = ["", "01-Jan","02-Feb","03-Mar","04-Apr","05-May","06-Jun",
+                     "07-Jul","08-Aug","09-Sep","10-Oct","11-Nov","12-Dec"]
+        return names[max(1, min(12, m))]
+    }
+
+    // MARK: Apply
+
+    struct ApplyResult: Sendable {
+        let moved: Int
+        let skipped: Int
+        let failed: Int
+        let conflicts: [String]
+        let mode: ApplyMode
+    }
+
+    enum ApplyMode: Sendable {
+        case symlink   // Originals untouched; new tree mirrors via symlinks.
+        case realMove  // `mv` on disk; updates DB path_text rows.
+    }
+
+    /// Symlink mode (default) leaves originals in place; realMove `mv`s
+    /// each file and rewrites its path_text row immediately after the
+    /// move (rolling the file back on DB failure), so a crash or WAL
+    /// contention strands at most one file instead of the whole batch.
+    static func apply(proposals: [RestructureView.Proposal],
+                       store: ReadStore, mode: ApplyMode,
+                       libraryRoot: URL) async -> ApplyResult {
+        let fm = FileManager.default
+        var moved = 0
+        var skipped = 0
+        var failed = 0
+        var conflicts: [String] = []
+        let resolvedRoot = libraryRoot.resolvingSymlinksInPath().path
+
+        // Fail fast: if the DB isn't writable (engine mid-batch holding
+        // the lock past the busy timeout, wiped DB, …), move NOTHING —
+        // moved-but-unrecorded files are the failure mode this prevents.
+        var updateQueue: DatabaseQueue?
+        if mode == .realMove {
+            guard let q = try? store.openPathUpdateQueue() else {
+                return ApplyResult(moved: 0, skipped: 0, failed: proposals.count,
+                                   conflicts: [], mode: mode)
+            }
+            updateQueue = q
+        }
+
+        for p in proposals {
+            let oldURL = URL(fileURLWithPath: p.oldPath)
+            let newURL = URL(fileURLWithPath: p.newPath)
+            if oldURL == newURL { skipped += 1; continue }
+            let parent = newURL.deletingLastPathComponent()
+            // SEC-7: destination's resolved parent must stay inside the
+            // resolved root — a symlinked bucket component must not let
+            // a move (or link) land outside the authorized tree.
+            guard pathIsContained(parent, inResolvedRoot: resolvedRoot) else {
+                failed += 1; continue
+            }
+            do {
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+            } catch {
+                failed += 1; continue
+            }
+            // SEC-5: re-verify after createDirectory (check-to-use window).
+            guard pathIsContained(parent, inResolvedRoot: resolvedRoot) else {
+                failed += 1; continue
+            }
+            // No fileExists pre-check: it opens a TOCTOU window.
+            // createSymbolicLink / moveItem already throw on existing
+            // destination — that's the atomic test.
+            do {
+                switch mode {
+                case .symlink:
+                    try fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
+                case .realMove:
+                    try fm.moveItem(at: oldURL, to: newURL)
+                    do {
+                        try store.updatePathText(fileID: p.fileID,
+                                                 newPath: newURL.path,
+                                                 on: updateQueue!)
+                    } catch {
+                        // Disk and DB must not diverge — put the file back.
+                        try? fm.moveItem(at: newURL, to: oldURL)
+                        failed += 1
+                        continue
+                    }
+                }
+                moved += 1
+            } catch CocoaError.fileWriteFileExists {
+                conflicts.append(p.newPath); skipped += 1
+            } catch let err as NSError where err.domain == NSPOSIXErrorDomain && err.code == EEXIST {
+                conflicts.append(p.newPath); skipped += 1
+            } catch {
+                // Some FileManager errors surface as generic NSErrors;
+                // treat any "file exists at destination" indicator as
+                // a conflict, otherwise count as failed.
+                if fm.fileExists(atPath: newURL.path) {
+                    conflicts.append(p.newPath); skipped += 1
+                } else {
+                    failed += 1
+                }
+            }
+        }
+        if moved > 0 { store.notifyChanged() }
+        return ApplyResult(moved: moved, skipped: skipped, failed: failed,
+                           conflicts: conflicts, mode: mode)
+    }
+
+    /// For each proposal whose newPath is a symlink → original, replace
+    /// it with a real move and update the DB row immediately (rolling
+    /// back on DB failure).
+    static func convertSymlinksToMoves(proposals: [RestructureView.Proposal],
+                                        store: ReadStore) async -> ApplyResult {
+        let fm = FileManager.default
+        var moved = 0
+        var skipped = 0
+        var failed = 0
+        guard let updateQueue = try? store.openPathUpdateQueue() else {
+            return ApplyResult(moved: 0, skipped: 0, failed: proposals.count,
+                               conflicts: [], mode: .realMove)
+        }
+        for p in proposals {
+            let oldURL = URL(fileURLWithPath: p.oldPath)
+            let newURL = URL(fileURLWithPath: p.newPath)
+            // Skip if newPath isn't a symlink (hand-edited tree).
+            guard let attrs = try? fm.attributesOfItem(atPath: newURL.path),
+                  let type = attrs[.type] as? FileAttributeType,
+                  type == .typeSymbolicLink else {
+                skipped += 1; continue
+            }
+            // Verify the symlink still points where we created it.
+            // An attacker with local filesystem access could swap the
+            // link to redirect a "convert to real move" toward a
+            // sensitive file (e.g. /etc/passwd).
+            let destPath = (try? fm.destinationOfSymbolicLink(atPath: newURL.path))
+                .map { resolveSymlinkDestination(linkPath: newURL.path, relative: $0) }
+            guard let resolvedDest = destPath, resolvedDest == p.oldPath else {
+                skipped += 1; continue
+            }
+            // unlink(2), not removeItem: it deletes only a link/file and
+            // fails on a directory, so a check-to-use swap can never turn
+            // this into a recursive delete of real user data.
+            guard unlink(newURL.path) == 0 else {
+                skipped += 1; continue
+            }
+            do {
+                try fm.moveItem(at: oldURL, to: newURL)
+            } catch {
+                // Restore the link so the tree stays browsable.
+                try? fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
+                failed += 1; continue
+            }
+            do {
+                try store.updatePathText(fileID: p.fileID,
+                                         newPath: newURL.path,
+                                         on: updateQueue)
+                moved += 1
+            } catch {
+                try? fm.moveItem(at: newURL, to: oldURL)
+                try? fm.createSymbolicLink(at: newURL, withDestinationURL: oldURL)
+                failed += 1
+            }
+        }
+        if moved > 0 { store.notifyChanged() }
+        return ApplyResult(moved: moved, skipped: skipped, failed: failed,
+                           conflicts: [], mode: .realMove)
+    }
+
+    /// Strip path separators and `..` segments from a single bucket
+    /// path (which itself may be multi-level like `Documents/Receipts`).
+    /// Drops empty components so a leading slash can't escape root.
+    static func sanitizePathSegment(_ raw: String) -> String {
+        let parts = raw.split(separator: "/", omittingEmptySubsequences: true)
+            .map { String($0) }
+            .filter { $0 != "." && $0 != ".." && !$0.isEmpty }
+            .map { sanitizeFilename($0) }
+        return parts.joined(separator: "/")
+    }
+
+    /// Sanitize a generated filename via the canonical cross-platform
+    /// rules (FilesystemNameSafe: illegal/control chars, trailing
+    /// dots/spaces, Windows reserved basenames, length cap) — the old
+    /// hand-rolled version here only stripped `/` and NUL, so a
+    /// restructure could mint folders Windows can't read when the
+    /// library syncs cross-platform. Leading dots still stripped so a
+    /// generated name never becomes a hidden file.
+    static func sanitizeFilename(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasPrefix(".") { s.removeFirst() }
+        if s.isEmpty || s == "." || s == ".." { return "untitled" }
+        let safe = FilesystemNameSafe.componentSafe(s)
+        return safe == "_" ? "untitled" : safe
+    }
+
+    /// Resolve a symlink target that may be relative to the link's
+    /// containing directory; returns an absolute path with `..`
+    /// segments collapsed for safe equality comparison against the
+    /// original `oldPath`.
+    private static func resolveSymlinkDestination(linkPath: String,
+                                                    relative target: String) -> String {
+        if target.hasPrefix("/") {
+            return URL(fileURLWithPath: target).standardizedFileURL.path
+        }
+        let dir = (linkPath as NSString).deletingLastPathComponent
+        let combined = (dir as NSString).appendingPathComponent(target)
+        return URL(fileURLWithPath: combined).standardizedFileURL.path
     }
 }

@@ -8,6 +8,7 @@
 //! probabilities. The full YAMNet sound-event tagger + Whisper transcription
 //! are documented Phase-5b follow-ups; both need a publicly downloadable ONNX
 //! release per the no-self-host policy.
+#![allow(dead_code)] // wired into run_decoder_thread for FileKind::Audio.
 
 use std::path::Path;
 
@@ -66,6 +67,8 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     // thousands of "N sec" tags at score 0.000). This mirrors the earlier
     // refinement that dropped "Has Faces"/"Has Text"/aspect tags for the same
     // reason — metadata facts belong in columns/facets, not the tag stream.
+    // `duration_label` is kept (module-level allow(dead_code)) for a future
+    // duration facet/column.
 
     // Some formats (FLAC, Vorbis, M4A) carry metadata on the FormatReader;
     // others (MP3 with ID3v2) carry it on the probe's MetadataLog. Read
@@ -82,67 +85,31 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     out
 }
 
-/// Structured title / artist / album for Deep Analyze smart-renaming. Reuses the same
-/// `symphonia` probe as [`extract`] but keeps the fields SEPARATE so a descriptive
-/// filename can be built ("Artist - Title"). Path-based open only (the rename pass has
-/// no pre-read buffer). Best-effort — any field symphonia can't expose stays None.
-#[derive(Default, Debug, Clone)]
-pub(crate) struct AudioTags {
-    pub title: Option<String>,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-}
-
-pub(crate) fn extract_structured(path: &Path) -> AudioTags {
-    let p = crate::util::path_safety::to_extended_length(path);
-    let file = match std::fs::File::open(&p) {
-        Ok(f) => f,
-        Err(_) => return AudioTags::default(),
-    };
-    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
+/// Format the audio's total duration as a Library chip ("12 min" / "1 h 5 min").
+/// Returns None when symphonia can't expose enough info (some streamed formats).
+fn duration_label(format: &dyn symphonia::core::formats::FormatReader) -> Option<String> {
+    let track = format.default_track().or_else(|| format.tracks().first())?;
+    let cp = &track.codec_params;
+    let n_frames = cp.n_frames?;
+    let sample_rate = cp.sample_rate?;
+    if sample_rate == 0 {
+        return None;
     }
-    let mut probed = match symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return AudioTags::default(),
-    };
-    let mut format = probed.format;
-    let mut tags = AudioTags::default();
-    if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
-        collect_structured(&mut tags, rev);
+    let total_secs = (n_frames as f64) / (sample_rate as f64);
+    if total_secs < 1.0 {
+        return None;
     }
-    if let Some(rev) = format.metadata().current() {
-        collect_structured(&mut tags, rev);
-    }
-    tags
-}
-
-/// First-non-empty per field, matching `push_metadata`'s standard-key set. Artist
-/// prefers the track Artist over AlbumArtist (both map to `artist`).
-fn collect_structured(tags: &mut AudioTags, rev: &symphonia::core::meta::MetadataRevision) {
-    for tag in rev.tags() {
-        let value = match &tag.value {
-            Value::String(s) => s.trim().to_string(),
-            _ => continue,
-        };
-        if value.is_empty() {
-            continue;
-        }
-        match tag.std_key {
-            Some(StandardTagKey::TrackTitle) if tags.title.is_none() => tags.title = Some(value),
-            Some(StandardTagKey::Artist) if tags.artist.is_none() => tags.artist = Some(value),
-            Some(StandardTagKey::AlbumArtist) if tags.artist.is_none() => tags.artist = Some(value),
-            Some(StandardTagKey::Album) if tags.album.is_none() => tags.album = Some(value),
-            _ => {}
-        }
-    }
+    let total_secs = total_secs.round() as u64;
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    Some(if hours > 0 {
+        format!("{hours} h {mins:02} min")
+    } else if mins > 0 {
+        format!("{mins} min")
+    } else {
+        format!("{secs} sec")
+    })
 }
 
 fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::meta::MetadataRevision) {
@@ -164,10 +131,7 @@ fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::me
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => {
                 // Keep only the year (first 4 digits) so different date formats
                 // collapse to a single tag (mm/dd/yyyy, yyyy-mm-dd, yyyy).
-                // Emit as "Year_NNN" to match the enriched-extras format used by
-                // all other file kinds — prevents a double tag ("2019" + "Year_2019").
-                let year: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
-                if year.len() == 4 { format!("Year_{year}") } else { continue }
+                value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect()
             }
             _ => continue,
         };

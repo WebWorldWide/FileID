@@ -73,23 +73,12 @@ public sealed partial class SidebarEngineStatus : UserControl
                     ec.LastError?.Message ?? "See app.log for details.");
                 break;
             case EngineClient.LifecycleState.Crashed:
-                ApplyStatus(
-                    StatusAccent.Red,
-                    ResolveCrashedStatusText(ec.CrashReason),
-                    ResolveCrashedStatusTip(ec.CrashReason));
+                ApplyStatus(StatusAccent.Red,
+                    ec.CrashReason ?? "Engine crashed",
+                    ec.CrashReason ?? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log.");
                 break;
         }
     }
-
-    internal static string ResolveCrashedStatusText(string? reason)
-        => string.IsNullOrWhiteSpace(reason) ? "Engine crashed" : reason;
-
-    internal static string ResolveCrashedStatusTip(string? reason)
-        => string.IsNullOrWhiteSpace(reason)
-            ? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log."
-            : reason == EngineClient.StoppedReason
-                ? "Engine stopped. Restart it from Settings."
-                : reason;
 
     private enum StatusAccent { Gold, Red }
 
@@ -110,4 +99,9 @@ public sealed partial class SidebarEngineStatus : UserControl
         // plus its detail line, so the dot+text reads as one announcement.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, $"Engine status: {text}");
     }
+
+    private static string BuildReadyTooltip(EngineClient ec) =>
+        ec.Info is { } info
+            ? $"Version {info.Version}  •  PID {info.Pid}  •  {info.WorkerCap} workers  •  {info.PhysicalMemoryGB:F1} GB RAM"
+            : "Engine running.";
 }

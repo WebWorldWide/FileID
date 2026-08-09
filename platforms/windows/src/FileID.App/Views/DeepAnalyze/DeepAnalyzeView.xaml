@@ -32,7 +32,7 @@
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Text="Run local analysis across photos, videos, documents, PDFs, and audio metadata to write descriptions and propose smart filenames." />
+                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
             </StackPanel>
 
             <!-- Item 4: plain-language explainer distinguishing automatic
@@ -81,9 +81,12 @@
                 </Grid>
             </Border>
 
-            <!-- RuntimeBanner + CudnnInfoBanner were removed. The universal
-                 llama.cpp runtime now installs with an explicit VLM action;
-                 optional vendor acceleration installs from Welcome/Settings. -->
+            <!-- RuntimeBanner + CudnnInfoBanner were removed.
+                 Both are now auto-installed at engine-ready time:
+                 LlamaRuntimeAutoInstaller fires the Vulkan runtime fetch
+                 for every Windows user; CudnnAutoInstaller fires the
+                 cuDNN fetch on NVIDIA hardware. Users see the install
+                 progress through the welcome-sheet style download cards. -->
 
             <!-- "Name people first" gate banner. Visible when any
                  person cluster has both name + first_name NULL — Deep
@@ -183,7 +186,7 @@
                             Tag="qwen2_5_vl_7b"
                             Tapped="OnModelCardTapped"
                             AutomationProperties.Name="Qwen 2.5-VL 7B model, best"
-                            AutomationProperties.HelpText="Select this model. Approximately 5.7 GB disk, 7 GB working memory, balanced quality.">
+                            AutomationProperties.HelpText="Select this model. Approximately 4.7 GB disk, 7.5 GB RAM, best quality.">
                         <StackPanel Spacing="6">
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -197,13 +200,13 @@
                                         Background="{ThemeResource GoldSelectedBackgroundBrush}"
                                         BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
                                         BorderThickness="1">
-                                    <TextBlock Text="Balanced"
+                                    <TextBlock Text="Best"
                                                Style="{StaticResource CaptionTextBlockStyle}"
                                                Foreground="{ThemeResource GoldBrush}"
                                                FontWeight="SemiBold" />
                                 </Border>
                             </Grid>
-                            <TextBlock Text="≈5.7 GB disk · 7 GB working memory · balanced"
+                            <TextBlock Text="≈4.7 GB disk · 7.5 GB RAM · best quality"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="QwenLargeStatus"
@@ -233,10 +236,10 @@
                             Tag="gemma_3_4b"
                             Tapped="OnModelCardTapped"
                             AutomationProperties.Name="Gemma 3 4B model"
-                            AutomationProperties.HelpText="Select this model. Approximately 3.1 GB disk, 4.5 GB working memory, lightest.">
+                            AutomationProperties.HelpText="Select this model. Approximately 2.5 GB disk, 4.5 GB RAM, balanced.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Gemma 3 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈3.1 GB disk · 4.5 GB working memory · lightest"
+                            <TextBlock Text="≈2.5 GB disk · 4.5 GB RAM · balanced"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="GemmaStatus"
@@ -271,7 +274,7 @@
                     <TextBlock x:Name="ActiveModelText"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Active model: Qwen 2.5-VL 7B (balanced)" />
+                               Text="Active model: Qwen 2.5-VL 7B (best quality)" />
                     <!-- Horizontal scroll so this action row never clips its
                          right-hand controls (Propose renames / Cancel) on a
                          narrow / laptop window. Mirrors the PeopleView +
@@ -295,7 +298,7 @@
                                 Click="OnAnalyzeAllClicked"
                                 Style="{StaticResource AccentButtonStyle}"
                                 AutomationProperties.Name="Analyze whole library"
-                                AutomationProperties.HelpText="Run the selected model across every supported file in the library">
+                                AutomationProperties.HelpText="Run the selected vision-language model on every image in the library">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon Glyph="&#xE945;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
                                 <TextBlock Text="Whole library" />
@@ -334,7 +337,7 @@
                                       OnContent="Skip already-analyzed"
                                       Margin="14,0,0,0"
                                       AutomationProperties.Name="Skip already-analyzed files"
-                                      AutomationProperties.HelpText="When on, files that completed a full pass with the selected model are skipped; partial passes may run again" />
+                                      AutomationProperties.HelpText="When on, files that already have a caption are skipped; when off, every file is re-analyzed" />
                         <CheckBox Grid.Column="5"
                                   x:Name="ProposeRenamesCheck"
                                   Content="Propose renames"

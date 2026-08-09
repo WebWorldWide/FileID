@@ -29,7 +29,6 @@ public final class ArcFaceModelInstaller {
     /// arm wrote a terminal status — gate them on liveness so a stale
     /// tick can't resurrect a phantom "Downloading…" row.
     private var active: Set<FaceEmbedderKind> = []
-    private var uninstalling: Set<FaceEmbedderKind> = []
 
     private init() {}
 
@@ -66,11 +65,9 @@ public final class ArcFaceModelInstaller {
     }
 
     public func install(_ kind: FaceEmbedderKind) {
-        guard tasks[kind] == nil, !uninstalling.contains(kind) else { return }
+        guard tasks[kind] == nil else { return }
         tasks[kind] = Task { [weak self] in
-            await AppSleepActivity.run(reason: "Install face model") {
-                await self?.runInstall(kind)
-            }
+            await self?.runInstall(kind)
             self?.tasks[kind] = nil
         }
     }
@@ -79,14 +76,8 @@ public final class ArcFaceModelInstaller {
         tasks[kind]?.cancel()
     }
 
-    public func uninstall(_ kind: FaceEmbedderKind) async {
-        guard !uninstalling.contains(kind) else { return }
-        uninstalling.insert(kind)
-        defer { uninstalling.remove(kind) }
-        let activeTask = tasks[kind]
-        activeTask?.cancel()
-        await activeTask?.value
-        tasks[kind] = nil
+    public func uninstall(_ kind: FaceEmbedderKind) {
+        cancel(kind)
         let url = Self.destination(for: kind)
         try? FileManager.default.removeItem(at: url)
         refreshStatus()

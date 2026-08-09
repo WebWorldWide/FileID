@@ -104,19 +104,6 @@
                     <TextBlock Text="Start Scan" FontWeight="SemiBold" />
                 </StackPanel>
             </Button>
-            <Button x:Name="RestartEngineButton"
-                    HorizontalAlignment="Stretch"
-                    Click="OnRestartEngineClicked"
-                    Style="{StaticResource GoldButtonStyle}"
-                    Height="40"
-                    Visibility="Collapsed"
-                    AutomationProperties.Name="Restart Engine"
-                    AutomationProperties.HelpText="Restart FileID's engine after a GPU reset">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE777;" />
-                    <TextBlock Text="Restart Engine" FontWeight="SemiBold" />
-                </StackPanel>
-            </Button>
             <!-- AutoPilot button removed. macOS has only "Start Scan"
                  and the engine auto-enqueues face clustering after scan
                  completes. Windows now matches: ScanComplete in

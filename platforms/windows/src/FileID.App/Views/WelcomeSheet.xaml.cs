@@ -34,8 +34,6 @@ public sealed partial class WelcomeSheet : UserControl
     internal ModelInstallerService Svc => ModelInstallerService.Instance;
 
     private bool _autoDismissScheduled;
-    private bool _syncingVlmPicker;
-    private int _dismissInFlight;
 
     /// <summary>Cancels the auto-dismiss task + any in-flight restart
     /// prompt if the sheet unloads before they complete. Without this
@@ -64,7 +62,6 @@ public sealed partial class WelcomeSheet : UserControl
         try
         {
             Svc.SeedFromSentinels();
-            SyncVlmPicker();
         }
         catch (Exception ex)
         {
@@ -75,25 +72,16 @@ public sealed partial class WelcomeSheet : UserControl
         // (e.g. they re-opened it from Settings), the auto-dismiss should
         // still fire so they're not staring at three green checkmarks.
         // Belt-and-braces with the PropertyChanged path above.
-        if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired) ScheduleAutoDismiss();
+        if (Svc.AllInstalled) ScheduleAutoDismiss();
     }
 
     private void OnServicePropertyChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("WelcomeSheet.OnServicePropertyChanged", () =>
     {
-        if (e.PropertyName is nameof(ModelInstallerService.AllInstalled)
-            or nameof(ModelInstallerService.IsBusy)
-            or nameof(ModelInstallerService.AcceleratorRestartRequired))
+        if (e.PropertyName == nameof(ModelInstallerService.AllInstalled) && Svc.AllInstalled)
         {
-            if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired) ScheduleAutoDismiss();
-            SyncVlmPicker();
+            ScheduleAutoDismiss();
         }
-        if (e.PropertyName is nameof(ModelInstallerService.DeepVlmModelKind)
-            or nameof(ModelInstallerService.DeepVlmRecommendation))
-        {
-            SyncVlmPicker();
-        }
-    });
+    }
 
     private void ScheduleAutoDismiss()
     {
@@ -112,14 +100,7 @@ public sealed partial class WelcomeSheet : UserControl
                 dq?.TryEnqueue(() =>
                 {
                     if (ct.IsCancellationRequested) return;
-                    if (Svc.AllInstalled && !Svc.IsBusy && !Svc.AcceleratorRestartRequired)
-                    {
-                        RaiseDismissed();
-                    }
-                    else
-                    {
-                        _autoDismissScheduled = false;
-                    }
+                    if (Svc.AllInstalled) RaiseDismissed();
                 });
             }
             catch (OperationCanceledException) { /* sheet dismissed before 800 ms — fine */ }
@@ -260,11 +241,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     internal string RateEtaLabel(double bytesPerSecond, double etaSeconds)
     {
-        // The rate row stays VISIBLE for the whole download (gated by
-        // VisibleIfDownloading) so its appearance can't reflow every row
-        // below mid-install; a non-breaking space keeps the reserved line's
-        // height stable until the first EMA sample lands.
-        if (bytesPerSecond <= 0) return " ";
+        if (bytesPerSecond <= 0) return string.Empty;
         var rate = $"{FormatBytes((ulong)bytesPerSecond)}/s";
         var eta = etaSeconds > 0 ? " · " + FormatEta(etaSeconds) + " remaining" : string.Empty;
         return rate + eta;
@@ -274,8 +251,8 @@ public sealed partial class WelcomeSheet : UserControl
         "Failed: " + (lastError ?? "unknown error");
 
     /// <summary>Deep Analyze (Qwen) row title — e.g. "Deep Analyze (Qwen2.5-VL
-    /// 7B)". Reads DisplayLabel via x:Bind so Gemma / Qwen / Mistral selection
-    /// updates the row text without a page reload.</summary>
+    /// 3B)". Reads DisplayLabel via x:Bind so the hardware-tiered recommendation
+    /// (3B ↔ 7B) updates the row text without a page reload.</summary>
     internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
 
     internal string VlmSize(ulong approxBytes)
@@ -318,97 +295,38 @@ public sealed partial class WelcomeSheet : UserControl
     // ─── Per-row action handlers ────────────────────────────────────────
 
     private void OnClipActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnClipActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] CLIP per-row button clicked.");
         HandleAction(Svc.Clip);
-    });
+    }
 
     private void OnArcfaceActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnArcfaceActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] ArcFace per-row button clicked.");
         HandleAction(Svc.Arcface);
-    });
+    }
 
     private void OnRamPlusActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnRamPlusActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] RAM++ per-row button clicked.");
         HandleAction(Svc.RamPlus);
-    });
-
-    private void OnBgeActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnBgeActionClicked), () =>
-    {
-        DebugLog.Info("[INSTALL] BGE document understanding per-row button clicked.");
-        HandleAction(Svc.Bge);
-    });
+    }
 
     private void OnDeepVlmActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnDeepVlmActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] Deep Analyze (Qwen) per-row button clicked.");
         HandleAction(Svc.DeepVlm);
-    });
-
-    private void OnVlmSelectionChanged(object sender, SelectionChangedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnVlmSelectionChanged), () =>
-    {
-        if (_syncingVlmPicker || sender is not ComboBox combo
-            || combo.SelectedItem is not ComboBoxItem item
-            || item.Tag is not string kind)
-        {
-            return;
-        }
-        if (!Svc.CanInstallVlm(kind))
-        {
-            SyncVlmPicker();
-            return;
-        }
-        Svc.SelectDeepVlmModel(kind);
-    });
-
-    private void SyncVlmPicker()
-    {
-        if (VlmPicker is null) return;
-        _syncingVlmPicker = true;
-        try
-        {
-            foreach (var value in VlmPicker.Items)
-            {
-                if (value is not ComboBoxItem item || item.Tag is not string kind) continue;
-                item.IsEnabled = Svc.CanInstallVlm(kind);
-                if (string.Equals(kind, Svc.DeepVlmModelKind, StringComparison.Ordinal))
-                {
-                    VlmPicker.SelectedItem = item;
-                }
-            }
-            VlmPicker.IsEnabled = Svc.DeepVlm.Status != ModelInstallStatus.Downloading;
-        }
-        finally
-        {
-            _syncingVlmPicker = false;
-        }
     }
 
     // GPU Acceleration Pack row. On NVIDIA this kicks off the
     // cuDNN download via PrewarmModelAsync("cudnn_runtime_x64"). On other
     // vendors the button isn't shown (ShowAcceleratorButton returns
     // Collapsed) so this handler can't fire.
-    private void OnWhisperActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnWhisperActionClicked), () =>
-    {
-        DebugLog.Info("[INSTALL] Whisper (speech) per-row button clicked.");
-        HandleAction(Svc.Whisper);
-    });
-
     private void OnAcceleratorActionClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnAcceleratorActionClicked), () =>
     {
         DebugLog.Info("[INSTALL] GPU Acceleration Pack per-row button clicked.");
         HandleAction(Svc.Accelerator);
-    });
+    }
 
     // XAML binding helpers for the Accelerator row.
     internal Visibility ShowAcceleratorButton(ModelInstallStatus status, bool isRealInstall)
@@ -422,44 +340,13 @@ public sealed partial class WelcomeSheet : UserControl
         return status != ModelInstallStatus.Installed ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    internal Visibility ShowAcceleratorInstalledBadge(ModelInstallStatus status, bool isRealInstall, bool restartRequired)
+    internal Visibility ShowAcceleratorInstalledBadge(ModelInstallStatus status, bool isRealInstall)
     {
         // "Installed" badge is shown only after a real cuDNN install
         // (NVIDIA only). For non-NVIDIA, no badge — the Message text
         // already explains "DirectML is already optimal".
-        return (status == ModelInstallStatus.Installed && isRealInstall && !restartRequired)
+        return (status == ModelInstallStatus.Installed && isRealInstall)
             ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    internal Visibility ShowAcceleratorRestartButton(bool restartRequired, bool isBusy)
-        => restartRequired && !isBusy ? Visibility.Visible : Visibility.Collapsed;
-
-    private async void OnRestartAcceleratorClicked(object sender, RoutedEventArgs e)
-    {
-        var button = sender as Button;
-        try
-        {
-            if (Svc.IsBusy) return;
-            if (button is not null)
-            {
-                button.IsEnabled = false;
-                button.Content = "Restarting…";
-            }
-            await EngineClient.Instance.RestartAsync();
-            Svc.Refresh();
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Welcome accelerator restart failed: " + ex.Message);
-        }
-        finally
-        {
-            if (button is not null && Svc.AcceleratorRestartRequired)
-            {
-                button.IsEnabled = true;
-                button.Content = "Restart engine";
-            }
-        }
     }
 
     internal string AcceleratorGlyph(ModelInstallStatus status, bool isRealInstall)
@@ -541,44 +428,41 @@ public sealed partial class WelcomeSheet : UserControl
     }
 
     private void OnInstallAllClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnInstallAllClicked), () =>
     {
         DebugLog.Info("[INSTALL] 'Install all' button clicked.");
         _ = SafeRunAsync(() => Svc.InstallAllAsync(), "Install all");
-    });
+    }
 
     private void OnSkipClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnSkipClicked), () =>
     {
         RaiseDismissed();
-    });
+    }
 
     /// <summary>Persist welcomeSheetSeen and raise the Dismissed event.
     /// { welcomeSheetSeen = true }
     /// (FileIDApp.swift:39). Idempotent — safe to invoke from both the
     /// auto-dismiss path and the manual Skip/Done paths.</summary>
     private void RaiseDismissed()
-        => _ = DebugLog.SafeRunAsync(nameof(RaiseDismissed), RaiseDismissedAsync);
-
-    private async Task RaiseDismissedAsync()
     {
-        if (Interlocked.CompareExchange(ref _dismissInFlight, 1, 0) != 0) return;
-        // Use the ONE canonical in-memory instance, not a throwaway
-        // Load(): the long-lived AppViewModel instance would otherwise
-        // serialize its stale snapshot on its next Save() and revert this
-        // write (the Welcome sheet then re-appears every launch).
-        var settings = AppViewModel.Instance.Settings;
-        if (!settings.WelcomeSheetSeen)
+        try
         {
-            settings.WelcomeSheetSeen = true;
-            if (!await settings.SaveImmediatelyAsync())
+            // Use the ONE canonical in-memory instance, not a throwaway
+            // Load(): the long-lived AppViewModel instance would otherwise
+            // serialize its stale snapshot on its next Save() and revert this
+            // write (the Welcome sheet then re-appears every launch).
+            var settings = AppViewModel.Instance.Settings;
+            if (!settings.WelcomeSheetSeen)
             {
-                settings.WelcomeSheetSeen = false;
-                throw new InvalidOperationException(
-                    "The welcome preference could not be saved. Check FileID's settings-folder permissions and try again.");
+                settings.WelcomeSheetSeen = true;
+                // Synchronous flush, not the debounced Save(): dismissing the
+                // sheet then closing the app within the ~200 ms debounce window
+                // would otherwise drop the write and re-show the sheet next
+                // launch. Mirrors MainWindow.OnClosed's SaveImmediately().
+                settings.SaveImmediately();
+                DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
             }
-            DebugLog.Info("[INSTALL] welcomeSheetSeen=true persisted to app-settings.json");
         }
+        catch (Exception ex) { DebugLog.Warn("RaiseDismissed: settings.Save threw: " + ex.Message); }
         Dismissed?.Invoke(this, EventArgs.Empty);
     }
 

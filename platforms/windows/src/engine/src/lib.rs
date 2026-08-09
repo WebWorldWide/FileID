@@ -8,8 +8,6 @@
 //! wanting bench/test scaffolding.
 
 #![allow(clippy::needless_return)]
-// Modules are compiled independently for the engine binary, where these paths
-// are live; the library duplicate intentionally exposes only selected helpers.
 #![allow(dead_code)]
 
 pub mod commands;
@@ -20,7 +18,6 @@ pub mod ipc;
 pub mod job_queue;
 pub mod logging;
 pub mod models;
-pub mod ort_runtime;
 pub mod paths;
 pub mod pipeline;
 pub mod platform;

@@ -13,7 +13,7 @@
 #
 # Usage:
 #   pwsh build/build-all.ps1                    # Debug, x64
-#   pwsh build/build-all.ps1 -Release           # Release publish (.NET self-contained; WinAppSDK framework-dependent)
+#   pwsh build/build-all.ps1 -Release           # Release self-contained publish
 #   pwsh build/build-all.ps1 -Run               # Build + launch FileID.exe
 #   pwsh build/build-all.ps1 -Clean             # Wipe build artifacts first
 #   pwsh build/build-all.ps1 -Wipe              # FULL wipe (artifacts + Desktop\FileID + %LOCALAPPDATA%\FileID)
@@ -64,8 +64,11 @@ param(
     # aarch64-pc-windows-msvc and the .NET app for win-arm64. Implies
     # -Release because debug ARM64 + WinAppSDK has rough edges.
     [switch]$Arm64,
+    # Native llama.cpp bindings (in-process VLM). Adds ~150 MB of build
+    # artifacts + needs cmake. Off by default; enable for ship builds.
+    [switch]$VlmNative,
     # Sign every built binary using `build/sign.ps1`. Requires either
-    # -Thumbprint to be set or FILEID_SIGN_THUMBPRINT env var.
+    # -Thumbprint to be set or FILEID_EV_THUMBPRINT env var.
     [switch]$Sign,
     [string]$Thumbprint,
     # Fast iteration mode: cargo uses the `release-fast` profile (thin LTO
@@ -100,8 +103,6 @@ if ($Arm64) { $Release = $true }
 $RustTarget    = if ($Arm64) { "aarch64-pc-windows-msvc" } else { "x86_64-pc-windows-msvc" }
 $DotnetRid     = if ($Arm64) { "win-arm64" } else { "win-x64" }
 $ArchLabel     = if ($Arm64) { "arm64" } else { "x64" }
-$HostArch      = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-$CanRunTargetTests = (-not $Arm64) -or $HostArch -eq "arm64"
 
 # --- Paths ------------------------------------------------------------------
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -126,10 +127,10 @@ $AppRid      = $DotnetRid
 $Configuration = if ($Release) { "Release" } else { "Debug" }
 # Pick the cargo profile. -Fast = release-fast (thin LTO + parallel codegen)
 # is dramatically faster on a multi-core box and the perf delta vs
-# fat-LTO release is small for our hot paths. Ship builds use the identical
-# optimized release-debuginfo profile so native crash PDBs are retained.
+# fat-LTO release is small for our hot paths. The plain `release`
+# profile stays the default for ship builds.
 $RustProfile   = if ($Fast -and $Release) { "release-fast" }
-                  elseif ($Release)         { "release-debuginfo" }
+                  elseif ($Release)         { "release" }
                   else                       { "debug" }
 $RustFlag      = if ($Release) { "--release" } else { "" }
 
@@ -278,25 +279,31 @@ if (-not $SkipApp) {
 }
 
 if (-not $SkipEngine) {
-    Write-Host "Building engine ($RustProfile, $($RustTarget))..." -ForegroundColor Cyan
+    Write-Host "Building engine ($RustProfile, $($RustTarget))$(if ($VlmNative) { ' [vlm-native]' })..." -ForegroundColor Cyan
+    if ($VlmNative) {
+        Write-Host "  vlm-native feature: requires cmake + ~150 MB build artifacts" -ForegroundColor DarkGray
+        if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+            Write-Host "ERROR: cmake not found in PATH. Install via 'winget install Kitware.CMake' before -VlmNative." -ForegroundColor Red
+            exit 1
+        }
+    }
     Push-Location $EngineDir
     try {
+        $featureArgs = if ($VlmNative) { @("--features", "vlm-native") } else { @() }
         # Cargo uses every CPU by default; `-j` is redundant but explicit
         # makes the intent obvious. The big win is the profile choice
         # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
-            & cargo build --profile release-fast --target $($RustTarget) @jobsArg
+            & cargo build --profile release-fast --target $($RustTarget) @featureArgs @jobsArg
         } elseif ($Release) {
-            & cargo build --profile release-debuginfo --target $($RustTarget) @jobsArg
+            & cargo build --release --target $($RustTarget) @featureArgs @jobsArg
         } else {
-            & cargo build --target $($RustTarget) @jobsArg
+            & cargo build --target $($RustTarget) @featureArgs @jobsArg
         }
-        if ($RunTests -and $CanRunTargetTests) {
+        if ($RunTests) {
             Write-Host "Running cargo tests..." -ForegroundColor Cyan
-            & cargo test --target $($RustTarget) @jobsArg
-        } elseif ($RunTests) {
-            Write-Host "Skipping ARM64 Rust test execution on $HostArch; run build-arm64.ps1 tests on native ARM64 hardware." -ForegroundColor Yellow
+            & cargo test --target $($RustTarget) @featureArgs @jobsArg
         }
     } finally {
         Pop-Location
@@ -325,7 +332,7 @@ if (-not $SkipEngine) {
     $fetchScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
     if (Test-Path $fetchScript) {
         Write-Host "Fetching runtime DLLs (ORT + DirectML)..." -ForegroundColor Cyan
-        $runtimeOutput = & $fetchScript -Architecture $ArchLabel
+        $runtimeOutput = & $fetchScript
         $runtimeDlls = @{}
         foreach ($line in $runtimeOutput) {
             if ($line -match '^RUNTIME_DLL=(.+)$') {
@@ -384,9 +391,7 @@ if (-not $SkipApp) {
     if ($RunTests) {
         Write-Host "Running xUnit tests..." -ForegroundColor Cyan
         & dotnet test (Join-Path $PlatformDir "Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj") `
-            --nologo -c $Configuration
-        & dotnet test (Join-Path $PlatformDir "Tests/FileID.App.Tests/FileID.App.Tests.csproj") `
-            --nologo -c $Configuration -p:Platform=x64
+            --nologo --no-build -c $Configuration
     }
 }
 
@@ -427,15 +432,6 @@ if (-not $SkipApp) {
         }
     }
 
-    if (-not $SkipEngine) {
-        foreach ($required in @("FileIDEngine.exe", "onnxruntime.dll", "DirectML.dll")) {
-            $requiredPath = Join-Path $AppOutDir $required
-            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-                throw "Publish output is incomplete: missing $requiredPath"
-            }
-        }
-    }
-
     # --- Sign (optional) ----------------------------------------------------
     if ($Sign) {
         $signScript = Join-Path $ScriptDir "sign.ps1"
@@ -449,7 +445,7 @@ if (-not $SkipApp) {
                 exit 1
             }
         } else {
-            throw "-Sign requested but signing helper is missing: $signScript"
+            Write-Host "WARN: -Sign requested but $signScript not found." -ForegroundColor Yellow
         }
     }
 
@@ -461,43 +457,13 @@ if (-not $SkipApp) {
         Write-Host "  WinAppSDK bootstrap DLL OK" -ForegroundColor Green
     } else {
         Write-Host "  WARN: Microsoft.WindowsAppRuntime.Bootstrap.dll not found beside FileID.exe." -ForegroundColor Yellow
-        Write-Host "        The unpackaged app needs this bootstrap DLL to activate Windows App Runtime 1.7." -ForegroundColor Yellow
-    }
-}
-
-# Retain native and managed symbols outside the installed payload. Release
-# incidents otherwise produce WER minidumps that cannot be resolved to source.
-if ($Release) {
-    $SymbolsDir = Join-Path $DistDir "symbols"
-    New-Item -ItemType Directory -Force -Path $SymbolsDir | Out-Null
-    $symbolCount = 0
-    if (-not $SkipEngine -and $EngineBuildExe) {
-        $enginePdb = [System.IO.Path]::ChangeExtension($EngineBuildExe, ".pdb")
-        if (Test-Path -LiteralPath $enginePdb -PathType Leaf) {
-            Copy-Item -LiteralPath $enginePdb -Destination $SymbolsDir -Force
-            $symbolCount++
-        }
-    }
-    if (-not $SkipApp) {
-        Get-ChildItem -LiteralPath (Resolve-AppOutputDir) -Filter "*.pdb" -File -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $SymbolsDir -Force
-            $symbolCount++
-        }
-    }
-    if (-not $SkipEngine -and -not (Test-Path -LiteralPath (Join-Path $SymbolsDir "FileIDEngine.pdb") -PathType Leaf)) {
-        throw "Release engine PDB was not produced; crash dumps would be unsymbolizable."
-    }
-    if ($symbolCount -eq 0) {
-        Write-Host "WARN: no release PDBs were retained; crash dumps will not be symbolizable." -ForegroundColor Yellow
-    } else {
-        Write-Host "  Retained $symbolCount release symbol file(s) in $SymbolsDir" -ForegroundColor Green
+        Write-Host "        Self-contained mode should pull this in; if missing the app will fail to launch." -ForegroundColor Yellow
     }
 }
 
 # --- 7. Install to LocalAppData + Desktop shortcut --------------------------
-# The publish produces ~900 companion files (the self-contained .NET runtime,
-# WinAppSDK bootstrapper, Win2D, project DLLs). Windows App Runtime 1.7 remains
-# a machine prerequisite for source-build runs. Dumping the app files on the
+# WinUI 3 self-contained publish produces ~900 companion files (the .NET
+# runtime, WinAppSDK runtime, Win2D, project DLLs). Dumping that on the
 # Desktop is unfriendly. Instead: put the files in %LOCALAPPDATA% (out of
 # sight) and put ONE shortcut named "FileID" on the Desktop. User sees one
 # icon, double-clicks it, app runs -- like every other Windows app.

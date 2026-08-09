@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use parking_lot::Mutex;
 use rusqlite::Connection;
 use tokio::sync::mpsc;
@@ -23,7 +23,7 @@ use crate::ipc::{
     sink::Sink, BatchSummary, EventPayload, IpcEvent, ScanComplete, ScanPhase, ScanProgress, Wrap,
 };
 use crate::pipeline::dbwriter::{BatchStats, DbWriter};
-use crate::pipeline::discovery::{path_fingerprint_text, Discovery, SkipFingerprint};
+use crate::pipeline::discovery::Discovery;
 use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
@@ -71,13 +71,20 @@ pub struct ScanSession {
     /// When true, skip the incremental-rescan skip set and reprocess
     /// every file. Plumbed from `StartScanPayload::rescan`.
     rescan: bool,
-    /// User-excluded folders, raw as received from the app. Resolved
-    /// against the root at run() time. Plumbed from
-    /// `StartScanPayload::excluded_paths`.
-    excluded_paths: Vec<String>,
 }
 
 impl ScanSession {
+    #[allow(dead_code)]
+    pub fn new(
+        coordinator: ScanCoordinator,
+        db_conn: Arc<Mutex<Connection>>,
+        worker_count: usize,
+        sink: Sink,
+        models: Arc<ModelStack>,
+    ) -> Self {
+        Self::new_with_options(coordinator, db_conn, worker_count, sink, models, false)
+    }
+
     pub fn new_with_options(
         coordinator: ScanCoordinator,
         db_conn: Arc<Mutex<Connection>>,
@@ -85,7 +92,6 @@ impl ScanSession {
         sink: Sink,
         models: Arc<ModelStack>,
         rescan: bool,
-        excluded_paths: Vec<String>,
     ) -> Self {
         Self {
             session_id: Uuid::new_v4().to_string(),
@@ -95,7 +101,6 @@ impl ScanSession {
             sink,
             models,
             rescan,
-            excluded_paths,
         }
     }
 
@@ -168,18 +173,6 @@ impl ScanSession {
             );
         }
 
-        // Resolve user exclusions against this root, then purge already-
-        // cataloged rows beneath them BEFORE the skip-set preload so a
-        // stale excluded row can never enter the skip set.
-        let exclusions = crate::util::path_safety::resolve_exclusions(root, &self.excluded_paths);
-        if !exclusions.is_empty() {
-            let conn = self.db_conn.lock();
-            let purged = purge_excluded_rows(&conn, &exclusions);
-            if purged > 0 {
-                tracing::info!("[SCAN] purged {purged} cataloged rows under excluded folders");
-            }
-        }
-
         // Pre-load the "already current" set from DB so Discovery can skip
         // files whose `scanned_at >= modified_at`. For a 1M-file repeat
         // scan this turns an 8-hour redo into ~1-second startup + ~0
@@ -193,7 +186,7 @@ impl ScanSession {
             // revalidate against the LIVE file mtime — a bare path set skipped any
             // file edited after its last scan.
             let mut set =
-                std::collections::HashMap::<SkipFingerprint, (i64, Option<f64>)>::new();
+                std::collections::HashMap::<std::path::PathBuf, (i64, Option<f64>)>::new();
             let root_prefix = root.to_string_lossy().to_string();
             // Diagnostic counts so we can tell at a glance whether (a) the
             // DB is empty, (b) the LIKE prefix is wrong, or (c) the
@@ -201,7 +194,7 @@ impl ScanSession {
             let total_files: i64 = conn
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
-            let lo = root_descendant_prefix(root);
+            let lo = root_prefix.trim_end_matches(['\\', '/']).to_string();
             // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
             // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
             // non-sargable because LIKE defaults to case-insensitive and forces
@@ -235,14 +228,6 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
-            // R-14 (lockstep with macOS Discovery): when BGE is installed, keep
-            // embeddingless docs/pdfs OUT of the skip set so an install-then-rescan
-            // re-emits them and the tagger backfills the BGE embedding. Empty when BGE
-            // isn't on disk (no doc could embed → don't force a perpetual re-walk).
-            let text_embed_gate = if bge_installed() { SKIP_SET_TEXT_EMBED_GATE } else { "" };
-            // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
-            // to backfill its rendered-shape CLIP vector (lockstep with macOS).
-            let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -252,13 +237,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -277,26 +262,8 @@ impl ScanSession {
                 };
                 if let Ok(rows) = rows {
                     for (p, size, modified) in rows.flatten() {
-                        set.insert(path_fingerprint_text(&p), (size, modified));
+                        set.insert(std::path::PathBuf::from(p), (size, modified));
                     }
-                }
-            }
-
-            // Crash self-heal: face crops are written post-commit outside the
-            // writer tx, so a mid-scan kill can leave committed face_prints
-            // rows with no on-disk crop JPEG. Those files are size+mtime
-            // unchanged, so they'd be skipped forever and show gray faces in
-            // the People tab. Only after an unclean prior shutdown, pull the
-            // affected files back out of the skip set so they reprocess and
-            // re-emit their crops. Bounded to face-bearing files under the
-            // scan root; clean shutdowns skip this entirely.
-            if crate::db::UNCLEAN_PRIOR_SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
-                let removed = reconcile_missing_face_crops(&conn, &mut set, &lo, hi.as_deref());
-                if removed > 0 {
-                    tracing::info!(
-                        removed,
-                        "[SCAN] crash self-heal: reprocessing files with missing face crops"
-                    );
                 }
             }
             tracing::info!(
@@ -314,61 +281,12 @@ impl ScanSession {
         // result with a non-empty skip set means "incremental rescan, all files
         // already current" — NOT an empty/unsupported folder (#21).
         let skip_count = skip_paths.len();
-        let excl_norm: Vec<String> = exclusions.iter().map(|e| e.normalized.clone()).collect();
-        let discovery = Discovery::new_with_skip_and_exclusions(
-            root,
-            self.coordinator.clone(),
-            skip_paths,
-            Arc::new(excl_norm),
-        );
+        let discovery = Discovery::new_with_skip(root, self.coordinator.clone(), skip_paths);
         let handle = discovery.spawn();
         let discovered_count = handle.count.clone();
-        let discovered_heavy = handle.heavy_count.clone();
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
-        let discovered_seen_paths = handle.seen_paths.clone();
-        let discovery_join = handle.join;
         let discovered_rx = handle.rx;
-        let mut zero_byte_rx = handle.zero_byte_rx;
-        let zero_byte_conn = self.db_conn.clone();
-        let zero_byte_worker = tokio::task::spawn_blocking(move || -> Result<(u64, u64)> {
-            const ZERO_BYTE_BATCH_SIZE: usize = 64;
-            let mut observations = Vec::with_capacity(ZERO_BYTE_BATCH_SIZE);
-            let mut applied = 0_u64;
-            let mut rejected = 0_u64;
-            while let Some(observation) = zero_byte_rx.blocking_recv() {
-                observations.push(observation);
-                if observations.len() < ZERO_BYTE_BATCH_SIZE {
-                    continue;
-                }
-                let validation = crate::db::zero_byte::validate_zero_byte_files(&observations);
-                rejected += validation.changed_since_observation;
-                let mutation = {
-                    let conn = zero_byte_conn.lock();
-                    crate::db::zero_byte::deactivate_validated_zero_byte_files(
-                        &conn,
-                        &validation.observations,
-                    )?
-                };
-                let summary = crate::db::zero_byte::finish_zero_byte_mutation(mutation);
-                applied += summary.applied;
-                observations.clear();
-            }
-            if !observations.is_empty() {
-                let validation = crate::db::zero_byte::validate_zero_byte_files(&observations);
-                rejected += validation.changed_since_observation;
-                let mutation = {
-                    let conn = zero_byte_conn.lock();
-                    crate::db::zero_byte::deactivate_validated_zero_byte_files(
-                        &conn,
-                        &validation.observations,
-                    )?
-                };
-                let summary = crate::db::zero_byte::finish_zero_byte_mutation(mutation);
-                applied += summary.applied;
-            }
-            Ok((applied, rejected))
-        });
 
         // Emit a live Progress event every 250 ms while discovery walks
         // the tree. Without this, the sidebar stays on "Discovering…" with
@@ -449,7 +367,44 @@ impl ScanSession {
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
                     // when a notice is actually delivered. (audit R3-21)
-                    let notice = discovery_notice(count, skip_count, errs, &root_for_tick);
+                    let notice = if count == 0 && skip_count > 0 {
+                        // Incremental rescan where every file was already
+                        // current — not an error. Non-fatal "already up to
+                        // date" notice (#21).
+                        Some(crate::ipc::EngineError {
+                            kind: "rescan_no_changes".into(),
+                            message: "Library is already up to date — no new or changed files to scan."
+                                .into(),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else if count == 0 {
+                        // Genuinely empty / unsupported folder.
+                        Some(crate::ipc::EngineError {
+                            kind: "empty_folder".into(),
+                            message: format!(
+                                "No supported files found in {}.\n\
+                                 Pick a folder with images, videos, PDFs, or documents.",
+                                root_for_tick
+                            ),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else if errs > 0 {
+                        // Non-fatal: walk recovered after the failures.
+                        Some(crate::ipc::EngineError {
+                            kind: "discovery_partial".into(),
+                            message: format!(
+                                "Scanned {} file(s); {} path(s) couldn't be read \
+                                 (permission denied or removed mid-scan). Scan continues.",
+                                count, errs
+                            ),
+                            path: Some(root_for_tick.clone()),
+                            model_kind: None,
+                        })
+                    } else {
+                        None
+                    };
                     if let Some(err) = notice {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
@@ -471,12 +426,8 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
-        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
-            .with_scan_root(root.to_path_buf());
-        let (tagged_rx, mut decoder_join): (
-            mpsc::Receiver<TaggedFile>,
-            tokio::task::JoinHandle<()>,
-        ) = tagger.spawn(discovered_rx);
+        let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone());
+        let tagged_rx: mpsc::Receiver<TaggedFile> = tagger.spawn(discovered_rx);
 
         // Throttle progress emission: at most one event per 100 ms OR
         // every 1000 files (whichever first). Without throttling, a fast
@@ -491,34 +442,20 @@ impl ScanSession {
         // events during tagging report the real discovered total — else
         // the sidebar progress bar pegs at 100 % during tagging.
         let discovered_count_for_batch = discovered_count.clone();
-        let discovered_heavy_for_batch = discovered_heavy.clone();
-        let discovered_done_for_batch = discovered_done_post.clone();
-        let mut last_summary_processed = 0u64;
 
         let writer_outcome = writer
             .run(tagged_rx, move |stats: BatchStats| {
-                if should_emit_batch_summary(stats.batch_index, stats.processed_total, last_summary_processed) {
-                    emit_batch_summary(&sink_for_batch, &stats);
-                    last_summary_processed = stats.processed_total;
-                }
+                emit_batch_summary(&sink_for_batch, &stats);
                 let discovered = discovered_count_for_batch.load(std::sync::atomic::Ordering::Relaxed);
-                let heavy = discovered_heavy_for_batch.load(std::sync::atomic::Ordering::Relaxed);
-                let walk_done =
-                    discovered_done_for_batch.load(std::sync::atomic::Ordering::Acquire);
                 maybe_emit_progress(
                     &sink_for_batch,
                     &progress_state_for_batch,
                     &session_id_for_batch,
                     &stats,
                     discovered,
-                    heavy,
-                    walk_done,
                 );
             })
             .await;
-        if writer_outcome.is_err() {
-            self.coordinator.request_cancel();
-        }
 
         // Tick exits on its own once discovery's `done` flips true; this
         // abort is belt-and-suspenders for the rare case where DBWriter
@@ -528,48 +465,12 @@ impl ScanSession {
         // PhaseChanged(Failed).
         tick.abort();
 
-        let decoder_wait = if self.coordinator.is_cancelled() {
-            std::time::Duration::from_secs(2)
-        } else {
-            std::time::Duration::from_secs(60)
-        };
-        let decoder_outcome = match tokio::time::timeout(decoder_wait, &mut decoder_join).await {
-            Ok(result) => result.context("joining decoder pool"),
-            Err(_) if self.coordinator.is_cancelled() => {
-                tracing::warn!(
-                    active = crate::pipeline::tagging::active_decoder_threads(),
-                    "cancelled scan left a decoder draining bounded read-only work"
-                );
-                Ok(())
-            }
-            Err(_) => Err(anyhow::anyhow!(
-                "decoder pool did not quiesce within {} seconds",
-                decoder_wait.as_secs()
-            )),
-        };
-        let zero_byte_outcome = zero_byte_worker
-            .await
-            .context("joining zero-byte catalog worker")
-            .and_then(|outcome| outcome);
-        let discovery_outcome = discovery_join.await.context("joining discovery worker");
-        let pipeline_outcome = match (
-            writer_outcome,
-            decoder_outcome,
-            zero_byte_outcome,
-            discovery_outcome,
-        ) {
-            (Ok((total, failed)), Ok(()), Ok((applied, rejected)), Ok(())) => {
-                Ok((total, failed, applied, rejected))
-            }
-            (Err(err), _, _, _) | (_, _, Err(err), _) => Err(err),
-            (_, Err(err), _, _) | (_, _, _, Err(err)) => Err(err),
-        };
-        let (total, failed, zero_byte_applied, zero_byte_rejected) = match pipeline_outcome {
-            Ok(result) => result,
+        let (total, failed) = match writer_outcome {
+            Ok(t) => t,
             Err(err) => {
                 // Stamp the row 'failed' so Settings → Recent scans doesn't
-                // show it as 'running' forever. Best-effort: the failure may be
-                // the DB itself (SQLITE_FULL / unreachable).
+                // show it as 'running' forever. Best-effort: the writer
+                // failure may be the DB itself (SQLITE_FULL / unreachable).
                 let conn = self.db_conn.lock();
                 let completed_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -582,29 +483,6 @@ impl ScanSession {
                 return Err(err);
             }
         };
-        if zero_byte_applied > 0 {
-            tracing::info!(
-                zero_byte_applied,
-                "[SCAN] transitioned existing zero-byte rows to dormant state"
-            );
-        }
-        if zero_byte_rejected > 0 {
-            tracing::warn!(
-                zero_byte_rejected,
-                "[SCAN] files changed after zero-byte discovery; preserving catalog rows"
-            );
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                crate::ipc::EngineError {
-                    kind: "discovery_partial".into(),
-                    message: format!(
-                        "{zero_byte_rejected} file(s) changed after zero-byte discovery; their catalog rows were preserved for the next scan."
-                    ),
-                    path: Some(root.to_string_lossy().into_owned()),
-                    model_kind: None,
-                },
-            ))))
-            .await;
-        }
 
         // discoveryComplete backstop (audit F-C2-006): the 250 ms tick emits this
         // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
@@ -634,38 +512,43 @@ impl ScanSession {
             let count = discovered_count.load(std::sync::atomic::Ordering::Relaxed);
             let errs = discovered_errors.load(std::sync::atomic::Ordering::Relaxed);
             let root_display = root.to_string_lossy().into_owned();
-            let notice = discovery_notice(count, skip_count, errs, &root_display);
-            if let Some(err) = notice {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
-                    .await;
+            let notice = if count == 0 && skip_count > 0 {
+                Some((
+                    "rescan_no_changes".to_string(),
+                    "Library is already up to date — no new or changed files to scan.".to_string(),
+                ))
+            } else if count == 0 {
+                Some((
+                    "empty_folder".to_string(),
+                    format!(
+                        "No supported files found in {}.\n\
+                         Pick a folder with images, videos, PDFs, or documents.",
+                        root_display
+                    ),
+                ))
+            } else if errs > 0 {
+                Some((
+                    "discovery_partial".to_string(),
+                    format!(
+                        "Scanned {} file(s); {} path(s) couldn't be read \
+                         (permission denied or removed mid-scan). Scan continues.",
+                        count, errs
+                    ),
+                ))
+            } else {
+                None
+            };
+            if let Some((kind, message)) = notice {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
+                    crate::ipc::EngineError {
+                        kind,
+                        message,
+                        path: Some(root_display),
+                        model_kind: None,
+                    },
+                ))))
+                .await;
             }
-        }
-
-        let clean_walk = zero_byte_rejected == 0
-            && should_reconcile_missing_rows(
-            self.coordinator.is_cancelled(),
-            self.coordinator.is_gpu_dead(),
-            discovered_done_post.load(std::sync::atomic::Ordering::Acquire),
-            discovered_errors.load(std::sync::atomic::Ordering::Relaxed),
-            std::env::var("FILEID_TEST_FILE_CAP")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(0),
-        );
-        if clean_walk {
-            let mut seen = discovered_seen_paths.lock();
-            let mut conn = self.db_conn.lock();
-            match soft_hide_missing_rows(&mut conn, root, &mut seen) {
-                Ok(marked) if marked > 0 => {
-                    tracing::info!(marked, "[SCAN] soft-hid catalog rows missing from completed walk");
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::error!(error = %err, "[SCAN] missing-file reconciliation failed; preserving catalog rows");
-                }
-            }
-        } else {
-            tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
         }
 
         let elapsed = started.elapsed().as_secs_f64();
@@ -700,7 +583,7 @@ impl ScanSession {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
                 crate::ipc::EngineError {
                     kind: "gpu_device_removed".into(),
-                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+                    message: "Windows reported GPU device removed (TDR). The scan has been aborted to keep the system responsive. Restart the engine to recover; if this repeats, consider lowering FILEID_MODEL_POOL_SIZE or switching to CPU EP via gpuExecutionProviderOverride.".into(),
                     path: None,
                     model_kind: None,
                 },
@@ -783,14 +666,6 @@ struct ProgressState {
     rate_anchor: Instant,
     rate_anchor_total: u64,
     rolling_fps: f64,
-    // Split heavy (Image/Video/Model — the vision path) vs light rates for
-    // the ETA. The blended rate swings an order of magnitude between photo
-    // bursts (~tens/s) and hash-only stretches (hundreds/s) on mixed
-    // libraries, so an ETA computed from it oscillated wildly; each class
-    // rate is stable, and remaining work is estimated per class.
-    rate_anchor_heavy: u64,
-    rolling_heavy_fps: f64,
-    rolling_light_fps: f64,
 }
 
 impl ProgressState {
@@ -800,14 +675,11 @@ impl ProgressState {
             // -60 s forces the first batch callback past the throttle so the
             // sidebar fills immediately; the rate anchor below uses the real
             // `now` so the first measured interval is honest.
-            last_emit: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
+            last_emit: now - Duration::from_secs(60),
             last_total: 0,
             rate_anchor: now,
             rate_anchor_total: 0,
             rolling_fps: 0.0,
-            rate_anchor_heavy: 0,
-            rolling_heavy_fps: 0.0,
-            rolling_light_fps: 0.0,
         }
     }
 
@@ -815,100 +687,22 @@ impl ProgressState {
     /// it. Re-samples only after `MIN_RATE_DT` so a burst of file-triggered
     /// emits a few ms apart can't divide by a near-zero interval; between
     /// re-samples it returns the last rolling value unchanged.
-    fn observe_rate(&mut self, processed_total: u64, processed_heavy: u64, now: Instant) -> f64 {
+    fn observe_rate(&mut self, processed_total: u64, now: Instant) -> f64 {
         const MIN_RATE_DT: f64 = 0.5;
         let dt = now.duration_since(self.rate_anchor).as_secs_f64();
         if dt >= MIN_RATE_DT {
             let delta = processed_total.saturating_sub(self.rate_anchor_total) as f64;
-            let delta_heavy = processed_heavy.saturating_sub(self.rate_anchor_heavy) as f64;
-            let ema = |rolling: f64, instant: f64| {
-                if rolling <= 0.0 { instant } else { 0.7 * rolling + 0.3 * instant }
+            let instant = delta / dt;
+            self.rolling_fps = if self.rolling_fps <= 0.0 {
+                instant
+            } else {
+                0.7 * self.rolling_fps + 0.3 * instant
             };
-            self.rolling_fps = ema(self.rolling_fps, delta / dt);
-            // Only fold a class sample when that class made progress this
-            // window — an all-light stretch must not decay the heavy rate
-            // toward zero (that's the oscillation this split exists to fix).
-            if delta_heavy > 0.0 {
-                self.rolling_heavy_fps = ema(self.rolling_heavy_fps, delta_heavy / dt);
-            }
-            let delta_light = delta - delta_heavy;
-            if delta_light > 0.0 {
-                self.rolling_light_fps = ema(self.rolling_light_fps, delta_light / dt);
-            }
             self.rate_anchor = now;
             self.rate_anchor_total = processed_total;
-            self.rate_anchor_heavy = processed_heavy;
         }
         self.rolling_fps
     }
-
-    /// Kind-aware ETA: seconds for the remaining heavy (vision-path) files at
-    /// the heavy rate plus the remaining light files at the light rate.
-    /// Falls back to the blended rate for any class whose own rate is still
-    /// unknown, and to a plain blended estimate before any split data exists.
-    fn eta_seconds(&self, remaining_heavy: u64, remaining_light: u64) -> Option<f64> {
-        let blended = self.rolling_fps;
-        if remaining_heavy + remaining_light == 0 {
-            return None;
-        }
-        let rate_or = |own: f64| if own > 0.01 { own } else { blended };
-        let (rh, rl) = (rate_or(self.rolling_heavy_fps), rate_or(self.rolling_light_fps));
-        if rh <= 0.01 || rl <= 0.01 {
-            return if blended > 0.01 {
-                Some((remaining_heavy + remaining_light) as f64 / blended)
-            } else {
-                None
-            };
-        }
-        Some(remaining_heavy as f64 / rh + remaining_light as f64 / rl)
-    }
-}
-
-/// Single source for the empty/rescan/partial discovery notice: the 250 ms
-/// tick and the post-drain backstop must emit byte-identical IPC, so the kind
-/// codes + messages live here once. (audit R3-21 / E3)
-fn discovery_notice(
-    count: u64,
-    skip_count: usize,
-    errs: u64,
-    root: &str,
-) -> Option<crate::ipc::EngineError> {
-    let (kind, message) = if count == 0 && skip_count > 0 {
-        (
-            "rescan_no_changes",
-            "No files required content reprocessing; catalog reconciliation will still complete.".to_string(),
-        )
-    } else if count == 0 {
-        (
-            "empty_folder",
-            format!(
-                "No supported files found in {}.\n\
-                 Pick a folder with images, videos, PDFs, or documents.",
-                root
-            ),
-        )
-    } else if errs > 0 {
-        (
-            "discovery_partial",
-            format!(
-                "Scanned {} file(s); {} path(s) couldn't be read \
-                 (permission denied or removed mid-scan). Scan continues.",
-                count, errs
-            ),
-        )
-    } else {
-        return None;
-    };
-    Some(crate::ipc::EngineError {
-        kind: kind.into(),
-        message,
-        path: Some(root.to_string()),
-        model_kind: None,
-    })
-}
-
-fn should_emit_batch_summary(batch_index: u32, processed_total: u64, last_emitted: u64) -> bool {
-    batch_index == 0 || processed_total.saturating_sub(last_emitted) >= 100
 }
 
 fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
@@ -928,9 +722,9 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
         resident_mb: crate::platform::process_memory_mb(),
         available_mb: 0,
     };
-    // Intentional try_send. Summaries are sampled every ~100 processed files;
-    // progress and terminal events carry the authoritative lifecycle. Dropping
-    // a diagnostic sample is preferable to backpressuring the scan.
+    // Intentional try_send. Per-batch BatchSummary events (one per ~100
+    // files) are best-effort — dropping during a sink-full burst is
+    // preferable to spawning an unbounded tail of tasks awaiting capacity.
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
@@ -939,214 +733,15 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
 /// placeholder, whose content read is skipped to avoid a network hydration).
 /// Because hydration doesn't bump `modified_at`, this is the only durable
 /// signal that a now-local file still needs ML processing.
-/// Crash self-heal (only after an unclean shutdown — see `UNCLEAN_PRIOR_SHUTDOWN`).
-/// Face-crop JPEGs are written post-commit outside the writer tx, so a kill can
-/// leave committed `face_prints` rows with no on-disk crop. Such a file is
-/// size+mtime unchanged, so the skip set would drop it forever and the People
-/// tab shows gray faces. This pulls every affected file (any face missing its
-/// `<face_id>.jpg`) back OUT of `set` so the next scan reprocesses it and
-/// re-emits the crops. Bounded to face-bearing files under the scan root;
-/// returns how many files were reopened for reprocessing. Best-effort: a query
-/// or FS error just leaves the skip set as-is (the file stays gray, no worse
-/// than before).
-fn reconcile_missing_face_crops(
-    conn: &rusqlite::Connection,
-    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
-    lo: &str,
-    hi: Option<&str>,
-) -> usize {
-    let Ok(faces_dir) = crate::paths::faces_dir() else {
-        return 0;
-    };
-    reconcile_missing_face_crops_in(conn, set, lo, hi, &faces_dir)
-}
-
-fn reconcile_missing_face_crops_in(
-    conn: &rusqlite::Connection,
-    set: &mut std::collections::HashMap<SkipFingerprint, (i64, Option<f64>)>,
-    lo: &str,
-    hi: Option<&str>,
-    faces_dir: &std::path::Path,
-) -> usize {
-    let sql = if hi.is_some() {
-        "SELECT f.path_text, fp.id FROM face_prints fp \
-         JOIN files f ON f.id = fp.file_id \
-         WHERE f.path_text >= ?1 AND f.path_text < ?2"
-    } else {
-        "SELECT f.path_text, fp.id FROM face_prints fp \
-         JOIN files f ON f.id = fp.file_id"
-    };
-    let Ok(mut stmt) = conn.prepare(sql) else {
-        return 0;
-    };
-    let row = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
-    let rows = match hi {
-        Some(hi) => stmt.query_map(rusqlite::params![lo, hi], row),
-        None => stmt.query_map([], row),
-    };
-    let Ok(rows) = rows else { return 0 };
-    let mut missing: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for entry in rows.flatten() {
-        let (path, face_id) = entry;
-        if missing.contains(&path) {
-            continue;
-        }
-        if !faces_dir.join(format!("{face_id}.jpg")).is_file() {
-            missing.insert(path);
-        }
-    }
-    let mut removed = 0;
-    for path in &missing {
-        if set.remove(&path_fingerprint_text(path)).is_some() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
 pub(crate) const SKIP_SET_CONTENT_HASH_GATE: &str =
     "AND NOT (content_hash IS NULL \
       AND kind IN ('image', 'video', 'pdf', 'doc', 'audio'))";
 
-/// R-14 (lockstep with macOS `DBWriter.skipSetTextBackfillExclusionSQL`): keep any
-/// doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set, so an
-/// install-then-rescan re-emits it and the tagger backfills its BGE embedding. BGE is
-/// opt-in, so the first scan usually predates it — without this, those docs would be
-/// stranded on the weaker filename-bag-of-words clustering forever (the doc-content
-/// pass has no plan-time fallback). Appended ONLY when BGE is on disk (see
-/// `bge_installed`); leading space because it concatenates after the content gate.
-/// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-extracted
-/// but yielded no embeddable text (image-only PDF, iWork, empty file) — otherwise such a
-/// doc, never able to get a `text_embeddings` row, would re-walk forever (v19).
-pub(crate) const SKIP_SET_TEXT_EMBED_GATE: &str =
-    " AND NOT (kind IN ('doc', 'pdf') AND text_stage_done = 0 \
-      AND NOT EXISTS (SELECT 1 FROM text_embeddings \
-                      WHERE text_embeddings.file_id = files.id))";
-
-/// R-14 (lockstep with macOS `DBWriter.skipSetModelClipBackfillExclusionSQL`): keep a `.obj`
-/// 3D model still LACKING a `clip_embeddings` row OUT of the skip set so its rendered-shape
-/// CLIP vector backfills on a rescan after the render→CLIP feature shipped. Limited to
-/// `extension = 'obj'` (the only format `obj_render` rasterizes). The `text_stage_done = 0`
-/// clause stops the re-walk once a render has been ATTEMPTED but failed (a corrupt /
-/// geometry-less .obj) — otherwise that .obj would re-walk forever. CLIP ships by default,
-/// so this is appended unconditionally; leading space concatenates after the content gate.
-pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
-    " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
-      AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
-                      WHERE clip_embeddings.file_id = files.id))";
-
-/// True once the BGE document embedder's weights are on disk — the same probe the
-/// tagger uses to decide whether to build the embedder (tagging.rs). Gates
-/// `SKIP_SET_TEXT_EMBED_GATE`: with no model installed no doc could embed, so forcing
-/// embeddingless docs out of the skip set would re-walk every doc on every scan.
-fn bge_installed() -> bool {
-    crate::models::bge_text::default_weights_path()
-        .map(|p| p.exists())
-        .unwrap_or(false)
-}
-
-fn should_reconcile_missing_rows(
-    cancelled: bool,
-    gpu_dead: bool,
-    discovery_done: bool,
-    discovery_errors: u64,
-    test_file_cap: u64,
-) -> bool {
-    !cancelled && !gpu_dead && discovery_done && discovery_errors == 0 && test_file_cap == 0
-}
-
-fn root_descendant_prefix(root: &Path) -> String {
-    let mut prefix = root.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
-    prefix.push(std::path::MAIN_SEPARATOR);
-    prefix
-}
-
-fn soft_hide_missing_rows(
-    conn: &mut Connection,
-    root: &Path,
-    seen: &mut Vec<i64>,
-) -> rusqlite::Result<usize> {
-    seen.sort_unstable();
-    seen.dedup();
-    let lo = root_descendant_prefix(root);
-    let Some(hi) = prefix_upper_bound(&lo) else { return Ok(0) };
-    let tx = conn.transaction()?;
-    tx.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS fileid_seen_path_hashes (
-             path_hash INTEGER PRIMARY KEY
-         ) WITHOUT ROWID;
-         DELETE FROM fileid_seen_path_hashes;",
-    )?;
-    {
-        let mut insert = tx.prepare_cached(
-            "INSERT OR IGNORE INTO fileid_seen_path_hashes (path_hash) VALUES (?1)",
-        )?;
-        for path_hash in seen.iter() {
-            insert.execute([path_hash])?;
-        }
-    }
-    let marked = tx.execute(
-        "UPDATE files
-         SET failed = 1,
-             error_message = 'File is no longer present under the completed scan root.'
-         WHERE path_text >= ?1 AND path_text < ?2
-           AND failed = 0
-           AND NOT EXISTS (
-               SELECT 1 FROM fileid_seen_path_hashes seen
-               WHERE seen.path_hash = files.path_hash
-           )",
-        rusqlite::params![lo, hi],
-    )?;
-    tx.execute("DELETE FROM fileid_seen_path_hashes", [])?;
-    tx.commit()?;
-    Ok(marked)
-}
-
-/// Delete cataloged rows under each excluded folder. Child rows
-/// (tags / face prints / captions / embeddings) go via ON DELETE CASCADE
-/// (`PRAGMA foreign_keys = ON` on every engine connection); face-crop JPEGs
-/// are pruned best-effort after each delete. Range-matches `path_text` with
-/// the exclusion's original casing — same walk-derived casing contract as
-/// the skip-set preload above; a mismatch fails safe (rows survive until a
-/// future exact-cased scan). Returns the number of `files` rows purged.
-pub(crate) fn purge_excluded_rows(
-    conn: &Connection,
-    exclusions: &[crate::util::path_safety::ResolvedExclusion],
-) -> u64 {
-    let mut purged = 0u64;
-    for excl in exclusions {
-        let lo = format!("{}{}", excl.original, std::path::MAIN_SEPARATOR);
-        let Some(hi) = prefix_upper_bound(&lo) else { continue };
-        let crop_ids: Vec<i64> = conn
-            .prepare(
-                "SELECT id FROM face_prints WHERE file_id IN \
-                 (SELECT id FROM files WHERE path_text >= ?1 AND path_text < ?2)",
-            )
-            .and_then(|mut st| {
-                st.query_map(rusqlite::params![lo, hi], |r| r.get(0))
-                    .map(|rows| rows.filter_map(Result::ok).collect())
-            })
-            .unwrap_or_default();
-        match conn.execute(
-            "DELETE FROM files WHERE path_text >= ?1 AND path_text < ?2",
-            rusqlite::params![lo, hi],
-        ) {
-            Ok(n) => {
-                purged += n as u64;
-                for id in crop_ids {
-                    crate::pipeline::dbwriter::remove_face_crop(id);
-                }
-            }
-            Err(err) => tracing::warn!(?err, "excluded-rows purge failed"),
-        }
-    }
-    purged
-}
-
 /// Exclusive upper bound for a sargable prefix range: `prefix` with its last
 /// Unicode scalar incremented, so `path_text >= prefix AND path_text < upper`
 /// selects exactly the rows `LIKE 'prefix%'` would (BINARY collation). Returns
-/// None when no finite bound exists.
+/// None when no finite bound exists (empty prefix, or an all-`char::MAX` tail)
+/// — callers then match the whole table.
 pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut chars: Vec<char> = prefix.chars().collect();
     while let Some(last) = chars.pop() {
@@ -1173,8 +768,6 @@ fn maybe_emit_progress(
     session_id: &str,
     stats: &BatchStats,
     discovered_total: u64,
-    discovered_heavy: u64,
-    discovery_done: bool,
 ) {
     let now = Instant::now();
     let should_emit = {
@@ -1187,42 +780,29 @@ fn maybe_emit_progress(
         return;
     }
     // Fold the new sample into the rolling wall-clock throughput under one lock.
-    let (fps, eta_kind_aware) = {
+    let fps = {
         let mut st = state.lock();
         st.last_emit = now;
         st.last_total = stats.processed_total;
-        let fps = st.observe_rate(stats.processed_total, stats.processed_heavy, now);
-        let eta = if discovery_done {
-            let total_now = discovered_total.max(stats.processed_total);
-            let remaining = total_now.saturating_sub(stats.processed_total);
-            let remaining_heavy = discovered_heavy.saturating_sub(stats.processed_heavy);
-            let remaining_light = remaining.saturating_sub(remaining_heavy);
-            st.eta_seconds(remaining_heavy, remaining_light)
-        } else {
-            None
-        };
-        (fps, eta)
+        st.observe_rate(stats.processed_total, now)
     };
     // Progress payload fields:
-    //   total            = 0 until the discovery walk completes (the IPC
-    //                      schema contract: "0 until discovery completes"),
-    //                      then the final discovered count. Emitting the
-    //                      still-climbing counter as `total` made both the
-    //                      progress-bar denominator and the ETA moving
-    //                      targets — the overnight "17.0h → 16.4h after 10
-    //                      hours" symptom.
+    //   total            = discovered file count (from Discovery's atomic
+    //                      counter; persisted through tagging so the
+    //                      progress bar shows correct fill, not 100%).
     //   files_per_second = the ROLLING wall-clock rate (real end-to-end
     //                      throughput), NOT the per-batch DB-flush rate.
     //   eta_seconds      = (total - processed) / rolling_fps when known;
-    //                      None during ramp-up or while total is unknown.
+    //                      None during ramp-up (first ~0.5 s, or total==0).
     //   failed           = cumulative failed-file count from DBWriter.
     //   resident_mb      = process RSS via Win32 GetProcessMemoryInfo.
-    let total = if discovery_done {
-        discovered_total.max(stats.processed_total)
+    let total = discovered_total.max(stats.processed_total);
+    let remaining = total.saturating_sub(stats.processed_total);
+    let eta_seconds = if fps > 0.01 && remaining > 0 && total > 0 {
+        Some(remaining as f64 / fps)
     } else {
-        0
+        None
     };
-    let eta_seconds = if total > 0 { eta_kind_aware } else { None };
     let progress = ScanProgress {
         session_id: session_id.into(),
         phase: ScanPhase::Tagging,
@@ -1245,38 +825,6 @@ fn maybe_emit_progress(
 mod tests {
     use super::*;
 
-    #[test]
-    fn batch_summary_sampling_bounds_ipc_volume() {
-        assert!(should_emit_batch_summary(0, 5, 0));
-        assert!(!should_emit_batch_summary(1, 99, 5));
-        assert!(should_emit_batch_summary(20, 105, 5));
-        assert!(!should_emit_batch_summary(21, 150, 105));
-        assert!(should_emit_batch_summary(40, 205, 105));
-    }
-
-    /// Kind-aware ETA: the heavy and light classes each use their own rate,
-    /// so a hash-only stretch (light files flying by at hundreds/s) must not
-    /// collapse the ETA for tens of thousands of remaining images — the
-    /// "ETA jumping everywhere" regression on mixed libraries.
-    #[test]
-    fn eta_uses_per_class_rates() {
-        let mut st = ProgressState::new();
-        let t0 = Instant::now();
-        st.rate_anchor = t0;
-        // Window 1: 10 heavy in 1s → heavy rate ~10/s.
-        let _ = st.observe_rate(10, 10, t0 + Duration::from_secs(1));
-        // Window 2: 400 light in 1s → light rate ~400/s, heavy rate HELD.
-        let _ = st.observe_rate(410, 10, t0 + Duration::from_secs(2));
-        assert!((st.rolling_heavy_fps - 10.0).abs() < 1.0, "heavy rate held: {}", st.rolling_heavy_fps);
-        assert!(st.rolling_light_fps > 100.0, "light rate: {}", st.rolling_light_fps);
-        // 1000 heavy + 1000 light remaining: ETA is ~100s of images plus a
-        // few seconds of light files — NOT (2000 / blended≈210) ≈ 9.5s.
-        let eta = st.eta_seconds(1000, 1000).unwrap();
-        assert!(eta > 90.0 && eta < 130.0, "eta: {eta}");
-        // No remaining work → no ETA.
-        assert!(st.eta_seconds(0, 0).is_none());
-    }
-
     /// The rolling fps must measure real wall-clock throughput, not the
     /// per-batch DB-flush rate — the regression that produced "13s" ETAs for
     /// an hour of work.
@@ -1290,11 +838,11 @@ mod tests {
 
         // 5 files in the first second → ~5 files/s (the real pipeline rate),
         // NOT the thousands/s a DB-flush measurement reports.
-        let fps1 = st.observe_rate(5, 0, t0 + Duration::from_secs(1));
+        let fps1 = st.observe_rate(5, t0 + Duration::from_secs(1));
         assert!((fps1 - 5.0).abs() < 0.01, "first-interval rate should be 5/s, got {fps1}");
 
         // Sustained 5/s → EMA stays ~5.
-        let fps2 = st.observe_rate(10, 0, t0 + Duration::from_secs(2));
+        let fps2 = st.observe_rate(10, t0 + Duration::from_secs(2));
         assert!((fps2 - 5.0).abs() < 0.01, "sustained rate ~5/s, got {fps2}");
 
         // An ETA built on this rate is hours for tens of thousands remaining,
@@ -1323,179 +871,6 @@ mod tests {
         assert_eq!(prefix_upper_bound("abc").as_deref(), Some("abd"));
     }
 
-    #[test]
-    fn completed_walk_soft_hides_only_unseen_active_rows_and_preserves_metadata() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        for pragma in crate::db::SETUP_PRAGMAS {
-            let _ = conn.execute_batch(pragma);
-        }
-        crate::db::migrations::apply(&conn).unwrap();
-
-        let root = if cfg!(windows) { r"C:\library" } else { "/library" };
-        let separator = std::path::MAIN_SEPARATOR;
-        let path = |tail: &str| format!("{root}{separator}{tail}");
-        let sibling_root = if cfg!(windows) { r"C:\library-old" } else { "/library-old" };
-        let insert = |conn: &Connection, value: &str, failed: i64, message: Option<&str>| -> i64 {
-            conn.execute(
-                "INSERT INTO files \
-                 (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, error_message) \
-                 VALUES (?1, ?2, 10, 100.0, 'image', 'jpg', ?3, ?4)",
-                rusqlite::params![
-                    value,
-                    crate::util::path_safety::stable_path_hash(value),
-                    failed,
-                    message,
-                ],
-            )
-            .unwrap();
-            conn.last_insert_rowid()
-        };
-        let seen_path = path("seen.jpg");
-        let missing_path = path("missing.jpg");
-        let failed_path = path("already-failed.jpg");
-        let seen_id = insert(&conn, &seen_path, 0, None);
-        let missing_id = insert(&conn, &missing_path, 0, None);
-        let failed_id = insert(&conn, &failed_path, 1, Some("decode failed"));
-        let sibling_id = insert(&conn, &format!("{sibling_root}{separator}sibling.jpg"), 0, None);
-        conn.execute(
-            "INSERT INTO tags (file_id, tag, source) VALUES (?1, 'family', 'user')",
-            [missing_id],
-        )
-        .unwrap();
-
-        let mut seen = vec![crate::util::path_safety::stable_path_hash(&seen_path)];
-        let marked = soft_hide_missing_rows(&mut conn, Path::new(root), &mut seen).unwrap();
-        assert_eq!(marked, 1);
-        let state = |id: i64| {
-            conn.query_row(
-                "SELECT failed, error_message FROM files WHERE id = ?1",
-                [id],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .unwrap()
-        };
-        assert_eq!(state(seen_id).0, 0);
-        assert_eq!(state(missing_id).0, 1);
-        assert!(state(missing_id).1.unwrap().contains("no longer present"));
-        assert_eq!(state(failed_id), (1, Some("decode failed".into())));
-        assert_eq!(state(sibling_id).0, 0, "prefix-sharing sibling root must survive");
-        let tag_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tags WHERE file_id = ?1", [missing_id], |row| row.get(0))
-            .unwrap();
-        assert_eq!(tag_count, 1, "soft hide must preserve user tags for recovery");
-    }
-
-    #[test]
-    fn missing_reconciliation_requires_a_complete_uncapped_error_free_walk() {
-        assert!(should_reconcile_missing_rows(false, false, true, 0, 0));
-        assert!(!should_reconcile_missing_rows(true, false, true, 0, 0));
-        assert!(!should_reconcile_missing_rows(false, true, true, 0, 0));
-        assert!(!should_reconcile_missing_rows(false, false, false, 0, 0));
-        assert!(!should_reconcile_missing_rows(false, false, true, 1, 0));
-        assert!(!should_reconcile_missing_rows(false, false, true, 0, 1));
-    }
-
-    #[test]
-    #[ignore = "manual 1M-row performance gate"]
-    fn million_row_reconciliation_uses_set_based_update() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE files (
-                 id INTEGER PRIMARY KEY,
-                 path_text TEXT NOT NULL UNIQUE,
-                 path_hash INTEGER NOT NULL,
-                 failed INTEGER NOT NULL DEFAULT 0,
-                 error_message TEXT
-             );
-             CREATE INDEX files_path_hash ON files(path_hash);",
-        )
-        .unwrap();
-        let root = if cfg!(windows) { r"C:\million" } else { "/million" };
-        let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
-        conn.execute(
-            "WITH RECURSIVE seq(x) AS (
-                 SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 1000000
-             )
-             INSERT INTO files (id, path_text, path_hash)
-             SELECT x, ?1 || x || '.jpg', x FROM seq",
-            [prefix],
-        )
-        .unwrap();
-        let mut seen: Vec<i64> = (1..=1_000_000).step_by(2).collect();
-        let started = Instant::now();
-        let marked = soft_hide_missing_rows(&mut conn, Path::new(root), &mut seen).unwrap();
-        assert_eq!(marked, 500_000);
-        assert!(started.elapsed() < Duration::from_secs(30));
-    }
-
-    /// purge_excluded_rows deletes exactly the rows strictly under each
-    /// excluded folder (BINARY prefix range) and cascades child rows; a
-    /// sibling folder sharing the excluded name as a prefix survives.
-    #[test]
-    fn purge_excluded_rows_deletes_subtree_and_cascades() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        for pragma in crate::db::SETUP_PRAGMAS {
-            let _ = conn.execute_batch(pragma);
-        }
-        crate::db::migrations::apply(&conn).unwrap();
-
-        let insert = |path: &str| -> i64 {
-            conn.execute(
-                "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
-                 VALUES (?1, 1, 10, 100.0, 'image', 'jpg')",
-                rusqlite::params![path],
-            )
-            .unwrap();
-            conn.last_insert_rowid()
-        };
-        // Platform-appropriate absolute paths: resolve_exclusions drops
-        // non-absolute entries, and these tests also run on Linux CI.
-        let j = |tail: &str| {
-            if cfg!(windows) {
-                format!(r"C:\a{}", tail.replace('/', "\\"))
-            } else {
-                format!("/a{tail}")
-            }
-        };
-        let in_a = insert(&j("/b/one.jpg"));
-        let in_b = insert(&j("/b/deep/two.jpg"));
-        let boundary = insert(&j("/bc/three.jpg")); // shares '…\a\b' as string prefix
-        let keeper = insert(&j("/keep/four.jpg"));
-        conn.execute(
-            "INSERT INTO tags (file_id, tag, source) VALUES (?1, 'cat', 'test')",
-            rusqlite::params![in_a],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO face_prints (file_id, print_data, bbox) VALUES (?1, X'00', '[]')",
-            rusqlite::params![in_b],
-        )
-        .unwrap();
-
-        let root = if cfg!(windows) { r"C:\a".to_string() } else { "/a".to_string() };
-        let exclusions = crate::util::path_safety::resolve_exclusions(
-            std::path::Path::new(&root),
-            &[j("/b")],
-        );
-        assert_eq!(exclusions.len(), 1);
-        let purged = purge_excluded_rows(&conn, &exclusions);
-        assert_eq!(purged, 2);
-
-        let remaining: Vec<i64> = conn
-            .prepare("SELECT id FROM files ORDER BY id")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(remaining, vec![boundary, keeper]);
-        let tag_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
-        let face_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM face_prints", [], |r| r.get(0)).unwrap();
-        assert_eq!((tag_count, face_count), (0, 0), "cascade must clear child rows");
-    }
-
     /// Two emits closer than MIN_RATE_DT must not re-divide and spike the rate.
     #[test]
     fn rolling_fps_holds_between_rapid_samples() {
@@ -1505,54 +880,9 @@ mod tests {
         st.rate_anchor_total = 0;
         st.rolling_fps = 0.0;
 
-        let _ = st.observe_rate(10, 0, t0 + Duration::from_secs(1)); // seeds ~10/s
-        let held = st.observe_rate(1000, 0, t0 + Duration::from_millis(1100)); // only +0.1 s
+        let _ = st.observe_rate(10, t0 + Duration::from_secs(1)); // seeds ~10/s
+        let held = st.observe_rate(1000, t0 + Duration::from_millis(1100)); // only +0.1 s
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
-    }
-
-    /// Crash self-heal: after an unclean shutdown, a file with committed
-    /// face_prints rows but a missing crop JPEG must be pulled OUT of the skip
-    /// set (so it reprocesses), while a file whose crops all exist stays in it.
-    #[test]
-    fn reconcile_missing_face_crops_reopens_only_crop_missing_files() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL UNIQUE);
-             CREATE TABLE face_prints (id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL);",
-        )
-        .unwrap();
-        conn.execute("INSERT INTO files (id, path_text) VALUES (1, 'C:\\Lib\\a.jpg')", [])
-            .unwrap();
-        conn.execute("INSERT INTO files (id, path_text) VALUES (2, 'C:\\Lib\\b.jpg')", [])
-            .unwrap();
-        // a.jpg: two faces (10, 11). b.jpg: one face (20).
-        for (fid, file) in [(10, 1), (11, 1), (20, 2)] {
-            conn.execute(
-                "INSERT INTO face_prints (id, file_id) VALUES (?1, ?2)",
-                rusqlite::params![fid, file],
-            )
-            .unwrap();
-        }
-        let tmp = std::env::temp_dir().join(format!("fileid-crop-test-{}", std::process::id()));
-        let faces = tmp.join("face_crops");
-        std::fs::create_dir_all(&faces).unwrap();
-        // b.jpg's crop exists; a.jpg is missing crop 11 (killed mid-crop-write).
-        std::fs::write(faces.join("20.jpg"), b"x").unwrap();
-        std::fs::write(faces.join("10.jpg"), b"x").unwrap();
-
-        let mut set = std::collections::HashMap::new();
-        set.insert(path_fingerprint_text("C:\\Lib\\a.jpg"), (1i64, None));
-        set.insert(path_fingerprint_text("C:\\Lib\\b.jpg"), (2i64, None));
-
-        let lo = "C:\\Lib\\";
-        let hi = prefix_upper_bound(lo);
-        let removed =
-            reconcile_missing_face_crops_in(&conn, &mut set, lo, hi.as_deref(), &faces);
-        std::fs::remove_dir_all(&tmp).ok();
-
-        assert_eq!(removed, 1, "only a.jpg (missing a crop) should be reopened");
-        assert!(!set.contains_key(&path_fingerprint_text("C:\\Lib\\a.jpg")), "a.jpg reopened");
-        assert!(set.contains_key(&path_fingerprint_text("C:\\Lib\\b.jpg")), "b.jpg stays skipped");
     }
 
     /// C1-013: the incremental skip-set must NOT skip a file whose
@@ -1626,167 +956,6 @@ mod tests {
         assert!(
             skip.contains("C:\\Local\\notes.bin"),
             "a non-content kind without a content_hash must not be force-rescanned"
-        );
-    }
-
-    /// R-14 (lockstep with macOS `skipSetTextBackfillExclusionSQL`): the BGE-text gate
-    /// must keep a doc/pdf still lacking a `text_embeddings` row OUT of the skip set
-    /// (so an install-then-rescan backfills it), while leaving docs that already have
-    /// one — and non-doc kinds entirely — in the skip set.
-    #[test]
-    fn text_embed_gate_reprocesses_embeddingless_docs_only() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE files (
-                 id              INTEGER PRIMARY KEY,
-                 path_text       TEXT NOT NULL UNIQUE,
-                 kind            TEXT NOT NULL,
-                 modified_at     DOUBLE,
-                 scanned_at      DOUBLE NOT NULL,
-                 failed          INTEGER NOT NULL DEFAULT 0,
-                 content_hash    BLOB,
-                 text_stage_done INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE text_embeddings (
-                 file_id   INTEGER PRIMARY KEY,
-                 embedding BLOB,
-                 model     TEXT
-             );",
-        )
-        .unwrap();
-        // All rows carry a content_hash so the content gate keeps them all — isolating
-        // the text gate's effect. id=5 is a text-less doc whose text stage already ran
-        // (text_stage_done=1) — it must NOT be re-walked (no embeddable text to find).
-        conn.execute(
-            "INSERT INTO files (id, path_text, kind, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
-                 (1, 'C:\\Docs\\no_embed.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
-                 (2, 'C:\\Docs\\embedded.docx',  'doc',   100.0, 200.0, 0, X'00', 0), \
-                 (3, 'C:\\Docs\\no_embed.pdf',   'pdf',   100.0, 200.0, 0, X'00', 0), \
-                 (4, 'C:\\Pics\\photo.jpg',      'image', 100.0, 200.0, 0, X'00', 0), \
-                 (5, 'C:\\Docs\\scanned.pdf',    'pdf',   100.0, 200.0, 0, X'00', 1)",
-            [],
-        )
-        .unwrap();
-        // Only doc id=2 has a stored embedding.
-        conn.execute(
-            "INSERT INTO text_embeddings (file_id, embedding, model) \
-             VALUES (2, X'00', 'bge_small_en_v1_5')",
-            [],
-        )
-        .unwrap();
-
-        // Production no-prefix predicate with BOTH gates appended (BGE installed).
-        let sql = format!(
-            "SELECT path_text FROM files \
-             WHERE failed = 0 \
-             {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_TEXT_EMBED_GATE}"
-        );
-        let mut stmt = conn.prepare(&sql).unwrap();
-        let skip: std::collections::HashSet<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .flatten()
-            .collect();
-
-        assert!(
-            !skip.contains("C:\\Docs\\no_embed.docx"),
-            "an embeddingless doc must be reprocessed so its BGE embedding backfills"
-        );
-        assert!(
-            !skip.contains("C:\\Docs\\no_embed.pdf"),
-            "an embeddingless pdf must be reprocessed too"
-        );
-        assert!(
-            skip.contains("C:\\Docs\\embedded.docx"),
-            "a doc that already has a text_embeddings row stays in the skip set"
-        );
-        assert!(
-            skip.contains("C:\\Pics\\photo.jpg"),
-            "the text gate must not touch non-doc kinds (images use clip_embeddings)"
-        );
-        assert!(
-            skip.contains("C:\\Docs\\scanned.pdf"),
-            "a text-less doc whose text stage already ran (text_stage_done=1) must NOT re-walk forever"
-        );
-    }
-
-    /// R-14 (lockstep with macOS `skipSetModelClipBackfillExclusionSQL`): the model-CLIP
-    /// gate must keep a `.obj` still lacking a `clip_embeddings` row OUT of the skip set
-    /// (so a rescan backfills its rendered-shape vector), while leaving an embedded `.obj`,
-    /// a non-`.obj` 3D format (not renderable), and non-model kinds in the skip set.
-    #[test]
-    fn model_clip_gate_reprocesses_embeddingless_obj_only() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE files (
-                 id              INTEGER PRIMARY KEY,
-                 path_text       TEXT NOT NULL UNIQUE,
-                 kind            TEXT NOT NULL,
-                 extension       TEXT NOT NULL,
-                 modified_at     DOUBLE,
-                 scanned_at      DOUBLE NOT NULL,
-                 failed          INTEGER NOT NULL DEFAULT 0,
-                 content_hash    BLOB,
-                 text_stage_done INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE clip_embeddings (
-                 file_id   INTEGER PRIMARY KEY,
-                 embedding BLOB,
-                 model     TEXT
-             );",
-        )
-        .unwrap();
-        // All rows carry a content_hash so the content gate keeps them — isolating the
-        // model gate's effect. id=5 is an un-renderable .obj whose render already ran
-        // (text_stage_done=1) — it must NOT be re-walked (no CLIP vector to ever produce).
-        conn.execute(
-            "INSERT INTO files (id, path_text, kind, extension, modified_at, scanned_at, failed, content_hash, text_stage_done) VALUES \
-                 (1, 'C:\\M\\no_embed.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
-                 (2, 'C:\\M\\embedded.obj', 'model', 'obj',  100.0, 200.0, 0, X'00', 0), \
-                 (3, 'C:\\M\\shape.stl',    'model', 'stl',  100.0, 200.0, 0, X'00', 0), \
-                 (4, 'C:\\P\\photo.jpg',    'image', 'jpg',  100.0, 200.0, 0, X'00', 0), \
-                 (5, 'C:\\M\\corrupt.obj',  'model', 'obj',  100.0, 200.0, 0, X'00', 1)",
-            [],
-        )
-        .unwrap();
-        // Only obj id=2 has a stored CLIP embedding.
-        conn.execute(
-            "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (2, X'00', 'mobileclip_s2')",
-            [],
-        )
-        .unwrap();
-
-        let sql = format!(
-            "SELECT path_text FROM files \
-             WHERE failed = 0 \
-             {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_MODEL_CLIP_GATE}"
-        );
-        let mut stmt = conn.prepare(&sql).unwrap();
-        let skip: std::collections::HashSet<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
-            .unwrap()
-            .flatten()
-            .collect();
-
-        assert!(
-            !skip.contains("C:\\M\\no_embed.obj"),
-            "an embeddingless .obj must be reprocessed so its rendered-shape CLIP backfills"
-        );
-        assert!(
-            skip.contains("C:\\M\\embedded.obj"),
-            "an .obj that already has a clip_embeddings row stays in the skip set"
-        );
-        assert!(
-            skip.contains("C:\\M\\shape.stl"),
-            "a non-.obj 3D format isn't renderable, so the gate must not re-walk it"
-        );
-        assert!(
-            skip.contains("C:\\P\\photo.jpg"),
-            "the model gate must not touch images"
-        );
-        assert!(
-            skip.contains("C:\\M\\corrupt.obj"),
-            "an un-renderable .obj whose render already ran (text_stage_done=1) must NOT re-walk forever"
         );
     }
 }

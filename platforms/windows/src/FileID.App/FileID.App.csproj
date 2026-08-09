@@ -14,10 +14,6 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
-    <Platforms>x64;ARM64</Platforms>
-    <PlatformTarget Condition="'$(Platform)' == 'ARM64'">ARM64</PlatformTarget>
-    <PlatformTarget Condition="'$(Platform)' != 'ARM64'">x64</PlatformTarget>
-    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <RootNamespace>FileID</RootNamespace>
     <AssemblyName>FileID</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
@@ -30,18 +26,14 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>false</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>
-    <!-- Framework-dependent Windows App SDK mode. `SelfContained` below still
-         bundles .NET 8; `WindowsAppSDKSelfContained=false` keeps WinUI on the
-         separately installed Windows App Runtime 1.7. The release Burn bundle
-         embeds Microsoft's matching 1.7 prerequisite installer. App-SDK
-         self-contained mode (the inverse) bundles Microsoft.UI.Xaml.dll into
-         the publish folder, but on Windows 11
+    <!-- Framework-dependent mode. Self-contained mode (the inverse) bundles
+         the WinAppSDK runtime into the publish folder, but on Windows 11
          build 26200+ the bundled Microsoft.UI.Xaml.dll fast-fails (0xC000027B)
          when an installed framework package of a different patch version is
-         also present. Source-build users can install the prerequisite with
-         `winget install Microsoft.WindowsAppRuntime.1.7`. -->
+         also present. End users get the WinAppSDK runtime via the Microsoft
+         Store auto-install, the WiX bundle (publish-bundle.ps1) chains it as
+         a prerequisite, or `winget install Microsoft.WindowsAppRuntime.1.8`. -->
     <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
-    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <SelfContained>true</SelfContained>
 
     <!-- We provide our own [STAThread] Main in Program.cs so we can run the
@@ -66,20 +58,6 @@
     <AssemblyTitle>FileID</AssemblyTitle>
     <Description>On-device AI file organization for Windows.</Description>
   </PropertyGroup>
-
-  <ItemGroup Condition="'$(FileIDRequireSignedEngine)' == 'true'">
-    <AssemblyMetadata Include="FileIDRequireSignedEngine" Value="true" />
-    <AssemblyMetadata Include="FileIDExpectedSignerSubject" Value="$(FileIDExpectedSignerSubject)" />
-    <AssemblyMetadata Include="FileIDExpectedSignerPublicKeySha256" Value="$(FileIDExpectedSignerPublicKeySha256)" />
-  </ItemGroup>
-
-  <Target Name="ValidateReleaseSigningPolicy" BeforeTargets="CoreCompile"
-          Condition="'$(FileIDRequireSignedEngine)' == 'true'">
-    <Error Condition="'$(FileIDExpectedSignerSubject)' == ''"
-           Text="Signed release builds must set FileIDExpectedSignerSubject so the app can reject a replaced engine." />
-    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch($(FileIDExpectedSignerPublicKeySha256), '^[0-9A-Fa-f]{64}$'))"
-           Text="Signed release builds must set FileIDExpectedSignerPublicKeySha256 to the approved signer key identity." />
-  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />

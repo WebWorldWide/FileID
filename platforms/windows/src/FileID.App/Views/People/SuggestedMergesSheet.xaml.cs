@@ -1,4 +1,4 @@
-﻿// SuggestedMergesSheet code-behind. Binds EngineClient's
+// SuggestedMergesSheet code-behind. Binds EngineClient's
 // LastMergeSuggestions to an ItemsRepeater via a DataTemplate over
 // MergeSuggestionVm (see PeopleViewModel). Each row shows side-by-side anchor
 // face JPEGs + similarity % + action buttons. Merge fires mergeClusters IPC;
@@ -35,35 +35,30 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // don't reliably fire Loaded; the WelcomeSheet hit the same wall.
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += OnUnloaded;
+        Loaded += async (_, _) =>
+        {
+            // Trigger a fresh suggestion fetch whenever the sheet opens, and
+            // bound-wait the engine's reply so the sheet doesn't sit forever on
+            // the placeholder when clustering is still running. On success the
+            // MergeSuggestionsEvent already drives Render() via the
+            // LastMergeSuggestions PropertyChanged subscription — nothing extra
+            // to do here.
+            HeaderText.Text = "Looking for similar clusters…";
+            try
+            {
+                await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (TimeoutException)
+            {
+                HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
+                HeaderText.Text = "Couldn't fetch suggestions — see logs.";
+            }
+        };
     }
-
-    public async Task InitializeAsync()
-        => await Services.DebugLog.SafeRunAsync("SuggestedMergesSheet.InitializeAsync", async () =>
-    {
-        if (_unloaded) return;
-        if (EngineClient.Instance.LastMergeSuggestions is not null)
-        {
-            Render();
-        }
-        HeaderText.Text = "Looking for similar clusters…";
-        SetBusy(true, "Comparing face clusters…");
-        try
-        {
-            await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
-            SetBusy(false);
-            Render();
-        }
-        catch (TimeoutException)
-        {
-            SetBusy(false);
-            HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
-        }
-        catch (Exception ex)
-        {
-            SetBusy(false);
-            Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
-        }
-    });
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
@@ -82,30 +77,14 @@ public sealed partial class SuggestedMergesSheet : UserControl
             DispatcherQueue.TryEnqueue(Render);
         });
 
-    /// Show/hide the indeterminate busy state. The ring's IsActive is toggled
-    /// (not just its Visibility) so a hidden ring stops animating instead of
-    /// burning composition work behind the list.
-    private void SetBusy(bool busy, string? message = null)
-    {
-        if (_unloaded) return;
-        BusyRing.IsActive = busy;
-        BusyPanel.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        PairScroller.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
-        if (message is not null) BusyText.Text = message;
-    }
-
     private void Render()
     {
         if (_unloaded) return;
         var sug = EngineClient.Instance.LastMergeSuggestions;
-        // A null result means the reply hasn't landed yet — stay in the busy
-        // state rather than flashing "No merge-review candidates found." over the ring.
-        if (sug is null) return;
-        SetBusy(false);
         _rows.Clear();
-        if (sug.Pairs.Count == 0)
+        if (sug is null || sug.Pairs.Count == 0)
         {
-            HeaderText.Text = "No merge-review candidates found. (Try after a fresh scan + re-cluster.)";
+            HeaderText.Text = "No likely merges found. (Try after a fresh scan + re-cluster.)";
             return;
         }
         HeaderText.Text = $"{sug.Pairs.Count} candidate pair{(sug.Pairs.Count == 1 ? "" : "s")} — review each.";
@@ -116,16 +95,12 @@ public sealed partial class SuggestedMergesSheet : UserControl
     }
 
     private async void OnMergeClicked(object sender, RoutedEventArgs e)
-        => await Services.DebugLog.SafeRunAsync(nameof(OnMergeClicked), async () =>
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
         if (vm.IsResolved || vm.IsBusy) return;
         vm.IsBusy = true;
         try
         {
-            // Snapshot the source's face ids for revertMerge before they move
-            // (session change log undo; the merge reply doesn't carry them).
-            var movedFaceIds = await PeopleView.ReadFaceIdsForPersonAsync(vm.SourcePersonId);
             // Await the engine's bulkActionResult BEFORE dimming the row.
             // Previously the row was marked resolved on a fire-and-forget
             // send, so an engine-side merge failure left the pair greyed-out
@@ -139,15 +114,18 @@ public sealed partial class SuggestedMergesSheet : UserControl
                 StatusText.Text = $"Merge failed: {FirstFailureMessage(r) ?? "the engine did not confirm the merge."}";
                 return;
             }
-            PeopleView.PushMergeUndo(vm.SourcePersonId, vm.DestinationPersonId, movedFaceIds,
-                $"merge people #{vm.SourcePersonId} into #{vm.DestinationPersonId}");
             vm.IsResolved = true;
-            // Both endpoint memberships and the destination centroid changed.
-            // Require a fresh engine result before either endpoint is reviewed again.
+            // The merged-away source person no longer exists; resolve any other
+            // visible pair that references it so the user can't act on a
+            // now-dangling person (which would be a no-op merge).
             foreach (var other in _rows)
             {
                 if (other.SourcePersonId == vm.SourcePersonId
                     || other.DestinationPersonId == vm.SourcePersonId
+                    // The destination cluster's membership changed (it absorbed
+                    // the source's faces), so any other suggestion involving
+                    // the destination is now stale — its similarity score and
+                    // face anchors are invalidated by the merge.
                     || other.SourcePersonId == vm.DestinationPersonId
                     || other.DestinationPersonId == vm.DestinationPersonId)
                 {
@@ -164,7 +142,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             vm.IsBusy = false;
         }
-    });
+    }
 
     private static string? FirstFailureMessage(FileID.IpcSchema.BulkActionResult r)
     {
@@ -179,7 +157,6 @@ public sealed partial class SuggestedMergesSheet : UserControl
     }
 
     private async void OnDifferentClicked(object sender, RoutedEventArgs e)
-        => await Services.DebugLog.SafeRunAsync(nameof(OnDifferentClicked), async () =>
     {
         if ((sender as FrameworkElement)?.DataContext is not MergeSuggestionVm vm) return;
         if (vm.IsResolved || vm.IsBusy) return;
@@ -192,7 +169,7 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             vm.IsBusy = false;
         }
-    });
+    }
 
     private async Task MarkDifferentAsync(MergeSuggestionVm vm)
     {
@@ -202,19 +179,11 @@ public sealed partial class SuggestedMergesSheet : UserControl
         // suppressing the pair across re-clustering.
         try
         {
-            var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                "markPersonsDifferent",
-                () => EngineClient.Instance.MarkPersonsDifferentAsync(
-                    vm.SourcePersonId,
-                    vm.DestinationPersonId,
-                    vm.SourceAnchorFaceId,
-                    vm.DestinationAnchorFaceId),
-                TimeSpan.FromSeconds(30));
-            if (r.Failed > 0 || r.Succeeded == 0)
-            {
-                StatusText.Text = $"Couldn't save: {FirstFailureMessage(r) ?? "the engine did not confirm the verdict."}";
-                return;
-            }
+            await EngineClient.Instance.MarkPersonsDifferentAsync(
+                vm.SourcePersonId,
+                vm.DestinationPersonId,
+                vm.SourceAnchorFaceId,
+                vm.DestinationAnchorFaceId);
             vm.IsResolved = true;
             StatusText.Text = $"Marked #{vm.SourcePersonId} ↔ #{vm.DestinationPersonId} as different people.";
         }

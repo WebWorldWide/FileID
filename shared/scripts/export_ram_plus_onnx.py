@@ -42,7 +42,7 @@ USAGE:
       --out-dir ./ram_plus_onnx \
       --sample-image some_photo.jpg
 
-OUTPUT (place these where ram_plus.rs looks, i.e. %LOCALAPPDATA%\\FileID\\Models\\ram_plus\\):
+OUTPUT (place these where ram_plus.rs looks, i.e. %LOCALAPPDATA%\FileID\Models\ram_plus\):
   ram_plus.onnx
   ram_plus_tags.txt
 """

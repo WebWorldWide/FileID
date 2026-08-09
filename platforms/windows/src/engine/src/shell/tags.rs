@@ -247,24 +247,11 @@ mod tests {
     use super::*;
 
     fn temp_file_with_name(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fileid-tags-test-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::env::temp_dir().join("fileid-tags-test");
+        let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(name);
         std::fs::write(&path, b"hello").unwrap();
         path
-    }
-
-    fn cleanup_temp_file(path: &Path) {
-        let _ = write_tags(path, &[]);
-        let _ = std::fs::remove_file(sidecar_path(path));
-        let _ = std::fs::remove_file(path);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::remove_dir(parent);
-        }
     }
 
     #[test]
@@ -277,7 +264,9 @@ mod tests {
         // produce the original two tags.
         assert!(read.contains(&"holiday".to_string()));
         assert!(read.contains(&"2024".to_string()));
-        cleanup_temp_file(&f);
+        // Cleanup.
+        let _ = std::fs::remove_file(sidecar_path(&f));
+        let _ = write_tags(&f, &[]);
     }
 
     #[test]
@@ -287,7 +276,6 @@ mod tests {
         assert!(sidecar_path(&f).exists());
         write_tags(&f, &[]).unwrap();
         assert!(!sidecar_path(&f).exists());
-        cleanup_temp_file(&f);
     }
 
     #[test]
@@ -296,7 +284,6 @@ mod tests {
         let _ = std::fs::remove_file(sidecar_path(&f));
         let _ = write_tags(&f, &[]);
         assert!(read_tags(&f).unwrap().is_empty());
-        cleanup_temp_file(&f);
     }
 
     #[test]
@@ -309,6 +296,6 @@ mod tests {
             .filter(|t| t.eq_ignore_ascii_case("holiday"))
             .count();
         assert_eq!(occurrences, 1);
-        cleanup_temp_file(&f);
+        let _ = write_tags(&f, &[]);
     }
 }

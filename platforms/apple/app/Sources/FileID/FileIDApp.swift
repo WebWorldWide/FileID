@@ -86,6 +86,10 @@ struct FileIDApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Held for the app lifetime to keep AppNap from suspending the UI
+    /// process during long scans / Deep Analyze runs.
+    private var activityToken: NSObjectProtocol?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         if let window = NSApplication.shared.windows.first {
@@ -93,6 +97,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.backgroundColor = .clear
             window.appearance = NSAppearance(named: .darkAqua)
             window.styleMask.insert(.fullSizeContentView)
+        }
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled, .latencyCritical],
+            reason: "FileID is processing files"
+        )
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            activityToken = nil
         }
     }
 }

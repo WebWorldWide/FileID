@@ -1,7 +1,7 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
     SuggestedMergesSheet — modal listing pairs of clusters whose anchor
-    faces fall in the uncertain similarity band (0.55..<0.97). Engine-side
+    faces fall in the uncertain similarity band (0.45..0.70). Engine-side
     `findMergeSuggestions` IPC computes the pairs; we render side-by-side
     anchor faces + similarity %, with Merge / Different-people / Skip
     buttons per pair.
@@ -35,33 +35,7 @@
                        Text="Pairs of clusters that look similar. Confirm a merge if they're the same person, or mark them different so we don't ask again." />
         </StackPanel>
 
-        <!-- Busy state. findMergeSuggestions emits only a terminal event (no
-             per-step progress), so this is deliberately an INDETERMINATE ring
-             rather than a percentage bar we'd have to invent. On a library with
-             thousands of clusters the search takes real time, and without this
-             the sheet showed a static line of text and read as frozen. -->
-        <StackPanel x:Name="BusyPanel"
-                    Grid.Row="1"
-                    Visibility="Collapsed"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
-                    Spacing="12">
-            <ProgressRing x:Name="BusyRing"
-                          IsActive="False"
-                          Width="44" Height="44"
-                          Foreground="{ThemeResource GoldBrush}" />
-            <TextBlock x:Name="BusyText"
-                       HorizontalAlignment="Center"
-                       TextAlignment="Center"
-                       TextWrapping="Wrap"
-                       MaxWidth="360"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       Text="Comparing face clusters…" />
-        </StackPanel>
-
-        <ScrollViewer x:Name="PairScroller"
-                      Grid.Row="1"
+        <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollMode="Disabled">
             <ItemsRepeater x:Name="PairRepeater"
@@ -71,49 +45,56 @@
                 </ItemsRepeater.Layout>
                 <ItemsRepeater.ItemTemplate>
                     <DataTemplate x:DataType="vm:MergeSuggestionVm">
-                        <Grid Padding="12,10,12,10"
-                              CornerRadius="10"
-                              Background="#33141414"
+                        <Grid Padding="14,12,14,12"
+                              CornerRadius="12"
+                              Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                              BorderThickness="1"
                               AutomationProperties.Name="{x:Bind Title}"
                               Opacity="{x:Bind RowOpacity, Mode=OneWay}">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
 
-                            <Border Grid.Column="0"
-                                    Width="80" Height="80" CornerRadius="80"
-                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}">
-                                <Image Source="{x:Bind SourceFaceImage, Mode=OneTime}"
-                                       Stretch="UniformToFill" Width="80" Height="80" />
-                            </Border>
-                            <Border Grid.Column="1"
-                                    Width="80" Height="80" CornerRadius="80" Margin="6,0,0,0"
-                                    Background="{ThemeResource SubtleFillColorTertiaryBrush}">
-                                <Image Source="{x:Bind DestFaceImage, Mode=OneTime}"
-                                       Stretch="UniformToFill" Width="80" Height="80" />
-                            </Border>
-
-                            <StackPanel Grid.Column="2"
-                                        Margin="14,0,14,0"
-                                        VerticalAlignment="Center">
-                                <TextBlock Text="{x:Bind Title}"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind SimilarityText}"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Border Width="72" Height="72" CornerRadius="72"
+                                        Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                    <Image Source="{x:Bind SourceFaceImage, Mode=OneTime}"
+                                           Stretch="UniformToFill" Width="72" Height="72" />
+                                </Border>
+                                <FontIcon Glyph="&#xE8D4;" FontSize="14" Foreground="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center" Margin="2,0,2,0" />
+                                <Border Width="72" Height="72" CornerRadius="72"
+                                        Background="{ThemeResource SubtleFillColorTertiaryBrush}"
+                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+                                    <Image Source="{x:Bind DestFaceImage, Mode=OneTime}"
+                                           Stretch="UniformToFill" Width="72" Height="72" />
+                                </Border>
                             </StackPanel>
 
-                            <Button Grid.Column="3"
+                            <StackPanel Grid.Column="1"
+                                        Margin="16,0,16,0"
+                                        VerticalAlignment="Center">
+                                <TextBlock Text="{x:Bind Title}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{x:Bind SimilarityText}"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                           Margin="0,2,0,0" />
+                            </StackPanel>
+
+                            <Button Grid.Column="2"
                                     Content="Different people"
                                     Margin="0,0,8,0"
                                     IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
                                     AutomationProperties.HelpText="Mark this pair as different people so it isn't suggested again."
                                     Click="OnDifferentClicked" />
-                            <Button Grid.Column="4"
+                            <Button Grid.Column="3"
                                     Content="Merge"
                                     Style="{StaticResource AccentButtonStyle}"
                                     IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"

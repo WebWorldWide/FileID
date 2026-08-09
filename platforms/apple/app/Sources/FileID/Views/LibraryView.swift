@@ -45,21 +45,14 @@ struct LibraryView: View {
     private var kindFilter: String? {
         get { kindFilterRaw.isEmpty ? nil : kindFilterRaw }
     }
+    @State private var lastSeenVersion: Int = -1
     @State private var lastSeenBatchIndex: Int = -1
     @State private var lastReloadAt: Date = .distantPast
-    /// Drives the preview sheet: which file is shown is keyed on its id
-    /// (not a raw `FileRow`) so navigation mutates the displayed file in
-    /// place — the sheet keeps identity instead of dismissing+re-presenting.
-    @State private var previewSelectedID: Int64? = nil
+    @State private var selected: FileRow?
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
-    @State private var previewSiblingIDs: [Int64] = []
-    @State private var previewInitialFile: FileRow? = nil
-    /// In-flight full-library ID upgrade for the open preview. Cancelled
-    /// before each new `openPreview` and on dismiss so rapid open/close or
-    /// fast photo-switching can't pile up concurrent full-library queries.
-    @State private var previewSiblingTask: Task<Void, Never>? = nil
+    @State private var previewSiblings: [FileRow] = []
     @State private var bulkRenameSheetOpen: Bool = false
     @State private var lastBatchAvailable: Bool = false
     @State private var lastTagBatchAvailable: Bool = false
@@ -143,7 +136,7 @@ struct LibraryView: View {
                 lastSeenBatchIndex = new
                 guard Date().timeIntervalSince(lastReloadAt) >= 1.0 else { return }
                 lastReloadAt = Date()
-                store.notifyChanged(includeDuplicateMetrics: false)
+                store.notifyChanged()
                 reload()
                 refreshBulkState()
             }
@@ -306,9 +299,7 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text(p.total > 0
-                     ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
-                     : "\(p.processed) processed  ·  \(p.discovered) found")
+                Text("\(p.processed) / \(p.total)  ·  \(p.discovered) found")
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -622,7 +613,7 @@ struct LibraryView: View {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                    withAnimation(.easeInOut(duration: 0.15)) {
                         kindFilterRaw = k.value ?? ""
                     }
                 } label: {
@@ -658,7 +649,8 @@ struct LibraryView: View {
                                     checkedFiles[row.id] = row
                                 }
                             } else {
-                                openPreview(row)
+                                previewSiblings = rows
+                                selected = row
                             }
                         }
                         .contextMenu {
@@ -675,7 +667,7 @@ struct LibraryView: View {
                         }
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Radius.m)
-                                .stroke(previewSelectedID == row.id && !selectMode
+                                .stroke(selected?.id == row.id && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
                         )
@@ -693,26 +685,10 @@ struct LibraryView: View {
             // allocates a new array per render and adds up at 1000+ tiles.
             .animation(.easeOut(duration: 0.30), value: rows.count)
         }
-        // One stable sheet. `isPresented` stays true across navigation so the
-        // sheet keeps identity; the displayed file is driven by selectedID.
-        .sheet(isPresented: Binding(
-            get: { previewSelectedID != nil },
-            set: {
-                if !$0 {
-                    previewSelectedID = nil
-                    previewSiblingTask?.cancel()
-                    previewSiblingTask = nil
-                }
-            }
-        )) {
-            if let previewInitialFile {
-                FilePreviewSheet(siblingIDs: previewSiblingIDs,
-                                 initialFile: previewInitialFile,
-                                 selectedID: $previewSelectedID,
-                                 store: store, engine: engine,
-                                 refreshToken: tileRefreshToken,
-                                 onEdit: { editEpoch += 1 })
-            }
+        .sheet(item: $selected) { file in
+            FilePreviewSheet(file: file, store: store, engine: engine,
+                              siblings: previewSiblings, onSelect: { selected = $0 },
+                              onEdit: { editEpoch += 1 })
         }
     }
 
@@ -734,30 +710,6 @@ struct LibraryView: View {
     }
 
     // MARK: - Data
-
-    /// Open the full-screen preview for `row`. Opens immediately on the on-screen rows,
-    /// then upgrades the prev/next nav context to the FULL library so arrow-nav isn't
-    /// capped at the 200-tile grid window (and the frozen list won't churn with the
-    /// live-scan `scanned_at` reorder). A search / find-similar result keeps its own set
-    /// so arrows stay within those matches.
-    private func openPreview(_ row: FileRow) {
-        previewSiblingIDs = rows.map(\.id)
-        previewInitialFile = row
-        previewSelectedID = row.id
-        guard searchText.trimmingCharacters(in: .whitespaces).isEmpty, similarSeed == nil else { return }
-        let kf = kindFilter
-        previewSiblingTask?.cancel()
-        previewSiblingTask = Task { @MainActor in
-            let full = await store.fileIDsAsync(kindFilter: kf)
-            guard !Task.isCancelled else { return }
-            // Upgrade the nav context by id — the user may have arrowed to a
-            // different photo while this loaded; keep the upgrade as long as the
-            // current selection is still represented in the full set.
-            guard let id = previewSelectedID, !full.isEmpty,
-                  full.contains(id) else { return }
-            previewSiblingIDs = full
-        }
-    }
 
     private func reload() {
         // Off the MainActor: similarity + semantic search cosine-scan the full
@@ -916,10 +868,14 @@ struct FileTile: View {
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // Vision tag chips — at-a-glance content cues. Reserved 18pt height
-            // eliminates vertical grid popping when tags land asynchronously.
-            HStack(spacing: 3) {
-                if !topTags.isEmpty {
+            // Vision tag chips — at-a-glance content cues. Informational,
+            // not actionable, so they use a neutral secondary tint
+            // (gold is reserved for primary actions + the Smart name
+            // result). Up to 2 highest-confidence labels.
+            // Uses .caption2 (semantic, scales with Dynamic Type) instead
+            // of fixed .system(size: 9) for accessibility.
+            if !topTags.isEmpty {
+                HStack(spacing: 3) {
                     ForEach(topTags.prefix(2), id: \.self) { tag in
                         Text(Self.formatTag(tag))
                             .font(.caption2.weight(.medium))
@@ -931,10 +887,9 @@ struct FileTile: View {
                             )
                             .lineLimit(1)
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
             }
-            .frame(height: 18)
             HStack(spacing: 4) {
                 Text(formatBytes(row.sizeBytes))
                     .font(.system(size: 9, design: .monospaced))
@@ -1096,66 +1051,29 @@ struct FileTile: View {
 //
 // Full-bleed preview + metadata panel + tags. Reveal-in-Finder.
 private struct FilePreviewSheet: View {
-    let siblingIDs: [Int64]
-    @Binding var selectedID: Int64?
+    let file: FileRow
     let store: ReadStore
     let engine: EngineClient
-    let refreshToken: String
+    let siblings: [FileRow]              // for prev/next arrow nav
+    let onSelect: (FileRow) -> Void
     /// Bump the parent's edit epoch so a Finder-tag edit / smart-name apply
     /// made in this sheet refreshes the underlying grid tile even mid-scan.
     var onEdit: () -> Void = {}
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
-    @State private var tags: [String] = []
-    @State private var file: FileRow?
-    /// Holds key focus so the arrow-key handlers fire; the tag field's
-    /// focus is tracked separately to suppress nav while the user types.
-    @FocusState private var keyFocus: Bool
-    @FocusState private var tagFieldFocused: Bool
 
-    /// Displayed file + its position, derived from selectedID so navigation
-    /// mutates the shown file in place without swapping the sheet's identity.
-    init(siblingIDs: [Int64], initialFile: FileRow,
-         selectedID: Binding<Int64?>, store: ReadStore, engine: EngineClient,
-         refreshToken: String, onEdit: @escaping () -> Void = {}) {
-        self.siblingIDs = siblingIDs
-        self._selectedID = selectedID
-        self.store = store
-        self.engine = engine
-        self.refreshToken = refreshToken
-        self.onEdit = onEdit
-        self._file = State(initialValue: initialFile)
+    private var siblingIndex: Int? {
+        siblings.firstIndex(where: { $0.id == file.id })
     }
-
-    private var siblingIndex: Int? { siblingIDs.firstIndex { $0 == selectedID } }
 
     private func step(_ delta: Int) {
         guard let idx = siblingIndex else { return }
-        let t = idx + delta
-        guard siblingIDs.indices.contains(t) else { return }
-        selectedID = siblingIDs[t]
+        let target = idx + delta
+        guard siblings.indices.contains(target) else { return }
+        onSelect(siblings[target])
     }
 
     var body: some View {
-        Group {
-            if let file {
-                content(for: file)
-            } else {
-                Color.clear.onAppear { dismiss() }
-            }
-        }
-        .task(id: "\(selectedID ?? -1)·\(refreshToken)") {
-            guard let selectedID else { return }
-            let loaded = await Task.detached(priority: .userInitiated) { [store] in
-                store.files(forFileIDs: [selectedID]).first
-            }.value
-            guard !Task.isCancelled else { return }
-            file = loaded
-        }
-    }
-
-    @ViewBuilder
-    private func content(for file: FileRow) -> some View {
         VStack(spacing: 0) {
             // Toolbar.
             HStack(spacing: 12) {
@@ -1169,9 +1087,8 @@ private struct FilePreviewSheet: View {
                         .lineLimit(1).truncationMode(.head)
                 }
                 Spacer()
-                if siblingIDs.count > 1 {
-                    let idx = siblingIndex ?? 0
-                    Text("\(idx + 1) of \(siblingIDs.count)")
+                if let idx = siblingIndex {
+                    Text("\(idx + 1) of \(siblings.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     HStack(spacing: 4) {
@@ -1179,13 +1096,15 @@ private struct FilePreviewSheet: View {
                             Image(systemName: "chevron.left")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(idx <= 0)
+                        .keyboardShortcut(.leftArrow, modifiers: [])
+                        .disabled(idx == 0)
                         .help("Previous file")
                         Button { step(1) } label: {
                             Image(systemName: "chevron.right")
                         }
                         .buttonStyle(.bordered)
-                        .disabled(idx >= siblingIDs.count - 1)
+                        .keyboardShortcut(.rightArrow, modifiers: [])
+                        .disabled(idx == siblings.count - 1)
                         .help("Next file")
                     }
                 }
@@ -1343,6 +1262,7 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
+                        let tags = store.tags(forFileID: file.id)
                         if !tags.isEmpty {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
@@ -1355,8 +1275,7 @@ private struct FilePreviewSheet: View {
                                 }
                             }
                         }
-                        FinderTagsEditor(file: file, store: store,
-                                         isFocused: $tagFieldFocused, onEdit: onEdit)
+                        FinderTagsEditor(file: file, store: store, onEdit: onEdit)
                     }
                     .padding(16)
                 }
@@ -1368,45 +1287,23 @@ private struct FilePreviewSheet: View {
         .preferredColorScheme(.dark)
         .focusable()
         .focusEffectDisabled()
-        .focused($keyFocus)
-        // Grab key focus when the sheet appears so the arrow handlers fire
-        // without a click; reclaim it whenever the tag field gives focus up.
-        // The brief defer lets the sheet enter the responder hierarchy first —
-        // setting focus synchronously in .task doesn't reliably stick on a
-        // freshly presented sheet.
-        .task {
-            try? await Task.sleep(for: .milliseconds(50))
-            keyFocus = true
-        }
-        .onChange(of: tagFieldFocused) { _, focused in
-            if !focused { keyFocus = true }
-        }
-        // Sheet-level key handler — beats Button.keyboardShortcut for arrows
-        // because focus lives on the sheet, not the nav buttons. Suppressed
-        // while the tag field is focused so typing doesn't navigate.
+        // Sheet-level key handler — beats Button.keyboardShortcut for
+        // arrows because text fields inside the sheet (tag editor) can
+        // steal focus from the buttons. .onKeyPress runs whenever the
+        // sheet's focus subtree handles a key.
         .onKeyPress(.leftArrow) {
-            if tagFieldFocused { return .ignored }
             step(-1); return .handled
         }
         .onKeyPress(.rightArrow) {
-            if tagFieldFocused { return .ignored }
             step(1); return .handled
         }
-        .task(id: "\(file.id):\(file.vlmAnalyzedAt?.timeIntervalSince1970 ?? 0)") {
+        .task(id: file.id) {
             // Generate a larger preview for the sheet (640px). Keyed on
-            // file id and analysis timestamp so it re-fires on sibling navigation
-            // and after Deep Analyze updates the current row. Clear first so the
-            // spinner shows and the prior preview never bleeds into the new state.
+            // file.id so it re-fires on sibling arrow nav — the sheet keeps
+            // identity across `.sheet(item:)` value changes, so a plain .task
+            // would load only the first file. Clear first so the spinner shows
+            // and the prior file's poster never bleeds into the new image.
             preview = nil
-            tags = []
-            // Read DB tags off the main actor (detached read doesn't inherit
-            // `.task` cancellation; drop it once `.task(id:)` superseded us — R7).
-            let fileID = file.id
-            let loadedTags = await Task.detached { [store] in
-                store.tags(forFileID: fileID)
-            }.value
-            guard !Task.isCancelled else { return }
-            tags = loadedTags
             let image = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
@@ -1437,9 +1334,6 @@ private struct FilePreviewSheet: View {
 private struct FinderTagsEditor: View {
     let file: FileRow
     let store: ReadStore
-    /// Bound to the preview sheet's tag-field focus so it can suppress
-    /// arrow-key navigation while the user is typing a tag.
-    var isFocused: FocusState<Bool>.Binding
     /// Notify the parent grid that this file's tags changed so its tile
     /// re-reads the Finder-tag dots — needed for refresh during a live scan.
     var onEdit: () -> Void = {}
@@ -1450,10 +1344,6 @@ private struct FinderTagsEditor: View {
     // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
     // concurrently (one would clobber the other). Each edit awaits the previous.
     @State private var tagEditChain: Task<Void, Never>?
-    // The file currently displayed. `file` is a by-value `let` captured stale in
-    // the edit closure; this @State reads live, so a write that finishes after the
-    // user arrowed to another file knows not to apply its result to that file.
-    @State private var displayedFileID: Int64?
 
     var body: some View {
         GlassCard {
@@ -1479,15 +1369,14 @@ private struct FinderTagsEditor: View {
                     }
                 }
                 HStack(spacing: 6) {
-                    TextField("Add tag…", text: $draft)
+                    TextField("Add tag…", text: $draft, onCommit: addDraft)
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
-                        .focused(isFocused)
-                    Button("Apply tag", systemImage: "checkmark", action: addDraft)
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.gold)
-                        .foregroundStyle(.black)
-                        .keyboardShortcut(.defaultAction)
+                    Button(action: addDraft) {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(Theme.gold)
+                    }
+                    .buttonStyle(.plain)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if let e = error {
@@ -1496,9 +1385,6 @@ private struct FinderTagsEditor: View {
             }
         }
         .task(id: file.id) {
-            // Record the now-displayed file so a still-in-flight tag write for the
-            // prior file can detect that the user navigated away (see runTagEdit).
-            displayedFileID = file.id
             // Read xattr off the main thread — for files on slow / network
             // volumes the read can stall the preview sheet for hundreds of
             // milliseconds while the user is trying to scrub through.
@@ -1534,25 +1420,17 @@ private struct FinderTagsEditor: View {
     /// task, then assigns on the main actor.
     private func runTagEdit(_ write: @escaping @Sendable (URL) throws -> [String]) {
         let url = file.url
-        let targetID = file.id
         let previous = tagEditChain
         tagEditChain = Task { @MainActor in
             _ = await previous?.value   // serialize: the prior edit's write has landed
             do {
                 let updated = try await Task.detached { try write(url) }.value
-                // The write (to `url`) always persists; only apply the result to the
-                // editor's @State if it's still showing the file we edited — else the
-                // user navigated away and this would clobber the new file's tags.
-                if displayedFileID == targetID {
-                    tags = updated
-                    error = nil
-                }
+                tags = updated
+                error = nil
                 store.notifyChanged()   // refresh Library tile tag-count
                 onEdit()
             } catch {
-                if displayedFileID == targetID {
-                    self.error = error.localizedDescription
-                }
+                self.error = error.localizedDescription
             }
         }
     }

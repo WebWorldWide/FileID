@@ -17,17 +17,14 @@ public struct IPCCommand: Codable, Sendable {
 
     public enum Payload: Codable, Sendable {
         /// Absolute filesystem `rootPath`, an optional human-readable
-        /// `rootDisplay` (defaults to `rootPath` when nil), `rescan` (force
-        /// every file through the pipeline), and optional `excludedPaths`
-        /// (folders to prune from the walk). Mirrors the schema's StartScan
-        /// shape byte-for-byte — the app resolves the security-scoped bookmark
-        /// to a path before sending.
-        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
+        /// `rootDisplay` (defaults to `rootPath` when nil), and `rescan`
+        /// (force every file to be reprocessed even when already current).
+        /// Mirrors the schema's StartScan shape byte-for-byte — the app
+        /// resolves the security-scoped bookmark to a path before sending.
+        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool)
         case pauseScan
         case resumeScan
         case cancelScan
-        case cancelRestructure
-        case healthCheck(requestID: String)
         case requestStatus
         case shutdown
         case runFaceClustering
@@ -42,17 +39,8 @@ public struct IPCCommand: Codable, Sendable {
         /// still decodes on macOS (Swift's enum Codable synthesis uses
         /// `decodeIfPresent` for optional associated values). Consumers apply
         /// the documented defaults: `tagsOnly ?? false`, `proposeRenames ?? true`.
-        /// `fileIDs` optionally scopes the persistent batch to one bounded
-        /// selection; nil retains whole-library behavior.
-        /// `excludedFolders` skips these absolute folder paths during a
-        /// whole-library run (path-segment-boundary matching, e.g. excluding
-        /// "/Photos" does not exclude "/PhotosBackup"); IGNORED when
-        /// `fileIDs` is present — an explicit selection is a deliberate
-        /// per-file action and is never silently filtered. Optional; nil/empty
-        /// means no folder exclusions.
-        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
-        /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
-        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
+        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.)
+        case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?)
         case deepAnalyzeCancel
         /// Pre-fetch a VLM's weights into the swift-transformers HF
         /// cache without running inference. Used by the welcome-sheet
@@ -70,24 +58,22 @@ public struct IPCCommand: Codable, Sendable {
         // ── Windows-originated commands ───────────────────────────
         // These land on mac only when the schema needs to round-trip
         // them (cross-platform tooling, shared test corpus). The mac
-        // engine implements the subset with equivalent engine-side semantics
-        // and returns structured "not_implemented_yet" errors for UI-owned
-        // flows that remain app-side on macOS.
-        case planRestructure(libraryRoot: String, supportsPagedPlans: Bool?)
-        case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool, planID: String?)
+        // engine dispatcher returns a structured "not_implemented_yet"
+        // error for each; equivalent flows on macOS go through their
+        // pre-existing per-tab actions.
+        case planRestructure(libraryRoot: String)
+        case applyRestructure(libraryRoot: String, moves: [RestructureMove], useSymlinks: Bool)
         /// Reverse the most recent applyRestructure: move every file the last run
         /// relocated back to its original location (the engine replays its on-disk
         /// undo journal). Reply lands on `restructureApplyResult`, where `applied`
         /// is the count of files moved back. (RESTRUCTURE.md §6 reversibility)
-        case undoRestructure(libraryRoot: String, shortcutUndoToken: String? = nil)
+        case undoRestructure(libraryRoot: String)
         case applyTags(fileIDs: [Int64], tags: [String], mode: String)
         case renameFiles(renames: [RenameEntry])
-        case purgeExcluded(excludedPaths: [String])
-        case trashFiles(fileIDs: [Int64], exactIdentities: [ExactTrashIdentity]?)
+        case trashFiles(fileIDs: [Int64])
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
-        case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
         case markPersonsAsUnknown(personIDs: [Int64])
         case findMergeSuggestions
         case embedImageQuery(fileID: Int64, queryID: String)
@@ -101,8 +87,8 @@ public struct IPCCommand: Codable, Sendable {
         case revertMerge(sourcePersonID: Int64, destinationPersonID: Int64, faceIDsToRevert: [Int64])
         /// Record a user "different people" verdict for a suggested pair so
         /// findMergeSuggestions stops re-suggesting it. Keyed on stable
-        /// anchor face ids so it survives re-clustering. Both native engines
-        /// persist it through their single-writer connection.
+        /// anchor face ids so it survives re-clustering. Windows-originated;
+        /// the mac engine returns the structured not-implemented pointer.
         case markPersonsDifferent(sourcePersonID: Int64, destinationPersonID: Int64, sourceAnchorFaceID: Int64, destinationAnchorFaceID: Int64)
         /// Truncate all learned library state (tags, faces, captions,
         /// embeddings) in-process on the engine's writer connection — no file
@@ -166,27 +152,6 @@ public struct RenameEntry: Codable, Sendable {
     }
 }
 
-public struct ExactTrashIdentity: Codable, Sendable {
-    public let fileID: Int64
-    public let path: String
-    public let sizeBytes: Int64
-    public let sha256Hex: String
-    public let keeperPath: String
-    public let keeperSizeBytes: Int64
-    public let keeperSha256Hex: String
-
-    public init(fileID: Int64, path: String, sizeBytes: Int64, sha256Hex: String,
-                keeperPath: String, keeperSizeBytes: Int64, keeperSha256Hex: String) {
-        self.fileID = fileID
-        self.path = path
-        self.sizeBytes = sizeBytes
-        self.sha256Hex = sha256Hex
-        self.keeperPath = keeperPath
-        self.keeperSizeBytes = keeperSizeBytes
-        self.keeperSha256Hex = keeperSha256Hex
-    }
-}
-
 public struct IPCEvent: Codable, Sendable {
     public let t: Date
     public let payload: Payload
@@ -198,7 +163,6 @@ public struct IPCEvent: Codable, Sendable {
 
     public enum Payload: Codable, Sendable {
         case ready(EngineInfo)
-        case healthCheckResult(HealthCheckResult)
         case progress(ScanProgress)
         case phaseChanged(ScanPhase)
         case discoveryComplete(totalFiles: Int)
@@ -230,16 +194,6 @@ public struct IPCEvent: Codable, Sendable {
 }
 
 // MARK: - DTOs
-
-public struct HealthCheckResult: Codable, Sendable {
-    public let requestID: String
-    public let pid: Int32
-
-    public init(requestID: String, pid: Int32) {
-        self.requestID = requestID
-        self.pid = pid
-    }
-}
 
 public struct EngineInfo: Codable, Sendable {
     public let version: String
@@ -712,66 +666,20 @@ public struct FolderClassificationCounts: Codable, Sendable {
     }
 }
 
-public struct RestructureConfidenceCounts: Codable, Sendable {
-    public let auto: Int
-    public let review: Int
-    public let ask: Int
-    public let unknown: Int
-
-    public init(auto: Int, review: Int, ask: Int, unknown: Int) {
-        self.auto = auto
-        self.review = review
-        self.ask = ask
-        self.unknown = unknown
-    }
-}
-
 public struct RestructurePlan: Codable, Sendable {
     public let libraryRoot: String
     public let moves: [RestructureMove]
     public let categoryCounts: [RestructureCategoryCount]
-    /// Full-plan confidence totals, including rows omitted from a bounded preview.
-    public let confidenceCounts: RestructureConfidenceCounts?
     /// Engine-authoritative folder classification counts. Nil on older engines.
     public let folderClassifications: FolderClassificationCounts?
-    /// Opaque engine-owned plan handle when `moves` is a bounded preview.
-    public let planID: String?
-    public let totalMoves: Int?
-    public let truncated: Bool
 
     public init(libraryRoot: String, moves: [RestructureMove],
                 categoryCounts: [RestructureCategoryCount],
-                folderClassifications: FolderClassificationCounts? = nil,
-                planID: String? = nil, totalMoves: Int? = nil,
-                truncated: Bool = false,
-                confidenceCounts: RestructureConfidenceCounts? = nil) {
+                folderClassifications: FolderClassificationCounts? = nil) {
         self.libraryRoot = libraryRoot
         self.moves = moves
         self.categoryCounts = categoryCounts
-        self.confidenceCounts = confidenceCounts
         self.folderClassifications = folderClassifications
-        self.planID = planID
-        self.totalMoves = totalMoves
-        self.truncated = truncated
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case libraryRoot, moves, categoryCounts, confidenceCounts, folderClassifications
-        case planID, totalMoves, truncated
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        libraryRoot = try c.decode(String.self, forKey: .libraryRoot)
-        moves = try c.decode([RestructureMove].self, forKey: .moves)
-        categoryCounts = try c.decode([RestructureCategoryCount].self, forKey: .categoryCounts)
-        confidenceCounts = try c.decodeIfPresent(
-            RestructureConfidenceCounts.self, forKey: .confidenceCounts)
-        folderClassifications = try c.decodeIfPresent(
-            FolderClassificationCounts.self, forKey: .folderClassifications)
-        planID = try c.decodeIfPresent(String.self, forKey: .planID)
-        totalMoves = try c.decodeIfPresent(Int.self, forKey: .totalMoves)
-        truncated = try c.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
     }
 }
 
@@ -780,36 +688,11 @@ public struct RestructureApplyResult: Codable, Sendable {
     public let failed: Int
     /// Surfaces a "Developer Mode required for symlinks" message; nil otherwise.
     public let privilegeError: String?
-    public let cancelled: Bool
-    public let planned: Int?
-    public let remaining: Int?
-    public let shortcutUndoToken: String?
 
-    public init(applied: Int, failed: Int, privilegeError: String? = nil,
-                cancelled: Bool = false, planned: Int? = nil, remaining: Int? = nil,
-                shortcutUndoToken: String? = nil) {
+    public init(applied: Int, failed: Int, privilegeError: String? = nil) {
         self.applied = applied
         self.failed = failed
         self.privilegeError = privilegeError
-        self.cancelled = cancelled
-        self.planned = planned
-        self.remaining = remaining
-        self.shortcutUndoToken = shortcutUndoToken
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case applied, failed, privilegeError, cancelled, planned, remaining, shortcutUndoToken
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        applied = try c.decode(Int.self, forKey: .applied)
-        failed = try c.decode(Int.self, forKey: .failed)
-        privilegeError = try c.decodeIfPresent(String.self, forKey: .privilegeError)
-        cancelled = try c.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false
-        planned = try c.decodeIfPresent(Int.self, forKey: .planned)
-        remaining = try c.decodeIfPresent(Int.self, forKey: .remaining)
-        shortcutUndoToken = try c.decodeIfPresent(String.self, forKey: .shortcutUndoToken)
     }
 }
 
@@ -826,8 +709,8 @@ public struct BulkActionItem: Codable, Sendable {
 }
 
 public struct BulkActionResult: Codable, Sendable {
-    /// Originating command's discriminator. Platforms with restore-from-trash
-    /// support may append an undo batch id as a ":<uuid>" suffix.
+    /// Originating command's discriminator; the trashFiles reply additionally
+    /// carries the undo batch id as a ":<uuid>" suffix.
     public let action: String
     public let succeeded: Int
     public let failed: Int

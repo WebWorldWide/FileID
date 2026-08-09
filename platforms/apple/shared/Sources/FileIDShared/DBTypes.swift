@@ -25,9 +25,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public let vlmDescription: String?
     public let vlmProposedName: String?
     public let vlmModel: String?
-    public let vlmFullModel: String?
     public let vlmAnalyzedAt: Date?
-    public let tags: [String]?
 
     public init(
         id: Int64, pathText: String, sizeBytes: Int64,
@@ -37,8 +35,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         cameraModel: String?, locationLat: Double?, locationLon: Double?,
         failed: Bool, errorMessage: String?,
         vlmDescription: String? = nil, vlmProposedName: String? = nil,
-        vlmModel: String? = nil, vlmFullModel: String? = nil,
-        vlmAnalyzedAt: Date? = nil, tags: [String]? = nil
+        vlmModel: String? = nil, vlmAnalyzedAt: Date? = nil
     ) {
         self.id = id
         self.pathText = pathText
@@ -60,9 +57,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         self.vlmDescription = vlmDescription
         self.vlmProposedName = vlmProposedName
         self.vlmModel = vlmModel
-        self.vlmFullModel = vlmFullModel
         self.vlmAnalyzedAt = vlmAnalyzedAt
-        self.tags = tags
     }
 
     public var url: URL { URL(fileURLWithPath: pathText) }
@@ -73,42 +68,18 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
 
     public var isImage: Bool { kind == "image" }
     public var isVideo: Bool { kind == "video" }
-
-    public func isFullyAnalyzed(by modelKey: String) -> Bool {
-        vlmFullModel == modelKey
-    }
 }
 
-/// Duplicate group — files verified by a live full-file digest, or a
-/// perceptual near-duplicate cluster when `isSimilar` is true (Cleanup's
-/// "Similar" mode: dHash Hamming grouping — NOT byte-identical).
+/// Duplicate group — files sharing the same byte-exact content_hash (item 1).
 public struct DuplicateGroup: Sendable, Identifiable, Hashable {
-    public let id: Int64           // exact: first 8 bytes of full digest; similar: min member file id
+    public let id: Int64           // first 8 bytes of the group's content_hash
     public let files: [FileRow]    // sorted by keeperRank descending (best first)
-    /// Exact cardinality/bytes for the whole group. `files` is a bounded
-    /// interactive preview when a pathological group contains thousands of
-    /// copies, so the preview and total counts may differ.
-    public let totalFileCount: Int
-    private let storedTotalBytes: Int64?
-    /// True for perceptual near-duplicate groups. The Cleanup "Similar" view
-    /// surfaces these with a "review before deleting — not identical" disclaimer
-    /// and never pre-selects copies for deletion.
-    public let isSimilar: Bool
-    public init(
-        id: Int64, files: [FileRow], isSimilar: Bool = false,
-        totalFileCount: Int? = nil, totalBytes: Int64? = nil
-    ) {
+    public init(id: Int64, files: [FileRow]) {
         self.id = id
         self.files = files
-        self.isSimilar = isSimilar
-        self.totalFileCount = totalFileCount ?? files.count
-        self.storedTotalBytes = totalBytes
     }
 
-    public var isTruncated: Bool { totalFileCount > files.count }
-    public var totalBytes: Int64 {
-        storedTotalBytes ?? files.reduce(0) { $0 + $1.sizeBytes }
-    }
+    public var totalBytes: Int64 { files.reduce(0) { $0 + $1.sizeBytes } }
     public var reclaimableBytes: Int64 { totalBytes - (files.first?.sizeBytes ?? 0) }
     public var keeper: FileRow? { files.first }
     public var trashable: ArraySlice<FileRow> { files.dropFirst() }

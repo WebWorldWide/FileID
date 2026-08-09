@@ -16,34 +16,10 @@
 
 param(
     [string]$Corpus = "",
-    [string[]]$ExcludedPaths = @(),
-    [int]$ThroughputTarget = 25,     # files/sec REGRESSION FLOOR, not a spec.
-                                     # MEASURED on the RTX 5080 / DirectML EP:
-                                     # ~29 f/s on a 1K-image subset, ~40 f/s on the
-                                     # full 62K library (2026-07-04). The old 100/140
-                                     # defaults predate the RAM++ Swin-L tagger and the
-                                     # DirectML path and false-fail every real run.
-                                     # RAM++ is dispatch-latency-bound on DirectML (GPU
-                                     # sits ~19% p50 during a scan — pool>4 measurably
-                                     # REGRESSES, see NEXT.md), so the real 3-5x lever
-                                     # is the CUDA Performance Pack, not tuning. Set to
-                                     # ~80% of the measured DirectML median so the gate
-                                     # catches regressions without flaking. Raise it
-                                     # once the CUDA EP ships.
-    [int]$MemoryCapMB = 8500,        # RAM++ Swin-L + CLIP + YuNet/SFace weights + the
-                                     # DirectML allocator. MEASURED peak 7913 MB on the
-                                     # full 62K-file library (RTX 5080, 2026-07-04); the
-                                     # old 6000 was set from a 3635 MB @300-file RTX 2060
-                                     # run and false-fails a real full-library scan.
-                                     # In-flight decode is concurrency-bounded (not
-                                     # file-count-bounded), so RSS plateaus; 8500 clears
-                                     # the measured steady state with headroom while
-                                     # still tripping a true unbounded leak.
+    [int]$ThroughputTarget = 100,    # files/sec; tier-default = 100, RTX-class = 140
+    [int]$MemoryCapMB = 1500,        # 1.2 GB ceiling per macOS, +25% slack
     [switch]$SkipBuild,
     [switch]$SkipWipe,               # V15.0 Phase B: skip DB wipe so incremental rescan kicks in
-    [int]$ScanTimeoutMinutes = 120,  # uncapped real corpora can exceed 90 min on cold storage
-    [string]$StateDirectory = "",     # isolated LOCALAPPDATA parent; retained for incremental reruns
-    [switch]$UseLiveState,            # explicit opt-in to %LOCALAPPDATA%\FileID (may wipe its catalog)
     [switch]$Verbose
 )
 
@@ -115,38 +91,14 @@ if ([string]::IsNullOrWhiteSpace($Corpus)) {
     }
 }
 if (-not (Test-Path $Corpus)) { Fail "corpus path does not exist: $Corpus"; exit 2 }
-$corpusEnumerationErrors = @()
-$corpusFiles = (Get-ChildItem -LiteralPath $Corpus -Recurse -File -ErrorAction SilentlyContinue `
-    -ErrorVariable +corpusEnumerationErrors | Measure-Object).Count
-if ($corpusEnumerationErrors.Count -gt 0) {
-    Warn "corpus pre-count skipped $($corpusEnumerationErrors.Count) unreadable or transient paths; engine discovery will report its own partial-walk status"
-}
+$corpusFiles = (Get-ChildItem -Recurse -File $Corpus | Measure-Object).Count
 if ($corpusFiles -lt 10) {
     Warn "corpus has only $corpusFiles files; assertion thresholds may not exercise everything"
 }
 OK "corpus has $corpusFiles files"
 
-# --- 3. Select isolated state + wipe DB ------------------------------
-$LiveLocalAppData = $env:LOCALAPPDATA
-if ($UseLiveState -and -not [string]::IsNullOrWhiteSpace($StateDirectory)) {
-    throw "Use either -UseLiveState or -StateDirectory, not both."
-}
-if ($UseLiveState) {
-    $EngineLocalAppData = $LiveLocalAppData
-    Warn "using live FileID state; a run without -SkipWipe deletes the live catalog"
-} else {
-    if ([string]::IsNullOrWhiteSpace($StateDirectory)) {
-        if ($SkipWipe) {
-            throw "-SkipWipe requires an explicit -StateDirectory so there is an isolated catalog to reuse."
-        }
-        $StateDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-iterate-" + [guid]::NewGuid().ToString("N"))
-    }
-    $EngineLocalAppData = [System.IO.Path]::GetFullPath($StateDirectory)
-    New-Item -ItemType Directory -Force -Path $EngineLocalAppData | Out-Null
-    OK "isolated engine state: $EngineLocalAppData"
-}
-$AppDataRoot = Join-Path $EngineLocalAppData "FileID"
-$faceCrops = Join-Path $AppDataRoot "face_crops"
+# --- 3. Wipe DB -------------------------------------------------------
+$AppDataRoot = Join-Path $env:LOCALAPPDATA "FileID"
 if ($SkipWipe) {
     Step "Skipping DB wipe (-SkipWipe set; testing incremental rescan)"
 } else {
@@ -155,15 +107,15 @@ if ($SkipWipe) {
         $p = Join-Path $AppDataRoot $f
         if (Test-Path $p) { Remove-Item -Force $p -ErrorAction SilentlyContinue }
     }
+    $faceCrops = Join-Path $AppDataRoot "face_crops"
     if (Test-Path $faceCrops) { Remove-Item -Recurse -Force $faceCrops -ErrorAction SilentlyContinue }
     OK "DB wiped"
 }
 
 # --- 4. Drive engine --------------------------------------------------
 Step "Driving engine (scan + cluster)"
-$tempDirPath = Join-Path ([System.IO.Path]::GetTempPath()) ("fileid-iterate-" + [guid]::NewGuid().ToString("N"))
-$tempDir = [System.IO.Directory]::CreateDirectory($tempDirPath)
-$eventLog = Join-Path $tempDir.FullName "events.jsonl"
+$tempDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_.FullName }
+$eventLog = Join-Path $tempDir "events.jsonl"
 
 # Spawn engine with redirected stdio.
 $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -174,21 +126,10 @@ $psi.RedirectStandardOutput = $true
 $psi.RedirectStandardError = $true
 $psi.CreateNoWindow = $true
 $psi.Environment["FILEID_LOG"] = "info"
-$psi.Environment["LOCALAPPDATA"] = $EngineLocalAppData
-if (-not $psi.Environment.ContainsKey("FILEID_MODELS_DIR")) {
-    $isolatedModels = Join-Path $AppDataRoot "Models"
-    $liveModels = Join-Path $LiveLocalAppData "FileID\Models"
-    if (Test-Path -LiteralPath $isolatedModels -PathType Container) {
-        $psi.Environment["FILEID_MODELS_DIR"] = $isolatedModels
-    } elseif (Test-Path -LiteralPath $liveModels -PathType Container) {
-        $psi.Environment["FILEID_MODELS_DIR"] = $liveModels
-    }
-}
-# Leave ORT_DYLIB_PATH unset. The engine pins a verified accelerator-pack
-# runtime (CUDA/OpenVINO) before its first ORT session when one is installed;
-# otherwise ort's load-dynamic resolver finds the base DLL colocated above.
-# Inheriting a developer-shell override silently defeats the accelerator pin.
-[void]$psi.Environment.Remove("ORT_DYLIB_PATH")
+# Force the bundled ORT 1.22 beside the engine — System32 ships a stale 1.17
+# that the default DLL search order (System32 first) would otherwise bind,
+# panicking our ort 2.0.0-rc.10 crate. Belt-and-suspenders with colocation.
+$psi.Environment["ORT_DYLIB_PATH"] = Join-Path (Split-Path $EnginePath) "onnxruntime.dll"
 # V14.9-X: do NOT set FILEID_MODEL_POOL_SIZE here. V14.9-W's pool=6
 # wedged the DirectML driver and locked the entire system requiring a
 # hard reboot. Pool sizing is now VRAM-budgeted inside the engine and
@@ -207,40 +148,15 @@ if ($env:FILEID_CLIP_BATCH_SIZE) {
 $engineProc = New-Object System.Diagnostics.Process
 $engineProc.StartInfo = $psi
 [void]$engineProc.Start()
-$script:stdoutTask = $engineProc.StandardOutput.ReadLineAsync()
-$script:stderrTask = $engineProc.StandardError.ReadLineAsync()
-$script:stdoutClosed = $false
-$script:stderrClosed = $false
-$script:engineExitReported = $false
 
-function Pump-EngineOutput {
-    $lines = [System.Collections.Generic.List[string]]::new()
-    while (-not $script:stdoutClosed -and $script:stdoutTask.IsCompleted) {
-        $line = $script:stdoutTask.GetAwaiter().GetResult()
-        if ($null -eq $line) {
-            $script:stdoutClosed = $true
-            break
-        }
-        Add-Content -LiteralPath $eventLog -Value $line
-        $lines.Add($line)
-        $script:stdoutTask = $engineProc.StandardOutput.ReadLineAsync()
-    }
-    while (-not $script:stderrClosed -and $script:stderrTask.IsCompleted) {
-        $line = $script:stderrTask.GetAwaiter().GetResult()
-        if ($null -eq $line) {
-            $script:stderrClosed = $true
-            break
-        }
-        Add-Content -LiteralPath $eventLog -Value ("[stderr] " + $line)
-        $script:stderrTask = $engineProc.StandardError.ReadLineAsync()
-    }
-    if ($engineProc.HasExited -and -not $script:engineExitReported) {
-        $script:engineExitReported = $true
-        $message = "ENGINE EXITED code={0} (0x{0:X8}) at {1}" -f $engineProc.ExitCode, (Get-Date -Format HH:mm:ss)
-        Add-Content -LiteralPath $eventLog -Value $message
-    }
-    return $lines.ToArray()
-}
+# Register-ObjectEvent works on both Windows PowerShell 5.1 and PowerShell 7;
+# the += operator on events fails on 5.1. Capture stdout/stderr to the temp
+# event log.
+$stdoutSub = Register-ObjectEvent -InputObject $engineProc -EventName 'OutputDataReceived' -Action {
+    if ($EventArgs.Data) { Add-Content -Path $event.MessageData -Value $EventArgs.Data }
+} -MessageData $eventLog
+$engineProc.BeginOutputReadLine()
+$engineProc.BeginErrorReadLine()
 
 # Send commands as JSON over stdin.
 function Send-Cmd($cmd) {
@@ -255,44 +171,19 @@ $ready = $false
 $deadline = (Get-Date).AddSeconds(30)
 while (-not $ready -and (Get-Date) -lt $deadline) {
     Start-Sleep -Milliseconds 250
-    $newLines = Pump-EngineOutput
-    if ($newLines | Where-Object { $_ -match '"ready"' }) { $ready = $true }
-    if ($engineProc.HasExited) { break }
+    if (Test-Path $eventLog) {
+        $tail = Get-Content $eventLog -Tail 10 -ErrorAction SilentlyContinue
+        if ($tail | Where-Object { $_ -match '"ready"' }) { $ready = $true }
+    }
 }
 if (-not $ready) {
     Fail "engine never emitted ready (30s timeout)"
-    [void](Pump-EngineOutput)
-    if (-not $engineProc.HasExited) { $engineProc.Kill() }
+    $engineProc.Kill()
     exit 2
 }
 OK "engine ready"
 
-$eventOffset = 0L
-function Read-NewEventLines {
-    [void](Pump-EngineOutput)
-    if (-not (Test-Path -LiteralPath $eventLog -PathType Leaf)) { return @() }
-    $stream = [System.IO.FileStream]::new(
-        $eventLog,
-        [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read,
-        [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
-    try {
-        [void]$stream.Seek($script:eventOffset, [System.IO.SeekOrigin]::Begin)
-        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $false, 4096, $true)
-        try {
-            $lines = [System.Collections.Generic.List[string]]::new()
-            while (($line = $reader.ReadLine()) -ne $null) { $lines.Add($line) }
-            $script:eventOffset = $stream.Position
-            return $lines.ToArray()
-        } finally { $reader.Dispose() }
-    } finally { $stream.Dispose() }
-}
-
-$scanPayload = @{ rootPath = $Corpus; rootDisplay = $null }
-if ($ExcludedPaths.Count -gt 0) {
-    $scanPayload.excludedPaths = @($ExcludedPaths)
-}
-Send-Cmd @{ id = "scan-1"; payload = @{ startScan = $scanPayload } }
+Send-Cmd @{ id = "scan-1"; payload = @{ startScan = @{ rootPath = $Corpus; rootDisplay = $null } } }
 
 $scanStart = Get-Date
 # Wait up to 15 minutes for scanComplete. V14.9-W: bumped 5→15 because a
@@ -300,13 +191,13 @@ $scanStart = Get-Date
 # current pipeline. iterate harness should reflect the realistic scan
 # floor rather than time out on healthy long runs.
 $scanComplete = $false
-$scanFailure = $null
 $peakResidentMB = 0
 $totalProcessed = 0
-$deadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
+$deadline = (Get-Date).AddMinutes(15)
 while (-not $scanComplete -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 1
-    foreach ($line in (Read-NewEventLines)) {
+    $events = Get-Content $eventLog -ErrorAction SilentlyContinue
+    foreach ($line in $events) {
         if ($line -match '"residentMB"\s*:\s*(\d+)') {
             $mb = [int]$Matches[1]
             if ($mb -gt $peakResidentMB) { $peakResidentMB = $mb }
@@ -315,55 +206,21 @@ while (-not $scanComplete -and (Get-Date) -lt $deadline) {
             $p = [int]$Matches[1]
             if ($p -gt $totalProcessed) { $totalProcessed = $p }
         }
-        if ($line -match '"error"') {
-            try {
-                $errorPayload = ($line | ConvertFrom-Json).payload.error._0
-                if ($errorPayload) {
-                    $scanFailure = "$($errorPayload.kind): $($errorPayload.message)"
-                    break
-                }
-            } catch {}
-        }
         if ($line -match '"scanComplete"') { $scanComplete = $true; break }
     }
-    if ($scanFailure) { break }
 }
 $scanElapsed = (Get-Date) - $scanStart
 
-if ($scanFailure) {
-    Fail "scan failed before completion: $scanFailure"
-    Send-Cmd @{ id = "shutdown-after-scan-failure"; payload = @{ shutdown = @{} } }
-    $engineProc.WaitForExit(10000) | Out-Null
-    if (-not $engineProc.HasExited) { $engineProc.Kill() }
-    exit 1
-}
 if (-not $scanComplete) {
-    Fail "scan did not complete within $ScanTimeoutMinutes minutes"
+    Fail "scan did not complete within 5 minutes"
     $engineProc.Kill()
     exit 1
 }
 OK "scan completed in $([int]$scanElapsed.TotalSeconds)s"
 
-# Trigger face clustering, then WAIT for its completion event rather than a
-# fixed sleep. A hardcoded 5s was enough for a ~1K-face subset but not a real
-# library: 62K files yield ~85K face embeddings whose clustering runs far longer
-# than 5s, so an early shutdown killed it mid-run and persisted zero persons
-# (A5/A12 false-RED). Poll the event log for faceClusteringComplete with the same
-# deadline budget as the scan wait.
+# Trigger face clustering.
 Send-Cmd @{ id = "cluster-1"; payload = @{ runFaceClustering = @{} } }
-$clusterDeadline = (Get-Date).AddMinutes($ScanTimeoutMinutes)
-$clusterDone = $false
-while (-not $clusterDone -and (Get-Date) -lt $clusterDeadline) {
-    Start-Sleep -Seconds 2
-    foreach ($line in (Read-NewEventLines)) {
-        if ($line -match '"residentMB"\s*:\s*(\d+)') {
-            $mb = [int]$Matches[1]
-            if ($mb -gt $peakResidentMB) { $peakResidentMB = $mb }
-        }
-        if ($line -match '"faceClusteringComplete"') { $clusterDone = $true; break }
-    }
-}
-if (-not $clusterDone) { Warn "face clustering did not emit completion within $ScanTimeoutMinutes min" }
+Start-Sleep -Seconds 5
 
 # Send shutdown.
 Send-Cmd @{ id = "shutdown-1"; payload = @{ shutdown = @{} } }
@@ -379,17 +236,9 @@ Assert "[A1] scan completed without crash" $scanComplete
 # A2: corpus had >= 10 files (or warned).
 Assert "[A2] corpus contains >= 10 files (or warning was emitted)" ($corpusFiles -ge 10) "(found $corpusFiles)"
 
-# A3: throughput meets target. On an incremental rescan (-SkipWipe) nearly
-# every file skip-matches, so processed/elapsed measures a handful of
-# re-processed files against the whole walk's wall clock and false-fails —
-# gate on WALK throughput (corpus files covered per second) in that case.
+# A3: throughput meets target.
 $throughput = if ($scanElapsed.TotalSeconds -gt 0) { $totalProcessed / $scanElapsed.TotalSeconds } else { 0 }
-if ($SkipWipe -and $totalProcessed -lt ($corpusFiles / 10)) {
-    $walkRate = if ($scanElapsed.TotalSeconds -gt 0) { $corpusFiles / $scanElapsed.TotalSeconds } else { 0 }
-    Assert "[A3] incremental walk >= $ThroughputTarget files/sec" ($walkRate -ge $ThroughputTarget) "(walked $([int]$walkRate)/s, reprocessed $totalProcessed)"
-} else {
-    Assert "[A3] throughput >= $ThroughputTarget files/sec" ($throughput -ge $ThroughputTarget) "(was $([int]$throughput))"
-}
+Assert "[A3] throughput >= $ThroughputTarget files/sec" ($throughput -ge $ThroughputTarget) "(was $([int]$throughput))"
 
 # A4: peak resident memory under cap.
 Assert "[A4] peak resident memory <= $MemoryCapMB MB" ($peakResidentMB -le $MemoryCapMB) "(peak $peakResidentMB MB)"
@@ -403,7 +252,7 @@ $fatalCount = (Get-Content $eventLog | Where-Object { $_ -match '"kind"\s*:\s*"(
 Assert "[A6] no fatal engine errors" ($fatalCount -eq 0)
 
 # A7: no Windows Error Reporting crash dumps for FileIDEngine in last 5 min.
-$werDir = Join-Path $LiveLocalAppData "Microsoft\Windows\WER\ReportArchive"
+$werDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\WER\ReportArchive"
 $recentCrashes = 0
 if (Test-Path $werDir) {
     $cutoff = (Get-Date).AddMinutes(-10)
@@ -428,15 +277,15 @@ $faceCount = if (Test-Path $faceCrops) { (Get-ChildItem $faceCrops -File).Count 
 # Acceptable: any (>= 0) — corpus may have no faces.
 Assert "[A10] face_crops directory present after scan (>= 0 files)" ($faceCount -ge 0) "(found $faceCount)"
 
-# A11: use the release-authoritative ASCII/UTF-16LE/UTF-16BE scanner.
-$privacyPython = Get-Command python -ErrorAction SilentlyContinue
-if (-not $privacyPython) {
-    Assert "[A11] privacy gate scanner available" $false "(python not found)"
-} else {
-    $privacyScanner = Join-Path $RepoRoot "shared\scripts\check_binary_privacy.py"
-    & $privacyPython.Source $privacyScanner $EnginePath
-    Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($LASTEXITCODE -eq 0)
+# A11: privacy gate -- no telemetry strings in shipped binary.
+$telemetryMarkers = @('sentry.io','applicationinsights','firebase','segment.com','mixpanel','google-analytics','amplitude','appcenter')
+$hits = @()
+$bytes = [System.IO.File]::ReadAllBytes($EnginePath)
+$text = [System.Text.Encoding]::ASCII.GetString($bytes)
+foreach ($m in $telemetryMarkers) {
+    if ($text -match $m) { $hits += $m }
 }
+Assert "[A11] privacy gate - zero telemetry strings in engine binary" ($hits.Count -eq 0) "(found: $($hits -join ', '))"
 
 # A12: model-swap DB assertions — RAM++/CLIP tag content + SFace 128-d
 # (512-byte) face embeddings, which reject stale 512-d/2048-byte ArcFace data.
@@ -460,10 +309,8 @@ if ($failures -eq 0) {
     Write-Host "  throughput: $([int]$throughput) files/sec" -ForegroundColor DarkGreen
     Write-Host "  peak RAM:   $peakResidentMB MB" -ForegroundColor DarkGreen
     Write-Host "  scan time:  $([int]$scanElapsed.TotalSeconds)s" -ForegroundColor DarkGreen
-    Write-Host "  state:      $EngineLocalAppData" -ForegroundColor DarkGreen
     exit 0
 } else {
     Write-Host "$failures assertion(s) FAILED" -ForegroundColor Red
-    Write-Host "  state:      $EngineLocalAppData" -ForegroundColor Yellow
     exit 1
 }

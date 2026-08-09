@@ -23,17 +23,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private string _activeModel = "qwen2_5_vl_7b";
     private string _captionAccumulator = string.Empty;
     private bool _unloaded;
-    private bool _hasNamedPeople;
-    private long _namePeopleGateGeneration;
 
-    // L5: set the moment Cancel is clicked while a Deep Analyze command is still
-    // in flight (most importantly while it's QUEUED behind a running scan, where
-    // the engine can't act on the cancel until the scan releases the mutation
-    // gate). Without it Cancel stayed enabled with no feedback for the whole scan.
-    // While set, Cancel is disabled and the stream card shows a 'Cancelling…'
-    // state; cleared once the command leaves flight (terminal Complete / slot
-    // release), re-arming Cancel for the next run.
-    private bool _cancelRequested;
+    // Trips when Cancel is clicked during an "Analyze Selected" batch so the
+    // per-file send loop stops dispatching the remaining files. The engine
+    // cancel only stops the in-flight file; without this the loop would keep
+    // queuing files 2..N after the user pressed Cancel.
+    private bool _selectedRunCancelled;
 
     // Monotonic generation for the streamed-thumbnail load. Each progress event
     // fires LoadStreamThumbAsync fire-and-forget; a slow decode for an earlier
@@ -41,15 +36,6 @@ public sealed partial class DeepAnalyzeView : UserControl
     // load and only commit StreamImage.Source if our captured generation is
     // still the latest, so a stale thumbnail never overwrites the current file's.
     private int _streamThumbGeneration;
-
-    // Last file path shown in the stream card. The engine emits a
-    // DeepAnalyzeProgress every ~250 ms (4 Hz) carrying the SAME CurrentPath for
-    // the whole time a file is being captioned; reloading the shell thumbnail on
-    // every one of those frames re-hits the shell thumbnail provider needlessly.
-    // Track the displayed path and only reload the thumb + reset the caption
-    // accumulator when the path actually changes. Reset on teardown / new run so
-    // re-running the same file reloads its preview. (Fix B)
-    private string? _lastStreamPath;
 
     // Warm-up watchdog: the engine emits DeepAnalyzeStarting (IsIndeterminate
     // "Preparing…") BEFORE the first DeepAnalyzeProgress/stream token while the
@@ -60,8 +46,6 @@ public sealed partial class DeepAnalyzeView : UserControl
     // (DispatcherQueueTimer.Tick), so touching XAML in the handler is safe.
     private static readonly TimeSpan WarmupTimeout = TimeSpan.FromSeconds(45);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _warmupTimer;
-    private long _warmupAttemptId;
-    private long _localPreparingAttemptId;
 
     public DeepAnalyzeView()
     {
@@ -78,28 +62,52 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnUnloadedHandler(object sender, RoutedEventArgs e)
     {
         _unloaded = true;
-        _lastStreamPath = null;
         CancelWarmupTimer();
         ModelInstallerService.Instance.DeepVlm.PropertyChanged -= OnInstallerChanged;
         EngineClient.Instance.PropertyChanged -= OnEngineChanged;
-        EngineClient.Instance.DeepAnalyzeFileDoneReceived -= OnDeepAnalyzeFileDoneReceived;
         SelectionRegistry.Instance.PropertyChanged -= OnSelectionRegistryChanged;
         Loaded -= OnLoadedHandler;
         Unloaded -= OnUnloadedHandler;
     }
 
+    // Resident-RAM budget per VLM, in GB. Mirrors the macOS AIModelKind
+    // .ramBudgetGB (platforms/apple .../AIModels.swift) so the OOM gate is
+    // identical across platforms. A model whose budget can't fit under the
+    // headroom is disabled — loading it would OOM-kill the engine.
+    private static double RamBudgetGB(string kind) => kind switch
+    {
+        "mistral_small_3_2" => 16.0,
+        "qwen2_5_vl_7b" => 7.0,
+        "gemma_3_4b" => 4.5,
+        _ => 7.0,
+    };
+
+    // Reserves ~8 GB for the OS + scan engine + DB cache, exactly like macOS
+    // AIModelKind.fits(ramGB:). Returns the machine's physical RAM in GB from
+    // EngineClient.Info (PhysicalMemoryGB, with Hardware.ramTotalMB as the
+    // fallback), or null when the engine hasn't reported yet.
+    private static double? PhysicalRamGB()
+    {
+        var info = EngineClient.Instance.Info;
+        if (info is null) return null;
+        if (info.PhysicalMemoryGB > 0) return info.PhysicalMemoryGB;
+        if (info.Hardware is { RamTotalMb: > 0 } hw) return hw.RamTotalMb / 1024.0;
+        return null;
+    }
+
+    private static bool Fits(string kind, double ramGB)
+    {
+        var headroom = Math.Max(0, ramGB - 8.0);
+        return RamBudgetGB(kind) <= headroom;
+    }
+
     private void OnLoadedHandler(object sender, RoutedEventArgs e)
     {
-        _unloaded = false;
-        _hasNamedPeople = false;
-        ApplyPeopleButton.IsEnabled = false;
         ModelInstallerService.Instance.DeepVlm.PropertyChanged += OnInstallerChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
-        EngineClient.Instance.DeepAnalyzeFileDoneReceived += OnDeepAnalyzeFileDoneReceived;
         SelectionRegistry.Instance.PropertyChanged += OnSelectionRegistryChanged;
         SyncCards();
         UpdateActiveModelLabel();
-        SyncStream();
         SyncSelectionButtons();
         // refresh the "Name people first" gate every time the
         // view loads; also refreshed in OnEngineChanged when face
@@ -131,36 +139,20 @@ public sealed partial class DeepAnalyzeView : UserControl
     }
 
     private void OnSelectionRegistryChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("DeepAnalyzeView.OnSelectionRegistryChanged",
-            () => DispatcherQueue.TryEnqueue(SyncSelectionButtons));
+        => DispatcherQueue.TryEnqueue(SyncSelectionButtons);
 
     private void SyncSelectionButtons()
     {
         if (_unloaded) return;
         var sel = SelectionRegistry.Instance.LibrarySelection;
-        bool canStart = !EngineClient.Instance.DeepAnalyzeCommandInFlight;
-        AnalyzeSelectedButton.IsEnabled = canStart && sel.Count > 0;
+        AnalyzeSelectedButton.IsEnabled = sel.Count > 0;
         AnalyzeSelectedText.Text = sel.Count switch
         {
             0 => "Selected",
             1 => "Selected (1)",
             _ => $"Selected ({sel.Count})",
         };
-        AnalyzeCurrentButton.IsEnabled = canStart && SelectionRegistry.Instance.HasPreviewedFile;
-    }
-
-    private void SyncDeepAnalyzeControls()
-    {
-        if (_unloaded) return;
-        var inFlight = EngineClient.Instance.DeepAnalyzeCommandInFlight;
-        // L5: once the command leaves flight (terminal reached / slot released),
-        // re-arm Cancel for the next run.
-        if (!inFlight) _cancelRequested = false;
-        AnalyzeAllButton.IsEnabled = !inFlight;
-        // L5: a pending cancel (esp. while queued behind a scan) disables Cancel so
-        // the user gets feedback and can't spam it while the engine can't yet act.
-        CancelButton.IsEnabled = inFlight && !_cancelRequested;
-        SyncSelectionButtons();
+        AnalyzeCurrentButton.IsEnabled = SelectionRegistry.Instance.HasPreviewedFile;
     }
 
     /// <summary>query the DB for any person row with NULL
@@ -168,81 +160,61 @@ public sealed partial class DeepAnalyzeView : UserControl
     /// when the count is non-zero.</summary>
     private async System.Threading.Tasks.Task RefreshNamePeopleGateAsync()
     {
-        var generation = System.Threading.Interlocked.Increment(
-            ref _namePeopleGateGeneration);
         int unnamed = 0;
-        bool hasNamedPeople = false;
         try
         {
             var dbPath = AppPaths.DbPath;
-            var summary = await System.Threading.Tasks.Task.Run(() =>
+            unnamed = await System.Threading.Tasks.Task.Run(() =>
             {
-                if (!System.IO.File.Exists(dbPath)) return (Unnamed: 0, HasNamed: false);
-                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
-                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                    {
-                        DataSource = dbPath,
-                        Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                    }.ToString());
-                conn.Open();
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = """
-                    SELECT
-                        COALESCE(SUM(CASE WHEN TRIM(COALESCE(name, '') || COALESCE(title, '') ||
-                                                     COALESCE(first_name, '') || COALESCE(middle_name, '') ||
-                                                     COALESCE(last_name, '') || COALESCE(suffix, '')) = ''
-                                          THEN 1 ELSE 0 END), 0),
-                        COALESCE(SUM(CASE WHEN IFNULL(is_unknown, 0) = 0
-                                                   AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
-                                                            COALESCE(first_name, '') || COALESCE(middle_name, '') ||
-                                                            COALESCE(last_name, '') || COALESCE(suffix, '')) != ''
-                                          THEN 1 ELSE 0 END), 0)
-                    FROM persons;
-                    """;
-                using var reader = cmd.ExecuteReader();
-                if (!reader.Read()) return (Unnamed: 0, HasNamed: false);
-                var unnamedCount = Math.Min(reader.GetInt64(0), int.MaxValue);
-                return (Unnamed: (int)unnamedCount, HasNamed: reader.GetInt64(1) > 0);
+                try
+                {
+                    if (!System.IO.File.Exists(dbPath)) return 0;
+                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                        {
+                            DataSource = dbPath,
+                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                        }.ToString());
+                    conn.Open();
+                    using var cmd = conn.CreateCommand();
+                    // A cluster is "unnamed" when both `name` (legacy) and
+                    // `first_name` (v5) are NULL — the display falls back
+                    // to "Person N" in PeopleViewModel.
+                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL;";
+                    var result = cmd.ExecuteScalar();
+                    return result is null ? 0 : Convert.ToInt32(result);
+                }
+                catch { return 0; }
             }).ConfigureAwait(false);
-            unnamed = summary.Unnamed;
-            hasNamedPeople = summary.HasNamed;
         }
         catch (Exception ex)
         {
             DebugLog.Warn("RefreshNamePeopleGateAsync failed: " + ex.Message);
+            unnamed = 0;
         }
-        if (_unloaded
-            || generation != System.Threading.Interlocked.Read(
-                ref _namePeopleGateGeneration))
-        {
-            return;
-        }
+        if (_unloaded) return;
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (_unloaded
-                || generation != System.Threading.Interlocked.Read(
-                    ref _namePeopleGateGeneration))
-            {
-                return;
-            }
-            _hasNamedPeople = hasNamedPeople;
+            if (_unloaded) return;
             if (unnamed > 0)
             {
                 NamePeopleGateBanner.Visibility = Visibility.Visible;
                 NamePeopleGateText.Text = unnamed == 1
                     ? "1 face cluster isn't named yet. Naming it first gives sharper captions — or analyze now and name later."
                     : $"{unnamed} face clusters aren't named yet. Naming them first gives sharper captions — or analyze now and name later.";
+                // Advisory, NOT blocking — mirrors the macOS two-path banner: the
+                // user can name people via the banner button OR run Deep Analyze
+                // now. (Previously this hard-disabled Analyze All, which stranded
+                // anyone who didn't want to name clusters first.)
+                AnalyzeAllButton.IsEnabled = true;
                 ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
             else
             {
                 NamePeopleGateBanner.Visibility = Visibility.Collapsed;
+                AnalyzeAllButton.IsEnabled = true;
                 ToolTipService.SetToolTip(AnalyzeAllButton, null);
             }
-            SyncDeepAnalyzeControls();
-            SetApplyBusy(
-                System.Threading.Volatile.Read(ref _applyInFlight) != 0,
-                ApplyStatusText.Text);
         });
     }
 
@@ -257,43 +229,20 @@ public sealed partial class DeepAnalyzeView : UserControl
         DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
     }
 
-    private void OnDeepAnalyzeFileDoneReceived(DeepAnalyzeFileDone fileDone)
-    {
-        if (_unloaded) return;
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            if (!_unloaded) ConsumeFileDone(fileDone);
-        });
-    }
-
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("DeepAnalyzeView.OnEngineChanged", () =>
         {
             if (_unloaded) return;
             switch (e.PropertyName)
             {
-                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeStarting):
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeLast):
                 case nameof(EngineClient.DeepAnalyzeComplete):
-                // QueueState drives the "queued behind a scan" branch of
-                // SyncStream: the pending deepAnalyze job can land after the
-                // command-in-flight flip, so re-sync to disarm the warm-up
-                // watchdog once the queued state becomes known. (Fix A)
-                case nameof(EngineClient.QueueState):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
                 case nameof(EngineClient.Phase):
-                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
-                    _ = RefreshNamePeopleGateAsync();
-                    // Phase is the immediate signal that a Deep Analyze command is
-                    // queued behind a scan (or that the scan just finished and the
-                    // job can now load); re-sync so the queued/prepare state and the
-                    // warm-up watchdog track it. (Fix A)
-                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
-                    break;
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     _ = RefreshNamePeopleGateAsync();
@@ -314,10 +263,10 @@ public sealed partial class DeepAnalyzeView : UserControl
         // not the shared "any VLM installed" slot, otherwise installing one model
         // makes the other cards mis-report as installed and Deep Analyze fails
         // every file with "VLM weights not installed".
-        var profile = VlmRecommendation.CurrentProfile();
-        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, profile);
-        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, profile);
-        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, profile);
+        var ramGB = PhysicalRamGB();
+        ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
+        ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
+        ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, ramGB);
         HighlightActiveCard();
     }
 
@@ -329,69 +278,28 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         try
         {
-            // Map the snake_case wire kind to the registry's dotted dir
-            // ("vlm/mistral-small-3.2") — joining the kind itself never found
-            // installed weights, so every card showed Install on a complete
-            // install (the app-side twin of the engine's find_weights bug).
-            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", Services.VlmWeightDirs.DirNameFor(kind));
+            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
             return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
                 && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
         }
         catch { return false; }
     }
 
-    private bool ActiveModelReady(out string reason)
+    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, double? ramGB)
     {
-        if (EngineClient.Instance.GpuDeviceRemoved)
+        // RAM gate — mirrors macOS ModelOptionRow. When the engine has reported
+        // physical RAM and this VLM's budget can't fit under the ~8 GB headroom,
+        // disable install/select and show a "Needs N GB (you have M)" affordance
+        // instead of letting the model OOM-kill the engine on load.
+        if (ramGB is double available && !Fits(kind, available))
         {
-            reason = EngineClient.GpuRestartRequiredMessage;
-            return false;
-        }
-        var profile = VlmRecommendation.CurrentProfile();
-        if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(_activeModel, profile))
-        {
-            reason = $"{VlmRecommendation.DisplayName(_activeModel)} is still your selected model, but current available memory is too low to run it safely. Choose a lighter model.";
-            return false;
-        }
-        if (!VlmWeightsPresent(_activeModel))
-        {
-            reason = $"Install {VlmRecommendation.DisplayName(_activeModel)} before starting Deep Analyze.";
-            return false;
-        }
-        if (!SentinelProbe.Installed("llama_runtime_x64"))
-        {
-            reason = "Finish installing the local llama.cpp runtime before starting Deep Analyze.";
-            return false;
-        }
-        reason = string.Empty;
-        return true;
-    }
-
-    private static void ApplyVlmCard(Border card, TextBlock status, ProgressBar bar, Button installButton, string kind, ModelSlot slot, VlmHardwareProfile profile)
-    {
-        if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(kind, profile))
-        {
-            status.Text = $"Needs ~{VlmRecommendation.WorkingSetGb(kind):0.#} GB working memory (this PC has {profile.TotalRamGb:0.#} GB RAM)";
+            status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
             status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
             bar.Visibility = Visibility.Collapsed;
             installButton.IsEnabled = false;
             ToolTipService.SetToolTip(card,
-                "System RAM has a hard safety floor even when the GPU has substantial VRAM. Pick a smaller model for this PC.");
+                $"This model needs {RamBudgetGB(kind):0} GB resident RAM. With your {available:0} GB machine and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.");
             card.Opacity = 0.55;
-            card.IsHitTestVisible = false;
-            return;
-        }
-
-        var installed = VlmWeightsPresent(kind);
-        if (!installed && !VlmRecommendation.HasDiskFor(kind, profile.FreeDiskBytes))
-        {
-            var needGb = VlmRecommendation.RequiredFreeBytes(kind) / (1024.0 * 1024 * 1024);
-            status.Text = $"Needs ~{needGb:0.#} GB free while downloading";
-            status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
-            bar.Visibility = Visibility.Collapsed;
-            installButton.IsEnabled = false;
-            ToolTipService.SetToolTip(card, "Free space on the models drive, then try again. Downloads stage verified parts beside the final model.");
-            card.Opacity = 0.7;
             card.IsHitTestVisible = false;
             return;
         }
@@ -410,7 +318,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             bar.Value = slot.Fraction;
             installButton.IsEnabled = false;
         }
-        else if (installed)
+        else if (VlmWeightsPresent(kind))
         {
             status.Text = "Installed";
             bar.Visibility = Visibility.Collapsed;
@@ -449,10 +357,10 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         ActiveModelText.Text = _activeModel switch
         {
-            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (balanced)",
-            "gemma_3_4b" => "Active model: Gemma 3 4B (lightest)",
+            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
+            "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
             "mistral_small_3_2" => "Active model: Mistral-Small 3.2 (max quality)",
-            _ => "Active model: Qwen 2.5-VL 7B (balanced)",
+            _ => "Active model: Qwen 2.5-VL 7B (best quality)",
         };
     }
 
@@ -463,15 +371,6 @@ public sealed partial class DeepAnalyzeView : UserControl
     // already consumed so the last-result effects run exactly once per file and
     // a later file's progress tick can't re-process the previous file's result.
     private FileID.IpcSchema.DeepAnalyzeFileDone? _lastConsumedFileDone;
-    // Count of FileDone events consumed since the live card's streamer file last
-    // changed. The engine streams only the wave's lowest-idx (streamer) file on
-    // the live current_path/current_caption channel, but fires a terminal
-    // FileDone for EVERY concurrent wave member — and FileDone carries no path,
-    // so a sibling's FileDone can't be matched to the displayed streamer. In a
-    // sequential run (one file per wave) exactly one FileDone lands per streamer,
-    // so only the FIRST FileDone since the streamer changed may write the live
-    // card's caption/proposed-name; later siblings only feed the pill tally.
-    private int _fileDonesThisStreamer;
 
     private void SyncStream()
     {
@@ -480,79 +379,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         var prog = ec.DeepAnalyzeProgress;
         var last = ec.DeepAnalyzeLast;
         var complete = ec.DeepAnalyzeComplete;
-        SyncDeepAnalyzeControls();
 
-        if (starting is null && prog is null && last is null && complete is null)
-        {
-            if (ec.DeepAnalyzeCommandInFlight)
-            {
-                var attemptId = ec.DeepAnalyzeCommandAttemptId;
-                if (_localPreparingAttemptId != attemptId)
-                {
-                    _localPreparingAttemptId = attemptId;
-                    _proposedNameCount = 0;
-                    _lastConsumedFileDone = null;
-                    _fileDonesThisStreamer = 0;
-                    _lastStreamPath = null;
-                    SyncProposedNamesPill();
-                }
-                StreamCard.Visibility = Visibility.Visible;
-                OverallProgress.Value = 0;
-                OverallProgress.IsIndeterminate = true;
-                StreamProposedNameText.Text = string.Empty;
-                StreamCaptionText.Text = string.Empty;
-                if (ec.DeepAnalyzeQueuedBehindScan)
-                {
-                    // Queued behind a running scan on the engine's mutation gate.
-                    // While queued the engine emits only QueueState — no
-                    // DeepAnalyzeStarting/Progress — so arming the warm-up watchdog
-                    // would false-fire "Model took too long to load" at 45 s on a
-                    // healthy job that is merely waiting. Show the truth and disarm;
-                    // the DeepAnalyzeStarting that fires when the job actually begins
-                    // loading re-arms the watchdog via the branch below. (Fix A)
-                    CancelWarmupTimer();
-                    if (_cancelRequested)
-                    {
-                        // L5: Cancel was pressed while queued — the engine can't act
-                        // until the scan releases the gate, so show that we heard it.
-                        OverallProgressText.Text = "Cancelling…";
-                        StreamFileNameText.Text = "Cancelling — will stop when the current scan finishes…";
-                    }
-                    else
-                    {
-                        OverallProgressText.Text = "Queued";
-                        StreamFileNameText.Text = "Queued — waiting for the current scan to finish…";
-                    }
-                }
-                else if (_cancelRequested)
-                {
-                    // L5: cancelled during the pre-load prepare window — don't arm
-                    // the warm-up watchdog (a cancelled job that never loads must not
-                    // trip "model took too long").
-                    CancelWarmupTimer();
-                    OverallProgressText.Text = "Cancelling…";
-                    StreamFileNameText.Text = "Cancelling…";
-                }
-                else
-                {
-                    OverallProgressText.Text = "Preparing…";
-                    StreamFileNameText.Text = "Preparing Deep Analyze…";
-                    ArmWarmupTimer(attemptId);
-                }
-            }
-            else if (_localPreparingAttemptId != 0)
-            {
-                _localPreparingAttemptId = 0;
-                _lastStreamPath = null;
-                _fileDonesThisStreamer = 0;
-                CancelWarmupTimer();
-                StreamCard.Visibility = Visibility.Collapsed;
-                OverallProgress.IsIndeterminate = false;
-                OverallProgress.Value = 0;
-                OverallProgressText.Text = string.Empty;
-            }
-            return;
-        }
+        if (starting is null && prog is null && last is null && complete is null) return;
 
         // Any real progress/result/terminal event proves the model loaded and
         // tokens are flowing — disarm the warm-up watchdog so it can't false-fire.
@@ -569,6 +397,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         if (starting is not null && prog is null)
         {
             StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            AnalyzeAllButton.IsEnabled = false;
             StreamFileNameText.Text = $"{starting.Phase}: {starting.ModelKind}";
             StreamCaptionText.Text = starting.Message ?? string.Empty;
             StreamProposedNameText.Text = string.Empty;
@@ -576,8 +406,6 @@ public sealed partial class DeepAnalyzeView : UserControl
             // reflects only THIS run, not a cumulative count across runs. (audit A13)
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
-            _fileDonesThisStreamer = 0;
-            _lastStreamPath = null;
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
@@ -585,12 +413,14 @@ public sealed partial class DeepAnalyzeView : UserControl
             // Arm the warm-up watchdog so a stalled model load surfaces a
             // dismissible error + reverts the optimistic UI instead of
             // spinning "Preparing…" indefinitely.
-            ArmWarmupTimer(ec.DeepAnalyzeCommandAttemptId);
+            ArmWarmupTimer();
         }
 
         if (prog is not null)
         {
             StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            AnalyzeAllButton.IsEnabled = false;
             OverallProgress.IsIndeterminate = false;
 
             var pct = prog.Total == 0 ? 0 : (double)prog.Processed / prog.Total;
@@ -602,20 +432,12 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : string.Empty;
             OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files{etaSuffix}";
 
-            if (!string.IsNullOrEmpty(prog.CurrentPath)
-                && !string.Equals(prog.CurrentPath, _lastStreamPath, StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(prog.CurrentPath))
             {
-                _lastStreamPath = prog.CurrentPath;
                 StreamFileNameText.Text = Path.GetFileName(prog.CurrentPath);
                 _ = LoadStreamThumbAsync(prog.CurrentPath);
                 _captionAccumulator = string.Empty;
                 StreamCaptionText.Text = string.Empty;
-                // New streamer file: clear the prior file's proposed name and
-                // re-open the single-FileDone window so this file's own terminal
-                // caption/proposed-name may render (and a concurrent sibling's
-                // may not).
-                StreamProposedNameText.Text = string.Empty;
-                _fileDonesThisStreamer = 0;
             }
             // live caption stream. Engine emits the partial
             // accumulated text at 4 Hz; show it directly in the caption
@@ -627,17 +449,31 @@ public sealed partial class DeepAnalyzeView : UserControl
             }
         }
 
-        // PropertyChanged remains a compatibility/replay path. The hot
-        // DeepAnalyzeFileDoneReceived event carries every back-to-back payload
-        // into the dispatcher; the reference guard prevents double consumption.
-        if (last is not null)
+        // Only act on a genuinely new FileDone. DeepAnalyzeLast stays latched
+        // across every subsequent progress tick for the *next* file; without
+        // this reference guard those ticks would re-increment _proposedNameCount
+        // (inflated pill) and clobber the current file's live caption / proposed
+        // name with the previous file's finished text. (audit A13 follow-up)
+        if (last is not null && !ReferenceEquals(last, _lastConsumedFileDone))
         {
-            ConsumeFileDone(last);
+            _lastConsumedFileDone = last;
+            StreamCaptionText.Text = last.Description ?? string.Empty;
+            if (!string.IsNullOrEmpty(last.ProposedName))
+            {
+                StreamProposedNameText.Text = $"Proposed name: {last.ProposedName}";
+                _proposedNameCount++;
+                SyncProposedNamesPill();
+            }
+            else
+            {
+                StreamProposedNameText.Text = string.Empty;
+            }
         }
 
         if (complete is not null)
         {
-            _localPreparingAttemptId = 0;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
             OverallProgress.IsIndeterminate = false;
             OverallProgressText.Text = complete.Cancelled
                 ? $"Cancelled ({complete.Processed} done, {complete.Failed} failed)"
@@ -646,32 +482,12 @@ public sealed partial class DeepAnalyzeView : UserControl
         }
     }
 
-    private void ConsumeFileDone(DeepAnalyzeFileDone fileDone)
-    {
-        if (ReferenceEquals(fileDone, _lastConsumedFileDone)) return;
-        _lastConsumedFileDone = fileDone;
-        _fileDonesThisStreamer++;
-        var hasProposed = !string.IsNullOrEmpty(fileDone.ProposedName);
-        if (hasProposed)
-        {
-            _proposedNameCount++;
-            SyncProposedNamesPill();
-        }
-        if (_fileDonesThisStreamer == 1)
-        {
-            StreamCaptionText.Text = fileDone.Description ?? string.Empty;
-            StreamProposedNameText.Text = hasProposed
-                ? $"Proposed name: {fileDone.ProposedName}"
-                : string.Empty;
-        }
-    }
-
     // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
     // DeepAnalyzeStarting (e.g. a re-queued run, or a phase transition still in
     // the pre-progress window) gives the model the full WarmupTimeout to load.
-    private void ArmWarmupTimer(long attemptId)
+    private void ArmWarmupTimer()
     {
-        if (_unloaded || attemptId == 0) return;
+        if (_unloaded) return;
         var dq = DispatcherQueue;
         if (dq is null) return;
         if (_warmupTimer is null)
@@ -681,14 +497,12 @@ public sealed partial class DeepAnalyzeView : UserControl
             _warmupTimer.Tick += OnWarmupTimerTick;
         }
         _warmupTimer.Stop();
-        _warmupAttemptId = attemptId;
         _warmupTimer.Interval = WarmupTimeout;
         _warmupTimer.Start();
     }
 
     private void CancelWarmupTimer()
     {
-        _warmupAttemptId = 0;
         try { _warmupTimer?.Stop(); } catch { /* best-effort */ }
     }
 
@@ -696,23 +510,26 @@ public sealed partial class DeepAnalyzeView : UserControl
         => DebugLog.SafeRun("DeepAnalyzeView.OnWarmupTimerTick", () =>
         {
             sender.Stop();
-            var attemptId = _warmupAttemptId;
-            _warmupAttemptId = 0;
-            if (_unloaded || attemptId == 0) return;
+            if (_unloaded) return;
             // Only fire if we're still in the pre-progress warm-up window — if a
             // progress/last/complete event already landed, CancelWarmupTimer was
             // called and we shouldn't be here, but guard defensively.
             var ec = EngineClient.Instance;
-            if (ec.DeepAnalyzeCommandAttemptId != attemptId
-                || ec.DeepAnalyzeProgress is not null
+            if (ec.DeepAnalyzeProgress is not null
                 || ec.DeepAnalyzeLast is not null
                 || ec.DeepAnalyzeComplete is not null)
             {
                 return;
             }
-            // Ownership remains authoritative: warn without making controls look
-            // idle while this exact engine attempt is still active.
-            SyncDeepAnalyzeControls();
+            // Revert the optimistic UI so it doesn't look like a run is still in
+            // flight, then surface a dismissible, actionable error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            OverallProgress.IsIndeterminate = false;
+            OverallProgress.Value = 0;
+            OverallProgressText.Text = string.Empty;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
+            SyncSelectionButtons();
             _ = ShowAlertAsync("Model took too long to load",
                 "The Deep Analyze model didn't finish loading in time. Check the engine logs and try again.");
         });
@@ -748,7 +565,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // `using` so the SQLite connection + SemaphoreSlim are released on
             // every exit — the empty-pending early return and the catch path
             // below both used to leak the store.
-            await using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
             var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
             if (pending.Count == 0)
@@ -915,8 +732,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // Don't let the user select a model that would OOM-kill the engine —
             // mirrors the macOS `guard fits else { return }`. The card is also
             // IsHitTestVisible=false in that state, but guard here defensively.
-            var profile = VlmRecommendation.CurrentProfile();
-            if (profile.TotalRamGb > 0 && !VlmRecommendation.CanRun(id, profile)) return;
+            if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return;
             _activeModel = id;
             HighlightActiveCard();
             UpdateActiveModelLabel();
@@ -929,7 +745,6 @@ public sealed partial class DeepAnalyzeView : UserControl
                 // pending write. (audit A8)
                 var s = AppViewModel.Instance.Settings;
                 s.SelectedVlmModelKind = id;
-                s.SelectedVlmModelWasUserChosen = true;
                 s.Save();
             }
             catch (Exception ex) { DebugLog.Warn("Persist VLM choice failed: " + ex.Message); }
@@ -954,7 +769,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // (which is where CurrentModelKind would otherwise be set).
             ModelInstallerService.Instance.DeepVlm.CurrentModelKind = modelId;
             SyncCards();
-            await ModelInstallerService.Instance.InstallDeepVlmAsync(modelId);
+            await EngineClient.Instance.PrewarmModelAsync(modelId);
         }
         catch (Exception ex)
         {
@@ -964,22 +779,27 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
-        if (!ActiveModelReady(out var reason))
-        {
-            await ShowAlertAsync("Deep Analyze isn't ready", reason);
-            return;
-        }
+        // Set the optimistic/working UI state BEFORE the await: if the send
+        // throws, the catch reverts it and surfaces the error. Setting it after
+        // the await meant a send failure showed the user nothing — the run
+        // silently never started while the UI looked idle/ready.
+        StreamCard.Visibility = Visibility.Visible;
+        CancelButton.IsEnabled = true;
+        AnalyzeAllButton.IsEnabled = false;
         try
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false,
-                proposeRenames: ProposeRenamesCheck.IsChecked == true,
-                excludedFolders: AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders);
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
         }
         catch (Exception ex)
         {
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
+            // Revert the optimistic state so the UI doesn't falsely look like a
+            // run is in flight, then surface a dismissible error.
+            StreamCard.Visibility = Visibility.Collapsed;
+            CancelButton.IsEnabled = false;
+            AnalyzeAllButton.IsEnabled = true;
             await ShowAlertAsync("Couldn't start Deep Analyze",
                 "Deep Analyze couldn't be started: " + ex.Message +
                 "\n\nMake sure the model is installed and the engine is running, then try again.");
@@ -1009,67 +829,30 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (System.Threading.Interlocked.CompareExchange(ref _applyInFlight, 1, 0) != 0) return;
         SetApplyBusy(true, "Applying…");
-        int tagged = 0, peopled = 0, applyFailed = 0;
+        int tagged = 0, peopled = 0;
         bool openRenameSheet = false;
-        IReadOnlyDictionary<long, List<string>>? priorUserTags = null;
-        var confirmedTagFileIds = new HashSet<long>();
         try
         {
-            await using var store = new Services.ReadStore(Services.AppPaths.DbPath);
-            await store.OpenAsync();
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             var ct = System.Threading.CancellationToken.None;
-            IReadOnlyDictionary<string, List<long>>? keywordMap = null;
-            IReadOnlyDictionary<string, List<long>>? peopleMap = null;
             if (keywords)
             {
-                keywordMap = await store.KeywordTagFileIdsAsync(ct);
+                var map = await store.KeywordTagFileIdsAsync(ct);
+                foreach (var kv in map)
+                {
+                    if (kv.Value.Count == 0) continue;
+                    await EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add");
+                    tagged += kv.Value.Count;
+                }
             }
             if (people)
             {
-                peopleMap = await store.NamedPersonFileIdsAsync(ct);
-            }
-            var requestedTagFileIds = (keywordMap?.Values ?? [])
-                .Concat(peopleMap?.Values ?? [])
-                .SelectMany(ids => ids)
-                .Distinct()
-                .ToArray();
-            priorUserTags = await Services.TagChangeJournal
-                .CapturePriorUserTagsAsync(requestedTagFileIds);
-
-            if (keywordMap is not null)
-            {
-                foreach (var kv in keywordMap)
+                var map = await store.NamedPersonFileIdsAsync(ct);
+                foreach (var kv in map)
                 {
                     if (kv.Value.Count == 0) continue;
-                    var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                        "applyTags",
-                        () => EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add"),
-                        Services.BulkActionTimeout.ForFileCount(kv.Value.Count));
-                    tagged += (int)result.Succeeded;
-                    applyFailed += (int)result.Failed;
-                    foreach (var fileId in Services.BulkActionResultTruth
-                                 .ConfirmedSuccessfulFileIds(result, kv.Value))
-                    {
-                        confirmedTagFileIds.Add(fileId);
-                    }
-                }
-            }
-            if (peopleMap is not null)
-            {
-                foreach (var kv in peopleMap)
-                {
-                    if (kv.Value.Count == 0) continue;
-                    var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                        "applyTags",
-                        () => EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add"),
-                        Services.BulkActionTimeout.ForFileCount(kv.Value.Count));
-                    peopled += (int)result.Succeeded;
-                    applyFailed += (int)result.Failed;
-                    foreach (var fileId in Services.BulkActionResultTruth
-                                 .ConfirmedSuccessfulFileIds(result, kv.Value))
-                    {
-                        confirmedTagFileIds.Add(fileId);
-                    }
+                    await EngineClient.Instance.ApplyTagsAsync(kv.Value, new[] { kv.Key }, "add");
+                    peopled += kv.Value.Count;
                 }
             }
             if (names)
@@ -1078,40 +861,17 @@ public sealed partial class DeepAnalyzeView : UserControl
                 openRenameSheet = pending.Count > 0;
             }
         }
-        catch
-        {
-            // The SetApplyBusy(false, …) that clears the busy UI lives after the
-            // try and is skipped when an awaited engine/DB call throws — clear it
-            // here so the card doesn't wedge on "Applying…". Rethrow so the outer
-            // SafeRunAsync still logs the original exception.
-            SetApplyBusy(false, "Couldn't apply — check the engine and try again.");
-            throw;
-        }
         finally
         {
-            if (priorUserTags is not null && confirmedTagFileIds.Count > 0)
-            {
-                var confirmed = confirmedTagFileIds.OrderBy(id => id).ToArray();
-                Services.TagChangeJournal.PushUndo(
-                    Services.TagChangeJournal.FormatLabel("add", confirmed.Length),
-                    confirmed,
-                    priorUserTags);
-            }
             System.Threading.Interlocked.Exchange(ref _applyInFlight, 0);
         }
 
         var parts = new System.Collections.Generic.List<string>();
         if (keywords) parts.Add($"{tagged} tagged");
         if (people) parts.Add($"{peopled} people-tagged");
-        if (applyFailed > 0) parts.Add($"{applyFailed} failed");
         SetApplyBusy(false, parts.Count == 0
             ? "Nothing to apply yet."
-            : (applyFailed == 0 ? "Applied — " : "Finished — ") + string.Join(", ", parts) + ".");
-        if (applyFailed > 0)
-        {
-            await ShowAlertAsync("Some tags couldn't be applied",
-                $"{applyFailed:N0} file{(applyFailed == 1 ? "" : "s")} failed. The successful tags were kept; check the engine log, then try again.");
-        }
+            : "Applied — " + string.Join(", ", parts) + ".");
 
         // Smart names go through the review sheet (correct extension + uniqueness
         // handling) rather than a blind bulk rename — safer for a destructive op,
@@ -1125,7 +885,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = !busy;
-            ApplyPeopleButton.IsEnabled = !busy && _hasNamedPeople;
+            ApplyPeopleButton.IsEnabled = !busy;
             ApplyAllButton.IsEnabled = !busy;
             ApplyProgressRing.IsActive = busy;
             ApplyProgressRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
@@ -1135,32 +895,22 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex) { DebugLog.Warn("SetApplyBusy UI update threw: " + ex.Message); }
     }
 
-    // Analyze the current Library selection as one bounded engine batch so the
-    // multi-GB VLM loads once and the existing persistent-server wave scheduler
-    // handles progress, cancellation, and per-file terminals.
+    // Analyzes every file currently selected in the Library view. We send
+    // one DeepAnalyzeFile per file. Engine throttles parallelism via its
+    // model pool; sending N requests just queues them up.
     private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
         {
-            if (!ActiveModelReady(out var reason))
+            var sel = SelectionRegistry.Instance.LibrarySelection;
+            if (sel.Count == 0) return;
+            _selectedRunCancelled = false;
+            StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            foreach (var id in sel)
             {
-                await ShowAlertAsync("Deep Analyze isn't ready", reason);
-                return;
-            }
-            var selected = SelectionRegistry.Instance.LibrarySelection.ToArray();
-            if (selected.Length == 0) return;
-            try
-            {
-                await EngineClient.Instance.DeepAnalyzeAllAsync(
-                    _activeModel,
-                    skipExisting: false,
-                    tagsOnly: false,
-                    proposeRenames: ProposeRenamesCheck.IsChecked == true,
-                    fileIds: selected);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn($"Deep Analyze selected batch failed: {ex.Message}");
-                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
+                if (_selectedRunCancelled) break;
+                try { await EngineClient.Instance.DeepAnalyzeFileAsync(id, _activeModel); }
+                catch (Exception ex) { DebugLog.Warn($"DeepAnalyzeFile({id}) failed: {ex.Message}"); }
             }
         });
 
@@ -1170,36 +920,19 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeCurrentClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeCurrentClicked), async () =>
         {
-            if (!ActiveModelReady(out var reason))
-            {
-                await ShowAlertAsync("Deep Analyze isn't ready", reason);
-                return;
-            }
             var id = SelectionRegistry.Instance.PreviewedFileId;
             if (id is null) return;
-            try
-            {
-                await EngineClient.Instance.DeepAnalyzeFileAsync(id.Value, _activeModel);
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn($"DeepAnalyzeFile (current) failed: {ex.Message}");
-                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
-            }
+            StreamCard.Visibility = Visibility.Visible;
+            CancelButton.IsEnabled = true;
+            try { await EngineClient.Instance.DeepAnalyzeFileAsync(id.Value, _activeModel); }
+            catch (Exception ex) { DebugLog.Warn($"DeepAnalyzeFile (current) failed: {ex.Message}"); }
         });
 
     private async void OnCancelClicked(object sender, RoutedEventArgs e)
     {
-        // L5: latch a 'Cancelling…' state + disable Cancel now. When the command
-        // is queued behind a scan the engine can't act until the scan releases the
-        // gate, so without this the button stayed enabled with no feedback for the
-        // whole scan. SyncStream reflects the state; SyncDeepAnalyzeControls clears
-        // the latch once the command leaves flight.
-        if (EngineClient.Instance.DeepAnalyzeCommandInFlight)
-        {
-            _cancelRequested = true;
-            SyncStream();
-        }
+        // Also stop the per-file "Analyze Selected" send loop — the engine
+        // cancel below only stops the file currently in flight.
+        _selectedRunCancelled = true;
         try { await EngineClient.Instance.DeepAnalyzeCancelAsync(); }
         catch (Exception ex) { DebugLog.Warn("Cancel failed: " + ex); }
     }

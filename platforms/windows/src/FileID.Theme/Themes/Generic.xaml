@@ -46,6 +46,16 @@
         </Setter>
     </Style>
 
+    <Style TargetType="motion:IridescentBorder">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="motion:IridescentBorder">
+                    <win2d:CanvasControl x:Name="PART_Canvas" ClearColor="Transparent" IsHitTestVisible="False" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- LavaLampBackground draws via Microsoft.UI.Composition directly —
          no Win2D, no template part needed. The default style just enforces
          that the control is hit-transparent. -->
@@ -53,4 +63,43 @@
         <Setter Property="IsHitTestVisible" Value="False" />
     </Style>
 
+    <!--
+        ThemedSegmentedControl ItemTemplate uses {Binding} (not {x:Bind}).
+        x:Bind requires compile-time type resolution; SegmentedOption is in
+        the same assembly as this template, so Pass 1 silently fails on the
+        forward reference. Plain Binding is runtime-resolved and works.
+    -->
+    <Style TargetType="controls:ThemedSegmentedControl">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="controls:ThemedSegmentedControl">
+                    <Grid Padding="3"
+                          CornerRadius="20"
+                          Background="{ThemeResource WhiteSubtleFillBrush}"
+                          BorderBrush="{ThemeResource WhiteSubtleStrokeBrush}"
+                          BorderThickness="1">
+                        <ItemsRepeater ItemsSource="{TemplateBinding ItemsSource}">
+                            <ItemsRepeater.Layout>
+                                <StackLayout Orientation="Horizontal" Spacing="2" />
+                            </ItemsRepeater.Layout>
+                            <ItemsRepeater.ItemTemplate>
+                                <DataTemplate>
+                                    <Button
+                                        Content="{Binding Label}"
+                                        Tag="{Binding Tag}"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        Padding="12,6"
+                                        FontSize="{StaticResource FontSizeBody}"
+                                        FontWeight="Medium"
+                                        Foreground="#B3FFFFFF"
+                                        CornerRadius="20" />
+                                </DataTemplate>
+                            </ItemsRepeater.ItemTemplate>
+                        </ItemsRepeater>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
 </ResourceDictionary>

@@ -22,25 +22,11 @@ public sealed record StartScanCommand(
     // `rescan = false` (default) is incremental: engine skips files where
     // `scanned_at >= modified_at`. `rescan = true` forces every file to
     // be re-tagged.
-    bool Rescan = false,
-    // User-excluded folder subtrees pruned from the walk; rows already
-    // cataloged under them are purged at scan start. Null = no exclusions
-    // (key omitted on the wire — additive-optional for macOS parity).
-    System.Collections.Generic.IReadOnlyList<string>? ExcludedPaths = null) : CommandPayload;
-
-/// <summary>Immediately remove cataloged rows under the given excluded
-/// folders (files on disk untouched). Sent when the user adds an exclusion
-/// so the Library reflects it without waiting for a rescan. Replies with a
-/// <c>bulkActionResult</c> (action "purgeExcluded").</summary>
-public sealed record PurgeExcludedCommand(
-    System.Collections.Generic.IReadOnlyList<string> ExcludedPaths) : CommandPayload;
+    bool Rescan = false) : CommandPayload;
 
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
-public sealed record CancelRestructureCommand : CommandPayload;
-public sealed record HealthCheckCommand(
-    [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
@@ -63,11 +49,7 @@ public sealed record DeepAnalyzeAllCommand(
     string ModelKind,
     bool SkipExisting,
     bool TagsOnly = false,
-    bool ProposeRenames = true,
-    [property: JsonPropertyName("fileIDs"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<long>? FileIds = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    IReadOnlyList<string>? ExcludedFolders = null) : CommandPayload;
+    bool ProposeRenames = true) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
@@ -75,24 +57,17 @@ public sealed record PrewarmModelCommand(string ModelKind) : CommandPayload;
 
 public sealed record CancelPrewarmCommand(string? ModelKind = null) : CommandPayload;
 
-public sealed record PlanRestructureCommand(
-    string LibraryRoot,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool SupportsPagedPlans = false) : CommandPayload;
+public sealed record PlanRestructureCommand(string LibraryRoot) : CommandPayload;
 
 public sealed record ApplyRestructureCommand(
     string LibraryRoot,
     System.Collections.Generic.IReadOnlyList<RestructureMove> Moves,
-    bool UseSymlinks = false,
-    [property: JsonPropertyName("planID")]
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PlanId = null) : CommandPayload;
+    bool UseSymlinks = false) : CommandPayload;
 
 /// <summary>Reverse the most recent applyRestructure — the engine replays its
 /// on-disk undo journal to move every relocated file back. Reply is a
 /// RestructureApplyResult (Applied = files moved back). (RESTRUCTURE.md §6)</summary>
-public sealed record UndoRestructureCommand(
-    string LibraryRoot,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    string? ShortcutUndoToken = null) : CommandPayload;
+public sealed record UndoRestructureCommand(string LibraryRoot) : CommandPayload;
 
 public sealed record RestructureMove(
     [property: JsonPropertyName("fileID")] long FileId,
@@ -120,17 +95,7 @@ public sealed record RenameFilesCommand(
 public sealed record RenameEntry([property: JsonPropertyName("fileID")] long FileId, string NewName);
 
 public sealed record TrashFilesCommand(
-    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,
-    System.Collections.Generic.IReadOnlyList<ExactTrashIdentity>? ExactIdentities = null) : CommandPayload;
-
-public sealed record ExactTrashIdentity(
-    [property: JsonPropertyName("fileID")] long FileId,
-    string Path,
-    long SizeBytes,
-    string Sha256Hex,
-    string KeeperPath,
-    long KeeperSizeBytes,
-    string KeeperSha256Hex);
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds) : CommandPayload;
 
 public sealed record MergeClustersCommand(
     [property: JsonPropertyName("sourcePersonID")] long SourcePersonId,
@@ -147,14 +112,6 @@ public sealed record RenamePersonCommand(
     string? MiddleName = null,
     string? LastName = null,
     string? Suffix = null) : CommandPayload;
-
-/// <summary>Move a face through the engine writer. A null destination removes
-/// the face from its current person; createNewPerson creates a fresh unnamed
-/// person before assigning it.</summary>
-public sealed record ReassignFaceCommand(
-    [property: JsonPropertyName("faceID")] long FaceId,
-    [property: JsonPropertyName("destinationPersonID")] long? DestinationPersonId = null,
-    bool CreateNewPerson = false) : CommandPayload;
 
 /// <summary>FEAT-CRIT-1: bulk mark-as-unknown for People multi-select.</summary>
 public sealed record MarkPersonsAsUnknownCommand(
@@ -234,7 +191,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "mergeClusters" => JsonSerializer.Deserialize<MergeClustersCommand>(ref reader, options) ?? throw new JsonException("mergeClusters: null body"),
             "embedTextQuery" => JsonSerializer.Deserialize<EmbedTextQueryCommand>(ref reader, options) ?? throw new JsonException("embedTextQuery: null body"),
             "renamePerson" => JsonSerializer.Deserialize<RenamePersonCommand>(ref reader, options) ?? throw new JsonException("renamePerson: null body"),
-            "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
             "markPersonsAsUnknown" => JsonSerializer.Deserialize<MarkPersonsAsUnknownCommand>(ref reader, options) ?? throw new JsonException("markPersonsAsUnknown: null body"),
             "markPersonsDifferent" => JsonSerializer.Deserialize<MarkPersonsDifferentCommand>(ref reader, options) ?? throw new JsonException("markPersonsDifferent: null body"),
             "findMergeSuggestions" => Empty<FindMergeSuggestionsCommand>(ref reader),
@@ -244,12 +200,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "generateVideoThumbnail" => JsonSerializer.Deserialize<GenerateVideoThumbnailCommand>(ref reader, options) ?? throw new JsonException("generateVideoThumbnail: null body"),
 
             "wipeLibrary" => Empty<WipeLibraryCommand>(ref reader),
-            "purgeExcluded" => JsonSerializer.Deserialize<PurgeExcludedCommand>(ref reader, options) ?? throw new JsonException("purgeExcluded: null body"),
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
-            "cancelRestructure" => Empty<CancelRestructureCommand>(ref reader),
-            "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
@@ -278,8 +231,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
-            case CancelRestructureCommand: WriteEmpty(writer, "cancelRestructure"); break;
-            case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
@@ -299,7 +250,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case MergeClustersCommand c: WriteVariant(writer, "mergeClusters", c, options); break;
             case EmbedTextQueryCommand c: WriteVariant(writer, "embedTextQuery", c, options); break;
             case RenamePersonCommand c: WriteVariant(writer, "renamePerson", c, options); break;
-            case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
             case MarkPersonsAsUnknownCommand c: WriteVariant(writer, "markPersonsAsUnknown", c, options); break;
             case MarkPersonsDifferentCommand c: WriteVariant(writer, "markPersonsDifferent", c, options); break;
             case FindMergeSuggestionsCommand: WriteEmpty(writer, "findMergeSuggestions"); break;
@@ -308,7 +258,6 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case RevertMergeCommand c: WriteVariant(writer, "revertMerge", c, options); break;
             case GenerateVideoThumbnailCommand c: WriteVariant(writer, "generateVideoThumbnail", c, options); break;
             case WipeLibraryCommand: WriteEmpty(writer, "wipeLibrary"); break;
-            case PurgeExcludedCommand c: WriteVariant(writer, "purgeExcluded", c, options); break;
             default:
                 throw new JsonException($"CommandPayload: unknown C# type {value.GetType().FullName}");
         }

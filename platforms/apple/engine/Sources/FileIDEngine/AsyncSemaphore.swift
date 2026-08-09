@@ -46,7 +46,7 @@ public actor AsyncSemaphore {
     /// method — the unstructured `Task { }` wrap was unnecessary AND
     /// risked reordering signals relative to acquisitions, briefly
     /// allowing more concurrent ANE access than the semaphore intends.
-    public func with<T: Sendable>(_ body: () async throws -> T) async rethrows -> T {
+    public func with<T>(_ body: () async throws -> T) async rethrows -> T {
         await wait()
         do {
             let result = try await body()

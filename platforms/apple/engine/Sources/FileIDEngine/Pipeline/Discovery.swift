@@ -21,7 +21,6 @@
 // huge videos / archives and decode can OOM on 16 GB), and
 // non-regular files.
 import Foundation
-import CryptoKit
 import GRDB
 import FileIDShared
 
@@ -37,10 +36,7 @@ public struct DiscoveredFile: Sendable {
     public let fileRef: UInt64?
 
     public enum Kind: String, Sendable {
-        // `model` = 3D models (scanned, not dropped like `other`) so Deep Analyze can
-        // name them from their embedded object/material labels. Lockstep with the Rust
-        // engine's FileKind::Model ("model"). Wavefront `.obj` only for now.
-        case image, video, pdf, doc, audio, model, other
+        case image, video, pdf, doc, audio, other
     }
 }
 
@@ -51,32 +47,14 @@ public enum FileTypes {
         "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf"
     ]
     public static let videos: Set<String> = [
-        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts"
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg"
     ]
     public static let pdfs: Set<String> = ["pdf"]
     public static let documents: Set<String> = [
-        "pdf", "doc", "docx", "odt", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
     ]
     public static let audio: Set<String> = [
         "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
-    ]
-    /// Source code + prose markup — read as UTF-8 text and clustered by content (BGE),
-    /// classified as `.doc`. Lockstep with the Rust engine's FileKind::from_extension.
-    public static let code: Set<String> = [
-        "swift", "py", "rb", "js", "jsx", "ts", "tsx", "java", "kt", "c", "h", "cpp",
-        "cc", "cxx", "hpp", "hh", "cs", "go", "rs", "php", "sh", "bash", "zsh", "sql",
-        "scala", "m", "mm", "r", "jl", "lua", "dart", "vue", "pl", "pm", "ps1",
-        "tex", "bib", "rst", "org", "adoc"
-    ]
-    /// E-books — extracted to text and clustered as `.doc`. EPUB only (zip of XHTML);
-    /// MOBI is proprietary (low ROI). Lockstep with the Rust engine.
-    public static let ebooks: Set<String> = ["epub"]
-    /// 3D models — rendered to a thumbnail and (for `.obj`) clustered by CLIP like images;
-    /// every recognized format is grouped under `3D Models/` + named by Deep Analyze.
-    /// Lockstep with the Rust engine's FileKind::from_extension.
-    public static let models: Set<String> = [
-        "obj", "stl", "ply", "glb", "gltf", "fbx", "usdz", "usd", "usda", "usdc",
-        "dae", "3mf", "3ds", "off"
     ]
 
     public static func kind(forExtension ext: String) -> DiscoveredFile.Kind {
@@ -84,17 +62,14 @@ public enum FileTypes {
         if images.contains(e)    { return .image }
         if videos.contains(e)    { return .video }
         if pdfs.contains(e)      { return .pdf }
-        if documents.contains(e) || code.contains(e) || ebooks.contains(e) { return .doc }
+        if documents.contains(e) { return .doc }
         if audio.contains(e)     { return .audio }
-        if models.contains(e)    { return .model }
         return .other
     }
 
     public static func isTaggable(_ ext: String) -> Bool {
         let e = ext.lowercased()
-        return images.contains(e) || videos.contains(e) || documents.contains(e)
-            || code.contains(e) || ebooks.contains(e)
-            || audio.contains(e) || models.contains(e)
+        return images.contains(e) || videos.contains(e) || documents.contains(e) || audio.contains(e)
     }
 }
 
@@ -120,19 +95,17 @@ public actor Discovery {
         forceReprocess: Bool = false,
         skipHidden: Bool = true,
         maxSizeMB: Int = 500,
-        excludedPaths: [String]? = nil,
         cancelCheck: @Sendable () -> Bool = { false },
         progress: @Sendable (Int) -> Void = { _ in }
     ) async -> [DiscoveredFile] {
-        let exclusions = Self.resolvedExclusions(root: root, rawPaths: excludedPaths)
         let skip = await Self.buildSkipSet(
             root: root, database: database, forceReprocess: forceReprocess)
         var collected: [DiscoveredFile] = []
         collected.reserveCapacity(8_192)
-        _ = await enumerate(
+        await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
-            exclusions: exclusions, cancelCheck: cancelCheck, progress: progress
+            cancelCheck: cancelCheck, progress: progress
         ) { file in
             collected.append(file)
         }
@@ -147,113 +120,29 @@ public actor Discovery {
     /// (the dominant NAS-prefetch win); the cross-directory alphabetical sort
     /// `walk` adds is intentionally traded away here for the streaming start.
     /// Honors the same incremental skip set as `walk`. (F-C6-005)
-    @discardableResult
     public func walkStreaming(
         root: URL,
         database: Database? = nil,
         forceReprocess: Bool = false,
         skipHidden: Bool = true,
         maxSizeMB: Int = 500,
-        excludedPaths: [String]? = nil,
         cancelCheck: @Sendable () -> Bool = { false },
         progress: @Sendable (Int) -> Void = { _ in },
         onFile: (DiscoveredFile) async -> Void
-    ) async -> Int {
-        let exclusions = Self.resolvedExclusions(root: root, rawPaths: excludedPaths)
+    ) async {
         let skip = await Self.buildSkipSet(
             root: root, database: database, forceReprocess: forceReprocess)
-        return await enumerate(
+        await enumerate(
             root: root, skipHidden: skipHidden, maxSizeMB: maxSizeMB, skip: skip,
             database: database,
-            exclusions: exclusions,
             cancelCheck: cancelCheck, progress: progress, emit: onFile)
     }
 
     // MARK: - Enumeration core
 
-    private struct Exclusion: Sendable {
-        let path: String
-        let prefix: String
-    }
-
     private struct SkipEntry: Sendable {
         let modifiedAt: Double?
         let size: Int64
-    }
-
-    /// Compact key for the incremental-rescan cache. Storing every full path
-    /// duplicated the path string and its heap allocation for the entire scan;
-    /// at a million files that can consume hundreds of MiB before tagging even
-    /// begins. SHA-256 truncated to 128 bits makes the retained size independent
-    /// of path length while keeping collision risk negligible.
-    private struct PathFingerprint: Hashable, Sendable {
-        let high: UInt64
-        let low: UInt64
-
-        init(_ path: String) {
-            let digest = SHA256.hash(data: Data(path.utf8))
-            var high: UInt64 = 0
-            var low: UInt64 = 0
-            for (index, byte) in digest.prefix(16).enumerated() {
-                if index < 8 {
-                    high = (high << 8) | UInt64(byte)
-                } else {
-                    low = (low << 8) | UInt64(byte)
-                }
-            }
-            self.high = high
-            self.low = low
-        }
-    }
-
-    public static func resolvedExclusionPaths(root: URL, rawPaths: [String]?) -> [String] {
-        resolvedExclusions(root: root, rawPaths: rawPaths).map(\.path)
-    }
-
-    private static func resolvedExclusions(root: URL, rawPaths: [String]?) -> [Exclusion] {
-        guard let rawPaths, !rawPaths.isEmpty else { return [] }
-        let rootPath = normalizedExclusionPath(root)
-        let rootPrefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
-        var seen = Set<String>()
-        var result: [Exclusion] = []
-        for raw in rawPaths {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let path = normalizedExclusionPath(URL(fileURLWithPath: trimmed))
-            guard path != rootPath, path.hasPrefix(rootPrefix), !seen.contains(path) else {
-                continue
-            }
-            seen.insert(path)
-            result.append(Exclusion(path: path, prefix: path + "/"))
-        }
-        return result
-    }
-
-    private static func normalizedExclusionPath(_ url: URL) -> String {
-        stripTrailingSlashes(
-            url.resolvingSymlinksInPath()
-                .standardizedFileURL
-                .path
-                .precomposedStringWithCanonicalMapping
-                .lowercased()
-        )
-    }
-
-    private static func stripTrailingSlashes(_ path: String) -> String {
-        guard path.count > 1 else { return path }
-        var p = path
-        while p.count > 1, p.hasSuffix("/") {
-            p.removeLast()
-        }
-        return p
-    }
-
-    private static func isExcluded(_ path: String, by exclusions: [Exclusion]) -> Bool {
-        guard !exclusions.isEmpty else { return false }
-        let normalized = normalizedExclusionPath(URL(fileURLWithPath: path))
-        return exclusions.contains { exclusion in
-            normalized == exclusion.path || normalized.hasPrefix(exclusion.prefix)
-        }
     }
 
     /// Shared tree walk used by both `walk` and `walkStreaming`. `emit` receives
@@ -263,38 +152,23 @@ public actor Discovery {
         root: URL,
         skipHidden: Bool,
         maxSizeMB: Int,
-        skip: [PathFingerprint: SkipEntry]?,
+        skip: [String: SkipEntry]?,
         database: Database?,
-        exclusions: [Exclusion],
         cancelCheck: @Sendable () -> Bool,
         progress: @Sendable (Int) -> Void,
         emit: (DiscoveredFile) async -> Void
-    ) async -> Int {
+    ) async {
         let resourceKeys: [URLResourceKey] = [
             .isDirectoryKey, .isRegularFileKey, .isHiddenKey,
             .fileSizeKey, .creationDateKey, .contentModificationDateKey
         ]
-        // Without an errorHandler the enumerator SILENTLY drops any entry it
-        // can't read (permission denied, a NAS share that drops mid-scan, a file
-        // removed underfoot) — the user gets an incomplete library with no warning.
-        // Count the failures and return true to keep walking, so one unreadable
-        // subtree can't truncate the scan; the running total is surfaced as a
-        // non-fatal `discovery_partial` summary below, mirroring the Windows engine
-        // (scan_session.rs error_count → "discovery_partial").
-        var discoveryErrorCount = 0
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: resourceKeys,
-            options: skipHidden ? [.skipsHiddenFiles] : [],
-            errorHandler: { url, error in
-                discoveryErrorCount += 1
-                JSONLog.shared.warn(ev: "discovery_dir_access_failed",
-                                    path: redactPathForLog(url.path), error: "\(error)")
-                return true
-            }
+            options: skipHidden ? [.skipsHiddenFiles] : []
         ) else {
             JSONLog.shared.error(ev: "discovery_enumerator_nil", path: redactPathForLog(root.path))
-            return 0
+            return
         }
 
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
@@ -314,13 +188,7 @@ public actor Discovery {
             if cancelCheck() { break }
             let values = try? url.resourceValues(forKeys: Set(resourceKeys))
             // Skip directories (enumerator yields both; we want files).
-            if values?.isDirectory == true {
-                if Self.isExcluded(url.path, by: exclusions) {
-                    enumerator.skipDescendants()
-                }
-                continue
-            }
-            if Self.isExcluded(url.path, by: exclusions) { continue }
+            if values?.isDirectory == true { continue }
             if values?.isRegularFile != true { continue }
             let ext = url.pathExtension
             guard FileTypes.isTaggable(ext) else { continue }
@@ -337,7 +205,7 @@ public actor Discovery {
             // only `failed = 0` rows (prior failures always reprocess) and excludes
             // embeddable images still lacking a CLIP row (R-14); a lookup miss
             // fails safe (the file is processed).
-            if let skip, let entry = skip[PathFingerprint(url.path)],
+            if let skip, let entry = skip[url.path],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: values?.contentModificationDate?.timeIntervalSince1970,
@@ -362,7 +230,7 @@ public actor Discovery {
             ))
             kept += 1
             sinceLastProgress += 1
-            if kept == 1 || sinceLastProgress >= 16 {
+            if sinceLastProgress >= 256 {
                 progress(kept)
                 sinceLastProgress = 0
             }
@@ -370,18 +238,6 @@ public actor Discovery {
         if !skippedTouch.isEmpty {
             await Self.touchScannedAt(skippedTouch, to: touchTime, database: database)
         }
-        // Non-fatal partial-discovery summary: some entries under `root` couldn't be
-        // read this walk (counted by the enumerator's errorHandler above). Logged so
-        // the app (Settings → Logs) can tell the user the library may be incomplete
-        // instead of silently dropping them. Mirrors the Windows `discovery_partial`
-        // event (scan_session.rs); the scan still completes.
-        if discoveryErrorCount > 0 {
-            JSONLog.shared.info(ev: "discovery_partial",
-                                path: redactPathForLog(root.path),
-                                extra: ["skipped": AnyCodable(discoveryErrorCount),
-                                        "kept": AnyCodable(kept)])
-        }
-        return kept
     }
 
     /// re-audit R-08: bump `scanned_at` for files SKIPPED this scan. A skip never
@@ -469,14 +325,13 @@ public actor Discovery {
     /// (a `LIKE prefix||'%'` is not) and scopes the load to THIS root's subtree,
     /// mirroring the Windows skip-set query (scan_session.rs) and the macOS
     /// orphan-sweep range. Only `failed = 0` rows are loaded, and an embeddable
-    /// image still lacking a `clip_embeddings` row (or a doc/pdf lacking a
-    /// `text_embeddings` row) is excluded (R-14) via the shared
-    /// `DBWriter.skipSetClipBackfillExclusionSQL` / `…TextBackfillExclusionSQL` so the
-    /// post-install backfill branches in DBWriter.insertOne stay reachable on an
-    /// incremental rescan instead of being filtered out here.
+    /// image still lacking a `clip_embeddings` row is excluded (R-14) via the
+    /// shared `DBWriter.skipSetClipBackfillExclusionSQL` so the post-CLIP-install
+    /// backfill branch in DBWriter.insertOne stays reachable on an incremental
+    /// rescan instead of being filtered out here.
     private static func buildSkipSet(
         root: URL, database: Database?, forceReprocess: Bool
-    ) async -> [PathFingerprint: SkipEntry]? {
+    ) async -> [String: SkipEntry]? {
         guard !forceReprocess, let database else { return nil }
         let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
         let prefixUpper: String = {
@@ -492,34 +347,25 @@ public actor Discovery {
         // when CLIP is actually installed. With no CLIP model on disk, no image
         // can ever get an embedding, so the exclusion would keep EVERY image out
         // of the skip set and re-run the full ANE/Vision pass on every scan
-        // forever. Gate it on the model file existing. The BGE doc-embedding
-        // exclusion has the exact same shape for docs/pdfs (gated on BGE on disk):
-        // BGE is opt-in, so the first scan usually predates it and the install-then-
-        // rescan path must keep embeddingless docs in the pipeline to backfill them.
+        // forever. Gate it on the model file existing.
         let clipInstalled = FileManager.default.fileExists(
             atPath: MobileCLIPService.defaultImageModelURL.path)
         let clipExclusion = clipInstalled
             ? "AND \(DBWriter.skipSetClipBackfillExclusionSQL)" : ""
-        // Same CLIP gate keeps an embeddingless `.obj` 3D model in the pipeline to backfill.
-        let modelExclusion = clipInstalled
-            ? "AND \(DBWriter.skipSetModelClipBackfillExclusionSQL)" : ""
-        let textExclusion = BGETextService.isInstalledOnDisk
-            ? "AND \(DBWriter.skipSetTextBackfillExclusionSQL)" : ""
         do {
-            return try await database.pool.read { db -> [PathFingerprint: SkipEntry] in
-                var map: [PathFingerprint: SkipEntry] = [:]
-                let cursor = try Row.fetchCursor(db, sql: """
+            return try await database.pool.read { db -> [String: SkipEntry] in
+                var map: [String: SkipEntry] = [:]
+                let rows = try Row.fetchAll(db, sql: """
                     SELECT path_text, size_bytes, modified_at FROM files
                     WHERE failed = 0 AND path_text >= ? AND path_text < ?
                       \(clipExclusion)
-                      \(modelExclusion)
-                      \(textExclusion)
                     """, arguments: [prefix, prefixUpper])
-                while let row = try cursor.next() {
+                map.reserveCapacity(rows.count)
+                for row in rows {
                     let path: String = row["path_text"]
                     let size: Int64 = row["size_bytes"] ?? -1
                     let modifiedAt: Double? = row["modified_at"]
-                    map[PathFingerprint(path)] = SkipEntry(modifiedAt: modifiedAt, size: size)
+                    map[path] = SkipEntry(modifiedAt: modifiedAt, size: size)
                 }
                 return map
             }

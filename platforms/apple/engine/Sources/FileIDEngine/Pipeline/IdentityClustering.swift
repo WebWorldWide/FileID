@@ -56,17 +56,6 @@ public enum IdentityClustering {
         /// coverage to connect each face to its same-person neighbors.
         public let kNN: Int
 
-        /// Mutual-kNN gate for Pass 1: keep an edge i—j only when EACH face
-        /// is in the OTHER's above-threshold neighbourhood, which breaks the
-        /// single "bridge" face that would otherwise chain two identities into
-        /// one mega-cluster. Mirror of the Rust `FILEID_FACE_MUTUAL_KNN` (which
-        /// is default-ON there); here it DEFAULTS OFF pending on-Mac label
-        /// calibration — macOS uses Apple Vision face quality (a different
-        /// 0..1 scale) and a separate alignment path, so the Windows-calibrated
-        /// values do NOT transfer. See MACOS_LOCKSTEP_NOTES.
-        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
-        public let mutualKNN: Bool
-
         // Defaults calibrated on-hardware for SFace (128-d) — the commercial-clean
         // embedder that replaced ArcFace (512-d). SFace's cosine distribution
         // differs: a known single identity (studio portraits) clusters at mean
@@ -84,8 +73,7 @@ public enum IdentityClustering {
             pass3VarianceThreshold: Float = 0.04,
             pass3MinMeanCosine: Float = 0.60,
             pass3MaxSplits: Int = 7,
-            kNN: Int = 10,
-            mutualKNN: Bool = false // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            kNN: Int = 10
         ) {
             self.pass1Cosine = pass1Cosine
             self.pass2Cosine = pass2Cosine
@@ -94,7 +82,6 @@ public enum IdentityClustering {
             self.pass3MinMeanCosine = pass3MinMeanCosine
             self.pass3MaxSplits = pass3MaxSplits
             self.kNN = kNN
-            self.mutualKNN = mutualKNN // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         }
     }
 
@@ -157,40 +144,13 @@ public enum IdentityClustering {
 
         // ─── Pass 1: connected components above pass1Cosine ───────
         var uf = UnionFind(n: n)
-        if params.mutualKNN {
-            // Mutual-kNN: union i—j only when EACH face lists the OTHER in its
-            // above-threshold neighbourhood, breaking the single "bridge" face
-            // that would otherwise chain two identities into one mega-cluster.
-            // Mirror of the Rust mutual_knn block (FILEID_FACE_MUTUAL_KNN): build
-            // a directed set of above-threshold ordered pairs, then union only
-            // the pairs whose reverse (j,i) is also present. Determinism
-            // preserved: candidates are gathered in ascending-i / searcher order
-            // and unioned in that same order. Pairs keyed as i*n+j (unique since
-            // both < n). UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
-            var directed = Set<Int>()
-            var candidates: [(Int, Int)] = []
-            for i in 0..<n {
-                if shouldCancel() { return cancelledResult() }
-                for hit in searcher(i) {
-                    let j = hit.neighbor
-                    guard j != i, j >= 0, j < n else { continue }
-                    guard hit.similarity >= params.pass1Cosine else { continue }
-                    directed.insert(i * n + j)
-                    candidates.append((i, j))
-                }
-            }
-            for (i, j) in candidates where directed.contains(j * n + i) {
+        for i in 0..<n {
+            if shouldCancel() { return cancelledResult() }
+            for hit in searcher(i) {
+                let j = hit.neighbor
+                guard j != i, j >= 0, j < n else { continue }
+                guard hit.similarity >= params.pass1Cosine else { continue }
                 uf.union(i, j)
-            }
-        } else {
-            for i in 0..<n {
-                if shouldCancel() { return cancelledResult() }
-                for hit in searcher(i) {
-                    let j = hit.neighbor
-                    guard j != i, j >= 0, j < n else { continue }
-                    guard hit.similarity >= params.pass1Cosine else { continue }
-                    uf.union(i, j)
-                }
             }
         }
         var rootMembers: [Int: [Int]] = [:]

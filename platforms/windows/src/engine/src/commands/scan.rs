@@ -18,73 +18,11 @@ use crate::pipeline::tagging::ModelStack;
 use crate::platform;
 use crate::scan_session::ScanSession;
 
-enum BlockingWait<T> {
-    Completed(Result<T, tokio::task::JoinError>),
-    TimedOut(tokio::task::JoinHandle<T>),
-}
-
-struct ScanStateGuard(Arc<Mutex<Option<ScanCoordinator>>>);
-impl Drop for ScanStateGuard {
-    fn drop(&mut self) {
-        *self.0.lock() = None;
-    }
-}
-
-async fn wait_for_blocking<T: Send + 'static>(
-    mut task: tokio::task::JoinHandle<T>,
-    timeout: Duration,
-) -> BlockingWait<T> {
-    match tokio::time::timeout(timeout, &mut task).await {
-        Ok(result) => BlockingWait::Completed(result),
-        Err(_) => BlockingWait::TimedOut(task),
-    }
-}
-
-async fn reject_stranded_decoders(
-    sink: &Sink,
-    scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
-    active: usize,
-) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "decoder_shutdown_incomplete".into(),
-        message: format!(
-            "{active} decoder worker(s) from the previous scan are still stopping. Wait and retry; restart FileID if they do not exit."
-        ),
-        path: None,
-        model_kind: None,
-    }))))
-    .await;
-    sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-        ScanPhase::Failed,
-    ))))
-    .await;
-    *scan_state.lock() = None;
-}
-
-async fn reject_gpu_device_removed(
-    sink: &Sink,
-    scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
-) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "gpu_device_removed".into(),
-        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-        path: None,
-        model_kind: None,
-    }))))
-    .await;
-    sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-        ScanPhase::Failed,
-    ))))
-    .await;
-    *scan_state.lock() = None;
-}
-
 pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
     scan_state: Arc<Mutex<Option<ScanCoordinator>>>,
     payload: ipc::StartScanPayload,
-    cancel_requested: Arc<std::sync::atomic::AtomicBool>,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
 
@@ -117,31 +55,14 @@ pub(crate) async fn handle_start_scan(
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
         return;
     }
-    let _state_guard = ScanStateGuard(scan_state.clone());
 
-    if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
-        coord.request_cancel();
-        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-            ScanPhase::Cancelled,
-        ))))
-        .await;
-        *scan_state.lock() = None;
-        tracing::info!("[SCAN] queued scan cancelled before model loading");
-        return;
+    struct ScanStateGuard(std::sync::Arc<parking_lot::Mutex<Option<ScanCoordinator>>>);
+    impl Drop for ScanStateGuard {
+        fn drop(&mut self) {
+            *self.0.lock() = None;
+        }
     }
-
-    let active_decoders = crate::pipeline::tagging::active_decoder_threads();
-    if active_decoders > 0 {
-        reject_stranded_decoders(&sink, &scan_state, active_decoders).await;
-        tracing::warn!(active_decoders, "[SCAN] previous decoder workers are still active");
-        return;
-    }
-
-    if coord.is_gpu_dead() {
-        reject_gpu_device_removed(&sink, &scan_state).await;
-        tracing::warn!("[SCAN] handle_start_scan exiting: process GPU failure is latched");
-        return;
-    }
+    let _scan_guard = ScanStateGuard(scan_state.clone());
 
     // Pre-flight before ModelStack::load_default. Without this, a user who
     // clicked Scan before completing Welcome would wedge ORT for the full
@@ -186,35 +107,7 @@ pub(crate) async fn handle_start_scan(
             model_kind: None,
         }))))
         .await;
-        *scan_state.lock() = None;
         tracing::warn!("[SCAN] handle_start_scan exiting: models_not_installed");
-        return;
-    }
-
-    // macOS pre-flight: the engine's `load-dynamic` ONNX Runtime build needs an
-    // installed `libonnxruntime.dylib` (ORT's `download-binaries` ships only a
-    // STATIC lib for arm64). If it isn't resolvable, fail fast with a distinct,
-    // actionable `runtime_not_installed` error — pointing at the ONE-TIME
-    // runtime install, NOT the model download — instead of wedging ORT for the
-    // 120 s model-load timeout and then surfacing an opaque dlopen panic as
-    // `model_load_failed`. No-op on Windows/Linux (`is_available()` is always
-    // true there). main.rs already pinned `ORT_DYLIB_PATH` when resolvable.
-    #[cfg(target_os = "macos")]
-    if !crate::ort_runtime::is_available() {
-        tracing::warn!("[SCAN] ONNX Runtime dylib not installed; aborting scan");
-        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-            ScanPhase::Failed,
-        ))))
-        .await;
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "runtime_not_installed".into(),
-            message: crate::ort_runtime::missing_runtime_message(),
-            path: None,
-            model_kind: None,
-        }))))
-        .await;
-        *scan_state.lock() = None;
-        tracing::warn!("[SCAN] handle_start_scan exiting: runtime_not_installed");
         return;
     }
 
@@ -263,8 +156,10 @@ pub(crate) async fn handle_start_scan(
     // 120 s still catches a genuinely hung or corrupt model file.
     let models_worker_count = platform::default_worker_cap() as usize;
     // EP crash-safety: arm a breadcrumb around the first ORT session bind (this
-    // is where a bad GPU pack DLL crashes the process). A timed-out blocking load
-    // keeps both this guard and the scan reservation until the loader really exits.
+    // is where a bad GPU pack DLL crashes the process). If we get past the
+    // `.await` at all — success, Rust error, or timeout — the process survived,
+    // so disarm; only a hard native crash leaves the breadcrumb for the next
+    // launch's ep_guard to disable the EP. See models::ep_guard.
     // Arm the override-aware EP that will actually attempt the first native
     // GPU bind (honors gpuExecutionProviderOverride), not the auto-detected
     // active_provider() which ignores the override — see runtime::armed_provider.
@@ -275,29 +170,18 @@ pub(crate) async fn handle_start_scan(
     // native crash skips the drop (process gone) and keeps the breadcrumb.
     let armed_ep = models::runtime::armed_provider();
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
-    let load_result = wait_for_blocking(
-        tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
+    let load_result = tokio::time::timeout(
         Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
     )
     .await;
+    // We survived the bind (success, Rust error, or timeout) — disarm now; the
+    // guard's drop covers the graceful-shutdown-mid-load cancellation instead.
+    drop(ep_guard);
     let models = match load_result {
-        BlockingWait::Completed(Ok(m)) => {
-            drop(ep_guard);
-            Arc::new(m)
-        }
-        BlockingWait::Completed(Err(err)) => {
-            drop(ep_guard);
+        Ok(Ok(m)) => Arc::new(m),
+        Ok(Err(err)) => {
             tracing::error!(?err, "model stack load panicked");
-            // macOS: a dylib that resolved at pre-flight but fails to load is
-            // almost always the wrong architecture or older than the required
-            // ONNX Runtime 1.22 (`ort` hard-panics on a lower minor version) —
-            // point at the one-time runtime reinstall in addition to the models.
-            #[cfg(target_os = "macos")]
-            let runtime_hint = "\nOn macOS this can also mean the ONNX Runtime is the wrong \
-                                architecture or older than 1.22 — reinstall it with \
-                                `fileid runtime install`.";
-            #[cfg(not(target_os = "macos"))]
-            let runtime_hint = "";
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Failed,
             ))))
@@ -306,18 +190,17 @@ pub(crate) async fn handle_start_scan(
                 kind: "model_load_failed".into(),
                 message: format!(
                     "The inference engine couldn't load its models: {err}.\n\
-                     Try reinstalling models from Settings → Local AI.{runtime_hint}"
+                     Try reinstalling models from Settings → Local AI."
                 ),
                 path: None,
                 model_kind: None,
             }))))
             .await;
-            *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
             return;
         }
-        BlockingWait::TimedOut(load_task) => {
-            tracing::error!("model stack load timed out after 120s; retaining scan reservation until the blocking loader exits");
+        Err(_elapsed) => {
+            tracing::error!("model stack load timed out after 120s");
             sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
                 ScanPhase::Failed,
             ))))
@@ -325,34 +208,22 @@ pub(crate) async fn handle_start_scan(
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "model_load_timeout".into(),
                 message:
-                    "Loading inference models took longer than 120 seconds. The native \
-                     loader cannot be cancelled safely, so FileID will reject another scan \
-                     until it finishes. Restart the engine before retrying if it remains stuck.\n\nTry:\n\
-                     • Close other memory- or GPU-heavy apps.\n\
-                     • Reinstall the models from Settings → Local AI.\n\
+                    "Loading inference models took longer than 120 seconds and was \
+                     stopped.\n\nThis usually means the model is too large for the \
+                     available memory or GPU, or a model file is incomplete. Try:\n\
+                     • Close other memory- or GPU-heavy apps and start the scan again.\n\
+                     • Reinstall the models from Settings → Local AI to repair an \
+                     incomplete download.\n\
                      • Pick a smaller Deep Analyze model in Settings → Local AI."
                         .into(),
                 path: None,
                 model_kind: None,
             }))))
             .await;
-            let late_result = load_task.await;
-            drop(ep_guard);
-            match late_result {
-                Ok(_) => tracing::warn!("[SCAN] timed-out model loader eventually exited"),
-                Err(err) => tracing::warn!(?err, "[SCAN] timed-out model loader eventually failed"),
-            }
-            *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_timeout");
             return;
         }
     };
-
-    if coord.is_gpu_dead() {
-        reject_gpu_device_removed(&sink, &scan_state).await;
-        tracing::warn!("[SCAN] model load observed a process GPU failure");
-        return;
-    }
 
     // A model whose install SENTINEL passed the pre-flight above but whose
     // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
@@ -398,7 +269,6 @@ pub(crate) async fn handle_start_scan(
                 model_kind: None,
             }))))
             .await;
-            *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
             return;
         }
@@ -421,7 +291,6 @@ pub(crate) async fn handle_start_scan(
         sink.clone(),
         models,
         payload.rescan,
-        payload.excluded_paths.clone().unwrap_or_default(),
     );
     let root = PathBuf::from(payload.root_path.clone());
 
@@ -445,136 +314,4 @@ pub(crate) async fn handle_start_scan(
     }
 
     tracing::info!("[SCAN] handle_start_scan exiting normally");
-}
-
-/// `purgeExcluded` handler — immediately remove cataloged rows under the
-/// given excluded folders (files on disk untouched). Sent when the user adds
-/// an exclusion so the Library reflects it without waiting for a rescan; the
-/// same purge also runs at every scan start as the durable backstop.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    #[test]
-    fn scan_state_guard_clears_a_preflight_panic() {
-        let scan_state = Arc::new(Mutex::new(Some(ScanCoordinator::new())));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
-            let scan_state = scan_state.clone();
-            move || {
-                let _guard = ScanStateGuard(scan_state);
-                panic!("injected preflight panic");
-            }
-        }));
-        assert!(result.is_err());
-        assert!(scan_state.lock().is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn timed_out_blocking_load_remains_joinable() {
-        let release = Arc::new(AtomicBool::new(false));
-        let release_for_task = release.clone();
-        let task = tokio::task::spawn_blocking(move || {
-            while !release_for_task.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            7
-        });
-
-        let timed_out = wait_for_blocking(task, Duration::from_millis(10)).await;
-        let BlockingWait::TimedOut(task) = timed_out else {
-            panic!("blocking loader unexpectedly completed before the timeout");
-        };
-        assert!(!task.is_finished());
-        release.store(true, Ordering::Release);
-        assert_eq!(task.await.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn preset_pending_cancel_stops_scan_before_model_loading() {
-        let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
-        let scan_state = Arc::new(Mutex::new(None));
-        let cancel_requested = Arc::new(AtomicBool::new(true));
-        let (sink, mut events) = Sink::channel_for_test(2);
-        let payload = ipc::StartScanPayload {
-            root_path: std::env::temp_dir().to_string_lossy().into_owned(),
-            root_display: None,
-            rescan: false,
-            excluded_paths: None,
-        };
-
-        handle_start_scan(
-            sink,
-            db,
-            scan_state.clone(),
-            payload,
-            cancel_requested,
-        )
-        .await;
-
-        let event = events.recv().await.expect("cancelled phase event");
-        assert!(matches!(
-            event.payload,
-            EventPayload::PhaseChanged(Wrap {
-                inner: ScanPhase::Cancelled
-            })
-        ));
-        assert!(scan_state.lock().is_none());
-    }
-
-    #[tokio::test]
-    async fn gpu_failure_rejection_is_terminal_and_releases_scan_slot() {
-        let coordinator = ScanCoordinator::new();
-        let scan_state = Arc::new(Mutex::new(Some(coordinator)));
-        let (sink, mut events) = Sink::channel_for_test(2);
-
-        reject_gpu_device_removed(&sink, &scan_state).await;
-
-        let error = events.recv().await.expect("GPU error event");
-        let phase = events.recv().await.expect("failed phase event");
-        match error.payload {
-            EventPayload::Error(error) => {
-                assert_eq!(error.inner.kind, "gpu_device_removed");
-                assert_eq!(error.inner.message, crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE);
-            }
-            other => panic!("expected GPU error, got {other:?}"),
-        }
-        assert!(matches!(
-            phase.payload,
-            EventPayload::PhaseChanged(Wrap { inner: ScanPhase::Failed })
-        ));
-        assert!(scan_state.lock().is_none());
-    }
-}
-
-pub(crate) async fn handle_purge_excluded(
-    sink: Sink,
-    db: Arc<Mutex<rusqlite::Connection>>,
-    payload: ipc::PurgeExcludedPayload,
-) {
-    let result = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<crate::ipc::BulkActionResult> {
-            const MAX_PATHS: usize = 4096;
-            let resolved: Vec<_> = payload
-                .excluded_paths
-                .iter()
-                .take(MAX_PATHS)
-                .filter_map(|raw| {
-                    crate::util::path_safety::resolve_exclusion_unrooted(std::path::Path::new(raw))
-                })
-                .collect();
-            let purged = {
-                let conn = db.lock();
-                crate::scan_session::purge_excluded_rows(&conn, &resolved)
-            };
-            Ok(crate::ipc::BulkActionResult {
-                action: "purgeExcluded".into(),
-                succeeded: purged.min(u32::MAX as u64) as u32,
-                failed: 0,
-                messages: Vec::new(),
-            })
-        },
-    )
-    .await;
-    crate::commands::bulk::emit_bulk_result(&sink, "purgeExcluded", result).await;
 }

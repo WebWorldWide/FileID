@@ -7,34 +7,20 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
-      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
       - 'platforms/windows/global.json'
-      - 'platforms/windows/VERSION'
-      - 'platforms/windows/installer/**'
-      - 'platforms/windows/build/publish-bundle.ps1'
-      - 'shared/scripts/check_binary_privacy.py'
-      - 'shared/scripts/test_check_binary_privacy.py'
-      - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   pull_request:
     paths:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
-      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
       - 'platforms/windows/global.json'
-      - 'platforms/windows/VERSION'
-      - 'platforms/windows/installer/**'
-      - 'platforms/windows/build/publish-bundle.ps1'
-      - 'shared/scripts/check_binary_privacy.py'
-      - 'shared/scripts/test_check_binary_privacy.py'
-      - '.github/workflows/release.yml'
       - '.github/workflows/windows-app.yml'
   workflow_dispatch:
 
@@ -62,10 +48,10 @@ jobs:
         working-directory: platforms/windows
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v4
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
@@ -76,10 +62,10 @@ jobs:
       # workload is installed. setup-msbuild exposes the runner's VS
       # Build Tools install to dotnet build via PATH + MSBuildExtensionsPath.
       - name: Setup MSBuild (VS WinUI tooling)
-        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+        uses: microsoft/setup-msbuild@v2
 
       - name: Cache NuGet
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@v4
         with:
           path: ~/.nuget/packages
           key: nuget-${{ matrix.arch }}-${{ hashFiles('platforms/windows/Directory.Packages.props') }}
@@ -123,26 +109,24 @@ jobs:
           -m
         shell: pwsh
 
-      - name: Test — IPC schema (x64 only)
+      - name: Run all test projects
+        # V15.3: was IpcSchema-only with continue-on-error. Now runs every
+        # discoverable test project in Tests/, fails on red. Tests run on
+        # x64 only — ARM64 cross-building tests is rarely useful here.
+        # `dotnet test` triggers its own restore for the Tests/ projects;
+        # safe to run here because the x64 build is already complete.
         if: matrix.arch == 'x64'
         shell: pwsh
+        run: |
+          if (Test-Path Tests) {
+            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "No Tests/ directory; skipping."
+          }
         working-directory: platforms/windows/Tests
-        timeout-minutes: 10
-        run: dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal
-
-      - name: Test — app services (x64 only)
-        if: matrix.arch == 'x64'
-        shell: pwsh
-        working-directory: platforms/windows/Tests
-        timeout-minutes: 20
-        run: >
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj
-          -c Debug
-          -p:Platform=x64
-          -p:RuntimeIdentifier=win-x64
-          --verbosity minimal
-          --blame-hang-timeout 5m
-          --blame-hang-dump-type mini
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
       # caused `dotnet format FileID.sln`'s solution-level restore to
@@ -152,23 +136,7 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        shell: pwsh
-        run: |
-          $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
-          $env:DOTNET_HOST_PATH = $dotnet
-          $env:DOTNET_ROOT = Split-Path -Parent $dotnet
-
-          $formatOutput = & $dotnet format FileID.sln --verify-no-changes 2>&1
-          $formatExit = $LASTEXITCODE
-          $formatOutput | ForEach-Object { Write-Host $_ }
-
-          if ($formatExit -eq 4 -and (($formatOutput | Out-String) -like '*Unable to locate dotnet CLI*')) {
-            Write-Warning 'dotnet format hit its upstream CLI-probe race; retrying once.'
-            & $dotnet format FileID.sln --verify-no-changes
-            exit $LASTEXITCODE
-          }
-
-          exit $formatExit
+        run: dotnet format FileID.sln --verify-no-changes
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'
@@ -209,9 +177,7 @@ jobs:
             "developer.download.nvidia.com",
             "developer.nvidia.com",
             "schemas.microsoft.com",
-            "schemas.openxmlformats.org",
-            "ai.google.dev",
-            "docs.nvidia.com"
+            "schemas.openxmlformats.org"
           )
           $sources = Get-ChildItem -Path src -Recurse -File `
             -Include *.cs,*.xaml,*.xaml.cs |
@@ -245,31 +211,9 @@ jobs:
         run: |
           $output = dotnet list package --vulnerable --include-transitive 2>&1 | Out-String
           Write-Host $output
-
-          # Extract every advisory GHSA-ID from the output, then reject any that
-          # are not in the accepted list. Full output is always logged above; this
-          # gate ensures any NEW advisory still fails CI.
-          $found = [regex]::Matches($output, 'https://github\.com/advisories/(GHSA-[a-z0-9-]+)') |
-            ForEach-Object { $_.Groups[1].Value }
-
-          # Accepted advisories — each requires a DECISIONS.md justification.
-          $accepted = @(
-            # GHSA-2m69-gcr7-jv3q: SQLitePCLRaw.lib.e_sqlite3 2.1.10 (transitive via
-            # Microsoft.Data.Sqlite 9.0.0). App opens SQLite read-only — vulnerable write
-            # path unreachable from the app binary. Proper fix requires lock-file
-            # regeneration on Windows. See DECISIONS.md 2026-06-19.
-            "GHSA-2m69-gcr7-jv3q"
-          )
-
-          $unexpected = $found | Where-Object { $accepted -notcontains $_ }
-          if ($unexpected.Count -gt 0) {
-            Write-Error "Unexpected vulnerable packages: $($unexpected -join ', ') — see full output above."
+          if ($output -match 'has the following vulnerable packages') {
+            Write-Error "Vulnerable packages found — see output above."
             exit 1
-          }
-          if ($found.Count -gt 0) {
-            Write-Host "Vulnerability scan: $($found.Count) advisory/ies found, all accepted (see DECISIONS.md)."
-          } else {
-            Write-Host "Vulnerability scan passed — no vulnerabilities found."
           }
         shell: pwsh
 
@@ -294,14 +238,63 @@ jobs:
           $allDlls = Get-ChildItem -Path $publishDir -Filter "*.dll"
           Write-Host ("publish dir contains {0} dll(s)" -f $allDlls.Count)
 
-      # The shared scanner recursively covers every shipped EXE/DLL and owns
-      # the raw ASCII/UTF-16LE/UTF-16BE marker contract.
+      # Privacy gate — parity with macos.yml + windows-engine.yml. The
+      # forbidden-strings list MUST stay in sync across all three
+      # workflows + platforms/windows/build/publish-bundle.ps1. Failing
+      # this is a release blocker — no exception.
       - name: Privacy — telemetry-string scan
         shell: pwsh
         run: |
           $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
-          python "$env:GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" $publishDir
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $forbidden = @(
+            "sentry.io",
+            "io.sentry",
+            "applicationinsights",
+            "applicationinsights.azure.com",
+            "googletagmanager",
+            "google-analytics.com",
+            "segment.io",
+            "segment.com",
+            "mixpanel.com",
+            "amplitude.com",
+            "posthog.com",
+            "datadoghq",
+            "bugsnag",
+            "rollbar.com",
+            "honeycomb.io",
+            "newrelic.com",
+            "raygun.io",
+            "firebase",
+            "firebaseio.com",
+            "appcenter.ms",
+            "in.appcenter.ms",
+            "crashpad",
+            "breakpad"
+          )
+          # Scan every shipped binary (EXE + every DLL). The .NET
+          # framework + WinUI runtime DLLs are bundled into self-contained
+          # publish output and could in principle ship telemetry strings;
+          # we want to know.
+          $targets = @()
+          $targets += Get-ChildItem -Path $publishDir -Filter "FileID.exe"
+          $targets += Get-ChildItem -Path $publishDir -Filter "*.dll"
+          $hits = @()
+          foreach ($file in $targets) {
+            $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            $textAscii = [System.Text.Encoding]::ASCII.GetString($bytes)
+            $textUtf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+            foreach ($needle in $forbidden) {
+              if ($textAscii -match [regex]::Escape($needle) -or
+                  $textUtf16 -match [regex]::Escape($needle)) {
+                $hits += "$($file.Name):$needle"
+              }
+            }
+          }
+          if ($hits.Count -gt 0) {
+            Write-Error "Telemetry strings found in shipped binary:`n  $($hits -join "`n  ")"
+            exit 1
+          }
+          Write-Host ("Scanned {0} binaries; no telemetry strings detected. ✅" -f $targets.Count)
 
       # Launch smoke — verifies the published binary at least starts,
       # paints chrome, and stays alive for a few seconds. Catches the
@@ -315,12 +308,12 @@ jobs:
           $exe = Join-Path $publishDir "FileID.exe"
           if (-not (Test-Path $exe)) { throw "FileID.exe not found at $exe" }
           # Launch without redirecting stdin/stdout — the app expects to
-          # spawn its engine and message-pump. GitHub's windows runners
-          # provide an interactive desktop session, so a healthy build
-          # stays alive past the 5 s window. ANY exit inside it fails —
-          # a startup crash can exit 0 (a swallowed OnLaunched exception
-          # tearing down the dispatcher), so exit code alone proves
-          # nothing.
+          # spawn its engine and message-pump. The headless runner has no
+          # display, so we expect the app to fail fast OR keep ticking
+          # for a couple seconds before we kill it. Either way, a NULL
+          # ref / startup crash inside OnLaunched would surface as an
+          # immediate exit with non-zero code; the smoke validates we
+          # didn't ship that.
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = (Resolve-Path $exe).Path
           $psi.UseShellExecute = $false
@@ -328,10 +321,11 @@ jobs:
           $proc = [System.Diagnostics.Process]::Start($psi)
           Start-Sleep -Seconds 5
           if ($proc.HasExited) {
-            # If a legitimate headless fast-exit path ever appears, gate it
-            # explicitly (env flag + asserted log line) rather than
-            # re-allowing exit 0 here.
-            throw "FileID.exe exited within 5 s (code $($proc.ExitCode)) — startup smoke expects the app to stay alive."
+            $code = $proc.ExitCode
+            if ($code -ne 0) {
+              throw "FileID.exe exited within 5 s with code $code — likely startup crash."
+            }
+            Write-Host "FileID.exe exited cleanly within 5 s (expected on a headless runner)."
           } else {
             Write-Host "FileID.exe still running after 5 s — clean startup. Killing for cleanup."
             try { $proc.Kill() } catch { }

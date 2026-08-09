@@ -7,7 +7,7 @@ Phase 1 of the Windows port is code-complete as of V11 (2026-05-02). This file i
 ## 0. Prerequisites
 
 - [ ] Windows 10 22H2 OR Windows 11 (any build)
-- [ ] Visual Studio 2022 17.11+ with Windows App SDK workload — OR — `winget install Microsoft.WindowsAppRuntime.1.7` and the .NET 8 SDK
+- [ ] Visual Studio 2022 17.11+ with Windows App SDK 1.6 workload — OR — `winget install Microsoft.WindowsAppRuntime.1.6` and the .NET 8 SDK
 - [ ] Rust 1.78+ (`rustup default 1.78`) for the engine
 - [ ] PowerShell 7+ (`pwsh`)
 
@@ -97,7 +97,7 @@ The user's favorite. We made specific commitments to match macOS exactly.
 
 If you hit one of these, it's not a Phase 1 bug — it's a known-tricky pattern:
 
-- **WinAppSDK runtime not found at launch** → install `Microsoft.WindowsAppRuntime.1.7` via winget. Release users should use `FileIDSetup.exe`, whose Burn chain embeds the matching runtime prerequisite; the standalone MSI is for managed IT deployment.
+- **WinAppSDK runtime not found at launch** → install `Microsoft.WindowsAppRuntime.1.6` via winget. Or, when shipping, the WiX MSI installs the runtime alongside us.
 - **Folder picker silently does nothing** → the InitializeWithWindow call needs the right HWND. We grab it via `WinRT.Interop.WindowNative.GetWindowHandle(MainWindow)`. If a third-party tweak changes how MainWindow is constructed, this can drop.
 - **Mica looks flat / not translucent** → Win10 22H2 falls back to AcrylicBrush; Mica is Win11-only. Both work; just visually different. Verify by hitting the Win+Tab task switcher and confirming Mica blends with the desktop wallpaper on Win11.
 - **LavaLamp draws behind a black box** → Win2D wasn't restored. Re-`dotnet restore`.

@@ -125,6 +125,8 @@
         a 0.4s spring on another. Motion primitives reference these keys.
     -->
     <x:Double x:Key="DurationShimmerSeconds">1.6</x:Double>
+    <x:Double x:Key="DurationCompletionRippleSeconds">0.9</x:Double>
+    <x:Double x:Key="DurationIridescentBorderSeconds">14</x:Double>
     <x:Double x:Key="DurationTabCrossfadeSeconds">0.22</x:Double>
     <x:Double x:Key="DurationSidebarToggleSeconds">0.20</x:Double>
     <x:Double x:Key="DurationStatTileHoverSeconds">0.18</x:Double>

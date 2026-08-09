@@ -9,8 +9,8 @@
 // We poll on construction + listen to the AnimationsEnabledChanged event,
 // so toggles surfaced while the app is open take effect immediately.
 //
-// Every motion primitive (Shimmer, LavaLamp, springs) checks
-// `ReducedMotion.IsReduced` before kicking off animation.
+// Every motion primitive (Shimmer, Ripple, IridescentBorder, LavaLamp,
+// springs) checks `ReducedMotion.IsReduced` before kicking off animation.
 
 using System.ComponentModel;
 using Windows.UI.ViewManagement;
@@ -36,8 +36,8 @@ public sealed class ReducedMotion : INotifyPropertyChanged
 
     /// <summary>
     /// True when the user has asked the OS to minimize animations. All
-    /// motion primitives gate on this — Shimmer freezes and LavaLamp
-    /// halves its rate.
+    /// motion primitives gate on this — Shimmer / IridescentBorder freeze,
+    /// CompletionRipple skips the pulse, LavaLamp halves its rate.
     /// </summary>
     public bool IsReduced
     {
@@ -49,35 +49,7 @@ public sealed class ReducedMotion : INotifyPropertyChanged
                 return;
             }
             _isReduced = value;
-            RaiseIsReducedChanged();
-        }
-    }
-
-    // Subscribers are invoked from OnAnimationsEnabledChanged, which runs on a
-    // threadpool thread. A plain multicast Invoke there is a process-kill: one
-    // subscriber that throws (a null DispatcherQueue on a torn-down control is
-    // the realistic case) escapes as an unhandled exception on a thread with no
-    // handler, AND every later subscriber is skipped, silently freezing their
-    // motion. Isolate each subscriber so neither can happen.
-    private void RaiseIsReducedChanged()
-    {
-        var handler = PropertyChanged;
-        if (handler is null)
-        {
-            return;
-        }
-        var args = new PropertyChangedEventArgs(nameof(IsReduced));
-        foreach (var target in handler.GetInvocationList())
-        {
-            try
-            {
-                ((PropertyChangedEventHandler)target)(this, args);
-            }
-            catch
-            {
-                // A motion primitive failing to react to the accessibility
-                // toggle must never take the app down or block its siblings.
-            }
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsReduced)));
         }
     }
 

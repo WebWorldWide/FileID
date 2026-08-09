@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # FileID dev bootstrap — macOS + Linux (all distros).
 #
-# Installs system-packaged build prerequisites and builds the isolated RAM++
-# export venv. Security-sensitive bootstrap tools must already be installed;
-# this script never downloads and executes remote installer code.
+# Installs the SCRIPTABLE toolchain (Rust, Python 3.11, a C/build toolchain) and
+# builds the isolated RAM++ export venv (pinned, from requirements-ramplus.txt),
 # then prints the GUI-gated steps it can't automate (full Xcode on macOS).
 # Idempotent — skips anything already present.
 #
-#   macOS  : requires Homebrew; installs python@3.11, cmake/pkg-config; Xcode CLT via xcode-select.
-#   Linux  : detects apt/dnf/pacman/zypper/apk → build tools + python; requires existing Rust.
+#   macOS  : Homebrew → rustup, python@3.11, cmake/pkg-config; Xcode CLT via xcode-select.
+#   Linux  : detects apt/dnf/pacman/zypper/apk → build tools + python; rustup via rustup.rs.
 #            (Linux is Phase 5 / engine-only today; the C# app + macOS app don't build here.)
 #
 # Usage:  bash shared/scripts/setup-dev.sh [--skip-export-venv]
@@ -22,7 +21,6 @@ SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info()  { printf '\033[36m[setup]\033[0m %s\n' "$*"; }
 ok()    { printf '\033[32m[ ok ]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
-die()   { printf '\033[31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
 OS="$(uname -s)"
@@ -32,10 +30,14 @@ info "FileID dev bootstrap. OS=$OS  repo=$ROOT"
 PY=python3
 install_macos() {
   if ! have brew; then
-    die "Homebrew is required but missing. Install it separately from a reviewed, trusted source, then rerun; FileID will not execute a mutable remote installer."
+    info "installing Homebrew ..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # add brew to PATH for this session (Apple Silicon vs Intel prefixes)
+    [[ -x /opt/homebrew/bin/brew ]] && eval "$(/opt/homebrew/bin/brew shellenv)"
+    [[ -x /usr/local/bin/brew ]] && eval "$(/usr/local/bin/brew shellenv)"
   fi
   info "brew install python@3.11 cmake pkg-config ..."
-  brew install python@3.11 cmake pkg-config >/dev/null
+  brew install python@3.11 cmake pkg-config >/dev/null || true
   PY="$(brew --prefix)/bin/python3.11"; [[ -x "$PY" ]] || PY=python3.11
   # Xcode Command Line Tools (clang, headers) — full Xcode is App Store only.
   if ! xcode-select -p >/dev/null 2>&1; then
@@ -64,20 +66,14 @@ case "$OS" in
   *) warn "unsupported OS '$OS' — this script targets macOS + Linux (use setup-dev.ps1 on Windows)."; exit 1 ;;
 esac
 
-# --- Rust ------------------------------------------------------------------
-if have rustc && have cargo; then
-  RUST_VERSION="$(rustc --version | awk '{print $2}')"
-  if [[ ! "$RUST_VERSION" =~ ^([0-9]+)\.([0-9]+)(\.[0-9]+)? ]]; then
-    die "Unable to parse rustc version: $RUST_VERSION"
-  fi
-  RUST_MAJOR="${BASH_REMATCH[1]}"
-  RUST_MINOR="${BASH_REMATCH[2]}"
-  if (( RUST_MAJOR < 1 || (RUST_MAJOR == 1 && RUST_MINOR < 90) )); then
-    die "Rust 1.90 or newer is required by rust-toolchain.toml; found $RUST_VERSION. Install the pinned toolchain separately, then rerun."
-  fi
-  ok "Rust already present ($(rustc --version))"
+# --- Rust (rustup) ----------------------------------------------------------
+if have rustc; then ok "Rust already present ($(rustc --version))"
 else
-  die "Rust and Cargo are required. Install the 1.90 toolchain pinned by rust-toolchain.toml separately from a reviewed, trusted source, then rerun; FileID will not pipe a remote installer into a shell."
+  info "installing Rust via rustup ..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
+  ok "Rust $(rustc --version 2>/dev/null || echo installed)"
 fi
 
 # --- RAM++ export venv (pinned) --------------------------------------------
@@ -88,11 +84,11 @@ if [[ "$SKIP_VENV" -eq 0 ]]; then
   [[ -d "$VENV" ]] && { warn "removing stale $VENV (re-pinning deps)"; rm -rf "$VENV"; }
   "$PY" -m venv "$VENV"
   VPY="$VENV/bin/python"
+  "$VPY" -m pip install --upgrade pip
   "$VPY" -m pip install -r "$REQ"
-  # Apache-2.0 recognize-anything at the reviewed 2025-02-18 commit. Install
-  # WITHOUT deps because requirements-ramplus.txt owns every direct version.
-  "$VPY" -m pip install --no-deps \
-    "git+https://github.com/xinyu1205/recognize-anything.git@7cb804a8609e9f4b1a50b7f31436d2df40bb9481"
+  # recognize-anything WITHOUT deps — requirements-ramplus.txt owns the versions
+  # so it can't drag in conflicting latest timm/transformers.
+  "$VPY" -m pip install --no-deps "git+https://github.com/xinyu1205/recognize-anything.git"
   info "verifying the ram_plus import resolves ..."
   "$VPY" -c "from ram.models import ram_plus; print('ram_plus import OK')"
   ok "RAM++ export venv ready"

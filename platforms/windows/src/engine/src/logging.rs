@@ -13,7 +13,7 @@ use crate::paths;
 /// `%LOCALAPPDATA%/FileID/logs/` plus stderr layer. Local-only; PII
 /// redaction happens at call sites.
 pub(crate) fn init() -> Result<()> {
-    use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     let logs_dir = paths::logs_dir().context("resolving logs dir")?;
     std::fs::create_dir_all(&logs_dir).context("creating logs dir")?;
@@ -34,16 +34,10 @@ pub(crate) fn init() -> Result<()> {
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(false)
-        .with_target(true)
-        .with_filter(LevelFilter::WARN);
+        .with_target(true);
 
-    // `ort=warn`: ORT's native logger (bridged via the ort crate's `tracing`
-    // feature) is VERBOSE-grade — per-inference CUDA arena lines would swamp
-    // the log; only its WARN/ERROR (EP registration failures, kernel errors)
-    // carry signal. The environment severity is also clamped at the source in
-    // main.rs; this keeps the file lean even when FILEID_LOG is unset.
-    let env_filter = EnvFilter::try_from_env("FILEID_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,ort=warn"));
+    let env_filter =
+        EnvFilter::try_from_env("FILEID_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(env_filter)

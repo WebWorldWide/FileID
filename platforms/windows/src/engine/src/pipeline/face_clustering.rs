@@ -1,7 +1,7 @@
 // Face clustering — density-clustering driver over SFace (128-d) embeddings.
 //
 // Source of truth for thresholds: `identity_clustering::Hyperparameters::default()`
-// and the MERGE_SUGGEST_* / AUTOMERGE_* constants in THIS file. Do not
+// and the COS_* / MERGE_SUGGEST_* / AUTOMERGE_* constants in THIS file. Do not
 // re-document numeric thresholds elsewhere — they drift.
 //
 // Pipeline (see `cluster()` + `consolidate()` here, and the DB-side handler in
@@ -18,23 +18,28 @@
 //      emits `FaceClusteringResult`. `face_verifications` is only READ here
 //      (same_person = 0, to block auto-merge of user-confirmed splits).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 
-/// Lower bound for surfacing MERGE suggestions in the People tab. A 0.32 floor
-/// flooded the sheet with anchor pairs deep in impostor territory, so a low floor
-/// is mostly noise. 0.55 keeps the genuinely-uncertain band (plausible cross-pose
-/// same person, plus the hardest impostors worth a human glance) and drops the
-/// rest — fewer, more actionable suggestions.
-///
-/// NOTE (2026-07-29): the earlier claim here that "genuine same-person SFace
-/// cosine sits at 0.88-0.95" is NOT true of a real family library, and was the
-/// premise behind the old 0.88 auto-merge bar. Measured on the Adlon catalog,
-/// clusters of <=150 faces (overwhelmingly single identities) have mean PAIRWISE
-/// cosine 0.71-0.86 with p10 0.54-0.78, and centroid-to-centroid cosine between
-/// genuinely-same-person fragments runs well below 0.88 — which is why
-/// consolidate at 0.88 fired only 3 times across 3,092 clusters. See
-/// AUTOMERGE_COS_DEFAULT below. This band (0.55..0.97) is unchanged and remains
-/// the right "ask a human" range.
+/// Cosine threshold for "definitely same person". Tuned for SFace's 128-d
+/// embeddings — OpenCV's published same-identity cosine for SFace is 0.363, so
+/// genuine pairs sit lower than ArcFace's old 512-d distribution. PROVISIONAL:
+/// anchored on the OpenCV reference; calibrate against a labeled library.
+pub const COS_HIGH: f32 = 0.50;
+
+/// Cosine threshold for "definitely different person". The 0.32..=0.50 band is
+/// the uncertain range that routes through VLM verification. SFace default
+/// (provisional — calibrate with labeled faces).
+pub const COS_LOW: f32 = 0.32;
+
+/// Lower bound for surfacing MERGE suggestions in the People tab. The old code
+/// reused COS_LOW (0.32) as the floor, which flooded the sheet with anchor pairs
+/// deep in impostor territory — empirically (identity_clustering.rs) genuine
+/// same-person SFace cosine sits at 0.88–0.95 and the hardest different-person
+/// (lookalike) pairs top out near ~0.55, so a 0.32 floor is mostly noise. 0.55
+/// keeps the genuinely-uncertain band (plausible cross-pose same person, plus
+/// the hardest impostors worth a human glance) and drops the rest — fewer, more
+/// actionable suggestions. Distinct from COS_LOW so the VLM-verifier band is
+/// unaffected.
 pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
 
 /// Upper bound for surfacing MERGE suggestions in the People tab. Previously
@@ -50,25 +55,12 @@ pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
 pub const MERGE_SUGGEST_COS_HIGH: f32 = 0.97;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FaceRow {
     pub face_id: i64,
     pub file_id: i64,
-    pub content_hash: Option<Vec<u8>>,
     pub embedding: Vec<f32>,
     pub quality: f32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum CaptureKey {
-    Content(Vec<u8>),
-    File(i64),
-}
-
-fn capture_key(face: &FaceRow) -> CaptureKey {
-    match face.content_hash.as_ref().filter(|hash| !hash.is_empty()) {
-        Some(hash) => CaptureKey::Content(hash.clone()),
-        None => CaptureKey::File(face.file_id),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,19 +74,11 @@ pub struct ClusterAssignment {
 pub struct ClusterAnchor {
     pub cluster_id: i32,
     pub anchor_face_id: i64,
+    pub anchor_embedding: Vec<f32>,
     pub member_count: u32,
 }
 
-fn compare_neighbors(
-    a: &super::identity_clustering::Neighbor,
-    b: &super::identity_clustering::Neighbor,
-) -> std::cmp::Ordering {
-    b.similarity
-        .total_cmp(&a.similarity)
-        .then_with(|| a.idx.cmp(&b.idx))
-}
-
-/// Group `faces` into clusters via the 3-pass density algorithm in
+/// Group `faces` into clusters via the two-pass density algorithm in
 /// `identity_clustering`.
 ///
 /// Returns (assignments, anchors). Cluster IDs are 1-based and stable
@@ -112,25 +96,6 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     // `(1 − cosine)` (the index gives the same neighbor ranking as cosine).
     const HNSW_MIN: usize = 5_000;
     let embeddings: Vec<Vec<f32>> = faces.iter().map(|f| f.embedding.clone()).collect();
-    // Each file contributes one decoded still or one video keyframe, so two
-    // detections in one physical file are negative identity evidence. Key by
-    // file_id rather than content hash so corresponding faces in copied files
-    // can still join.
-    let mut face_indices_by_file: HashMap<i64, Vec<usize>> = HashMap::new();
-    for (index, face) in faces.iter().enumerate() {
-        face_indices_by_file
-            .entry(face.file_id)
-            .or_default()
-            .push(index);
-    }
-    let mut cannot_links = Vec::new();
-    for indices in face_indices_by_file.into_values() {
-        for (offset, &a) in indices.iter().enumerate() {
-            for &b in &indices[(offset + 1)..] {
-                cannot_links.push((a, b));
-            }
-        }
-    }
     let k = super::identity_clustering::Hyperparameters::default().k_nn;
     let hnsw_idx = (embeddings.len() >= HNSW_MIN).then(|| {
         let points: Vec<(Vec<f32>, usize)> = embeddings
@@ -141,7 +106,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         crate::util::hnsw_index::build(points)
     });
     let mut knn_search = crate::util::hnsw_index::Searcher::default();
-    let result = super::identity_clustering::cluster_with_cannot_links(
+    let result = super::identity_clustering::cluster(
         &embeddings,
         |i| {
             let mut hits: Vec<super::identity_clustering::Neighbor> = if let Some(idx) = &hnsw_idx {
@@ -171,15 +136,20 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
             // in O(n), avoiding the O(n log n) full sort of all n-1 brute-force
             // neighbors when only k are used; then sort just those k for a stable
             // confidence-ordered result (identical top-k set + order).
+            let cmp = |a: &super::identity_clustering::Neighbor,
+                       b: &super::identity_clustering::Neighbor| {
+                b.similarity
+                    .partial_cmp(&a.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            };
             if hits.len() > k {
-                hits.select_nth_unstable_by(k, compare_neighbors);
+                hits.select_nth_unstable_by(k, cmp);
                 hits.truncate(k);
             }
-            hits.sort_by(compare_neighbors);
+            hits.sort_by(cmp);
             hits
         },
         super::identity_clustering::Hyperparameters::default(),
-        &cannot_links,
     );
 
     // Remap dense 0-based IDs to 1-based stable IDs in first-seen order
@@ -223,6 +193,7 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
         anchors.push(ClusterAnchor {
             cluster_id: cid,
             anchor_face_id: faces[best_idx].face_id,
+            anchor_embedding: faces[best_idx].embedding.clone(),
             member_count: members.len() as u32,
         });
     }
@@ -230,241 +201,18 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
     (assignments, anchors)
 }
 
-const BIMODAL_SPLIT_MIN_FACES: usize = 5_000;
-const BIMODAL_SPLIT_MIN_GROUP_FACES: usize = 500;
-const BIMODAL_SPLIT_MIN_GROUP_FRACTION: f32 = 0.20;
-const BIMODAL_SPLIT_MAX_CENTROID_COSINE: f32 = 0.74;
-const BIMODAL_SPLIT_MIN_MARGIN_P05: f32 = 0.02;
-
-fn normalized_member_centroid(faces: &[FaceRow], members: &[usize]) -> Option<Vec<f32>> {
-    let dim = faces.get(*members.first()?)?.embedding.len();
-    if dim == 0
-        || members
-            .iter()
-            .any(|&index| faces.get(index).is_none_or(|face| face.embedding.len() != dim))
-    {
-        return None;
-    }
-    let mut centroid = vec![0.0f32; dim];
-    for &index in members {
-        for (slot, value) in centroid.iter_mut().zip(&faces[index].embedding) {
-            *slot += value;
-        }
-    }
-    let norm = centroid
-        .iter()
-        .map(|value| value * value)
-        .sum::<f32>()
-        .sqrt();
-    if !norm.is_finite() || norm <= f32::MIN_POSITIVE {
-        return None;
-    }
-    for value in &mut centroid {
-        *value /= norm;
-    }
-    Some(centroid)
-}
-
-fn bimodal_split(faces: &[FaceRow], members: &[usize]) -> Option<(Vec<usize>, Vec<usize>)> {
-    if members.len() < 2 {
-        return None;
-    }
-    let centroid = normalized_member_centroid(faces, members)?;
-    let seed_a = *members.iter().min_by(|&&left, &&right| {
-        cosine(&faces[left].embedding, &centroid)
-            .total_cmp(&cosine(&faces[right].embedding, &centroid))
-            .then_with(|| faces[left].face_id.cmp(&faces[right].face_id))
-    })?;
-    let seed_b = *members
-        .iter()
-        .filter(|&&index| index != seed_a)
-        .min_by(|&&left, &&right| {
-            cosine(&faces[left].embedding, &faces[seed_a].embedding)
-                .total_cmp(&cosine(&faces[right].embedding, &faces[seed_a].embedding))
-                .then_with(|| faces[left].face_id.cmp(&faces[right].face_id))
-        })?;
-    let mut centroid_a = faces[seed_a].embedding.clone();
-    let mut centroid_b = faces[seed_b].embedding.clone();
-    let mut group_a = Vec::new();
-    let mut group_b = Vec::new();
-    for _ in 0..10 {
-        group_a.clear();
-        group_b.clear();
-        for &index in members {
-            let similarity_a = cosine(&faces[index].embedding, &centroid_a);
-            let similarity_b = cosine(&faces[index].embedding, &centroid_b);
-            let assign_a = match similarity_a.total_cmp(&similarity_b) {
-                std::cmp::Ordering::Greater => true,
-                std::cmp::Ordering::Equal => faces[index].face_id % 2 == 0,
-                std::cmp::Ordering::Less => false,
-            };
-            if assign_a {
-                group_a.push(index);
-            } else {
-                group_b.push(index);
-            }
-        }
-        if group_a.is_empty() || group_b.is_empty() {
-            return None;
-        }
-        let next_a = normalized_member_centroid(faces, &group_a)?;
-        let next_b = normalized_member_centroid(faces, &group_b)?;
-        let converged = cosine(&next_a, &centroid_a) > 0.999
-            && cosine(&next_b, &centroid_b) > 0.999;
-        centroid_a = next_a;
-        centroid_b = next_b;
-        if converged {
-            break;
-        }
-    }
-    let minimum_group = group_a.len().min(group_b.len());
-    if minimum_group < BIMODAL_SPLIT_MIN_GROUP_FACES
-        || (minimum_group as f32 / members.len() as f32)
-            < BIMODAL_SPLIT_MIN_GROUP_FRACTION
-        || cosine(&centroid_a, &centroid_b) > BIMODAL_SPLIT_MAX_CENTROID_COSINE
-    {
-        return None;
-    }
-    let mut margins = Vec::with_capacity(members.len());
-    for &index in &group_a {
-        margins.push(
-            cosine(&faces[index].embedding, &centroid_a)
-                - cosine(&faces[index].embedding, &centroid_b),
-        );
-    }
-    for &index in &group_b {
-        margins.push(
-            cosine(&faces[index].embedding, &centroid_b)
-                - cosine(&faces[index].embedding, &centroid_a),
-        );
-    }
-    margins.sort_by(f32::total_cmp);
-    let p05 = margins[(margins.len() * 5 / 100).min(margins.len() - 1)];
-    (p05 >= BIMODAL_SPLIT_MIN_MARGIN_P05).then_some((group_a, group_b))
-}
-
-pub fn split_bimodal_mega_clusters<S>(
-    faces: &[FaceRow],
-    mut assignments: Vec<ClusterAssignment>,
-    mut anchors: Vec<ClusterAnchor>,
-    protected_clusters: &HashSet<i32, S>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S: std::hash::BuildHasher,
-{
-    let stats = cluster_vector_stats(faces, &assignments);
-    let assignment_by_face: HashMap<i64, usize> = assignments
-        .iter()
-        .enumerate()
-        .map(|(index, assignment)| (assignment.face_id, index))
-        .collect();
-    let anchor_by_cluster: HashMap<i32, usize> = anchors
-        .iter()
-        .enumerate()
-        .map(|(index, anchor)| (anchor.cluster_id, index))
-        .collect();
-    let mut next_cluster_id = anchors
-        .iter()
-        .map(|anchor| anchor.cluster_id)
-        .max()
-        .unwrap_or(0);
-    for stat in stats {
-        if stat.member_indices.len() < BIMODAL_SPLIT_MIN_FACES
-            || protected_clusters.contains(&stat.cluster_id)
-        {
-            continue;
-        }
-        let Some((group_a, group_b)) = bimodal_split(faces, &stat.member_indices) else {
-            continue;
-        };
-        let (retained, split) = if group_a.len() > group_b.len()
-            || (group_a.len() == group_b.len()
-                && group_a
-                    .iter()
-                    .map(|&index| faces[index].face_id)
-                    .min()
-                    < group_b
-                        .iter()
-                        .map(|&index| faces[index].face_id)
-                        .min())
-        {
-            (group_a, group_b)
-        } else {
-            (group_b, group_a)
-        };
-        let Some(new_cluster_id) = next_cluster_id.checked_add(1) else {
-            break;
-        };
-        next_cluster_id = new_cluster_id;
-        for &face_index in &split {
-            if let Some(&assignment_index) = assignment_by_face.get(&faces[face_index].face_id) {
-                assignments[assignment_index].cluster_id = new_cluster_id;
-            }
-        }
-        let best_face = |members: &[usize]| {
-            members.iter().copied().max_by(|&left, &right| {
-                faces[left]
-                    .quality
-                    .total_cmp(&faces[right].quality)
-                    .then_with(|| faces[right].face_id.cmp(&faces[left].face_id))
-            })
-        };
-        let Some(retained_anchor_face) = best_face(&retained) else {
-            continue;
-        };
-        let Some(split_anchor_face) = best_face(&split) else {
-            continue;
-        };
-        if let Some(&anchor_index) = anchor_by_cluster.get(&stat.cluster_id) {
-            anchors[anchor_index].anchor_face_id = faces[retained_anchor_face].face_id;
-            anchors[anchor_index].member_count = retained.len() as u32;
-        }
-        anchors.push(ClusterAnchor {
-            cluster_id: new_cluster_id,
-            anchor_face_id: faces[split_anchor_face].face_id,
-            member_count: split.len() as u32,
-        });
-    }
-    anchors.sort_by_key(|anchor| anchor.cluster_id);
-    (assignments, anchors)
-}
-
-/// Default minimum CENTROID cosine to auto-fold two clusters into one person.
-/// 0.88 is a CONSERVATIVE re-merge bar: only clusters whose centroids are near-
-/// identical get folded, so it recovers a same-person over-split without ever
-/// gluing two different people together. Override with `FILEID_FACE_AUTOMERGE_COS`
-/// (clamped to [0.70, 1.0]; set 1.0 to disable and keep pure over-split).
-/// Centroids (means of all member embeddings) are denoised, so this is safer
-/// than any single anchor-to-anchor comparison.
-///
-/// **0.75 as of 2026-07-29, lowered from 0.88 on corpus measurement.** The prior
-/// 0.88 rationale assumed "genuine same-person SFace cosine sits at 0.88-0.95",
-/// which does not hold on a real family library: at 0.88 consolidate performed
-/// only **3 merges across 3,092 non-mega clusters** — effectively inert, which is
-/// why the same person stayed split across thousands of duplicate-burst clusters
-/// (the owner's "tons are the same people" complaint).
-///
-/// Re-measured on the 2026-07-29 Adlon catalog, judging each candidate merge by a
-/// LABEL-FREE safety criterion: a merge is unsafe if the merged cluster gains an
-/// anti-correlated face pair (cosine < 0), which a single identity cannot contain.
-///
-/// ```text
-/// automerge   merges   unsafe merges
-///   0.88          3        0          (shipped before — inert)
-///   0.78         78        0
-///   0.75        140        0          <- chosen
-///   0.70        329        1          <- safety margin ends here
-/// ```
-///
-/// 0.75 gives 47x more same-person recovery than 0.88 with zero identity mixing,
-/// and keeps a real margin above 0.70 where the first unsafe merge appears. It
-/// cannot re-glue the known mega-clusters: their pairwise centroid cosines measure
-/// 0.21-0.29, far below any threshold in this table.
-///
-/// Centroids (means of all member embeddings) are denoised, so this is safer than
-/// any single anchor-to-anchor comparison. Consolidate also still respects user
-/// "different people" verdicts and protected named clusters, so lowering the bar
-/// cannot override an explicit human decision.
+/// Default minimum CENTROID cosine to auto-fold two clusters into one person —
+/// the Balanced default. 0.75 sits inside genuine same-person territory
+/// (empirical SFace median 0.88–0.95) yet comfortably above the hardest
+/// cross-identity / lookalike matches (~0.55, well under the 0.66 Pass-1 core
+/// threshold), so fragments of the SAME identity that the over-split-safe
+/// clusterer left apart get rejoined — the "WAY too many similar faces" the
+/// People tab otherwise shows — while distinct people stay apart. Lowered from
+/// 0.85 to claw back more over-split without inviting cross-identity merges
+/// (the ~0.55 lookalike ceiling leaves a wide margin). Override with
+/// `FILEID_FACE_AUTOMERGE_COS` (clamped to [0.70, 1.0]; set 1.0 to disable and
+/// keep pure over-split). Centroids (means of all member embeddings) are
+/// denoised, so this is safer than any single anchor-to-anchor comparison.
 pub const AUTOMERGE_COS_DEFAULT: f32 = 0.75;
 
 /// Resolve the auto-consolidation threshold from `FILEID_FACE_AUTOMERGE_COS`,
@@ -505,8 +253,7 @@ fn edges_brute(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize
 /// Edges are deduped as `(min, max)` index pairs so each pair scores once.
 /// Returns the same `(cosine, i, j)` shape as `edges_brute`, i < j.
 fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)> {
-    const INITIAL_K: usize = 64;
-    const MAX_K: usize = 512;
+    const K: usize = 32;
     let points: Vec<(Vec<f32>, usize)> = centroids
         .iter()
         .enumerate()
@@ -517,26 +264,8 @@ fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)
     let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut edges: Vec<(f32, usize, usize)> = Vec::new();
     for i in 0..centroids.len() {
-        let mut k = (INITIAL_K + 1).min(centroids.len());
-        let hits = loop {
-            let hits = searcher.top_k(&idx, &centroids[i], k);
-            let threshold_saturated = k < centroids.len()
-                && hits
-                    .iter()
-                    .filter(|(j, _)| *j != i)
-                    .all(|(j, _)| cosine(&centroids[i], &centroids[*j]) >= threshold);
-            if threshold_saturated {
-                if k < MAX_K.min(centroids.len()) {
-                    k = (k * 2).min(MAX_K).min(centroids.len());
-                    continue;
-                }
-                if k < centroids.len() {
-                    return edges_brute(centroids, threshold);
-                }
-            }
-            break hits;
-        };
-        for (j, _approx_dist) in hits {
+        // Query K+1 so the self-hit doesn't crowd out a real neighbor.
+        for (j, _approx_dist) in searcher.top_k(&idx, &centroids[i], K + 1) {
             if j == i {
                 continue;
             }
@@ -554,221 +283,6 @@ fn edges_hnsw(centroids: &[Vec<f32>], threshold: f32) -> Vec<(f32, usize, usize)
     edges
 }
 
-#[cfg(test)]
-pub fn partition_protected_clusters<S1, S2>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    bucket_owner_by_face: &HashMap<i64, i64, S1>,
-    different_pairs: &HashSet<(i64, i64), S2>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-{
-    partition_protected_clusters_excluding(
-        faces,
-        assignments,
-        bucket_owner_by_face,
-        different_pairs,
-        &HashSet::new(),
-    )
-}
-
-pub fn partition_protected_clusters_excluding<S1, S2, S3>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    bucket_owner_by_face: &HashMap<i64, i64, S1>,
-    different_pairs: &HashSet<(i64, i64), S2>,
-    excluded_face_ids: &HashSet<i64, S3>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-    S3: std::hash::BuildHasher,
-{
-    let mut raw_groups: BTreeMap<i32, BTreeSet<i64>> = BTreeMap::new();
-    for assignment in assignments {
-        raw_groups
-            .entry(assignment.cluster_id)
-            .or_default()
-            .insert(assignment.face_id);
-    }
-
-    let mut owner_groups: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
-    for (&face_id, &owner_id) in bucket_owner_by_face {
-        if !excluded_face_ids.contains(&face_id) {
-            owner_groups.entry(owner_id).or_default().insert(face_id);
-        }
-    }
-    let ownerless_endpoints: BTreeSet<i64> = different_pairs
-        .iter()
-        .flat_map(|&(a, b)| [a, b])
-        .filter(|face_id| {
-            !bucket_owner_by_face.contains_key(face_id) && !excluded_face_ids.contains(face_id)
-        })
-        .collect();
-    let mut singleton_endpoints_by_owner: BTreeMap<i64, BTreeSet<i64>> = BTreeMap::new();
-    for &(a, b) in different_pairs {
-        if let (Some(owner_a), Some(owner_b)) = (
-            bucket_owner_by_face.get(&a),
-            bucket_owner_by_face.get(&b),
-        ) {
-            if owner_a == owner_b {
-                singleton_endpoints_by_owner
-                    .entry(*owner_a)
-                    .or_default()
-                    .extend([a, b]);
-            }
-        }
-    }
-
-    for members in raw_groups.values_mut() {
-        members.retain(|face_id| {
-            !excluded_face_ids.contains(face_id)
-                && !bucket_owner_by_face.contains_key(face_id)
-                && !ownerless_endpoints.contains(face_id)
-        });
-    }
-
-    let mut buckets: Vec<Vec<i64>> = Vec::new();
-    for (&owner_id, members) in &owner_groups {
-        let singleton_endpoints = singleton_endpoints_by_owner
-            .get(&owner_id)
-            .cloned()
-            .unwrap_or_default();
-        let remainder: Vec<i64> = members
-            .iter()
-            .copied()
-            .filter(|face_id| !singleton_endpoints.contains(face_id))
-            .collect();
-        if !remainder.is_empty() {
-            buckets.push(remainder);
-        }
-        for face_id in singleton_endpoints {
-            buckets.push(vec![face_id]);
-        }
-    }
-    for face_id in ownerless_endpoints {
-        buckets.push(vec![face_id]);
-    }
-    for members in raw_groups.into_values() {
-        if !members.is_empty() {
-            buckets.push(members.into_iter().collect());
-        }
-    }
-
-    let quality: HashMap<i64, f32> = faces.iter().map(|face| (face.face_id, face.quality)).collect();
-    let mut new_assignments = Vec::new();
-    let mut new_anchors = Vec::new();
-    for (index, mut members) in buckets.into_iter().enumerate() {
-        members.sort_unstable();
-        members.dedup();
-        if members.is_empty() {
-            continue;
-        }
-        let cluster_id = i32::try_from(index + 1).expect("protected cluster count exceeds i32");
-        let anchor_face_id = members
-            .iter()
-            .copied()
-            .max_by(|a, b| {
-                let qa = quality.get(a).copied().unwrap_or(f32::NEG_INFINITY);
-                let qb = quality.get(b).copied().unwrap_or(f32::NEG_INFINITY);
-                qa.total_cmp(&qb).then_with(|| b.cmp(a))
-            })
-            .unwrap_or(members[0]);
-        new_assignments.extend(members.iter().map(|&face_id| ClusterAssignment {
-            face_id,
-            cluster_id,
-        }));
-        new_anchors.push(ClusterAnchor {
-            cluster_id,
-            anchor_face_id,
-            member_count: members.len() as u32,
-        });
-    }
-    (new_assignments, new_anchors)
-}
-
-pub fn protected_owner_by_cluster<S1, S2>(
-    identity_owner_by_face: &HashMap<i64, i64, S1>,
-    cluster_of: &HashMap<i64, i32, S2>,
-) -> Result<HashMap<i32, i64>, String>
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-{
-    let mut owner_by_cluster = HashMap::new();
-    for (&face_id, &owner_id) in identity_owner_by_face {
-        let Some(&cluster_id) = cluster_of.get(&face_id) else {
-            continue;
-        };
-        if let Some(existing) = owner_by_cluster.insert(cluster_id, owner_id) {
-            if existing != owner_id {
-                return Err(format!(
-                    "cluster {cluster_id} contains distinct protected identities"
-                ));
-            }
-        }
-    }
-    Ok(owner_by_cluster)
-}
-
-pub fn validate_protected_clusters<S1, S2>(
-    assignments: &[ClusterAssignment],
-    identity_owner_by_face: &HashMap<i64, i64, S1>,
-    different_pairs: &HashSet<(i64, i64), S2>,
-) -> Result<(), String>
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-{
-    let cluster_of: HashMap<i64, i32> = assignments
-        .iter()
-        .map(|assignment| (assignment.face_id, assignment.cluster_id))
-        .collect();
-    let mut owner_of_cluster: HashMap<i32, i64> = HashMap::new();
-    for (&face_id, &owner_id) in identity_owner_by_face {
-        let Some(&cluster_id) = cluster_of.get(&face_id) else {
-            return Err(format!("protected face {face_id} is missing from the final partition"));
-        };
-        if let Some(existing) = owner_of_cluster.insert(cluster_id, owner_id) {
-            if existing != owner_id {
-                return Err(format!(
-                    "cluster {cluster_id} contains distinct protected identities"
-                ));
-            }
-        }
-    }
-    for &(a, b) in different_pairs {
-        let (Some(&ca), Some(&cb)) = (cluster_of.get(&a), cluster_of.get(&b)) else {
-            return Err("a different-people verdict endpoint is missing from the final partition".into());
-        };
-        if ca == cb {
-            return Err(format!(
-                "cluster {ca} contains a user-confirmed different-people pair"
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub fn protected_cluster_ids<S>(
-    assignments: &[ClusterAssignment],
-    protected_faces: &HashSet<i64, S>,
-) -> HashSet<i32>
-where
-    S: std::hash::BuildHasher,
-{
-    assignments
-        .iter()
-        .filter_map(|assignment| {
-            protected_faces
-                .contains(&assignment.face_id)
-                .then_some(assignment.cluster_id)
-        })
-        .collect()
-}
-
 /// Conservatively fold near-certain duplicate clusters that the over-split-safe
 /// 3-pass clusterer left fragmented, using denoised per-cluster CENTROIDS.
 ///
@@ -784,7 +298,6 @@ where
 ///
 /// `threshold` ≥ 1.0 (or < 2 clusters) is a no-op: the inputs pass through
 /// unchanged, preserving the pure over-split behavior.
-#[cfg(test)]
 pub fn consolidate<S: std::hash::BuildHasher>(
     faces: &[FaceRow],
     assignments: Vec<ClusterAssignment>,
@@ -792,28 +305,6 @@ pub fn consolidate<S: std::hash::BuildHasher>(
     blocked: &std::collections::HashSet<(i32, i32), S>,
     threshold: f32,
 ) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
-    consolidate_with_protected_owners(
-        faces,
-        assignments,
-        anchors,
-        blocked,
-        &HashMap::new(),
-        threshold,
-    )
-}
-
-pub fn consolidate_with_protected_owners<S1, S2>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    blocked: &HashSet<(i32, i32), S1>,
-    protected_owner_by_cluster: &HashMap<i32, i64, S2>,
-    threshold: f32,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-{
     // `>= 1.0` (not `> 1.0`): automerge_threshold() clamps to [0.70, 1.0], so the
     // documented "set FILEID_FACE_AUTOMERGE_COS=1.0 to disable" must hit this
     // no-op path. With a strict `>` the disable value still ran the full O(C²)
@@ -873,44 +364,12 @@ where
     // Strongest merges first so canonical assignment is stable + greedy-optimal.
     edges.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut blocked_neighbors = vec![HashSet::new(); cids.len()];
-    for &(cluster_a, cluster_b) in blocked {
-        let (Some(&a), Some(&b)) = (idx_of.get(&cluster_a), idx_of.get(&cluster_b)) else {
-            continue;
-        };
-        blocked_neighbors[a].insert(b);
-        blocked_neighbors[b].insert(a);
-    }
-    let mut clusters_by_file: HashMap<i64, BTreeSet<usize>> = HashMap::new();
-    for face in faces {
-        let Some(&cluster_id) = cluster_of.get(&face.face_id) else {
-            continue;
-        };
-        let Some(&cluster_index) = idx_of.get(&cluster_id) else {
-            continue;
-        };
-        clusters_by_file
-            .entry(face.file_id)
-            .or_default()
-            .insert(cluster_index);
-    }
-    for clusters in clusters_by_file.into_values() {
-        let clusters: Vec<usize> = clusters.into_iter().collect();
-        for (offset, &a) in clusters.iter().enumerate() {
-            for &b in &clusters[(offset + 1)..] {
-                blocked_neighbors[a].insert(b);
-                blocked_neighbors[b].insert(a);
-            }
-        }
-    }
+    let blocked_idx: Vec<(usize, usize)> = blocked
+        .iter()
+        .filter_map(|&(a, b)| Some((*idx_of.get(&a)?, *idx_of.get(&b)?)))
+        .collect();
 
     let mut parent: Vec<usize> = (0..cids.len()).collect();
-    let mut component_size = vec![1usize; cids.len()];
-    let mut forbidden = blocked_neighbors;
-    let mut protected_owner: Vec<Option<i64>> = cids
-        .iter()
-        .map(|cluster_id| protected_owner_by_cluster.get(cluster_id).copied())
-        .collect();
     fn find(parent: &mut [usize], mut x: usize) -> usize {
         while parent[x] != x {
             parent[x] = parent[parent[x]]; // path halving
@@ -925,37 +384,16 @@ where
         if ri == rj {
             continue;
         }
-        let explicit_conflict = forbidden[ri].contains(&rj) || forbidden[rj].contains(&ri);
-        let owner_conflict = matches!(
-            (protected_owner[ri], protected_owner[rj]),
-            (Some(a), Some(b)) if a != b
-        );
-        if explicit_conflict || owner_conflict {
+        // Reject if merging ri,rj would put a "different people" pair together.
+        let conflict = blocked_idx.iter().any(|&(a, b)| {
+            let ra = find(&mut parent, a);
+            let rb = find(&mut parent, b);
+            (ra == ri && rb == rj) || (ra == rj && rb == ri)
+        });
+        if conflict {
             continue;
         }
-        // Keep the component with the larger forbidden set as the root. Every
-        // explicit edge then moves only when it belongs to the smaller set.
-        let (keep, drop) = match forbidden[ri].len().cmp(&forbidden[rj].len()) {
-            std::cmp::Ordering::Greater => (ri, rj),
-            std::cmp::Ordering::Less => (rj, ri),
-            std::cmp::Ordering::Equal if component_size[ri] >= component_size[rj] => (ri, rj),
-            std::cmp::Ordering::Equal => (rj, ri),
-        };
-        parent[drop] = keep;
-        component_size[keep] += component_size[drop];
-        protected_owner[keep] = protected_owner[keep].or(protected_owner[drop]);
-        let moved = std::mem::take(&mut forbidden[drop]);
-        for neighbor in moved {
-            let neighbor_root = find(&mut parent, neighbor);
-            if neighbor_root == keep {
-                continue;
-            }
-            forbidden[neighbor_root].remove(&drop);
-            forbidden[neighbor_root].insert(keep);
-            forbidden[keep].insert(neighbor_root);
-        }
-        forbidden[keep].remove(&drop);
-        forbidden[keep].remove(&keep);
+        parent[ri] = rj;
         any_merge = true;
     }
     if !any_merge {
@@ -1009,1194 +447,12 @@ where
             Some(ClusterAnchor {
                 cluster_id: canon,
                 anchor_face_id: base.anchor_face_id,
+                anchor_embedding: base.anchor_embedding.clone(),
                 member_count: total,
             })
         })
         .collect();
-    new_anchors.extend(
-        anchor_by_cid
-            .into_iter()
-            .filter_map(|(cid, anchor)| (!remap.contains_key(&cid)).then_some(anchor)),
-    );
     new_anchors.sort_by_key(|a| a.cluster_id);
-    (new_assignments, new_anchors)
-}
-
-pub const FRAGMENT_RECOVERY_COS_DEFAULT: f32 = 0.75;
-
-const FRAGMENT_RECOVERY_MAX_FACES_DEFAULT: u32 = 12;
-const FRAGMENT_RECOVERY_MARGIN_DEFAULT: f32 = 0.05;
-const FRAGMENT_SOURCE_MIN_COHESION: f32 = 0.70;
-const FRAGMENT_TARGET_MIN_COHESION: f32 = 0.70;
-const FRAGMENT_MEMBER_COS: f32 = 0.75;
-const LARGE_FRAGMENT_MAX_FACES: u32 = 256;
-const LARGE_FRAGMENT_MIN_CENTROID_COS: f32 = 0.85;
-const LARGE_FRAGMENT_TARGET_SIZE_RATIO: u32 = 16;
-const LARGE_FRAGMENT_MIN_SOURCE_VOTERS: usize = 16;
-const LARGE_FRAGMENT_MIN_SOURCE_VOTER_RATIO: f32 = 0.80;
-const LARGE_FRAGMENT_MIN_DISTINCT_CAPTURE_RATIO: f32 = 0.25;
-const FRAGMENT_MIN_SOURCE_VOTERS: usize = 2;
-const FRAGMENT_MIN_TARGET_VOTERS: usize = 3;
-const FRAGMENT_EVIDENCE_SAMPLE_LIMIT: usize = 64;
-const FRAGMENT_BRUTE_TARGET_LIMIT: usize = 4_096;
-const FRAGMENT_HNSW_CANDIDATES: usize = 64;
-const FRAGMENT_HNSW_MAX_CANDIDATES: usize = 512;
-
-pub fn fragment_recovery_threshold() -> f32 {
-    std::env::var("FILEID_FACE_FRAGMENT_COS")
-        .ok()
-        .and_then(|value| value.trim().parse::<f32>().ok())
-        .filter(|value| value.is_finite())
-        .map(|value| value.clamp(FRAGMENT_RECOVERY_COS_DEFAULT, 1.0))
-        .unwrap_or(FRAGMENT_RECOVERY_COS_DEFAULT)
-}
-
-pub fn fragment_recovery_max_faces() -> u32 {
-    std::env::var("FILEID_FACE_FRAGMENT_MAX_FACES")
-        .ok()
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .map(|value| value.clamp(3, 64))
-        .unwrap_or(FRAGMENT_RECOVERY_MAX_FACES_DEFAULT)
-}
-
-pub fn fragment_recovery_margin() -> f32 {
-    std::env::var("FILEID_FACE_FRAGMENT_MARGIN")
-        .ok()
-        .and_then(|value| value.trim().parse::<f32>().ok())
-        .filter(|value| value.is_finite())
-        .map(|value| value.clamp(FRAGMENT_RECOVERY_MARGIN_DEFAULT, 0.25))
-        .unwrap_or(FRAGMENT_RECOVERY_MARGIN_DEFAULT)
-}
-
-#[derive(Debug, Clone)]
-struct ClusterVectorStats {
-    cluster_id: i32,
-    sum: Vec<f32>,
-    centroid: Vec<f32>,
-    member_count: u32,
-    cohesion: f32,
-    anchor_radius: f32,
-    capture_keys: HashSet<CaptureKey>,
-    physical_file_ids: HashSet<i64>,
-    member_indices: Vec<usize>,
-}
-
-fn cluster_vector_stats(
-    faces: &[FaceRow],
-    assignments: &[ClusterAssignment],
-) -> Vec<ClusterVectorStats> {
-    let Some(dim) = faces
-        .iter()
-        .find_map(|face| (!face.embedding.is_empty()).then_some(face.embedding.len()))
-    else {
-        return Vec::new();
-    };
-    let cluster_of: HashMap<i64, i32> = assignments
-        .iter()
-        .map(|assignment| (assignment.face_id, assignment.cluster_id))
-        .collect();
-    let mut sums: BTreeMap<
-        i32,
-        (
-            Vec<f32>,
-            u32,
-            HashSet<CaptureKey>,
-            HashSet<i64>,
-            Vec<usize>,
-        ),
-    > = BTreeMap::new();
-    for (face_index, face) in faces.iter().enumerate() {
-        if face.embedding.len() != dim {
-            continue;
-        }
-        let Some(&cluster_id) = cluster_of.get(&face.face_id) else {
-            continue;
-        };
-        let (sum, member_count, capture_keys, physical_file_ids, member_indices) =
-            sums.entry(cluster_id).or_insert_with(|| {
-                (
-                    vec![0.0; dim],
-                    0,
-                    HashSet::new(),
-                    HashSet::new(),
-                    Vec::new(),
-                )
-            });
-        for (slot, value) in sum.iter_mut().zip(&face.embedding) {
-            *slot += value;
-        }
-        *member_count += 1;
-        capture_keys.insert(capture_key(face));
-        physical_file_ids.insert(face.file_id);
-        member_indices.push(face_index);
-    }
-    sums.into_iter()
-        .filter_map(
-            |(
-                cluster_id,
-                (sum, member_count, capture_keys, physical_file_ids, member_indices),
-            )| {
-            if member_count == 0 {
-                return None;
-            }
-            let norm = sum.iter().map(|value| value * value).sum::<f32>().sqrt();
-            if !norm.is_finite() || norm <= f32::MIN_POSITIVE {
-                return None;
-            }
-            let centroid: Vec<f32> = sum.iter().map(|value| value / norm).collect();
-            let anchor_radius = if member_indices.len() < 2 {
-                0.50
-            } else {
-                let mut similarities: Vec<f32> = member_indices
-                    .iter()
-                    .map(|&index| cosine(&faces[index].embedding, &centroid))
-                    .collect();
-                similarities.sort_by(f32::total_cmp);
-                let p10 = (similarities.len() as f32 * 0.10).floor() as usize;
-                similarities[p10.min(similarities.len() - 1)].clamp(0.45, 0.85)
-            };
-            Some(ClusterVectorStats {
-                cluster_id,
-                sum,
-                centroid,
-                member_count,
-                cohesion: norm / member_count as f32,
-                anchor_radius,
-                capture_keys,
-                physical_file_ids,
-                member_indices,
-            })
-        },
-        )
-        .collect()
-}
-
-#[derive(Debug, Clone)]
-pub struct IdentityAnchor {
-    pub cluster_id: i32,
-    pub centroid: Vec<f32>,
-    pub anchor_radius: f32,
-}
-
-pub fn identity_anchors(
-    faces: &[FaceRow],
-    assignments: &[ClusterAssignment],
-) -> Vec<IdentityAnchor> {
-    cluster_vector_stats(faces, assignments)
-        .into_iter()
-        .map(|stat| IdentityAnchor {
-            cluster_id: stat.cluster_id,
-            centroid: stat.centroid,
-            anchor_radius: stat.anchor_radius,
-        })
-        .collect()
-}
-
-fn distinct_evidence_members(faces: &[FaceRow], stat: &ClusterVectorStats) -> Vec<usize> {
-    select_distinct_evidence_members(faces, stat.member_indices.clone())
-}
-
-fn select_distinct_evidence_members(
-    faces: &[FaceRow],
-    mut members: Vec<usize>,
-) -> Vec<usize> {
-    members.sort_by(|&a, &b| {
-        faces[b]
-            .quality
-            .total_cmp(&faces[a].quality)
-            .then_with(|| faces[a].face_id.cmp(&faces[b].face_id))
-    });
-    let mut seen_content = HashSet::new();
-    let mut seen_embeddings = HashSet::new();
-    let mut distinct = Vec::new();
-    for index in members {
-        let Some(content_hash) = faces[index].content_hash.as_ref() else {
-            continue;
-        };
-        let embedding_bits: Vec<u32> = faces[index]
-            .embedding
-            .iter()
-            .map(|value| value.to_bits())
-            .collect();
-        if !seen_content.insert(content_hash.clone()) || !seen_embeddings.insert(embedding_bits) {
-            continue;
-        }
-        distinct.push(index);
-        if distinct.len() == FRAGMENT_EVIDENCE_SAMPLE_LIMIT {
-            break;
-        }
-    }
-    distinct
-}
-
-fn merged_evidence_members(
-    faces: &[FaceRow],
-    target: &[usize],
-    source: &[usize],
-) -> Vec<usize> {
-    let mut members = Vec::with_capacity(target.len() + source.len());
-    members.extend_from_slice(target);
-    members.extend_from_slice(source);
-    select_distinct_evidence_members(faces, members)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FragmentEvidence {
-    source_voters: usize,
-    target_voters: usize,
-    robust_similarity: f32,
-}
-
-fn fragment_evidence(
-    faces: &[FaceRow],
-    source: &ClusterVectorStats,
-    target: &ClusterVectorStats,
-) -> Option<FragmentEvidence> {
-    let source_members = distinct_evidence_members(faces, source);
-    let target_members = distinct_evidence_members(faces, target);
-    fragment_evidence_from_members(faces, &source_members, &target_members)
-}
-
-fn fragment_evidence_from_members(
-    faces: &[FaceRow],
-    source_members: &[usize],
-    target_members: &[usize],
-) -> Option<FragmentEvidence> {
-    if source_members.len() < FRAGMENT_MIN_SOURCE_VOTERS
-        || target_members.len() < FRAGMENT_MIN_TARGET_VOTERS
-    {
-        return None;
-    }
-    let mut source_scores = Vec::new();
-    let mut target_voters = HashSet::new();
-    for &source_index in source_members {
-        let mut similarities: Vec<(f32, usize)> = target_members
-            .iter()
-            .map(|&target_index| {
-                (
-                    cosine(
-                        &faces[source_index].embedding,
-                        &faces[target_index].embedding,
-                    ),
-                    target_index,
-                )
-            })
-            .filter(|(similarity, _)| *similarity >= FRAGMENT_MEMBER_COS)
-            .collect();
-        similarities.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        if similarities.len() < FRAGMENT_MIN_TARGET_VOTERS {
-            return None;
-        }
-        source_scores.push(similarities[FRAGMENT_MIN_TARGET_VOTERS - 1].0);
-        target_voters.extend(similarities.into_iter().map(|(_, index)| index));
-    }
-    if source_scores.len() < FRAGMENT_MIN_SOURCE_VOTERS
-        || target_voters.len() < FRAGMENT_MIN_TARGET_VOTERS
-    {
-        return None;
-    }
-    source_scores.sort_by(|a, b| b.total_cmp(a));
-    Some(FragmentEvidence {
-        source_voters: source_scores.len(),
-        target_voters: target_voters.len(),
-        robust_similarity: source_scores[FRAGMENT_MIN_SOURCE_VOTERS - 1],
-    })
-}
-
-fn large_fragment_evidence(
-    faces: &[FaceRow],
-    source: &ClusterVectorStats,
-    target: &ClusterVectorStats,
-) -> Option<FragmentEvidence> {
-    let source_members = distinct_evidence_members(faces, source);
-    let target_members = distinct_evidence_members(faces, target);
-    large_fragment_evidence_from_members(faces, &source_members, &target_members)
-}
-
-fn large_fragment_evidence_from_members(
-    faces: &[FaceRow],
-    source_members: &[usize],
-    target_members: &[usize],
-) -> Option<FragmentEvidence> {
-    if source_members.len() < LARGE_FRAGMENT_MIN_SOURCE_VOTERS
-        || target_members.len() < FRAGMENT_MIN_TARGET_VOTERS
-    {
-        return None;
-    }
-    let required_source_voters = ((source_members.len() as f32
-        * LARGE_FRAGMENT_MIN_SOURCE_VOTER_RATIO)
-        .ceil() as usize)
-        .max(LARGE_FRAGMENT_MIN_SOURCE_VOTERS);
-    let mut source_scores = Vec::new();
-    let mut target_voters = HashSet::new();
-    for &source_index in source_members {
-        let mut similarities: Vec<(f32, usize)> = target_members
-            .iter()
-            .map(|&target_index| {
-                (
-                    cosine(
-                        &faces[source_index].embedding,
-                        &faces[target_index].embedding,
-                    ),
-                    target_index,
-                )
-            })
-            .filter(|(similarity, _)| *similarity >= FRAGMENT_MEMBER_COS)
-            .collect();
-        similarities.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        if similarities.len() < FRAGMENT_MIN_TARGET_VOTERS {
-            continue;
-        }
-        source_scores.push(similarities[FRAGMENT_MIN_TARGET_VOTERS - 1].0);
-        target_voters.extend(similarities.into_iter().map(|(_, index)| index));
-    }
-    if source_scores.len() < required_source_voters
-        || target_voters.len() < FRAGMENT_MIN_TARGET_VOTERS
-    {
-        return None;
-    }
-    source_scores.sort_by(|a, b| b.total_cmp(a));
-    Some(FragmentEvidence {
-        source_voters: source_scores.len(),
-        target_voters: target_voters.len(),
-        robust_similarity: source_scores[required_source_voters - 1],
-    })
-}
-
-pub fn corroborated_fragment_match(source: &[FaceRow], target: &[FaceRow]) -> bool {
-    if source.len() < FRAGMENT_MIN_SOURCE_VOTERS
-        || source.len() > FRAGMENT_RECOVERY_MAX_FACES_DEFAULT as usize
-        || target.len() <= FRAGMENT_RECOVERY_MAX_FACES_DEFAULT as usize
-    {
-        return false;
-    }
-    let source_captures: HashSet<CaptureKey> = source.iter().map(capture_key).collect();
-    let source_files: HashSet<i64> = source.iter().map(|face| face.file_id).collect();
-    let target_files: HashSet<i64> = target.iter().map(|face| face.file_id).collect();
-    if source_captures.len() != source.len() || !source_files.is_disjoint(&target_files) {
-        return false;
-    }
-    let cohesion = |faces: &[FaceRow]| {
-        let Some(dim) = faces.first().map(|face| face.embedding.len()) else {
-            return 0.0;
-        };
-        if dim == 0 || faces.iter().any(|face| face.embedding.len() != dim) {
-            return 0.0;
-        }
-        let mut sum = vec![0.0; dim];
-        for face in faces {
-            for (slot, value) in sum.iter_mut().zip(&face.embedding) {
-                *slot += value;
-            }
-        }
-        sum.iter().map(|value| value * value).sum::<f32>().sqrt() / faces.len() as f32
-    };
-    if cohesion(source) < FRAGMENT_SOURCE_MIN_COHESION
-        || cohesion(target) < FRAGMENT_TARGET_MIN_COHESION
-    {
-        return false;
-    }
-    let distinct = |faces: &[FaceRow]| {
-        let stat = ClusterVectorStats {
-            cluster_id: 0,
-            sum: Vec::new(),
-            centroid: Vec::new(),
-            member_count: faces.len() as u32,
-            cohesion: 0.0,
-            anchor_radius: 0.0,
-            capture_keys: HashSet::new(),
-            physical_file_ids: HashSet::new(),
-            member_indices: (0..faces.len()).collect(),
-        };
-        distinct_evidence_members(faces, &stat)
-    };
-    let source_members = distinct(source);
-    let target_members = distinct(target);
-    if source_members.len() < FRAGMENT_MIN_SOURCE_VOTERS
-        || target_members.len() < FRAGMENT_MIN_TARGET_VOTERS
-    {
-        return false;
-    }
-    source_members.into_iter().all(|source_index| {
-        target_members
-            .iter()
-            .filter(|&&target_index| {
-                cosine(
-                    &source[source_index].embedding,
-                    &target[target_index].embedding,
-                ) >= FRAGMENT_MEMBER_COS
-            })
-            .take(FRAGMENT_MIN_TARGET_VOTERS)
-            .count()
-            == FRAGMENT_MIN_TARGET_VOTERS
-    })
-}
-
-#[derive(Debug, Clone, Copy)]
-struct FragmentProposal {
-    centroid_similarity: f32,
-    evidence: FragmentEvidence,
-    required_similarity: f32,
-    source: usize,
-    target: usize,
-}
-
-pub fn recover_small_fragments<S1, S2, S3>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    blocked: &HashSet<(i32, i32), S1>,
-    protected_owner_by_cluster: &HashMap<i32, i64, S2>,
-    blocked_target_clusters: &HashSet<i32, S3>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-    S3: std::hash::BuildHasher,
-{
-    recover_small_fragments_with_params(
-        faces,
-        assignments,
-        anchors,
-        blocked,
-        protected_owner_by_cluster,
-        blocked_target_clusters,
-        fragment_recovery_threshold(),
-        fragment_recovery_max_faces(),
-        fragment_recovery_margin(),
-    )
-}
-
-fn recover_small_fragments_with_params<S1, S2, S3>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    blocked: &HashSet<(i32, i32), S1>,
-    protected_owner_by_cluster: &HashMap<i32, i64, S2>,
-    blocked_target_clusters: &HashSet<i32, S3>,
-    threshold: f32,
-    max_fragment_faces: u32,
-    margin_floor: f32,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S1: std::hash::BuildHasher,
-    S2: std::hash::BuildHasher,
-    S3: std::hash::BuildHasher,
-{
-    if threshold >= 1.0 || anchors.len() < 2 {
-        return (assignments, anchors);
-    }
-    let stats = cluster_vector_stats(faces, &assignments);
-    if stats.len() < 2 {
-        return (assignments, anchors);
-    }
-    let eligible_targets: Vec<usize> = stats
-        .iter()
-        .enumerate()
-        .filter_map(|(index, stat)| {
-            (stat.member_count > max_fragment_faces
-                && stat.cohesion >= FRAGMENT_TARGET_MIN_COHESION)
-                .then_some(index)
-        })
-        .collect();
-    if eligible_targets.is_empty() {
-        return (assignments, anchors);
-    }
-    let direct_allowed = |source: usize, target: usize| {
-        let source_owner = protected_owner_by_cluster
-            .get(&stats[source].cluster_id)
-            .copied();
-        let pair = if stats[source].cluster_id < stats[target].cluster_id {
-            (stats[source].cluster_id, stats[target].cluster_id)
-        } else {
-            (stats[target].cluster_id, stats[source].cluster_id)
-        };
-        source != target
-            && source_owner.is_none()
-            && !blocked_target_clusters.contains(&stats[target].cluster_id)
-            && !blocked.contains(&pair)
-            && stats[source]
-                .physical_file_ids
-                .is_disjoint(&stats[target].physical_file_ids)
-    };
-    let hnsw = (eligible_targets.len() > FRAGMENT_BRUTE_TARGET_LIMIT).then(|| {
-        crate::util::hnsw_index::build(
-            eligible_targets
-                .iter()
-                .map(|&index| (stats[index].centroid.clone(), index))
-                .collect(),
-        )
-    });
-    let mut searcher = crate::util::hnsw_index::Searcher::default();
-    let mut proposals = Vec::new();
-    for (source, stat) in stats.iter().enumerate() {
-        let is_small_fragment = stat.member_count <= max_fragment_faces
-            && stat.capture_keys.len() == stat.member_count as usize;
-        let is_large_fragment = stat.member_count >= LARGE_FRAGMENT_MIN_SOURCE_VOTERS as u32
-            && stat.member_count > max_fragment_faces
-            && stat.member_count <= LARGE_FRAGMENT_MAX_FACES
-            && stat.capture_keys.len() as f32 / stat.member_count as f32
-                >= LARGE_FRAGMENT_MIN_DISTINCT_CAPTURE_RATIO;
-        if stat.member_count < FRAGMENT_MIN_SOURCE_VOTERS as u32
-            || (!is_small_fragment && !is_large_fragment)
-            || stat.cohesion < FRAGMENT_SOURCE_MIN_COHESION
-            || protected_owner_by_cluster.contains_key(&stat.cluster_id)
-        {
-            continue;
-        }
-        let (mut hits, unresolved_dense_band): (Vec<(f32, usize)>, bool) =
-            if let Some(index) = &hnsw {
-                let mut k = (FRAGMENT_HNSW_CANDIDATES + 1).min(eligible_targets.len());
-                loop {
-                    let hits: Vec<(f32, usize)> = searcher
-                        .top_k(index, &stat.centroid, k)
-                        .into_iter()
-                        .map(|(target, _)| {
-                            (
-                                cosine(&stat.centroid, &stats[target].centroid),
-                                target,
-                            )
-                        })
-                        .collect();
-                    let saturated = k < eligible_targets.len()
-                        && hits
-                            .iter()
-                            .filter(|(_, target)| *target != source)
-                            .all(|(similarity, _)| *similarity >= threshold);
-                    if saturated
-                        && k < FRAGMENT_HNSW_MAX_CANDIDATES.min(eligible_targets.len())
-                    {
-                        k = (k * 2)
-                            .min(FRAGMENT_HNSW_MAX_CANDIDATES)
-                            .min(eligible_targets.len());
-                        continue;
-                    }
-                    break (
-                        hits,
-                        saturated
-                            && k == FRAGMENT_HNSW_MAX_CANDIDATES
-                            && k < eligible_targets.len(),
-                    );
-                }
-            } else {
-                (
-                    eligible_targets
-                        .iter()
-                        .map(|&target| {
-                            (
-                                cosine(&stat.centroid, &stats[target].centroid),
-                                target,
-                            )
-                        })
-                        .collect(),
-                    false,
-                )
-            };
-        if unresolved_dense_band {
-            continue;
-        }
-        let required_similarity = if is_large_fragment {
-            threshold.max(LARGE_FRAGMENT_MIN_CENTROID_COS)
-        } else {
-            threshold
-        };
-        hits.retain(|&(similarity, target)| {
-            similarity >= required_similarity
-                && (!is_large_fragment
-                    || stats[target].member_count
-                        >= stat
-                            .member_count
-                            .saturating_mul(LARGE_FRAGMENT_TARGET_SIZE_RATIO))
-                && direct_allowed(source, target)
-        });
-        hits.sort_by(|a, b| {
-            b.0.total_cmp(&a.0)
-                .then_with(|| stats[a.1].cluster_id.cmp(&stats[b.1].cluster_id))
-        });
-        let Some(&(centroid_similarity, target)) = hits.first() else {
-            continue;
-        };
-        let second = hits
-            .get(1)
-            .map(|candidate| candidate.0)
-            .unwrap_or(-1.0);
-        if centroid_similarity - second < margin_floor {
-            continue;
-        }
-        let evidence = if is_large_fragment {
-            large_fragment_evidence(faces, stat, &stats[target])
-        } else {
-            fragment_evidence(faces, stat, &stats[target])
-        };
-        if let Some(evidence) = evidence {
-            proposals.push(FragmentProposal {
-                centroid_similarity,
-                evidence,
-                required_similarity,
-                source,
-                target,
-            });
-        }
-    }
-    proposals.sort_by(|a, b| {
-        stats[b.source]
-            .member_count
-            .cmp(&stats[a.source].member_count)
-            .then_with(|| stats[a.source].cluster_id.cmp(&stats[b.source].cluster_id))
-            .then_with(|| b.centroid_similarity.total_cmp(&a.centroid_similarity))
-            .then_with(|| {
-                b.evidence
-                    .robust_similarity
-                    .total_cmp(&a.evidence.robust_similarity)
-            })
-            .then_with(|| b.evidence.source_voters.cmp(&a.evidence.source_voters))
-            .then_with(|| b.evidence.target_voters.cmp(&a.evidence.target_voters))
-    });
-
-    let mut group_members: Vec<Vec<usize>> =
-        (0..stats.len()).map(|index| vec![index]).collect();
-    let mut group_file_ids: Vec<HashSet<i64>> = stats
-        .iter()
-        .map(|stat| stat.physical_file_ids.clone())
-        .collect();
-    let mut group_sums: Vec<Vec<f32>> = stats.iter().map(|stat| stat.sum.clone()).collect();
-    let mut group_counts: Vec<u32> = stats.iter().map(|stat| stat.member_count).collect();
-    let mut group_centroids: Vec<Vec<f32>> =
-        stats.iter().map(|stat| stat.centroid.clone()).collect();
-    let mut group_evidence_members: Vec<Option<Vec<usize>>> = vec![None; stats.len()];
-    let mut group_blocked_target: Vec<bool> = stats
-        .iter()
-        .map(|stat| blocked_target_clusters.contains(&stat.cluster_id))
-        .collect();
-    let mut group_owner: Vec<Option<i64>> = stats
-        .iter()
-        .map(|stat| {
-            protected_owner_by_cluster
-                .get(&stat.cluster_id)
-                .copied()
-        })
-        .collect();
-    let mut parent: Vec<usize> = (0..stats.len()).collect();
-    fn find_root(parent: &mut [usize], mut index: usize) -> usize {
-        while parent[index] != index {
-            parent[index] = parent[parent[index]];
-            index = parent[index];
-        }
-        index
-    }
-    fn cached_evidence_members(
-        faces: &[FaceRow],
-        stats: &[ClusterVectorStats],
-        cache: &mut [Option<Vec<usize>>],
-        index: usize,
-    ) -> Vec<usize> {
-        if let Some(members) = &cache[index] {
-            return members.clone();
-        }
-        let members = distinct_evidence_members(faces, &stats[index]);
-        cache[index] = Some(members.clone());
-        members
-    }
-    let mut any_merge = false;
-    let mut dirty_target_roots = BTreeSet::new();
-    for proposal in proposals {
-        let source = find_root(&mut parent, proposal.source);
-        let proposed_target = find_root(&mut parent, proposal.target);
-        if source == proposed_target
-            || source != proposal.source
-            || group_owner[source].is_some()
-        {
-            continue;
-        }
-
-        let mut target_roots = BTreeSet::new();
-        let mut unresolved_dense_band = false;
-        if let Some(index) = &hnsw {
-            if dirty_target_roots.len() > FRAGMENT_HNSW_MAX_CANDIDATES {
-                break;
-            }
-            let mut k = (FRAGMENT_HNSW_CANDIDATES + 1).min(eligible_targets.len());
-            let hits = loop {
-                let hits = searcher.top_k(index, &stats[source].centroid, k);
-                let saturated = k < eligible_targets.len()
-                    && hits
-                        .iter()
-                        .filter(|(candidate, _)| *candidate != source)
-                        .all(|(candidate, _)| {
-                            cosine(
-                                &stats[source].centroid,
-                                &stats[*candidate].centroid,
-                            ) >= proposal.required_similarity
-                        });
-                if saturated
-                    && k < FRAGMENT_HNSW_MAX_CANDIDATES.min(eligible_targets.len())
-                {
-                    k = (k * 2)
-                        .min(FRAGMENT_HNSW_MAX_CANDIDATES)
-                        .min(eligible_targets.len());
-                    continue;
-                }
-                unresolved_dense_band = saturated
-                    && k == FRAGMENT_HNSW_MAX_CANDIDATES
-                    && k < eligible_targets.len();
-                break hits;
-            };
-            for (candidate, _) in hits {
-                target_roots.insert(find_root(&mut parent, candidate));
-            }
-            for &candidate in &dirty_target_roots {
-                target_roots.insert(find_root(&mut parent, candidate));
-            }
-        } else {
-            for &candidate in &eligible_targets {
-                target_roots.insert(find_root(&mut parent, candidate));
-            }
-        }
-        if unresolved_dense_band {
-            continue;
-        }
-        target_roots.insert(proposed_target);
-
-        let is_large_fragment = stats[source].member_count > max_fragment_faces;
-        let mut current_hits = Vec::new();
-        for target in target_roots {
-            if source == target
-                || group_counts[target] <= max_fragment_faces
-                || group_blocked_target[target]
-            {
-                continue;
-            }
-            if is_large_fragment
-                && group_counts[target]
-                    < stats[source]
-                        .member_count
-                        .saturating_mul(LARGE_FRAGMENT_TARGET_SIZE_RATIO)
-            {
-                continue;
-            }
-            let blocked_by_group = group_members[source].iter().any(|&source_member| {
-                group_members[target].iter().any(|&target_member| {
-                    let pair =
-                        if stats[source_member].cluster_id < stats[target_member].cluster_id {
-                            (
-                                stats[source_member].cluster_id,
-                                stats[target_member].cluster_id,
-                            )
-                        } else {
-                            (
-                                stats[target_member].cluster_id,
-                                stats[source_member].cluster_id,
-                            )
-                        };
-                    blocked.contains(&pair)
-                })
-            });
-            if blocked_by_group || !group_file_ids[source].is_disjoint(&group_file_ids[target]) {
-                continue;
-            }
-            let target_norm = group_sums[target]
-                .iter()
-                .map(|value| value * value)
-                .sum::<f32>()
-                .sqrt();
-            if !target_norm.is_finite()
-                || target_norm / (group_counts[target] as f32)
-                    < FRAGMENT_TARGET_MIN_COHESION
-            {
-                continue;
-            }
-            let similarity = cosine(&stats[source].centroid, &group_centroids[target]);
-            if similarity >= proposal.required_similarity {
-                current_hits.push((similarity, target));
-            }
-        }
-        current_hits.sort_by(|a, b| {
-            b.0.total_cmp(&a.0).then_with(|| {
-                let a_cluster = group_members[a.1]
-                    .iter()
-                    .map(|&member| stats[member].cluster_id)
-                    .min()
-                    .unwrap_or(i32::MAX);
-                let b_cluster = group_members[b.1]
-                    .iter()
-                    .map(|&member| stats[member].cluster_id)
-                    .min()
-                    .unwrap_or(i32::MAX);
-                a_cluster.cmp(&b_cluster)
-            })
-        });
-        let Some(&(current_similarity, target)) = current_hits.first() else {
-            continue;
-        };
-        if target != proposed_target {
-            continue;
-        }
-        let current_second = current_hits
-            .get(1)
-            .map(|candidate| candidate.0)
-            .unwrap_or(-1.0);
-        if current_similarity - current_second < margin_floor {
-            continue;
-        }
-
-        let source_evidence_members =
-            cached_evidence_members(faces, &stats, &mut group_evidence_members, source);
-        let target_evidence_members =
-            cached_evidence_members(faces, &stats, &mut group_evidence_members, target);
-        let current_evidence = if is_large_fragment {
-            large_fragment_evidence_from_members(
-                faces,
-                &source_evidence_members,
-                &target_evidence_members,
-            )
-        } else {
-            fragment_evidence_from_members(
-                faces,
-                &source_evidence_members,
-                &target_evidence_members,
-            )
-        };
-        if current_evidence.is_none() {
-            continue;
-        }
-
-        let combined_sum: Vec<f32> = group_sums[target]
-            .iter()
-            .zip(&group_sums[source])
-            .map(|(a, b)| a + b)
-            .collect();
-        let combined_norm = combined_sum
-            .iter()
-            .map(|value| value * value)
-            .sum::<f32>()
-            .sqrt();
-        let combined_count = group_counts[target] + group_counts[source];
-        if !combined_norm.is_finite()
-            || combined_norm / (combined_count as f32) < FRAGMENT_TARGET_MIN_COHESION
-        {
-            continue;
-        }
-        parent[source] = target;
-        group_sums[target] = combined_sum;
-        group_counts[target] = combined_count;
-        group_centroids[target] = group_sums[target]
-            .iter()
-            .map(|value| value / combined_norm)
-            .collect();
-        group_evidence_members[target] = Some(merged_evidence_members(
-            faces,
-            &target_evidence_members,
-            &source_evidence_members,
-        ));
-        let source_file_ids = std::mem::take(&mut group_file_ids[source]);
-        group_file_ids[target].extend(source_file_ids);
-        group_blocked_target[target] =
-            group_blocked_target[target] || group_blocked_target[source];
-        group_owner[target] = group_owner[target].or(group_owner[source]);
-        let source_members = std::mem::take(&mut group_members[source]);
-        group_members[target].extend(source_members);
-        dirty_target_roots.insert(target);
-        any_merge = true;
-    }
-    if !any_merge {
-        return (assignments, anchors);
-    }
-    let index_by_cluster: HashMap<i32, usize> = stats
-        .iter()
-        .enumerate()
-        .map(|(index, stat)| (stat.cluster_id, index))
-        .collect();
-    let mut remap = HashMap::new();
-    for (index, stat) in stats.iter().enumerate() {
-        let root = find_root(&mut parent, index);
-        remap.insert(stat.cluster_id, stats[root].cluster_id);
-    }
-    let new_assignments = assignments
-        .into_iter()
-        .map(|assignment| ClusterAssignment {
-            face_id: assignment.face_id,
-            cluster_id: remap
-                .get(&assignment.cluster_id)
-                .copied()
-                .unwrap_or(assignment.cluster_id),
-        })
-        .collect();
-    let mut anchor_by_cluster: HashMap<i32, ClusterAnchor> = anchors
-        .into_iter()
-        .map(|anchor| (anchor.cluster_id, anchor))
-        .collect();
-    let mut counts_by_root: BTreeMap<i32, u32> = BTreeMap::new();
-    for stat in &stats {
-        let root_cluster = remap[&stat.cluster_id];
-        let count = anchor_by_cluster
-            .get(&stat.cluster_id)
-            .map(|anchor| anchor.member_count)
-            .unwrap_or(stat.member_count);
-        *counts_by_root.entry(root_cluster).or_default() += count;
-    }
-    let mut new_anchors = Vec::with_capacity(counts_by_root.len());
-    for (root_cluster, member_count) in counts_by_root {
-        let Some(mut anchor) = anchor_by_cluster.remove(&root_cluster) else {
-            continue;
-        };
-        anchor.member_count = member_count;
-        new_anchors.push(anchor);
-    }
-    for (cluster_id, anchor) in anchor_by_cluster {
-        if !index_by_cluster.contains_key(&cluster_id) {
-            new_anchors.push(anchor);
-        }
-    }
-    new_anchors.sort_by_key(|anchor| anchor.cluster_id);
-    (new_assignments, new_anchors)
-}
-
-/// Remove only the far tail of an unprotected high-quality cluster. The 0.30
-/// default is paired with the 0.33 pre-clustering quality gate and was measured
-/// on the isolated Family Photos catalog: it retained the labelled same-person
-/// pair, separated every reviewed impostor, and improved every top-cluster
-/// cohesion floor. Named, merged, and verdict-backed identities bypass it.
-pub fn outlier_cosine_floor() -> f32 {
-    std::env::var("FILEID_FACE_OUTLIER_COSINE")
-        .ok()
-        .and_then(|value| value.trim().parse::<f32>().ok())
-        .filter(|value| value.is_finite())
-        .map(|value| value.clamp(-1.0, 1.0))
-        .unwrap_or(0.30)
-}
-
-pub fn suppress_embedding_outliers_with_keep<S>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    minimum_cosine: f32,
-    always_keep: &HashSet<i32, S>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S: std::hash::BuildHasher,
-{
-    if minimum_cosine <= -1.0 || faces.is_empty() || assignments.is_empty() {
-        return (assignments, anchors);
-    }
-    let face_by_id: HashMap<i64, &FaceRow> =
-        faces.iter().map(|face| (face.face_id, face)).collect();
-    let mut members_by_cluster: BTreeMap<i32, Vec<i64>> = BTreeMap::new();
-    for assignment in &assignments {
-        if face_by_id.contains_key(&assignment.face_id) {
-            members_by_cluster
-                .entry(assignment.cluster_id)
-                .or_default()
-                .push(assignment.face_id);
-        }
-    }
-
-    let mut kept_face_ids = HashSet::with_capacity(assignments.len());
-    for (&cluster_id, member_ids) in &members_by_cluster {
-        if always_keep.contains(&cluster_id) {
-            kept_face_ids.extend(member_ids.iter().copied());
-            continue;
-        }
-        let Some(dim) = member_ids
-            .iter()
-            .filter_map(|face_id| face_by_id.get(face_id))
-            .map(|face| face.embedding.len())
-            .find(|&dim| dim > 0)
-        else {
-            kept_face_ids.extend(member_ids.iter().copied());
-            continue;
-        };
-        if member_ids.iter().any(|face_id| {
-            face_by_id
-                .get(face_id)
-                .is_none_or(|face| face.embedding.len() != dim)
-        }) {
-            kept_face_ids.extend(member_ids.iter().copied());
-            continue;
-        }
-        let mut sum = vec![0.0f32; dim];
-        for face_id in member_ids {
-            for (slot, value) in sum.iter_mut().zip(&face_by_id[face_id].embedding) {
-                *slot += value;
-            }
-        }
-        let norm = sum.iter().map(|value| value * value).sum::<f32>().sqrt();
-        if !norm.is_finite() || norm <= f32::MIN_POSITIVE {
-            kept_face_ids.extend(member_ids.iter().copied());
-            continue;
-        }
-        let centroid: Vec<f32> = sum.into_iter().map(|value| value / norm).collect();
-        kept_face_ids.extend(member_ids.iter().filter_map(|face_id| {
-            (cosine(&face_by_id[face_id].embedding, &centroid) >= minimum_cosine)
-                .then_some(*face_id)
-        }));
-    }
-
-    let new_assignments: Vec<ClusterAssignment> = assignments
-        .into_iter()
-        .filter(|assignment| kept_face_ids.contains(&assignment.face_id))
-        .collect();
-    let mut kept_by_cluster: BTreeMap<i32, Vec<i64>> = BTreeMap::new();
-    for assignment in &new_assignments {
-        kept_by_cluster
-            .entry(assignment.cluster_id)
-            .or_default()
-            .push(assignment.face_id);
-    }
-    let new_anchors = kept_by_cluster
-        .into_iter()
-        .filter_map(|(cluster_id, member_ids)| {
-            let anchor_face_id = member_ids.iter().copied().max_by(|a, b| {
-                face_by_id[a]
-                    .quality
-                    .total_cmp(&face_by_id[b].quality)
-                    .then_with(|| b.cmp(a))
-            })?;
-            Some(ClusterAnchor {
-                cluster_id,
-                anchor_face_id,
-                member_count: member_ids.len() as u32,
-            })
-        })
-        .collect();
-    (new_assignments, new_anchors)
-}
-
-/// Minimum CORROBORATED cluster size kept regardless of per-face quality:
-/// ≥ this many mutually-similar faces is a real recurring identity even when
-/// every frame is mediocre. `FILEID_FACE_MIN_CLUSTER_SIZE` (clamped [1,10000];
-/// default 3).
-///
-/// Stays 3 (NOT lowered to 2): a 2026-07-05 scale test on ~44k faces from
-/// F:\TrueNAS showed min=2 keeps ~3,800 size-2 clusters (HNSW at scale produces
-/// a flood of pairs), so min=2 traded the singleton flood for a pair flood.
-/// min=3 + `solo_quality_floor` 0.40 cut that scale run to ~1,566 persons with
-/// no pair flood. Recurrence is still the primary "is this a person" signal;
-/// the quality floor only rescues exceptional single faces.
-pub fn min_cluster_size() -> u32 {
-    std::env::var("FILEID_FACE_MIN_CLUSTER_SIZE")
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .map(|v| v.clamp(1, 10_000))
-        .unwrap_or(3)
-}
-
-/// A cluster below `min_cluster_size` must contain a face at/above this quality
-/// to be persisted as a person; otherwise it is left UNCLUSTERED (no spurious
-/// singleton). `FILEID_FACE_SOLO_QUALITY` (clamped [0,1]; default 0.40). 0
-/// disables the quality escape entirely (pure recurrence gate).
-///
-/// Default 0.12→0.40 (2026-07-05, RTX 5080 / F:\TrueNAS calibration). The old
-/// 0.12 was a macOS Apple-Vision guess and the comment ASSUMED Windows scored
-/// on the same 0..~0.95 range. It does not: `face_quality` here is the YuNet
-/// detection score × landmark geometry (`scrfd::validate_face_geometry`, whose
-/// `geom_conf` structurally caps ~0.42), so measured on 84,629 real faces it is
-/// compressed into ~0.23..0.42 and 0.12 admitted EVERY single face — 91% of
-/// "persons" were one-off singletons
-/// (10,208 persons on the full corpus / 438 on the 1k-file subset). Worse,
-/// singleton quality (median 0.33) barely separates from genuine recurring-face
-/// quality (median 0.37), and 55% of singletons sit &lt;0.40 cosine from ANY real
-/// cluster centroid — i.e. they are genuine distinct one-off faces (crowds,
-/// backgrounds), NOT fragments a looser merge would recover. So quality alone
-/// can't gate them; recurrence (`min_cluster_size`) does the work and 0.40 (the
-/// measured ~90th percentile of the quality range) is a narrow escape that keeps
-/// only the crispest true solos. Subset (min=3): 438 → ~34 persons; ~44k-face
-/// scale run (min=3): singleton flood gone. macOS keeps its own Apple-Vision-
-/// calibrated floor (different quality scale — intentional lockstep divergence).
-///
-/// SCOPE NOTE: this floor is a POST-clustering suppression of small low-quality
-/// clusters. It works alongside two other levers added in the 2026-07-05
-/// label-driven retune: the PRE-clustering quality gate
-/// FILEID_FACE_CLUSTER_MIN_QUALITY (drops noise faces before they can chain into
-/// cones) and the Pass-1 threshold + mutual-kNN in identity_clustering.rs (which
-/// DID fix the bridge-face over-merge — see there). On the owner's labelled set
-/// that combination reached precision/recall 1.0; cross-corpus + full-84k recall
-/// confirmation is tracked in NEXT.md.
-pub fn solo_quality_floor() -> f32 {
-    std::env::var("FILEID_FACE_SOLO_QUALITY")
-        .ok()
-        .and_then(|s| s.trim().parse::<f32>().ok())
-        .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(0.40)
-}
-
-/// Drop "junk" micro-clusters so the People tab isn't flooded with spurious
-/// singleton/doubleton persons built from unrecognizable faces (blurry / motion
-/// / tiny / heavy-profile). A cluster is KEPT iff it has ≥ `min_cluster_size`
-/// members OR its best member quality ≥ `solo_quality_floor`; otherwise its
-/// faces are removed from the assignment (the caller's persist NULLs every
-/// unassigned face, so they land unclustered — still a candidate, never deleted).
-///
-/// This is the SAFE, high-impact fragmentation fix: it NEVER merges two clusters,
-/// so it cannot bridge distinct identities — it only suppresses low-confidence
-/// lone faces. On the macOS reference library it takes 407→~285 persons by
-/// dropping 127 junk micro-clusters with zero identity merges. `solo_quality_floor
-/// <= 0` is a no-op (every cluster kept). Mirrors `FaceClustering.swift`'s
-/// `suppressLowQualityClusters`.
-#[cfg(test)]
-pub fn suppress_low_quality_micro_clusters(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    min_cluster_size: u32,
-    solo_quality_floor: f32,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
-    suppress_low_quality_micro_clusters_with_keep(
-        faces,
-        assignments,
-        anchors,
-        min_cluster_size,
-        solo_quality_floor,
-        &HashSet::new(),
-    )
-}
-
-pub fn suppress_low_quality_micro_clusters_with_keep<S>(
-    faces: &[FaceRow],
-    assignments: Vec<ClusterAssignment>,
-    anchors: Vec<ClusterAnchor>,
-    min_cluster_size: u32,
-    solo_quality_floor: f32,
-    always_keep: &HashSet<i32, S>,
-) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>)
-where
-    S: std::hash::BuildHasher,
-{
-    if solo_quality_floor <= 0.0 {
-        return (assignments, anchors);
-    }
-    let face_of: HashMap<i64, &FaceRow> = faces.iter().map(|face| (face.face_id, face)).collect();
-    // Per-cluster distinct captures + best (max) member quality, taken from the FINAL
-    // assignments (post-consolidation cluster ids) — the source of truth for
-    // what would be persisted.
-    let mut captures: HashMap<i32, HashSet<CaptureKey>> = HashMap::new();
-    let mut max_q: HashMap<i32, f32> = HashMap::new();
-    for a in &assignments {
-        if let Some(face) = face_of.get(&a.face_id) {
-            captures
-                .entry(a.cluster_id)
-                .or_default()
-                .insert(capture_key(face));
-        }
-        let q = face_of
-            .get(&a.face_id)
-            .map(|face| face.quality)
-            .unwrap_or(f32::NEG_INFINITY);
-        let e = max_q.entry(a.cluster_id).or_insert(f32::NEG_INFINITY);
-        if q > *e {
-            *e = q;
-        }
-    }
-    let keep = |cid: i32| -> bool {
-        always_keep.contains(&cid)
-            || captures
-                .get(&cid)
-                .is_some_and(|keys| keys.len() >= min_cluster_size as usize)
-            || max_q.get(&cid).copied().unwrap_or(f32::NEG_INFINITY) >= solo_quality_floor
-    };
-    let new_assignments: Vec<ClusterAssignment> =
-        assignments.into_iter().filter(|a| keep(a.cluster_id)).collect();
-    let new_anchors: Vec<ClusterAnchor> =
-        anchors.into_iter().filter(|an| keep(an.cluster_id)).collect();
     (new_assignments, new_anchors)
 }
 
@@ -2213,7 +469,6 @@ where
 /// would otherwise leave a stale name in the guard and could unblock a
 /// wrong-cluster auto-merge. (audit C1-023) Same-named fragments and
 /// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
-#[cfg(test)]
 pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     face_name: &HashMap<i64, String, S>,
     cluster_of: &HashMap<i64, i32, S>,
@@ -2253,6 +508,70 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     blocked
 }
 
+/// Block auto-merge of a user-marked UNKNOWN cluster into a DIFFERENT person's
+/// cluster. mark-as-unknown nulls the name (bulk.rs), so `name_blocked_pairs`
+/// can't see it and `consolidate()` would otherwise fold the unknown cluster
+/// into a named/other person — reversing the user's verdict and, when the
+/// unknown owner wins the persist vote, overwriting a user-assigned name with
+/// NULL. (audit R3-03)
+///
+/// `face_owner` maps each carried-forward face to its prior person id;
+/// `unknown_persons` is the set of prior person ids with is_unknown=1. Each
+/// fresh cluster is assigned its majority prior PERSON id (ties → lowest id,
+/// matching the persist vote). Any pair of clusters whose majority owners
+/// differ is blocked when EITHER owner is unknown. Same-prior-person fragments
+/// (incl. two fragments of one unknown person) are never blocked, and untouched
+/// auto-clustered persons (name=NULL, is_unknown=0) are absent from `face_owner`,
+/// so normal over-split consolidation is unaffected.
+pub fn unknown_blocked_pairs<S: std::hash::BuildHasher>(
+    face_owner: &HashMap<i64, i64, S>,
+    unknown_persons: &std::collections::HashSet<i64, S>,
+    cluster_of: &HashMap<i64, i32, S>,
+) -> std::collections::HashSet<(i32, i32)> {
+    let mut owner_votes: HashMap<i32, HashMap<i64, u32>> = HashMap::new();
+    for (fid, &pid) in face_owner {
+        if let Some(&cid) = cluster_of.get(fid) {
+            *owner_votes.entry(cid).or_default().entry(pid).or_insert(0) += 1;
+        }
+    }
+    let cluster_owner: Vec<(i32, i64)> = owner_votes
+        .into_iter()
+        .filter_map(|(cid, votes)| {
+            votes
+                .into_iter()
+                .max_by(|(pa, ca), (pb, cb)| ca.cmp(cb).then_with(|| pb.cmp(pa)))
+                .map(|(pid, _)| (cid, pid))
+        })
+        .collect();
+    let mut blocked = std::collections::HashSet::new();
+    for i in 0..cluster_owner.len() {
+        for j in (i + 1)..cluster_owner.len() {
+            let (ci, pi) = cluster_owner[i];
+            let (cj, pj) = cluster_owner[j];
+            if pi != pj && (unknown_persons.contains(&pi) || unknown_persons.contains(&pj)) {
+                blocked.insert(if ci < cj { (ci, cj) } else { (cj, ci) });
+            }
+        }
+    }
+    blocked
+}
+
+/// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
+/// is invoked on these — outputs go back into the union-find.
+#[allow(dead_code)]
+pub fn uncertain_pairs(faces: &[FaceRow]) -> Vec<(i64, i64, f32)> {
+    let mut pairs = Vec::new();
+    for i in 0..faces.len() {
+        for j in (i + 1)..faces.len() {
+            let sim = cosine(&faces[i].embedding, &faces[j].embedding);
+            if (COS_LOW..COS_HIGH).contains(&sim) {
+                pairs.push((faces[i].face_id, faces[j].face_id, sim));
+            }
+        }
+    }
+    pairs
+}
+
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = 0.0f32;
@@ -2271,24 +590,8 @@ mod tests {
         coords.iter().map(|&x| x / n).collect()
     }
 
-    fn row(id: i64, file_id: i64, e: Vec<f32>, q: f32) -> FaceRow {
-        row_with_content(id, file_id, Some(file_id as u64), e, q)
-    }
-
-    fn row_with_content(
-        id: i64,
-        file_id: i64,
-        content: Option<u64>,
-        e: Vec<f32>,
-        q: f32,
-    ) -> FaceRow {
-        FaceRow {
-            face_id: id,
-            file_id,
-            content_hash: content.map(|value| value.to_le_bytes().to_vec()),
-            embedding: e,
-            quality: q,
-        }
+    fn row(id: i64, file: i64, e: Vec<f32>, q: f32) -> FaceRow {
+        FaceRow { face_id: id, file_id: file, embedding: e, quality: q }
     }
 
     #[test]
@@ -2329,93 +632,22 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_band_pairs_collected() {
+        // ~0.40 cosine — inside the SFace uncertain band (COS_LOW..COS_HIGH).
+        let a = unit(&[1.0, 0.0]);
+        let b = unit(&[0.40, 0.9165]); // dot ≈ 0.40
+        let faces = vec![row(1, 1, a, 0.9), row(2, 2, b, 0.9)];
+        let pairs = uncertain_pairs(&faces);
+        assert_eq!(pairs.len(), 1);
+        assert!(pairs[0].2 > COS_LOW && pairs[0].2 < COS_HIGH);
+    }
+
+    #[test]
     fn cluster_ids_are_one_based_and_stable() {
         let v = unit(&[1.0, 0.0, 0.0]);
         let faces = vec![row(1, 1, v.clone(), 0.5), row(2, 2, v, 0.9)];
         let (assignments, _) = cluster(&faces);
         assert!(assignments.iter().all(|a| a.cluster_id == 1));
-    }
-
-    fn mega_cluster_inputs(mixed: bool) -> (Vec<FaceRow>, Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
-        let faces: Vec<FaceRow> = (0..BIMODAL_SPLIT_MIN_FACES)
-            .map(|index| {
-                let embedding = if mixed && index >= BIMODAL_SPLIT_MIN_FACES / 2 {
-                    unit(&[0.0, 1.0, (index % 7) as f32 * 0.001])
-                } else {
-                    unit(&[1.0, (index % 7) as f32 * 0.001, 0.0])
-                };
-                row(index as i64 + 1, index as i64 + 1, embedding, 0.8)
-            })
-            .collect();
-        let assignments = faces
-            .iter()
-            .map(|face| ClusterAssignment {
-                face_id: face.face_id,
-                cluster_id: 7,
-            })
-            .collect();
-        let anchors = vec![ClusterAnchor {
-            cluster_id: 7,
-            anchor_face_id: 1,
-            member_count: faces.len() as u32,
-        }];
-        (faces, assignments, anchors)
-    }
-
-    #[test]
-    fn strongly_bimodal_mega_cluster_splits_once() {
-        let (faces, assignments, anchors) = mega_cluster_inputs(true);
-
-        let (assignments, anchors) = split_bimodal_mega_clusters(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::<i32>::new(),
-        );
-
-        assert_eq!(anchors.len(), 2);
-        assert_eq!(
-            anchors.iter().map(|anchor| anchor.member_count).sum::<u32>(),
-            BIMODAL_SPLIT_MIN_FACES as u32
-        );
-        assert_eq!(
-            assignments
-                .iter()
-                .map(|assignment| assignment.cluster_id)
-                .collect::<HashSet<_>>()
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn unimodal_mega_cluster_is_not_split() {
-        let (faces, assignments, anchors) = mega_cluster_inputs(false);
-
-        let (assignments, anchors) = split_bimodal_mega_clusters(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::<i32>::new(),
-        );
-
-        assert_eq!(anchors.len(), 1);
-        assert!(assignments.iter().all(|assignment| assignment.cluster_id == 7));
-    }
-
-    #[test]
-    fn protected_mega_cluster_is_not_split() {
-        let (faces, assignments, anchors) = mega_cluster_inputs(true);
-
-        let (assignments, anchors) = split_bimodal_mega_clusters(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::from([7]),
-        );
-
-        assert_eq!(anchors.len(), 1);
-        assert!(assignments.iter().all(|assignment| assignment.cluster_id == 7));
     }
 
     // Helper for property tests: deterministic LCG to spread vectors over
@@ -2438,7 +670,7 @@ mod tests {
 
     // Property tests proving bookkeeping invariants on randomized embeddings.
     // The two-pass density algorithm doesn't guarantee every cluster member
-    // is high-cosine-close to its anchor (clusters can chain transitively).
+    // is COS_HIGH-close to its anchor (clusters can chain transitively).
     proptest::proptest! {
         // Invariant: every face_id appears in exactly one cluster
         // assignment, and the assignment count equals the input count.
@@ -2503,104 +735,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clustering_partition_is_stable_across_input_order() {
-        fn normalized_partition(assignments: &[ClusterAssignment]) -> Vec<Vec<i64>> {
-            let mut groups: BTreeMap<i32, Vec<i64>> = BTreeMap::new();
-            for assignment in assignments {
-                groups
-                    .entry(assignment.cluster_id)
-                    .or_default()
-                    .push(assignment.face_id);
-            }
-            let mut groups: Vec<Vec<i64>> = groups
-                .into_values()
-                .map(|mut members| {
-                    members.sort_unstable();
-                    members
-                })
-                .collect();
-            groups.sort();
-            groups
-        }
-
-        let mut faces = Vec::new();
-        for family in 0..4usize {
-            for member in 0..24usize {
-                let mut embedding = vec![0.0; 4];
-                embedding[family] = 1.0;
-                embedding[(family + 1) % 4] = (member as f32 - 11.5) * 0.000_1;
-                let face_id = (family * 24 + member + 1) as i64;
-                faces.push(row(face_id, face_id, unit(&embedding), 0.9));
-            }
-        }
-
-        let (ordered, _) = cluster(&faces);
-        let mut shuffled = faces.clone();
-        shuffled.sort_by_key(|face| (face.face_id * 37).rem_euclid(97));
-        let (permuted, _) = cluster(&shuffled);
-
-        assert_eq!(
-            normalized_partition(&ordered),
-            normalized_partition(&permuted)
-        );
-    }
-
-    #[test]
-    fn knn_ties_keep_the_lowest_neighbor_indices() {
-        let mut hits: Vec<crate::pipeline::identity_clustering::Neighbor> = (0..12)
-            .rev()
-            .map(|idx| crate::pipeline::identity_clustering::Neighbor {
-                idx,
-                similarity: 0.75,
-            })
-            .collect();
-        let k = 4;
-        hits.select_nth_unstable_by(k, super::compare_neighbors);
-        hits.truncate(k);
-        hits.sort_by(super::compare_neighbors);
-        assert_eq!(hits.iter().map(|hit| hit.idx).collect::<Vec<_>>(), [0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn clustering_never_co_locates_faces_from_one_physical_file() {
-        let same = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(100), same.clone(), 0.9),
-            row_with_content(2, 10, Some(100), same.clone(), 0.9),
-            row_with_content(3, 20, Some(200), same, 0.9),
-        ];
-
-        let (assignments, anchors) = cluster(&faces);
-
-        assert_eq!(anchors.len(), 2);
-        assert_ne!(cluster_for(&assignments, 1), cluster_for(&assignments, 2));
-        assert_eq!(cluster_for(&assignments, 1), cluster_for(&assignments, 3));
-    }
-
-    #[test]
-    fn duplicate_file_copies_can_join_corresponding_identities() {
-        let person_a = unit(&[1.0, 0.0, 0.0]);
-        let person_b = unit(&[0.0, 1.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(777), person_a.clone(), 0.9),
-            row_with_content(2, 10, Some(777), person_b.clone(), 0.9),
-            row_with_content(3, 20, Some(777), person_a, 0.9),
-            row_with_content(4, 20, Some(777), person_b, 0.9),
-        ];
-
-        let (assignments, anchors) = cluster(&faces);
-
-        assert_eq!(anchors.len(), 2);
-        assert_eq!(cluster_for(&assignments, 1), cluster_for(&assignments, 3));
-        assert_eq!(cluster_for(&assignments, 2), cluster_for(&assignments, 4));
-        assert_ne!(cluster_for(&assignments, 1), cluster_for(&assignments, 2));
-    }
-
-    fn anchor(cid: i32, face: i64, _e: Vec<f32>, count: u32) -> ClusterAnchor {
+    fn anchor(cid: i32, face: i64, e: Vec<f32>, count: u32) -> ClusterAnchor {
         ClusterAnchor {
             cluster_id: cid,
             anchor_face_id: face,
+            anchor_embedding: e,
             member_count: count,
         }
     }
@@ -2689,171 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn preserved_faces_are_removed_from_the_rebuild_plan() {
-        let faces = vec![
-            row(1, 1, vec![1.0, 0.0, 0.0], 0.1),
-            row(2, 2, vec![1.0, 0.0, 0.0], 0.1),
-        ];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 1 },
-            ClusterAssignment { face_id: 2, cluster_id: 1 },
-        ];
-        let (assignments, anchors) = partition_protected_clusters_excluding(
-            &faces,
-            assignments,
-            &HashMap::new(),
-            &HashSet::new(),
-            &HashSet::from([1]),
-        );
-        assert_eq!(assignments.len(), 1);
-        assert_eq!(assignments[0].face_id, 2);
-        assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].anchor_face_id, 2);
-    }
-
-    #[test]
-    fn protected_named_bridge_is_split_and_stays_transitively_safe() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row(1, 1, v.clone(), 0.9),
-            row(2, 2, v.clone(), 0.8),
-            row(3, 3, v.clone(), 0.7),
-        ];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 1 },
-            ClusterAssignment { face_id: 2, cluster_id: 1 },
-            ClusterAssignment { face_id: 3, cluster_id: 1 },
-        ];
-        let owner_by_face: HashMap<i64, i64> = [(1, 10), (3, 20)].into_iter().collect();
-        let different = HashSet::new();
-        let (assignments, anchors) =
-            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
-        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
-
-        let cluster_of: HashMap<i64, i32> = assignments
-            .iter()
-            .map(|assignment| (assignment.face_id, assignment.cluster_id))
-            .collect();
-        let protected_owners = protected_owner_by_cluster(&owner_by_face, &cluster_of).unwrap();
-        let (assignments, anchors) = consolidate_with_protected_owners(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &protected_owners,
-            0.85,
-        );
-        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
-        assert_eq!(anchors.len(), 2, "the bridge may join one identity, never both");
-        let cid = |face_id| {
-            assignments
-                .iter()
-                .find(|assignment| assignment.face_id == face_id)
-                .unwrap()
-                .cluster_id
-        };
-        assert_ne!(cid(1), cid(3));
-    }
-
-    #[test]
-    fn protected_explicit_bridge_is_split_before_consolidation() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row(1, 1, v.clone(), 0.9),
-            row(2, 2, v.clone(), 0.8),
-            row(3, 3, v.clone(), 0.7),
-        ];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 4 },
-            ClusterAssignment { face_id: 2, cluster_id: 4 },
-            ClusterAssignment { face_id: 3, cluster_id: 4 },
-        ];
-        let owner_by_face = HashMap::new();
-        let different: HashSet<(i64, i64)> = [(1, 3)].into_iter().collect();
-        let (assignments, anchors) =
-            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
-        let cluster_of: HashMap<i64, i32> = assignments
-            .iter()
-            .map(|assignment| (assignment.face_id, assignment.cluster_id))
-            .collect();
-        let mut blocked = HashSet::new();
-        let (a, b) = (cluster_of[&1], cluster_of[&3]);
-        blocked.insert(if a < b { (a, b) } else { (b, a) });
-        let (assignments, _) = consolidate(&faces, assignments, anchors, &blocked, 0.85);
-        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
-    }
-
-    #[test]
-    fn protected_missing_face_survives_consolidation_and_suppression() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![row(1, 1, v.clone(), 0.05), row(2, 2, v.clone(), 0.05)];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 1 },
-            ClusterAssignment { face_id: 2, cluster_id: 2 },
-        ];
-        let owner_by_face: HashMap<i64, i64> = [(9, 90)].into_iter().collect();
-        let different = HashSet::new();
-        let (assignments, anchors) =
-            partition_protected_clusters(&faces, assignments, &owner_by_face, &different);
-        let (assignments, anchors) =
-            consolidate(&faces, assignments, anchors, &HashSet::new(), 0.85);
-        let protected_faces: HashSet<i64> = owner_by_face.keys().copied().collect();
-        let keep = protected_cluster_ids(&assignments, &protected_faces);
-        let (assignments, anchors) = suppress_low_quality_micro_clusters_with_keep(
-            &faces,
-            assignments,
-            anchors,
-            3,
-            0.40,
-            &keep,
-        );
-        validate_protected_clusters(&assignments, &owner_by_face, &different).unwrap();
-        assert!(assignments.iter().any(|assignment| assignment.face_id == 9));
-        assert!(anchors.iter().any(|anchor| anchor.anchor_face_id == 9));
-    }
-
-    #[test]
-    fn protected_validator_rejects_unsafe_persistence_partition() {
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 7 },
-            ClusterAssignment { face_id: 2, cluster_id: 7 },
-        ];
-        let owners: HashMap<i64, i64> = [(1, 10), (2, 20)].into_iter().collect();
-        let different: HashSet<(i64, i64)> = [(1, 2)].into_iter().collect();
-        assert!(validate_protected_clusters(&assignments, &owners, &different).is_err());
-    }
-
-    #[test]
-    fn preserved_verdict_endpoint_is_prefiltered_before_validate() {
-        // Regression (blocker): a different-people verdict whose endpoint face is
-        // owned by a PRESERVED identity is dropped from the clustering pool, so
-        // that face is absent from the final partition. The command must
-        // pre-filter any verdict pair touching an excluded face before building
-        // the blocked set or validating; without that filter the absent endpoint
-        // fails the whole clustering run every time, permanently breaking the
-        // People tab (clustering re-fires after every scan).
-        let assignments = vec![
-            ClusterAssignment { face_id: 10, cluster_id: 1 },
-            ClusterAssignment { face_id: 20, cluster_id: 2 },
-        ];
-        let owner_by_face: HashMap<i64, i64> = [(10, 100), (20, 200)].into_iter().collect();
-        // Face 99 belongs to a preserved owner and left the pool; the verdict
-        // 10≠99 still references it.
-        let raw_pairs: HashSet<(i64, i64)> = [(10, 99)].into_iter().collect();
-        // Unfiltered: the absent endpoint 99 makes validation fail closed.
-        assert!(validate_protected_clusters(&assignments, &owner_by_face, &raw_pairs).is_err());
-        // The command drops pairs touching excluded faces; the preserved owner is
-        // kept separate wholesale, so the constraint is already satisfied.
-        let excluded: HashSet<i64> = [99].into_iter().collect();
-        let active: HashSet<(i64, i64)> = raw_pairs
-            .into_iter()
-            .filter(|&(a, b)| !excluded.contains(&a) && !excluded.contains(&b))
-            .collect();
-        assert!(active.is_empty());
-        validate_protected_clusters(&assignments, &owner_by_face, &active).unwrap();
-    }
-
-    #[test]
     fn consolidate_merges_near_identical_clusters() {
         let v = unit(&[1.0, 0.0, 0.0]);
         // Cluster 1 (2 faces) + cluster 2 (3 faces), both centered on the same
@@ -2934,40 +908,6 @@ mod tests {
     }
 
     #[test]
-    fn forbidden_reverse_edge_follows_a_dropped_root() {
-        let v1 = unit(&[1.0, 0.0, 0.0]);
-        let v2 = unit(&[0.999, 0.01, 0.0]);
-        let v3 = unit(&[0.0, 1.0, 0.0]);
-        let v4 = unit(&[0.98, 0.2, 0.0]);
-        let faces = vec![
-            row(1, 1, v1.clone(), 0.9),
-            row(2, 2, v2.clone(), 0.9),
-            row(3, 3, v3.clone(), 0.9),
-            row(4, 4, v4.clone(), 0.9),
-        ];
-        let assignments = (1..=4)
-            .map(|id| ClusterAssignment { face_id: id, cluster_id: id as i32 })
-            .collect();
-        let anchors = vec![
-            anchor(1, 1, v1, 1),
-            anchor(2, 2, v2, 1),
-            anchor(3, 3, v3, 1),
-            anchor(4, 4, v4, 1),
-        ];
-        let blocked = HashSet::from([(1, 3), (2, 4)]);
-        let (assignments, _) = consolidate(&faces, assignments, anchors, &blocked, 0.95);
-        let cid = |face: i64| {
-            assignments
-                .iter()
-                .find(|assignment| assignment.face_id == face)
-                .unwrap()
-                .cluster_id
-        };
-        assert_eq!(cid(1), cid(2), "the strongest allowed edge merges first");
-        assert_ne!(cid(2), cid(4), "the dropped root's verdict follows its survivor");
-    }
-
-    #[test]
     fn consolidate_disabled_above_one_is_noop() {
         let v = unit(&[1.0, 0.0, 0.0]);
         let faces = vec![row(1, 1, v.clone(), 0.9), row(2, 2, v.clone(), 0.9)];
@@ -3011,364 +951,11 @@ mod tests {
     }
 
     #[test]
-    fn embedding_outlier_suppression_removes_gross_mismatch_and_rebuilds_anchor() {
-        let faces = vec![
-            row(1, 1, unit(&[1.0, 0.0]), 0.5),
-            row(2, 2, unit(&[1.0, 0.0]), 0.4),
-            row(3, 3, unit(&[-1.0, 0.0]), 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 7,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 7,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 7,
-            },
-        ];
-        let anchors = vec![anchor(7, 3, Vec::new(), 3)];
-
-        let (assignments, anchors) = suppress_embedding_outliers_with_keep(
-            &faces,
-            assignments,
-            anchors,
-            0.15,
-            &HashSet::new(),
-        );
-
-        assert_eq!(
-            assignments
-                .iter()
-                .map(|assignment| assignment.face_id)
-                .collect::<Vec<_>>(),
-            [1, 2]
-        );
-        assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].anchor_face_id, 1);
-        assert_eq!(anchors[0].member_count, 2);
-    }
-
-    #[test]
-    fn embedding_outlier_suppression_skips_protected_cluster() {
-        let faces = vec![
-            row(1, 1, unit(&[1.0, 0.0]), 0.5),
-            row(2, 2, unit(&[1.0, 0.0]), 0.4),
-            row(3, 3, unit(&[-1.0, 0.0]), 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 7,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 7,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 7,
-            },
-        ];
-        let anchors = vec![anchor(7, 3, Vec::new(), 3)];
-
-        let (assignments, anchors) = suppress_embedding_outliers_with_keep(
-            &faces,
-            assignments,
-            anchors,
-            0.15,
-            &HashSet::from([7]),
-        );
-
-        assert_eq!(assignments.len(), 3);
-        assert_eq!(anchors[0].anchor_face_id, 3);
-        assert_eq!(anchors[0].member_count, 3);
-    }
-
-    #[test]
-    fn embedding_outlier_floor_minus_one_is_noop() {
-        let faces = vec![
-            row(1, 1, unit(&[1.0, 0.0]), 0.5),
-            row(2, 2, unit(&[-1.0, 0.0]), 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 7,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 7,
-            },
-        ];
-        let anchors = vec![anchor(7, 2, Vec::new(), 2)];
-
-        let (kept_assignments, kept_anchors) = suppress_embedding_outliers_with_keep(
-            &faces,
-            assignments.clone(),
-            anchors.clone(),
-            -1.0,
-            &HashSet::new(),
-        );
-
-        assert_eq!(
-            kept_assignments
-                .iter()
-                .map(|assignment| (assignment.face_id, assignment.cluster_id))
-                .collect::<Vec<_>>(),
-            assignments
-                .iter()
-                .map(|assignment| (assignment.face_id, assignment.cluster_id))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(kept_anchors[0].anchor_face_id, anchors[0].anchor_face_id);
-        assert_eq!(kept_anchors[0].member_count, anchors[0].member_count);
-    }
-
-    #[test]
     fn automerge_threshold_clamps_and_defaults() {
         // Unset → default. (Other env-dependent cases aren't asserted here to
         // avoid process-global env races with parallel tests.)
         std::env::remove_var("FILEID_FACE_AUTOMERGE_COS");
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
-    }
-
-    #[test]
-    fn suppression_drops_low_quality_micro_clusters() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        // c1: junk pair (q .05/.06) -> drop; c2: good singleton (.40) -> keep;
-        // c3: junk singleton (.05) -> drop; c4: size-3 all-low -> keep (size wins).
-        let faces = vec![
-            row(1, 1, v.clone(), 0.05),
-            row(2, 2, v.clone(), 0.06),
-            row(3, 3, v.clone(), 0.40),
-            row(4, 4, v.clone(), 0.05),
-            row(5, 5, v.clone(), 0.04),
-            row(6, 6, v.clone(), 0.03),
-            row(7, 7, v.clone(), 0.02),
-        ];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 1 },
-            ClusterAssignment { face_id: 2, cluster_id: 1 },
-            ClusterAssignment { face_id: 3, cluster_id: 2 },
-            ClusterAssignment { face_id: 4, cluster_id: 3 },
-            ClusterAssignment { face_id: 5, cluster_id: 4 },
-            ClusterAssignment { face_id: 6, cluster_id: 4 },
-            ClusterAssignment { face_id: 7, cluster_id: 4 },
-        ];
-        let anchors = vec![
-            anchor(1, 1, v.clone(), 2),
-            anchor(2, 3, v.clone(), 1),
-            anchor(3, 4, v.clone(), 1),
-            anchor(4, 5, v.clone(), 3),
-        ];
-        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.12);
-        let kept: std::collections::HashSet<i32> = an.iter().map(|x| x.cluster_id).collect();
-        assert_eq!(kept, [2, 4].into_iter().collect());
-        let assigned: std::collections::HashSet<i64> = a.iter().map(|x| x.face_id).collect();
-        assert_eq!(
-            assigned,
-            [3, 5, 6, 7].into_iter().collect(),
-            "suppressed faces are unassigned (persist NULLs them)"
-        );
-    }
-
-    #[test]
-    fn suppression_does_not_count_copied_content_as_recurrence() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(77), v.clone(), 0.05),
-            row_with_content(2, 11, Some(77), v.clone(), 0.06),
-            row_with_content(3, 12, Some(77), v.clone(), 0.07),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 1,
-            },
-        ];
-        let anchors = vec![anchor(1, 1, v, 3)];
-
-        let (assignments, anchors) =
-            suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.40);
-
-        assert!(assignments.is_empty());
-        assert!(anchors.is_empty());
-    }
-
-    #[test]
-    fn suppression_keeps_copied_content_when_protected() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(77), v.clone(), 0.05),
-            row_with_content(2, 11, Some(77), v.clone(), 0.06),
-            row_with_content(3, 12, Some(77), v.clone(), 0.07),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 1,
-            },
-        ];
-        let anchors = vec![anchor(1, 1, v, 3)];
-
-        let (assignments, anchors) = suppress_low_quality_micro_clusters_with_keep(
-            &faces,
-            assignments,
-            anchors,
-            3,
-            0.40,
-            &HashSet::from([1]),
-        );
-
-        assert_eq!(assignments.len(), 3);
-        assert_eq!(anchors.len(), 1);
-    }
-
-    #[test]
-    fn suppression_keeps_copied_content_via_quality_escape() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(77), v.clone(), 0.05),
-            row_with_content(2, 11, Some(77), v.clone(), 0.40),
-            row_with_content(3, 12, Some(77), v.clone(), 0.07),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 1,
-            },
-        ];
-        let anchors = vec![anchor(1, 2, v, 3)];
-
-        let (assignments, anchors) =
-            suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.40);
-
-        assert_eq!(assignments.len(), 3);
-        assert_eq!(anchors.len(), 1);
-    }
-
-    #[test]
-    fn suppression_uses_file_ids_when_content_hash_is_missing() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, None, v.clone(), 0.05),
-            row_with_content(2, 11, None, v.clone(), 0.06),
-            row_with_content(3, 12, None, v.clone(), 0.07),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 1,
-            },
-        ];
-        let anchors = vec![anchor(1, 1, v, 3)];
-
-        let (assignments, anchors) =
-            suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.40);
-
-        assert_eq!(assignments.len(), 3);
-        assert_eq!(anchors.len(), 1);
-    }
-
-    #[test]
-    fn suppression_counts_one_missing_hash_file_once() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, None, v.clone(), 0.05),
-            row_with_content(2, 10, None, v.clone(), 0.06),
-            row_with_content(3, 10, None, v.clone(), 0.07),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 1,
-            },
-        ];
-        let anchors = vec![anchor(1, 1, v, 3)];
-
-        let (assignments, anchors) =
-            suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.40);
-
-        assert!(assignments.is_empty());
-        assert!(anchors.is_empty());
-    }
-
-    #[test]
-    fn suppression_keeps_pair_with_one_good_face() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![row(1, 1, v.clone(), 0.05), row(2, 2, v.clone(), 0.40)];
-        let assignments = vec![
-            ClusterAssignment { face_id: 1, cluster_id: 9 },
-            ClusterAssignment { face_id: 2, cluster_id: 9 },
-        ];
-        let anchors = vec![anchor(9, 2, v.clone(), 2)];
-        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.12);
-        assert_eq!(an.len(), 1, "the best face (0.40) rescues the pair");
-        assert_eq!(a.len(), 2);
-    }
-
-    #[test]
-    fn suppression_floor_zero_is_noop() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![row(1, 1, v.clone(), 0.01)];
-        let assignments = vec![ClusterAssignment { face_id: 1, cluster_id: 1 }];
-        let anchors = vec![anchor(1, 1, v.clone(), 1)];
-        let (a, an) = suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.0);
-        assert_eq!(an.len(), 1, "floor 0 disables suppression");
-        assert_eq!(a.len(), 1);
-    }
-
-    #[test]
-    fn suppression_env_defaults() {
-        std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE");
-        std::env::remove_var("FILEID_FACE_SOLO_QUALITY");
-        assert_eq!(min_cluster_size(), 3);
-        assert!((solo_quality_floor() - 0.40).abs() < 1e-6);
     }
 
     // Collapse a set of merge edges into a canonical per-centroid grouping via
@@ -3404,91 +991,6 @@ mod tests {
             }
         }
         (0..n).map(|x| group_min[&find(&mut parent, x)]).collect()
-    }
-
-    #[test]
-    fn hnsw_dense_band_above_candidate_cap_matches_brute() {
-        let cross_cosine = 0.89f32;
-        let cross_sine = (1.0 - cross_cosine * cross_cosine).sqrt();
-        let mut centroids = Vec::new();
-        for member in 0..513usize {
-            let z = (member as f32 - 256.0) * 0.000_000_1;
-            centroids.push(unit(&[1.0, 0.0, z]));
-        }
-        for member in 0..513usize {
-            let z = (member as f32 - 256.0) * 0.000_000_1;
-            centroids.push(unit(&[cross_cosine, cross_sine, z]));
-        }
-
-        let brute_labels = union_find_labels(centroids.len(), &edges_brute(&centroids, 0.88));
-        let hnsw_labels = union_find_labels(centroids.len(), &edges_hnsw(&centroids, 0.88));
-
-        assert_eq!(
-            brute_labels, hnsw_labels,
-            "a saturated >512-neighbor band must not silently split"
-        );
-        assert_eq!(
-            brute_labels.iter().copied().collect::<HashSet<_>>().len(),
-            1
-        );
-    }
-
-    #[test]
-    fn hnsw_dense_fallback_preserves_transitive_cannot_link() {
-        let cross_cosine = 0.89f32;
-        let cross_sine = (1.0 - cross_cosine * cross_cosine).sqrt();
-        let mut faces = Vec::new();
-        let mut assignments = Vec::new();
-        let mut anchors = Vec::new();
-
-        for member in 0..513usize {
-            let face_id = member as i64 + 1;
-            let z = (member as f32 - 256.0) * 0.000_000_1;
-            let embedding = unit(&[1.0, 0.0, z]);
-            faces.push(row(face_id, face_id, embedding.clone(), 0.9));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: face_id as i32,
-            });
-            anchors.push(anchor(face_id as i32, face_id, embedding, 1));
-        }
-        for member in 0..513usize {
-            let face_id = member as i64 + 514;
-            let z = (member as f32 - 256.0) * 0.000_000_1;
-            let embedding = unit(&[cross_cosine, cross_sine, z]);
-            faces.push(row(face_id, face_id, embedding.clone(), 0.9));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: face_id as i32,
-            });
-            anchors.push(anchor(face_id as i32, face_id, embedding, 1));
-        }
-        for member in 0..975usize {
-            let face_id = member as i64 + 1_027;
-            let embedding = unit(&[0.0, 0.0, 1.0]);
-            faces.push(row(face_id, face_id, embedding.clone(), 0.9));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: face_id as i32,
-            });
-            anchors.push(anchor(face_id as i32, face_id, embedding, 1));
-        }
-
-        let blocked = HashSet::from([(1, 514)]);
-        let (assignments, anchors) =
-            consolidate(&faces, assignments, anchors, &blocked, 0.88);
-
-        assert_eq!(anchors.len(), 3);
-        assert_eq!(cluster_for(&assignments, 1), cluster_for(&assignments, 513));
-        assert_eq!(
-            cluster_for(&assignments, 514),
-            cluster_for(&assignments, 1_026)
-        );
-        assert_ne!(cluster_for(&assignments, 1), cluster_for(&assignments, 514));
-        assert_ne!(
-            cluster_for(&assignments, 1),
-            cluster_for(&assignments, 1_027)
-        );
     }
 
     #[test]
@@ -3536,663 +1038,5 @@ mod tests {
         // the parity assertion above could pass trivially on all-singletons).
         let distinct: std::collections::HashSet<usize> = brute_labels.iter().copied().collect();
         assert_eq!(distinct.len(), FAMILIES, "fixture should fold into {FAMILIES} families");
-    }
-
-    fn recovery_fixture(
-        include_runner_up: bool,
-    ) -> (Vec<FaceRow>, Vec<ClusterAssignment>, Vec<ClusterAnchor>) {
-        let mut faces = vec![
-            row_with_content(1, 1, Some(1), unit(&[1.0, 0.0, 0.0]), 0.4),
-            row_with_content(2, 2, Some(2), unit(&[0.98, 0.20, 0.0]), 0.4),
-        ];
-        let mut assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-        ];
-        let mut anchors = vec![anchor(1, 1, Vec::new(), 2)];
-        for offset in 0..13i64 {
-            let face_id = 100 + offset;
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(1_000 + offset as u64),
-                unit(&[1.0, (offset % 3) as f32 * 0.02, 0.0]),
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 2,
-            });
-        }
-        anchors.push(anchor(2, 100, Vec::new(), 13));
-        if include_runner_up {
-            for offset in 0..13i64 {
-                let face_id = 200 + offset;
-                faces.push(row_with_content(
-                    face_id,
-                    face_id,
-                    Some(2_000 + offset as u64),
-                    unit(&[0.80, 0.60, (offset % 3) as f32 * 0.01]),
-                    0.4,
-                ));
-                assignments.push(ClusterAssignment {
-                    face_id,
-                    cluster_id: 3,
-                });
-            }
-            anchors.push(anchor(3, 200, Vec::new(), 13));
-        }
-        (faces, assignments, anchors)
-    }
-
-    fn cluster_for(assignments: &[ClusterAssignment], face_id: i64) -> i32 {
-        assignments
-            .iter()
-            .find(|assignment| assignment.face_id == face_id)
-            .unwrap()
-            .cluster_id
-    }
-
-    #[test]
-    fn recovery_attaches_unnamed_fragment_to_exactly_one_named_owner() {
-        let (faces, assignments, anchors) = recovery_fixture(true);
-        let owners = HashMap::from([(2, 20), (3, 30)]);
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &owners,
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(cluster_for(&assignments, 1), cluster_for(&assignments, 100));
-        assert_ne!(cluster_for(&assignments, 1), cluster_for(&assignments, 200));
-        assert_eq!(anchors.len(), 2);
-        assert_eq!(
-            anchors
-                .iter()
-                .find(|anchor| anchor.cluster_id == 2)
-                .unwrap()
-                .member_count,
-            15
-        );
-    }
-
-    #[test]
-    fn recovery_preserves_a_corroborated_low_quality_doubleton_before_suppression() {
-        let (mut faces, assignments, anchors) = recovery_fixture(false);
-        faces[0].quality = 0.1;
-        faces[1].quality = 0.1;
-
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        let (assignments, anchors) =
-            suppress_low_quality_micro_clusters(&faces, assignments, anchors, 3, 0.4);
-
-        assert_eq!(cluster_for(&assignments, 1), cluster_for(&assignments, 100));
-        assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].member_count, 15);
-    }
-
-    #[test]
-    fn recovery_never_moves_a_named_source_or_unions_named_targets() {
-        let (faces, assignments, anchors) = recovery_fixture(true);
-        let owners = HashMap::from([(1, 10), (2, 20), (3, 30)]);
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &owners,
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(anchors.len(), 3);
-        assert_ne!(cluster_for(&assignments, 1), cluster_for(&assignments, 100));
-        assert_ne!(cluster_for(&assignments, 100), cluster_for(&assignments, 200));
-    }
-
-    #[test]
-    fn recovery_never_attaches_to_an_unknown_target() {
-        let (faces, assignments, anchors) = recovery_fixture(false);
-        let (_, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::from([(2, 20)]),
-            &HashSet::from([2]),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(anchors.len(), 2);
-    }
-
-    #[test]
-    fn recovery_requires_three_distinct_target_contents() {
-        let (mut faces, assignments, anchors) = recovery_fixture(false);
-        for face in &mut faces[2..] {
-            face.content_hash = Some((9_999u64 + (face.face_id as u64 % 2)).to_le_bytes().to_vec());
-        }
-        let (_, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(anchors.len(), 2);
-    }
-
-    #[test]
-    fn recovery_deduplicates_source_content_and_fails_closed_without_hashes() {
-        for remove_hash in [false, true] {
-            let (mut faces, assignments, anchors) = recovery_fixture(false);
-            if remove_hash {
-                faces[1].content_hash = None;
-            } else {
-                faces[1].content_hash = faces[0].content_hash.clone();
-            }
-            let (_, anchors) = recover_small_fragments_with_params(
-                &faces,
-                assignments,
-                anchors,
-                &HashSet::new(),
-                &HashMap::new(),
-                &HashSet::new(),
-                0.75,
-                12,
-                0.05,
-            );
-            assert_eq!(anchors.len(), 2);
-        }
-    }
-
-    #[test]
-    fn recovery_heals_validated_large_fragment_shape() {
-        let fragment_cosine = 0.879497f32;
-        let fragment_vector = unit(&[
-            fragment_cosine,
-            (1.0 - fragment_cosine * fragment_cosine).sqrt(),
-            0.0,
-        ]);
-        let target_vector = unit(&[1.0, 0.0, 0.0]);
-        let mut faces = Vec::new();
-        let mut assignments = Vec::new();
-        for offset in 0..154i64 {
-            let face_id = offset + 1;
-            let embedding = unit(&[
-                fragment_cosine,
-                (1.0 - fragment_cosine * fragment_cosine).sqrt(),
-                (offset as f32 - 76.5) * 0.000_001,
-            ]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 1,
-            });
-        }
-        for offset in 0..8_267i64 {
-            let face_id = 10_000 + offset;
-            let embedding =
-                unit(&[1.0, 0.0, (offset as f32 - 4_133.0) * 0.000_000_1]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 2,
-            });
-        }
-        let anchors = vec![
-            anchor(1, 1, fragment_vector, 154),
-            anchor(2, 10_000, target_vector, 8_267),
-        ];
-
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::from([(2, 20)]),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-
-        assert_eq!(
-            cluster_for(&assignments, 1),
-            cluster_for(&assignments, 10_000)
-        );
-        assert_eq!(anchors.len(), 1);
-        assert_eq!(anchors[0].member_count, 8_421);
-    }
-
-    #[test]
-    fn recovery_revalidates_large_fragment_threshold_after_target_changes() {
-        let source_cosine = 0.86f32;
-        let source_sine = (1.0 - source_cosine * source_cosine).sqrt();
-        let source_a = unit(&[source_cosine, -source_sine, 0.0]);
-        let source_b = unit(&[source_cosine, source_sine, 0.0]);
-        let target = unit(&[1.0, 0.0, 0.0]);
-        let mut faces = Vec::new();
-        let mut assignments = Vec::new();
-
-        for offset in 0..16i64 {
-            let face_id = offset + 1;
-            let embedding = unit(&[
-                source_cosine,
-                -source_sine,
-                (offset as f32 - 7.5) * 0.000_001,
-            ]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 1,
-            });
-        }
-        for offset in 0..17i64 {
-            let face_id = 100 + offset;
-            let embedding = unit(&[
-                source_cosine,
-                source_sine,
-                (offset as f32 - 8.0) * 0.000_001,
-            ]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 2,
-            });
-        }
-        for offset in 0..272i64 {
-            let face_id = 1_000 + offset;
-            let embedding = unit(&[1.0, 0.0, (offset as f32 - 135.5) * 0.000_000_1]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 3,
-            });
-        }
-        let anchors = vec![
-            anchor(1, 1, source_a, 16),
-            anchor(2, 100, source_b, 17),
-            anchor(3, 1_000, target, 272),
-        ];
-
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::from([(3, 30)]),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-
-        assert_eq!(
-            cluster_for(&assignments, 100),
-            cluster_for(&assignments, 1_000)
-        );
-        assert_ne!(
-            cluster_for(&assignments, 1),
-            cluster_for(&assignments, 1_000)
-        );
-        assert_eq!(anchors.len(), 2);
-    }
-
-    #[test]
-    fn recovery_revalidates_margin_after_competing_target_changes() {
-        let vector = |degrees: f32, z: f32| {
-            let radians = degrees.to_radians();
-            unit(&[radians.cos(), radians.sin(), z])
-        };
-        let mut faces = Vec::new();
-        let mut assignments = Vec::new();
-        let mut push_cluster = |cluster_id: i32,
-                                first_face_id: i64,
-                                count: i64,
-                                degrees: f32,
-                                content_base: u64,
-                                shared_first_content: Option<u64>| {
-            for offset in 0..count {
-                let face_id = first_face_id + offset;
-                let content = if offset == 0 {
-                    shared_first_content.unwrap_or(content_base)
-                } else {
-                    content_base + offset as u64
-                };
-                let z = (offset as f32 - (count - 1) as f32 / 2.0) * 0.000_001;
-                faces.push(row_with_content(
-                    face_id,
-                    face_id,
-                    Some(content),
-                    vector(degrees, z),
-                    0.4,
-                ));
-                assignments.push(ClusterAssignment {
-                    face_id,
-                    cluster_id,
-                });
-            }
-        };
-
-        push_cluster(1, 1, 2, 0.0, 100, None);
-        push_cluster(2, 100, 3, 1.0, 200, None);
-        push_cluster(3, 1_000, 13, 30.0, 300, None);
-        push_cluster(4, 2_000, 13, 42.0, 400, None);
-        for face in faces
-            .iter_mut()
-            .filter(|face| face.face_id == 100 || face.face_id == 1_000)
-        {
-            face.file_id = 9_000;
-        }
-        let anchors = vec![
-            anchor(1, 1, vector(0.0, 0.0), 2),
-            anchor(2, 100, vector(1.0, 0.0), 3),
-            anchor(3, 1_000, vector(30.0, 0.0), 13),
-            anchor(4, 2_000, vector(42.0, 0.0), 13),
-        ];
-
-        let (assignments, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-
-        assert_eq!(
-            cluster_for(&assignments, 100),
-            cluster_for(&assignments, 2_000)
-        );
-        assert_ne!(
-            cluster_for(&assignments, 1),
-            cluster_for(&assignments, 1_000)
-        );
-        assert_ne!(
-            cluster_for(&assignments, 1),
-            cluster_for(&assignments, 2_000)
-        );
-        assert_eq!(anchors.len(), 3);
-    }
-
-    #[test]
-    fn recovery_rejects_large_fragment_without_enough_member_evidence() {
-        let matching = unit(&[1.0, 0.0, 0.0]);
-        let mut faces = Vec::new();
-        let mut assignments = Vec::new();
-        for offset in 0..154i64 {
-            let face_id = offset + 1;
-            let variation = offset as f32 * 0.000_001;
-            let (embedding, quality) = if offset < 51 {
-                (unit(&[1.0, 0.0, variation]), 0.9)
-            } else if offset < 64 {
-                (unit(&[0.0, 1.0, variation]), 0.9)
-            } else {
-                (unit(&[1.0, 0.0, variation]), 0.1)
-            };
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                quality,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 1,
-            });
-        }
-        for offset in 0..8_267i64 {
-            let face_id = 10_000 + offset;
-            let embedding = unit(&[1.0, 0.0, (offset as f32 + 10_000.0) * 0.000_000_01]);
-            faces.push(row_with_content(
-                face_id,
-                face_id,
-                Some(face_id as u64),
-                embedding,
-                0.4,
-            ));
-            assignments.push(ClusterAssignment {
-                face_id,
-                cluster_id: 2,
-            });
-        }
-        let anchors = vec![
-            anchor(1, 1, matching.clone(), 154),
-            anchor(2, 10_000, matching, 8_267),
-        ];
-
-        let (_, anchors) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::from([(2, 20)]),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-
-        assert_eq!(anchors.len(), 2);
-    }
-
-    #[test]
-    fn recovery_rejects_clusters_sharing_a_physical_file() {
-        let (mut faces, assignments, anchors) = recovery_fixture(false);
-        faces[0].file_id = faces[2].file_id;
-
-        let (_, kept) = recover_small_fragments_with_params(
-            &faces,
-            assignments,
-            anchors,
-            &HashSet::new(),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-
-        assert_eq!(kept.len(), 2);
-    }
-
-    #[test]
-    fn copied_files_can_recover_but_manual_different_remains_a_cannot_link() {
-        let (mut faces, assignments, anchors) = recovery_fixture(false);
-        faces[0].content_hash = faces[2].content_hash.clone();
-        let (_, kept) = recover_small_fragments_with_params(
-            &faces,
-            assignments.clone(),
-            anchors.clone(),
-            &HashSet::new(),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(kept.len(), 1);
-
-        let (fresh_faces, _, _) = recovery_fixture(false);
-        let (_, kept) = recover_small_fragments_with_params(
-            &fresh_faces,
-            assignments,
-            anchors,
-            &HashSet::from([(1, 2)]),
-            &HashMap::new(),
-            &HashSet::new(),
-            0.75,
-            12,
-            0.05,
-        );
-        assert_eq!(kept.len(), 2);
-    }
-
-    #[test]
-    fn consolidation_allows_duplicate_file_copies_to_join() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(77), v.clone(), 0.9),
-            row_with_content(2, 20, Some(77), v, 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 2,
-            },
-        ];
-        let anchors = vec![
-            anchor(1, 1, Vec::new(), 1),
-            anchor(2, 2, Vec::new(), 1),
-        ];
-        let (_, anchors) = consolidate(&faces, assignments, anchors, &HashSet::new(), 0.85);
-        assert_eq!(anchors.len(), 1);
-    }
-
-    #[test]
-    fn consolidation_rejects_faces_from_the_same_physical_file() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row_with_content(1, 10, Some(77), v.clone(), 0.9),
-            row_with_content(2, 10, Some(77), v, 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 2,
-            },
-        ];
-        let anchors = vec![
-            anchor(1, 1, Vec::new(), 1),
-            anchor(2, 2, Vec::new(), 1),
-        ];
-        let (_, anchors) = consolidate(&faces, assignments, anchors, &HashSet::new(), 0.85);
-        assert_eq!(anchors.len(), 2);
-    }
-
-    #[test]
-    fn identity_anchor_centroid_is_unit_and_radius_matches_p10_policy() {
-        let v = unit(&[1.0, 0.0, 0.0]);
-        let faces = vec![
-            row(1, 1, v.clone(), 0.9),
-            row(2, 2, v, 0.9),
-            row(3, 3, unit(&[0.0, 1.0, 0.0]), 0.9),
-        ];
-        let assignments = vec![
-            ClusterAssignment {
-                face_id: 1,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 2,
-                cluster_id: 1,
-            },
-            ClusterAssignment {
-                face_id: 3,
-                cluster_id: 2,
-            },
-        ];
-        let anchors = identity_anchors(&faces, &assignments);
-        let repeated = anchors
-            .iter()
-            .find(|anchor| anchor.cluster_id == 1)
-            .unwrap();
-        let norm = repeated
-            .centroid
-            .iter()
-            .map(|value| value * value)
-            .sum::<f32>()
-            .sqrt();
-        assert!((norm - 1.0).abs() < 1e-6);
-        assert!((repeated.anchor_radius - 0.85).abs() < 1e-6);
-        assert!(
-            (anchors
-                .iter()
-                .find(|anchor| anchor.cluster_id == 2)
-                .unwrap()
-                .anchor_radius
-                - 0.50)
-                .abs()
-                < 1e-6
-        );
-    }
-
-    #[test]
-    fn dense_hnsw_band_larger_than_32_stays_connected() {
-        let centroids: Vec<Vec<f32>> = (0..96)
-            .map(|index| unit(&[1.0, index as f32 * 0.0001, 0.0]))
-            .collect();
-        let labels = union_find_labels(centroids.len(), &edges_hnsw(&centroids, 0.99));
-        assert_eq!(labels.into_iter().collect::<HashSet<_>>().len(), 1);
     }
 }

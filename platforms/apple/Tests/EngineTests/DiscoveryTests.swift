@@ -11,23 +11,6 @@ private typealias Database = FileIDEngine.Database
 @Suite("Discovery")
 struct DiscoveryTests {
 
-    private final class ProgressCapture: @unchecked Sendable {
-        private let lock = NSLock()
-        private var values: [Int] = []
-
-        func record(_ value: Int) {
-            lock.lock()
-            values.append(value)
-            lock.unlock()
-        }
-
-        func snapshot() -> [Int] {
-            lock.lock()
-            defer { lock.unlock() }
-            return values
-        }
-    }
-
     @Test("Walks a small tree and returns sorted, filtered files")
     func smallTree() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -76,27 +59,6 @@ struct DiscoveryTests {
         #expect(byExt["mp4"] == .video)
     }
 
-    @Test("Streaming discovery publishes small-library progress before completion")
-    func streamingPublishesEarlyProgress() async throws {
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FileIDDiscoveryProgress-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        for index in 0..<20 {
-            try Data("image".utf8).write(to: tmp.appendingPathComponent("\(index).jpg"))
-        }
-
-        let capture = ProgressCapture()
-        let total = await Discovery().walkStreaming(
-            root: tmp,
-            progress: { capture.record($0) }
-        ) { _ in }
-
-        #expect(total == 20)
-        #expect(capture.snapshot() == [1, 17])
-    }
-
     @Test("Skips files larger than the size cap")
     func skipsLargeFiles() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -116,41 +78,6 @@ struct DiscoveryTests {
 
         #expect(result.count == 1)
         #expect(result.first?.url.lastPathComponent == "small.jpg")
-    }
-
-    @Test("Prunes user-excluded folders while keeping siblings")
-    func prunesExcludedFolders() async throws {
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FileIDExcludeTest-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        let root = realResolved(tmp)
-        let keep = root.appendingPathComponent("keep")
-        let excluded = root.appendingPathComponent("cache")
-        let nestedExcluded = excluded.appendingPathComponent("nested")
-        try FileManager.default.createDirectory(at: keep, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: nestedExcluded, withIntermediateDirectories: true)
-
-        let keptFile = keep.appendingPathComponent("photo.jpg")
-        let excludedFile = excluded.appendingPathComponent("drop.jpg")
-        let nestedFile = nestedExcluded.appendingPathComponent("also-drop.png")
-        let rootFile = root.appendingPathComponent("root.pdf")
-        let payload = Data("hello".utf8)
-        for url in [keptFile, excludedFile, nestedFile, rootFile] {
-            try payload.write(to: url)
-        }
-
-        let discovery = Discovery()
-        let result = await discovery.walk(
-            root: root,
-            excludedPaths: [excluded.path, root.path, "/definitely/outside/root"])
-        let resultPaths = Set(result.map { $0.url.resolvingSymlinksInPath().path })
-
-        #expect(resultPaths.contains(keptFile.resolvingSymlinksInPath().path))
-        #expect(resultPaths.contains(rootFile.resolvingSymlinksInPath().path))
-        #expect(!resultPaths.contains(excludedFile.resolvingSymlinksInPath().path))
-        #expect(!resultPaths.contains(nestedFile.resolvingSymlinksInPath().path))
     }
 
     // re-audit R-08: a file the incremental skip set DROPS is still present on
@@ -175,11 +102,8 @@ struct DiscoveryTests {
         // skips. (Real scan roots are /Users/.. or /Volumes/.. — no /private.)
         let root = realResolved(tmp)
 
-        // A fully-processed doc: it already HAS its BGE text_embedding (seeded below),
-        // so it's skippable regardless of whether BGE is installed. The R-14 carve-outs
-        // force only an embeddingLESS image (CLIP) or doc/pdf (BGE) to stay in the
-        // pipeline for backfill; without the embedding row this test would flake on a
-        // machine that has BGE installed (the carve-out would keep report.pdf resident).
+        // A non-image doc: skippable without a CLIP embedding (the R-14 carve-out
+        // forces only embeddingless IMAGES to stay in the pipeline).
         let doc = root.appendingPathComponent("report.pdf")
         let bytes = Data("hello".utf8)                              // 5 bytes
         try bytes.write(to: doc)
@@ -199,14 +123,6 @@ struct DiscoveryTests {
                 """, arguments: [
                     doc.path, 0, doc.path.precomposedStringWithCanonicalMapping,
                     Int(bytes.count), fixedMtime.timeIntervalSince1970, oldScannedAt
-                ])
-            // Give it a text_embeddings row so the doc carve-out treats it as fully
-            // processed → the "unchanged → skipped" path is what's exercised here.
-            try conn.execute(sql: """
-                INSERT INTO text_embeddings (file_id, embedding, model)
-                VALUES (?, ?, ?)
-                """, arguments: [
-                    conn.lastInsertedRowID, Data([0, 0, 0, 0]), "bge_small_en_v1_5"
                 ])
         }
 

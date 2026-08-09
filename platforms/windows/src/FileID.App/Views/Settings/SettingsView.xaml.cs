@@ -14,9 +14,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 {
     private bool _unloaded;
     private bool _initializingToggles;
-    private readonly System.Collections.Generic.Dictionary<string, long> _excludedPurgeGenerations =
-        new(StringComparer.OrdinalIgnoreCase);
-    private long _nextExcludedPurgeGeneration;
 
     /// <summary> expose the singleton ModelInstallerService so
     /// the Settings model cards can x:Bind to Svc.Arcface / Svc.Clip the same
@@ -35,7 +32,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         Svc.Arcface.PropertyChanged += OnSlotChanged;
         Svc.RamPlus.PropertyChanged += OnSlotChanged;
         Svc.DeepVlm.PropertyChanged += OnSlotChanged;
-        Svc.Accelerator.PropertyChanged += OnAcceleratorChanged;
         Unloaded += (_, _) =>
         {
             _unloaded = true;
@@ -45,7 +41,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             Svc.Arcface.PropertyChanged -= OnSlotChanged;
             Svc.RamPlus.PropertyChanged -= OnSlotChanged;
             Svc.DeepVlm.PropertyChanged -= OnSlotChanged;
-            Svc.Accelerator.PropertyChanged -= OnAcceleratorChanged;
         };
         Loaded += (_, _) =>
         {
@@ -58,15 +53,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // direct Bindings.Update() below forces re-evaluation even
             // if a PropertyChanged event was dropped (singleton first-
             // touched off the UI thread, etc.).
-            try { Svc.Refresh(); }
-            catch (Exception ex) { DebugLog.Warn("Settings model refresh failed: " + ex.Message); }
+            try { Svc.Refresh(); } catch { }
             // sync the CUDA llama.cpp + cuDNN install buttons to
             // reflect already-installed state at page load. Before this
             // the buttons always showed "Install" and the user had to
             // click them just to see the state flip (matching engine's
             // immediate sentinel-check short-circuit).
-            try { SyncInstallButtonStates(); }
-            catch (Exception ex) { DebugLog.Warn("Settings install-state sync failed: " + ex.Message); }
+            try { SyncInstallButtonStates(); } catch { }
             // Force a bindings refresh after sentinel re-seed. Without
             // this, the ArcFace / MobileCLIP install buttons can stay on
             // "Install" at page load even when the sentinels exist on
@@ -74,284 +67,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // PropertyChanged event when Refresh()'s SeedSlot writes a
             // status equal to the cached field. NEXT.md tracked this
             // as the "install-state detection at page load" bug.
-            try
-            {
-                DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
-                    "SettingsView.Bindings.Update",
-                    Bindings.Update));
-            }
-            catch (Exception ex) { DebugLog.Warn("Settings binding refresh enqueue failed: " + ex.Message); }
+            try { DispatcherQueue.TryEnqueue(() => Bindings.Update()); } catch { }
             // Populate the Recent Scans card. Query is cheap (≤5 rows)
             // so we do it inline on the dispatcher.
-            _ = DebugLog.SafeRunAsync(nameof(PopulateRecentScansAsync), PopulateRecentScansAsync);
-            try { PopulateExcludedFolders(); }
-            catch (Exception ex) { DebugLog.Warn("Settings excluded-folder render failed: " + ex.Message); }
-            try { PopulateDeepAnalyzeExcludedFolders(); }
-            catch (Exception ex) { DebugLog.Warn("Settings Deep Analyze exclusion render failed: " + ex.Message); }
+            try { _ = PopulateRecentScansAsync(); } catch { }
         };
     }
-
-    // ----- Excluded folders card -----
-
-    private void PopulateExcludedFolders()
-    {
-        var settings = AppViewModel.Instance.Settings;
-        if (settings.ExcludedFolders.Count == 0)
-        {
-            ExcludedFoldersEmptyText.Visibility = Visibility.Visible;
-            ExcludedFoldersList.ItemsSource = null;
-            return;
-        }
-        ExcludedFoldersEmptyText.Visibility = Visibility.Collapsed;
-        var root = AppViewModel.Instance.FolderPath?.TrimEnd('\\', '/');
-        var rows = new System.Collections.Generic.List<Grid>();
-        foreach (var path in settings.ExcludedFolders)
-        {
-            var outside = root is null
-                || !path.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase);
-            var grid = new Grid { ColumnSpacing = 8 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var label = new TextBlock
-            {
-                Text = outside ? path + "   (outside current library)" : path,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            ToolTipService.SetToolTip(label, path);
-            var remove = new Button
-            {
-                Content = "✕",
-                Tag = path,
-                Padding = new Thickness(6, 2, 6, 2),
-                IsEnabled = !_excludedPurgeGenerations.ContainsKey(path),
-            };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Stop excluding " + path);
-            if (!remove.IsEnabled)
-            {
-                ToolTipService.SetToolTip(remove,
-                    "Wait for FileID to finish applying this exclusion.");
-            }
-            remove.Click += OnRemoveExcludedFolderClicked;
-            Grid.SetColumn(remove, 1);
-            grid.Children.Add(label);
-            grid.Children.Add(remove);
-            rows.Add(grid);
-        }
-        ExcludedFoldersList.ItemsSource = rows;
-    }
-
-    private void ShowExcludedFoldersInfo(InfoBarSeverity severity, string message)
-    {
-        ExcludedFoldersInfoBar.Severity = severity;
-        ExcludedFoldersInfoBar.Message = message;
-        ExcludedFoldersInfoBar.IsOpen = true;
-    }
-
-    private async void OnAddExcludedFolderClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnAddExcludedFolderClicked), async () =>
-        {
-            var vm = AppViewModel.Instance;
-            var hwnd = App.HostWindow is { } window
-                ? WinRT.Interop.WindowNative.GetWindowHandle(window)
-                : IntPtr.Zero;
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
-            if (result.FailureReason is not null)
-            {
-                ShowExcludedFoldersInfo(InfoBarSeverity.Error, result.FailureReason);
-                return;
-            }
-            if (result.Path is null) return; // user cancelled
-            var picked = result.Path.TrimEnd('\\', '/');
-            var root = vm.FolderPath?.TrimEnd('\\', '/');
-            if (root is not null && string.Equals(picked, root, StringComparison.OrdinalIgnoreCase))
-            {
-                ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
-                    "That's your whole library. Pick a folder inside it instead.");
-                return;
-            }
-            foreach (var existing in vm.Settings.ExcludedFolders)
-            {
-                if (string.Equals(existing, picked, StringComparison.OrdinalIgnoreCase))
-                {
-                    ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
-                        "That folder is already excluded.");
-                    return;
-                }
-            }
-            var updated = new System.Collections.Generic.List<string>(vm.Settings.ExcludedFolders) { picked };
-            vm.Settings.ExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
-            vm.Settings.Save();
-            var purgeGeneration = ++_nextExcludedPurgeGeneration;
-            _excludedPurgeGenerations[picked] = purgeGeneration;
-            PopulateExcludedFolders();
-
-            // Purge-immediately ruling: the Library reflects the exclusion now,
-            // not at the next rescan. Engine offline / timeout degrades to the
-            // scan-start purge backstop — say so instead of failing silently.
-            try
-            {
-                var reply = await EngineClient.Instance
-                    .PurgeExcludedAndWaitAsync(new[] { picked }).ConfigureAwait(true);
-                if (IsCurrentExcludedPurge(picked, purgeGeneration))
-                {
-                    ShowExcludedFoldersInfo(InfoBarSeverity.Success, reply.Succeeded > 0
-                        ? $"Excluded. {reply.Succeeded:N0} file{(reply.Succeeded == 1 ? " was" : "s were")} removed from the library — nothing was deleted from your disk."
-                        : "Excluded. This folder will be skipped from now on.");
-                }
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn($"[SETTINGS] purgeExcluded didn't confirm: {ex.Message}");
-                if (IsCurrentExcludedPurge(picked, purgeGeneration))
-                {
-                    ShowExcludedFoldersInfo(InfoBarSeverity.Warning,
-                        "Excluded. The library will fully reflect this at the next scan.");
-                }
-            }
-            finally
-            {
-                if (_excludedPurgeGenerations.TryGetValue(picked, out var current)
-                    && current == purgeGeneration)
-                {
-                    _excludedPurgeGenerations.Remove(picked);
-                    if (!_unloaded) PopulateExcludedFolders();
-                }
-            }
-        });
-
-    private bool IsCurrentExcludedPurge(string path, long generation)
-        => !_unloaded
-            && _excludedPurgeGenerations.TryGetValue(path, out var current)
-            && current == generation
-            && AppViewModel.Instance.Settings.ExcludedFolders.Exists(
-                existing => string.Equals(existing, path, StringComparison.OrdinalIgnoreCase));
-
-    private void OnRemoveExcludedFolderClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnRemoveExcludedFolderClicked), () =>
-        {
-            if (sender is not Button button || button.Tag is not string path) return;
-            if (_excludedPurgeGenerations.ContainsKey(path))
-            {
-                ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
-                    "FileID is still applying this exclusion. Try again when it finishes.");
-                return;
-            }
-            var vm = AppViewModel.Instance;
-            var updated = new System.Collections.Generic.List<string>();
-            foreach (var existing in vm.Settings.ExcludedFolders)
-            {
-                if (!string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
-                {
-                    updated.Add(existing);
-                }
-            }
-            vm.Settings.ExcludedFolders = updated;
-            vm.Settings.Save();
-            PopulateExcludedFolders();
-            ShowExcludedFoldersInfo(InfoBarSeverity.Informational,
-                "No longer excluded. Its files will be added back at the next scan.");
-        });
-
-    // ----- Deep Analyze exclusions card -----
-    //
-    // Deliberately simpler than the scan-exclusion card above: nothing is
-    // removed from the library, so there is no purge-in-flight state to
-    // track and no generation bookkeeping — just persist the list. It only
-    // takes effect on the NEXT whole-library Deep Analyze run (there is no
-    // in-flight VLM pass to retroactively narrow).
-
-    private void PopulateDeepAnalyzeExcludedFolders()
-    {
-        var settings = AppViewModel.Instance.Settings;
-        if (settings.DeepAnalyzeExcludedFolders.Count == 0)
-        {
-            DeepAnalyzeExcludedFoldersEmptyText.Visibility = Visibility.Visible;
-            DeepAnalyzeExcludedFoldersList.ItemsSource = null;
-            return;
-        }
-        DeepAnalyzeExcludedFoldersEmptyText.Visibility = Visibility.Collapsed;
-        var rows = new System.Collections.Generic.List<Grid>();
-        foreach (var path in settings.DeepAnalyzeExcludedFolders)
-        {
-            var grid = new Grid { ColumnSpacing = 8 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var label = new TextBlock
-            {
-                Text = path,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            ToolTipService.SetToolTip(label, path);
-            var remove = new Button { Content = "✕", Tag = path, Padding = new Thickness(6, 2, 6, 2) };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-                remove, "Stop excluding " + path + " from Deep Analyze");
-            remove.Click += OnRemoveDeepAnalyzeExcludedFolderClicked;
-            Grid.SetColumn(remove, 1);
-            grid.Children.Add(label);
-            grid.Children.Add(remove);
-            rows.Add(grid);
-        }
-        DeepAnalyzeExcludedFoldersList.ItemsSource = rows;
-    }
-
-    private void ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity severity, string message)
-    {
-        DeepAnalyzeExcludedFoldersInfoBar.Severity = severity;
-        DeepAnalyzeExcludedFoldersInfoBar.Message = message;
-        DeepAnalyzeExcludedFoldersInfoBar.IsOpen = true;
-    }
-
-    private async void OnAddDeepAnalyzeExcludedFolderClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnAddDeepAnalyzeExcludedFolderClicked), async () =>
-        {
-            var vm = AppViewModel.Instance;
-            var hwnd = App.HostWindow is { } window
-                ? WinRT.Interop.WindowNative.GetWindowHandle(window)
-                : IntPtr.Zero;
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
-            if (result.FailureReason is not null)
-            {
-                ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Error, result.FailureReason);
-                return;
-            }
-            if (result.Path is null) return; // user cancelled
-            var picked = result.Path.TrimEnd('\\', '/');
-            foreach (var existing in vm.Settings.DeepAnalyzeExcludedFolders)
-            {
-                if (string.Equals(existing, picked, StringComparison.OrdinalIgnoreCase))
-                {
-                    ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Informational,
-                        "That folder is already excluded from Deep Analyze.");
-                    return;
-                }
-            }
-            var updated = new System.Collections.Generic.List<string>(vm.Settings.DeepAnalyzeExcludedFolders) { picked };
-            vm.Settings.DeepAnalyzeExcludedFolders = AppSettings.SanitizeExcludedFolders(updated);
-            vm.Settings.Save();
-            PopulateDeepAnalyzeExcludedFolders();
-            ShowDeepAnalyzeExcludedFoldersInfo(InfoBarSeverity.Success,
-                "Excluded. Deep Analyze will skip this folder starting with the next whole-library run.");
-        });
-
-    private void OnRemoveDeepAnalyzeExcludedFolderClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnRemoveDeepAnalyzeExcludedFolderClicked), () =>
-        {
-            if (sender is not Button button || button.Tag is not string path) return;
-            var vm = AppViewModel.Instance;
-            var updated = new System.Collections.Generic.List<string>();
-            foreach (var existing in vm.Settings.DeepAnalyzeExcludedFolders)
-            {
-                if (!string.Equals(existing, path, StringComparison.OrdinalIgnoreCase))
-                {
-                    updated.Add(existing);
-                }
-            }
-            vm.Settings.DeepAnalyzeExcludedFolders = updated;
-            vm.Settings.Save();
-            PopulateDeepAnalyzeExcludedFolders();
-        });
 
     // Reads up to the 5 most-recent scan_sessions rows and renders one
     // line per row in the Recent Scans card.
@@ -363,7 +84,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             try
             {
                 if (!System.IO.File.Exists(AppPaths.DbPath)) return list;
-                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                     new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                     {
                         DataSource = AppPaths.DbPath,
@@ -460,20 +181,11 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// </summary>
     private void SyncInstallButtonStates()
     {
-        // While the single Accelerator slot is mid-install, both NVIDIA buttons
-        // stay disabled so a second click can't dispatch a concurrent prewarm
-        // (they route to the same slot). Re-enabled below when nothing is in
-        // flight and the pack isn't already installed.
-        var acceleratorBusy = Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading;
         if (SentinelExists("llama_runtime_cuda_x64"))
         {
             InstallCudaLlamaButton.Content = "Installed";
             InstallCudaLlamaButton.IsEnabled = false;
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
-        }
-        else
-        {
-            InstallCudaLlamaButton.IsEnabled = !acceleratorBusy;
         }
         // Gate on the ORT CUDA provider (the pack that actually enables the
         // CUDA EP); cuDNN alone never flipped scanning off DirectML.
@@ -486,20 +198,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // the current engine session (which depends on engine restart,
             // not just sentinel presence).
         }
-        else
-        {
-            InstallCudnnButton.IsEnabled = !acceleratorBusy;
-        }
-        // Forward-only latches from sentinel presence. A slot that is actively
-        // Downloading must NOT be forced to Installed by a pre-existing
-        // sentinel (e.g. Qwen already on disk while Gemma streams into the
-        // same DeepVlm slot) — that clobbered the live download row to
-        // "100 % Installed" between progress events.
         // ArcFace requires the "arcface" sentinel (the engine bundles
         // SCRFD + ArcFace as one install in registry.rs).
-        if (SentinelExists("arcface")
-            && Svc.Arcface.Status is not Services.ModelInstallStatus.Installed
-                and not Services.ModelInstallStatus.Downloading)
+        if (SentinelExists("arcface") && Svc.Arcface.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -509,8 +210,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
         // CLIP requires BOTH halves on disk (image encoder + text encoder).
         if (SentinelExists("mobileclip_s2") && SentinelExists("clip_text")
-            && Svc.Clip.Status is not Services.ModelInstallStatus.Installed
-                and not Services.ModelInstallStatus.Downloading)
+            && Svc.Clip.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -521,8 +221,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
         if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
              || SentinelExists("mistral_small_3_2"))
-            && Svc.DeepVlm.Status is not Services.ModelInstallStatus.Installed
-                and not Services.ModelInstallStatus.Downloading)
+            && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
             DispatcherQueue.TryEnqueue(() =>
             {
@@ -532,16 +231,12 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // Must match BOTH sentinel forms the engine writes — flat
-    // `{id}.installed` and content-hashed `{id}-{hash}.installed`. A
-    // flat-only probe here never saw the hashed CUDA-pack sentinel, so the
-    // install buttons never latched "Installed" and the auto-install toggle
-    // re-dispatched the prewarm on every Settings load.
     private static bool SentinelExists(string modelId)
     {
         try
         {
-            return Services.SentinelProbe.Installed(modelId);
+            return System.IO.File.Exists(System.IO.Path.Combine(
+                AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
         }
         catch
         {
@@ -565,22 +260,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         DispatcherQueue.TryEnqueue(() => { if (!_unloaded) Bindings.Update(); });
     }
 
-    // The NVIDIA acceleration buttons aren't x:Bound to the Accelerator slot —
-    // they're imperatively managed in SyncInstallButtonStates + the install
-    // handlers. Re-run that sync whenever the slot's STATUS changes (an "Install
-    // all" or a peer button starting/finishing an accelerator install) so the
-    // CUDA/cuDNN buttons stay in step instead of only refreshing on page Loaded.
-    // Status only: the sync runs SentinelProbe's recursive directory walks, and
-    // a download fires Fraction/BytesDone/EtaSeconds changes ~5× per 10 Hz
-    // progress event — unfiltered, that walked the ~2 GB packs tree on the UI
-    // thread up to 50×/s for the whole install.
-    private void OnAcceleratorChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (_unloaded) return;
-        if (e.PropertyName is not nameof(Services.ModelSlot.Status)) return;
-        DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncInstallButtonStates(); });
-    }
-
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => Services.DebugLog.SafeRun("SettingsView.OnEngineChanged", () =>
         {
@@ -589,33 +268,21 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 or nameof(EngineClient.State))
             {
                 Services.DebugLog.Debug($"[ENGINE-SUB:SettingsView] {e.PropertyName}");
-                // PropertyChanged can arrive OFF the UI thread: RestartAsync spawns via
-                // ConfigureAwait(false), so StartAsync's synchronous State/CrashReason
-                // writes raise PropertyChanged on a thread-pool thread. These updates
-                // drive {x:Bind} TextBlocks (EngineVersionText, … — DispatcherObjects),
-                // so running OnPropertyChanged here directly mutated a DispatcherObject
-                // off-thread — the native fast-fail class (V15.2/V15.2.1/V15.4). Marshal
-                // to the UI thread like every other view's engine handler. (audit)
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    if (_unloaded) return;
-                    OnPropertyChanged(nameof(EngineVersionText));
-                    OnPropertyChanged(nameof(WorkerCapText));
-                    OnPropertyChanged(nameof(GpuSummaryText));
-                    OnPropertyChanged(nameof(ExecutionProviderText));
-                    OnPropertyChanged(nameof(RecommendationText));
-                    OnPropertyChanged(nameof(RecommendationVisibility));
-                    OnPropertyChanged(nameof(CpuTopologyText));
-                    OnPropertyChanged(nameof(MemoryDiagnosticsText));
-                    OnPropertyChanged(nameof(GpuDiagnosticsText));
-                    OnPropertyChanged(nameof(PowerDiagnosticsText));
-                    OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
-                    // SyncReprobeUi reads the live session's bound EP from Info, so
-                    // refresh the cuDNN pill here too — after a restart re-binds CUDA
-                    // the pill flips from "restart to switch" to "active".
-                    SyncNvidiaSection();
-                    SyncReprobeUi();
-                });
+                OnPropertyChanged(nameof(EngineVersionText));
+                OnPropertyChanged(nameof(WorkerCapText));
+                OnPropertyChanged(nameof(GpuSummaryText));
+                OnPropertyChanged(nameof(ExecutionProviderText));
+                OnPropertyChanged(nameof(RecommendationText));
+                OnPropertyChanged(nameof(RecommendationVisibility));
+                OnPropertyChanged(nameof(CpuTopologyText));
+                OnPropertyChanged(nameof(MemoryDiagnosticsText));
+                OnPropertyChanged(nameof(GpuDiagnosticsText));
+                OnPropertyChanged(nameof(PowerDiagnosticsText));
+                OnPropertyChanged(nameof(ThumbnailDiagnosticsText));
+                // SyncReprobeUi reads the live session's bound EP from Info, so
+                // refresh the cuDNN pill here too — after a restart re-binds CUDA
+                // the pill flips from "restart to switch" to "active".
+                DispatcherQueue.TryEnqueue(() => { if (!_unloaded) { SyncNvidiaSection(); SyncReprobeUi(); } });
             }
             else if (e.PropertyName == nameof(EngineClient.LastHardwareReprobe))
             {
@@ -664,17 +331,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                     break;
                 }
             }
-
-            // Hydrate the Restructure granularity picker.
-            string g = s.RestructureGranularity;
-            for (int i = 0; i < GranularityCombo.Items.Count; i++)
-            {
-                if (GranularityCombo.Items[i] is ComboBoxItem gi && gi.Tag is string gtag && gtag == g)
-                {
-                    GranularityCombo.SelectedIndex = i;
-                    break;
-                }
-            }
         }
         finally
         {
@@ -697,15 +353,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             if (_initializingToggles) return;
             var s = AppViewModel.Instance.Settings;
-            var disable = !AutoInstallCudaToggle.IsOn;
-            // ToggleSwitch replays Toggled after HydrateToggles' guarded
-            // programmatic set (deferred until the template applies), so a
-            // no-op echo lands here on every Settings load with the guard
-            // already dropped. Only a real user flip changes the persisted
-            // value; bail on echoes or each Settings visit re-dispatches the
-            // CUDA pack install.
-            if (s.DisableAutoInstallCuda == disable) return;
-            s.DisableAutoInstallCuda = disable;
+            s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
             s.Save();
             // Project policy forbids a silent GPU-pack fetch, so there is no
             // engine-ready auto-install left to gate — persisting the flag alone
@@ -738,21 +386,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             // read_user_ep_override(); to apply a change live, the user
             // must restart the engine (the Restart button in this view, or
             // the prompt shown after installing a Performance Pack).
-        });
-
-    private void OnGranularityChanged(object sender, SelectionChangedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnGranularityChanged), () =>
-        {
-            // Same init-guard rationale as OnProviderOverrideChanged: the ComboBox
-            // raises SelectionChanged while HydrateToggles seeds the saved value.
-            // Bail until the view is live so we don't clobber the saved choice.
-            if (!IsLoaded || _initializingToggles) return;
-            if (GranularityCombo.SelectedItem is not ComboBoxItem item || item.Tag is not string tag) return;
-            var s = AppViewModel.Instance.Settings;
-            s.RestructureGranularity = tag;
-            s.Save();
-            // The engine reads FILEID_RESTRUCTURE_GRANULARITY at spawn; to apply a
-            // change live the user restarts the engine (the Restart button in this view).
         });
 
     public string EngineVersionText
@@ -945,8 +578,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
             DebugLog.Info("[RETAG] force re-scan (re-tag) requested for the current library root.");
             await FileID.ViewModels.EngineClient.Instance
-                .StartScanAsync(root!, vm.FolderDisplay, rescan: true,
-                    excludedPaths: vm.Settings.ExcludedFolders)
+                .StartScanAsync(root!, vm.FolderDisplay, rescan: true)
                 .ConfigureAwait(true);
         });
 
@@ -966,8 +598,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private void OnOpenLogsClicked(object sender, RoutedEventArgs e) => RevealInExplorer(AppPaths.LogsDir);
     private void OnShowDbFolderClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnShowDbFolderClicked),
-            () => RevealInExplorer(System.IO.Path.GetDirectoryName(DbPathText) ?? AppPaths.LogsDir));
+        => RevealInExplorer(System.IO.Path.GetDirectoryName(DbPathText) ?? AppPaths.LogsDir);
     private void OnShowThumbCacheClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ThumbCachePathText);
     private void OnShowModelsFolderClicked(object sender, RoutedEventArgs e) => RevealInExplorer(ModelsPathText);
 
@@ -998,7 +629,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "https://github.com/WebWorldWide/FileID/blob/main/shared/docs/PRIVACY.md",
+                FileName = "https://github.com/anolle/FileID/blob/main/shared/docs/PRIVACY.md",
                 UseShellExecute = true,
             });
         }
@@ -1041,7 +672,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     private readonly System.Collections.Generic.HashSet<Services.ModelSlot> _installInFlight = new();
 
     private void OnInstallModelClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnInstallModelClicked), () =>
     {
         if (sender is not Button button || button.Tag is not string modelKind || string.IsNullOrWhiteSpace(modelKind))
             return;
@@ -1050,8 +680,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             "arcface_buffalo" => Svc.Arcface,
             "mobileclip_s2" => Svc.Clip,
             "ram_plus" => Svc.RamPlus,
-            "whisper" => Svc.Whisper,
-            "bge_text" => Svc.Bge,
             _ => null,
         };
         if (slot is null) return;
@@ -1077,7 +705,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             try { await slot.InstallAsync().ConfigureAwait(true); }
             finally { _installInFlight.Remove(slot); }
         }, "Install " + slot.DisplayLabel);
-    });
+    }
 
     // Drive the cancel and surface failure. If CancelAllAsync throws (engine
     // crashed / IPC dead), the slot would otherwise sit at "Cancelling…"
@@ -1246,35 +874,20 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// prewarm. Engine downloads, extracts, then VlmRunner::find prefers
     /// the CUDA build automatically on the next Deep Analyze.</summary>
     private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnInstallCudaLlamaClicked), async () =>
     {
         if (sender is not Button button) return;
         await InstallCudaLlamaAsync(button).ConfigureAwait(true);
-    });
+    }
 
     private async Task InstallCudaLlamaAsync(Button button)
     {
-        // Both NVIDIA buttons feed the one Accelerator slot; if a coordinated
-        // install is already in flight, don't dispatch a second prewarm.
-        if (Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading)
-        {
-            DebugLog.Info("[INSTALL] CUDA llama.cpp click ignored; an accelerator install is already in flight.");
-            return;
-        }
-        if (!await Services.ModelLicenseGate
-                .EnsureAcceptedAsync(["llama_runtime_cuda_x64"])
-                .ConfigureAwait(true))
-        {
-            return;
-        }
         var originalContent = button.Content;
         try
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~621 MB)…";
+            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~200 MB)…";
             await EngineClient.Instance.PrewarmModelAsync("llama_runtime_cuda_x64");
-            await WaitForModelSentinelsAsync(["llama_runtime_cuda_x64"]);
             button.Content = "Installed";
             CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
         }
@@ -1296,31 +909,18 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// "Verify install" (or restarts the engine) to flip scanning from DirectML
     /// to the CUDA EP (~3-5x faster).</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnInstallCudnnClicked), async () =>
     {
         if (sender is not Button button) return;
-        // Both NVIDIA buttons feed the one Accelerator slot; if a coordinated
-        // install is already in flight, don't dispatch a second prewarm.
-        if (Svc.Accelerator.Status == Services.ModelInstallStatus.Downloading)
-        {
-            DebugLog.Info("[INSTALL] CUDA pack click ignored; an accelerator install is already in flight.");
-            return;
-        }
-        if (!await Services.ModelLicenseGate
-                .EnsureAcceptedAsync(["cudnn_runtime_x64", "ort_cuda_x64"])
-                .ConfigureAwait(true))
-        {
-            return;
-        }
         var originalContent = button.Content;
         try
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading CUDA pack (~2.1 GB): cuDNN + ORT CUDA provider + CUDA math runtime…";
+            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
+            // Provider last — it's the "installed" gate; finishing it last keeps
+            // the status accurate (see ModelInstallerService.Accelerator).
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
             await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
-            await WaitForModelSentinelsAsync(["cudnn_runtime_x64", "ort_cuda_x64"]);
             button.Content = "Installed";
             CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
         }
@@ -1331,42 +931,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";
         }
-    });
-
-    private static async Task WaitForModelSentinelsAsync(string[] modelKinds)
-    {
-        var started = DateTime.UtcNow;
-        var lastProgressAt = started;
-        var lastProgress = EngineClient.Instance.ModelDownloadProgress;
-        var initialError = EngineClient.Instance.LastError;
-        while (DateTime.UtcNow - started < TimeSpan.FromHours(2))
-        {
-            if (modelKinds.All(SentinelProbe.Installed)) return;
-
-            var progress = EngineClient.Instance.ModelDownloadProgress;
-            if (!ReferenceEquals(progress, lastProgress))
-            {
-                lastProgress = progress;
-                if (progress is not null && modelKinds.Contains(progress.ModelKind, StringComparer.Ordinal))
-                {
-                    lastProgressAt = DateTime.UtcNow;
-                }
-            }
-
-            var error = EngineClient.Instance.LastError;
-            if (!ReferenceEquals(error, initialError)
-                && error?.ModelKind is { } failedKind
-                && modelKinds.Contains(failedKind, StringComparer.Ordinal))
-            {
-                throw new InvalidOperationException(error.Message);
-            }
-            if (DateTime.UtcNow - lastProgressAt > TimeSpan.FromMinutes(2))
-            {
-                throw new TimeoutException("The model installer stopped reporting progress. Check the connection and try again.");
-            }
-            await Task.Delay(250).ConfigureAwait(true);
-        }
-        throw new TimeoutException("The model install did not finish within two hours.");
     }
 
     /// <summary>F3c "Get cuDNN" link: opens NVIDIA's official cuDNN download

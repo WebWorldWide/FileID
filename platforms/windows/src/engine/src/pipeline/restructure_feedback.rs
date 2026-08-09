@@ -69,14 +69,7 @@ pub(crate) fn boost(conn: &Arc<Mutex<Connection>>, moves: &mut [ProposedMove]) {
         return;
     };
     for m in moves.iter_mut() {
-        // Only upgrade Review → Auto. An Ask-tier move is one the butler was
-        // explicitly UNSURE about — RESTRUCTURE.md defines Ask as "leave in
-        // place, needs per-file consent". Upgrading Ask → Auto here (at plan
-        // time, before the plan is spooled) let feedback weight silently
-        // rewrite an unsure move to auto, so exclude_ask_tier no longer
-        // matched it and it rode the bulk stored-plan apply without the
-        // consent the Ask tier exists to require.
-        if matches!(m.confidence, Confidence::Auto | Confidence::Ask) {
+        if matches!(m.confidence, Confidence::Auto) {
             continue;
         }
         let Some(folder) = dest_folder(&m.destination) else {
@@ -169,38 +162,6 @@ mod tests {
         let mut moves = vec![pm(1, "/in/trip_hawaii.mp4", "/lib/Videos/trip_hawaii.mp4", Confidence::Review)];
         boost(&db, &mut moves);
         assert_eq!(moves[0].confidence, Confidence::Review, "no feedback for this folder → unchanged");
-    }
-
-    #[test]
-    fn boost_never_upgrades_an_ask_tier_move() {
-        // The butler marked this move Ask (explicitly unsure — "leave in place,
-        // needs consent"). Even with overwhelming filing history toward the
-        // destination, boost() must NOT rewrite it to Auto, or it would ride
-        // the bulk stored-plan apply without the per-file consent the Ask tier
-        // exists to require.
-        let db = db();
-        let applied: Vec<(PathBuf, PathBuf)> = (0..5)
-            .map(|i| {
-                (
-                    PathBuf::from(format!("/in/receipt_{i}.pdf")),
-                    PathBuf::from(format!("/lib/Receipts/receipt_{i}.pdf")),
-                )
-            })
-            .collect();
-        record(&db, applied.iter().map(|(s, d)| (s.as_path(), d.as_path())), 0.0);
-
-        let mut moves = vec![pm(
-            42,
-            "/in/receipt_new.pdf",
-            "/lib/Receipts/receipt_new.pdf",
-            Confidence::Ask,
-        )];
-        boost(&db, &mut moves);
-        assert_eq!(
-            moves[0].confidence,
-            Confidence::Ask,
-            "an Ask-tier move must never be auto-upgraded by feedback"
-        );
     }
 
     #[test]

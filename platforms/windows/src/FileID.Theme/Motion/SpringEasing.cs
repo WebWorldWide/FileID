@@ -57,6 +57,25 @@ public static class SpringEasing
     }
 
     /// <summary>
+    /// Animate the element's Translation (the post-layout offset) by the
+    /// given delta over a spring. Equivalent of SwiftUI's
+    /// `.offset(x:y:).animation(.spring(...))`.
+    /// </summary>
+    public static void AnimateTranslation(
+        UIElement element,
+        float deltaX,
+        float deltaY,
+        double response,
+        double dampingFraction)
+    {
+        // Make sure this element has a Translation property (off-by-default
+        // on UIElements without explicit opt-in).
+        ElementCompositionPreview.SetIsTranslationEnabled(element, true);
+        AnimateScalar(element, "Translation.X", deltaX, response, dampingFraction);
+        AnimateScalar(element, "Translation.Y", deltaY, response, dampingFraction);
+    }
+
+    /// <summary>
     /// Animate uniform scale around the element's center.
     /// Equivalent of SwiftUI's `.scaleEffect(s).animation(.spring(...))`.
     /// </summary>
@@ -113,11 +132,55 @@ public static class SpringEasing
     }
 
     /// <summary>
+    /// Animate opacity from current to <paramref name="final"/>.
+    /// </summary>
+    public static void AnimateOpacity(
+        UIElement element,
+        float final,
+        double response,
+        double dampingFraction)
+        => AnimateScalar(element, "Opacity", final, response, dampingFraction);
+
+    /// <summary>
+    /// Snap a scalar property without animation. Use when reduced-motion
+    /// is on, or when you want to set the final state immediately.
+    /// </summary>
+    public static void SetScalar(UIElement element, string propertyName, float value)
+    {
+        var visual = ElementCompositionPreview.GetElementVisual(element);
+        // StopAnimation clears any in-flight spring on this property; then
+        // we set the property directly via an ExpressionAnimation snapshot.
+        visual.StopAnimation(propertyName);
+        // Translation is exposed via Visual.Properties (not directly on Visual);
+        // for the basics we cover here, set via the property API.
+        switch (propertyName)
+        {
+            case "Opacity": visual.Opacity = value; break;
+            case "Scale.X": visual.Scale = new System.Numerics.Vector3(value, visual.Scale.Y, visual.Scale.Z); break;
+            case "Scale.Y": visual.Scale = new System.Numerics.Vector3(visual.Scale.X, value, visual.Scale.Z); break;
+            case "Translation.X":
+            case "Translation.Y":
+                // Translation isn't a top-level Visual property; consumers
+                // that need a hard snap should set the parent's
+                // RenderTransform or use a CompositionPropertySet. Explicit
+                // no-op + debug warning until a consumer needs it.
+                System.Diagnostics.Debug.WriteLine(
+                    $"SpringEasing.SetScalar({propertyName}): direct set not supported for Translation; use a TranslateTransform.");
+                break;
+            default:
+                throw new ArgumentException($"SpringEasing.SetScalar: unsupported property '{propertyName}'");
+        }
+    }
+
+    /// <summary>
     /// Token bundle. Use this when you want to write callsites like
-    /// `SpringEasing.Tokens.Tight` rather than carrying response/damping pairs around.
+    /// `SpringEasing.Standard` rather than carrying response/damping pairs around.
     /// </summary>
     public readonly record struct Tokens(double Response, double DampingFraction)
     {
+        /// <summary>Standard spring (response 0.40, damping 0.80) — most card transitions.</summary>
+        public static Tokens Standard { get; } = new(0.40, 0.80);
+
         /// <summary>Tight spring (response 0.35, damping 0.78) — tile entrances, person cards.</summary>
         public static Tokens Tight { get; } = new(0.35, 0.78);
     }
