@@ -38,16 +38,16 @@ jobs:
         working-directory: platforms/windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust (1.90, x64 + arm64 targets)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: 1.90
           targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
       - name: Install .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@3951218d6a067d0e7440306129990867807d4b47 # v4
         with:
           dotnet-version: 8.0.x
 
