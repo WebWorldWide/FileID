@@ -277,6 +277,6 @@ Default model weights are commercially usable and contain no non-commercial-only
 
 ## Credits
 
-FileID is shaped and implemented with **Claude** and **Codex**, alongside the project’s human maintainers and contributors.
+FileID built with **Claude** and **Codex**.
 
 ---
