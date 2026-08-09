@@ -205,7 +205,16 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             }
             Err(_) => 0,
         };
-        let target_100ns = (duration_100ns / 4).max(0);
+        // Legacy MPEG program streams (the `.mpg` files common in older family
+        // archives) often expose a duration but do not support a non-keyframe
+        // MF seek. Reading from 25% then yields only format notifications and
+        // no sample. Start at zero for those containers; the first decodable
+        // frame is still a valid preview and keeps the whole archive usable.
+        let target_100ns = if seek_to_quarter(path) {
+            (duration_100ns / 4).max(0)
+        } else {
+            0
+        };
 
         if target_100ns > 0 {
             let pv: PROPVARIANT = i64_to_propvariant(target_100ns);
@@ -313,6 +322,16 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
     }
 }
 
+fn seek_to_quarter(path: &Path) -> bool {
+    !matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("mpg" | "mpeg" | "vob")
+    )
+}
+
 fn propvariant_to_i64(pv: &PROPVARIANT) -> Option<i64> {
     // PROPVARIANT impls TryFrom for the integer variants; round-trip through
     // &PROPVARIANT which the windows-rs macros convert. MF_PD_DURATION is
@@ -333,9 +352,10 @@ fn i64_to_propvariant(v: i64) -> PROPVARIANT {
 #[cfg(test)]
 mod tests {
     use super::{
-        scaled_video_dimensions, video_frame_fits_reservation, ComScope,
+        scaled_video_dimensions, seek_to_quarter, video_frame_fits_reservation, ComScope,
         VIDEO_DECODE_RESERVATION_BYTES,
     };
+    use std::path::Path;
 
     #[test]
     fn video_dimensions_scale_to_an_even_working_resolution() {
@@ -355,6 +375,14 @@ mod tests {
         let boundary_pixels = VIDEO_DECODE_RESERVATION_BYTES as u64 / 7;
         assert!(video_frame_fits_reservation(boundary_pixels as u32, 1));
         assert!(!video_frame_fits_reservation(boundary_pixels as u32 + 1, 1));
+    }
+
+    #[test]
+    fn legacy_mpeg_streams_start_at_a_decodable_keyframe() {
+        assert!(!seek_to_quarter(Path::new("family.mpg")));
+        assert!(!seek_to_quarter(Path::new("family.MPEG")));
+        assert!(!seek_to_quarter(Path::new("family.vob")));
+        assert!(seek_to_quarter(Path::new("family.mp4")));
     }
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,

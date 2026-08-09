@@ -212,7 +212,10 @@ mod linux_util {
             if output.as_ref().is_some_and(Result::is_err) {
                 terminate_process_group(&mut child);
                 let _ = reader.join();
-                return output.expect("output result present");
+                if let Some(output) = output {
+                    return output;
+                }
+                return Err(std::io::Error::other("child output result disappeared"));
             }
             if status.is_none() {
                 match child.try_wait() {

@@ -21,13 +21,10 @@
 // built once per engine launch (text-encoding every label×template, batched)
 // and cached process-static.
 
-#[allow(unused_imports)]
 use std::sync::{Arc, OnceLock};
 
-#[allow(unused_imports)]
 use anyhow::{Context, Result};
 
-#[allow(unused_imports)]
 use super::clip_text::ClipText;
 
 // Generated CLIP scene-vocab embeddings (one f32×512 row per SCENE_LABELS

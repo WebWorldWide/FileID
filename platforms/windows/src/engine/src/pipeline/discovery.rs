@@ -120,8 +120,12 @@ impl FileKind {
         let ext = ext.to_ascii_lowercase();
         match ext.as_str() {
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tif" | "tiff" | "heic"
-            | "heif" | "raw" | "arw" | "cr2" | "nef" | "dng" => FileKind::Image,
-            "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mts" | "m2ts" | "wmv" => {
+            | "heif" | "avif" | "raw" | "arw" | "cr2" | "cr3" | "nef" | "dng" | "orf"
+            | "rw2" | "raf" | "srw" | "pef" | "3fr" | "erf" | "kdc" | "mef" | "mos"
+            | "mrw" | "rwl" | "srf" | "x3f" => FileKind::Image,
+            "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "mts" | "m2ts" | "wmv"
+            | "mxf" | "3gp" | "3g2" | "flv" | "ogv" | "mpeg" | "mpg" | "vob"
+            | "f4v" | "asf" | "divx" => {
                 FileKind::Video
             }
             "pdf" => FileKind::Pdf,
@@ -136,7 +140,10 @@ impl FileKind {
             | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua"
             | "dart" | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org"
             | "adoc" => FileKind::Doc,
-            "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "opus" | "aiff" => FileKind::Audio,
+            "mp3" | "mp2" | "mp1" | "wav" | "flac" | "ogg" | "oga" | "m4a" | "m4b"
+            | "aac" | "opus" | "aiff" | "aif" | "aifc" | "caf" | "mka" | "spx" => {
+                FileKind::Audio
+            }
             // 3D models — `.obj` clusters by its rendered shape (CLIP); the rest are grouped
             // under 3D Models/ + named by Deep Analyze. Lockstep with macOS FileTypes.models.
             "obj" | "stl" | "ply" | "glb" | "gltf" | "fbx" | "usdz" | "usd" | "usda"
@@ -800,7 +807,10 @@ mod tests {
         assert_eq!(FileKind::from_extension("usdz"), FileKind::Model);
         // Lockstep alignment with macOS (formats Windows can also handle).
         assert_eq!(FileKind::from_extension("wmv"), FileKind::Video);
+        assert_eq!(FileKind::from_extension("cr3"), FileKind::Image);
+        assert_eq!(FileKind::from_extension("mxf"), FileKind::Video);
         assert_eq!(FileKind::from_extension("aiff"), FileKind::Audio);
+        assert_eq!(FileKind::from_extension("caf"), FileKind::Audio);
         assert_eq!(FileKind::from_extension("odt"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("xls"), FileKind::Doc);
         assert_eq!(FileKind::from_extension("ppt"), FileKind::Doc);

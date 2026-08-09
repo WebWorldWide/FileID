@@ -149,7 +149,7 @@ See `shared/docs/NEXT.md` for native packaging and hardware validation gates.
 | `shell/video` | `ffmpeg` keyframe → P6 PPM we parse, best-effort (`ffprobe` for the 25% seek) | **Done** (no crate) |
 | `shell/thumbnail` | Not used on Linux: the GTK app owns its off-thread GdkPixbuf thumbnail path; the engine API remains an explicit unsupported stub | **Not applicable** |
 | `shell/heic` | best-effort `heif-dec`/`heif-convert` CLI → temp PNG → `image` decode (no GPL libheif linked; graceful skip when the tools are absent) | **Done** (subprocess) |
-| `platform/SleepGuard` | `systemd-inhibit --what=sleep:idle` held for the scan lifetime; inert when logind is unavailable | **Done** (subprocess) |
+| `platform/SleepGuard` | `systemd-inhibit --what=sleep:idle` held for scan, Deep Analyze, clustering, and prewarm lifetimes; inert when logind is unavailable | **Done** (subprocess) |
 
 The five "Done" backends are gated `#[cfg(target_os = "linux")]` in `platforms/windows/src/engine/src/shell/mod.rs` and built only with **std + libc + subprocess** (no new crates). macOS / other Unix keep the `#[cfg(all(not(windows), not(target_os = "linux")))]` graceful stub; `thumbnail` + `heic` are still stubbed on every non-Windows OS. CI: `linux.yml` runs `cargo clippy --all-targets -D warnings` + `cargo test --lib` on the Linux target (where these arms actually compile).
 

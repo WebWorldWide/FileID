@@ -185,6 +185,7 @@ public class SchemaConformanceTests
         new MergeClustersCommand(1, 2),
         new EmbedTextQueryCommand("sunset at the beach", "q-1"),
         new RenamePersonCommand(1, Title: "Dr", FirstName: "Mary", MiddleName: "Q", LastName: "Smith", Suffix: "Jr"),
+        new ReassignFaceCommand(10, DestinationPersonId: 2),
         new MarkPersonsAsUnknownCommand(_examplePersonIds),
         new FindMergeSuggestionsCommand(),
         new MarkPersonsDifferentCommand(1, 2, 10, 20),

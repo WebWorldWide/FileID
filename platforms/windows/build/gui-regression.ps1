@@ -43,6 +43,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $AppDir      = Resolve-Path (Join-Path $PlatformDir "src/FileID.App")
+$EngineDir   = Resolve-Path (Join-Path $PlatformDir "src/engine")
 $Solution    = Join-Path $PlatformDir "FileID.sln"
 $AppTfm      = "net8.0-windows10.0.19041.0"
 
@@ -105,12 +106,33 @@ if (-not [string]::IsNullOrWhiteSpace($AppExecutable) -and -not $SkipBuild) {
     throw "-AppExecutable requires -SkipBuild so the requested binary cannot be replaced or ignored."
 }
 if (-not $SkipBuild) {
-    Step "Building app ($Configuration)"
+    Step "Building engine + app ($Configuration)"
+    Push-Location $EngineDir
+    try {
+        & cargo build --release --locked --target x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { Fail "cargo build failed"; exit 2 }
+    } finally { Pop-Location }
     Push-Location $PlatformDir
     try {
         & dotnet build $Solution -c $Configuration -p:Platform=x64 --nologo -v minimal
         if ($LASTEXITCODE -ne 0) { Fail "dotnet build failed"; exit 2 }
     } finally { Pop-Location }
+    $appOutput = Split-Path -Parent $AppExe
+    $engineOutput = Join-Path $EngineDir "target\x86_64-pc-windows-msvc\release"
+    foreach ($name in @(
+        "FileIDEngine.exe",
+        "onnxruntime.dll",
+        "onnxruntime_providers_shared.dll",
+        "DirectML.dll",
+        "pdfium.dll"
+    )) {
+        $source = Join-Path $engineOutput $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            Fail "required engine payload missing: $source"
+            exit 2
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $appOutput $name) -Force
+    }
     OK "build complete"
 }
 if (-not (Test-Path $AppExe)) {

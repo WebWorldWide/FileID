@@ -188,7 +188,7 @@ The user picks a folder, hits Start Scan. Files start streaming into a thumbnail
 - [ ] PnP solve from SCRFD landmarks → roll/yaw/pitch (~50 LoC standard math) for face quality
 - [ ] Face quality score: bbox confidence + Laplacian sharpness on the crop OR optional `face_quality_assessment.onnx`
 - [ ] `models/clip_text.rs` — OpenAI CLIP text ONNX + BPE tokenizer port from `CLIPTokenizer.swift` (~150 LoC, deterministic, unit-tested against Swift output bytes)
-- [ ] `shell/sleep.rs` — `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` RAII guard during scan
+- [x] `platform.rs` — `SleepGuard` holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on a dedicated thread during scans, Deep Analyze, face clustering, and model prewarm, then clears it on that same thread
 - [ ] Process priority elevation: `SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` on scan start, reset on scan end
 - [ ] Battery-aware throttle: `GetSystemPowerStatus` — if on battery + <20%, halve worker count (off by default on desktops)
 

@@ -7,6 +7,25 @@
 
 ---
 
+## 2026-08-08 — Calibrate automatic identities with labelled Family Photos evidence
+
+Windows/shared-engine SFace clustering uses `0.66` pass-1 cosine, `0.54` pass-2 cosine, a `0.33`
+pre-clustering quality floor, and a `0.30` unprotected-centroid outlier floor, with mutual-kNN still
+enabled. These defaults were selected from an isolated 41,855-face Family Photos catalog using an
+explicit oracle: every reviewed different-person pair separated, the reviewed same-person pair
+remained together, two default runs produced the same partition, and top-cluster cohesion improved.
+The previous `0.50`/`0.45` and `0.25` quality defaults were rejected because they admitted confirmed
+siblings, unrelated people, and non-face contamination. Lowering thresholds for recall was rejected
+because the measured SFace score ordering overlaps across age and image quality.
+
+Intel's Apache-2.0 `face-reidentification-retail-0095` was evaluated as a commercially clean
+alternative and rejected because it scored a confirmed different-person newborn pair at `0.734`,
+worse than SFace's `0.710`; it is not shipped. Unnamed clusters under six active faces are hidden at
+the People presentation boundary while named clusters remain visible and all rows remain available
+for search, review, and reclustering. This supersedes both the 2026-08-02 show-every-group decision
+and the 2026-08-01 13-face presentation floor without using an unsafe automatic merge to make the UI
+look smaller. Further recall changes require broader identity-disjoint labels or a stronger vetted
+embedder, not an unlabelled threshold reduction.
 ## 2026-08-08 — Uninstall only FileID-owned model roots and preserve original files
 
 macOS exposes separate destructive actions for one Deep Analyze LLM, all downloaded AI models, all

@@ -105,11 +105,42 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     // Single shared engine client (single-threaded on the GTK main context).
     let engine = Rc::new(RefCell::new(EngineClient::new()));
 
-    // ── Tabs (content pages) ─────────────────────────────────────────────────
     let stack = adw::ViewStack::new();
+    let nav_defs = [
+        ("library", "Library", "view-grid-symbolic"),
+        ("people", "People", "system-users-symbolic"),
+        ("cleanup", "Cleanup", "user-trash-symbolic"),
+        ("deep", "Deep Analyze", "starred-symbolic"),
+        ("restructure", "Restructure", "view-list-symbolic"),
+        ("settings", "Settings", "emblem-system-symbolic"),
+    ];
+    let nav_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
+    let activate_tab: Rc<dyn Fn(&str)> = {
+        let stack = stack.clone();
+        let nav_buttons = nav_buttons.clone();
+        let nav_defs_for_activation = nav_defs;
+        Rc::new(move |name| {
+            stack.set_visible_child_name(name);
+            crate::app_settings::remember_active_tab(name);
+            if let Some(index) = nav_defs_for_activation
+                .iter()
+                .position(|(tab, _, _)| *tab == name)
+            {
+                for (j, button) in nav_buttons.borrow().iter().enumerate() {
+                    if j == index {
+                        button.add_css_class("active");
+                    } else {
+                        button.remove_css_class("active");
+                    }
+                }
+            }
+        })
+    };
+
+    // ── Tabs (content pages) ─────────────────────────────────────────────────
     let library = crate::tabs::library::build(engine.clone());
     stack.add_titled_with_icon(&library, Some("library"), "Library", "view-grid-symbolic");
-    let people = crate::tabs::people::build(engine.clone());
+    let people = crate::tabs::people::build(engine.clone(), activate_tab.clone());
     stack.add_titled_with_icon(&people, Some("people"), "People", "system-users-symbolic");
     let cleanup = crate::tabs::cleanup::build_cleanup_tab(engine.clone());
     stack.add_titled_with_icon(&cleanup, Some("cleanup"), "Cleanup", "user-trash-symbolic");
@@ -168,15 +199,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
 
     // NAVIGATE section — the six nav rows
     sidebar.append(&section_heading("NAVIGATE"));
-    let nav_defs = [
-        ("library", "Library", "view-grid-symbolic"),
-        ("people", "People", "system-users-symbolic"),
-        ("cleanup", "Cleanup", "user-trash-symbolic"),
-        ("deep", "Deep Analyze", "starred-symbolic"),
-        ("restructure", "Restructure", "view-list-symbolic"),
-        ("settings", "Settings", "emblem-system-symbolic"),
-    ];
-    let nav_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, &(name, label, icon)) in nav_defs.iter().enumerate() {
         let row = gtk::Button::builder().css_classes(["nav-row"]).build();
         let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -191,23 +213,8 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         if i == 0 {
             row.add_css_class("active");
         }
-        row.connect_clicked(clone!(
-            #[weak]
-            stack,
-            #[strong]
-            nav_buttons,
-            move |_| {
-                stack.set_visible_child_name(name);
-                crate::app_settings::remember_active_tab(name);
-                for (j, b) in nav_buttons.borrow().iter().enumerate() {
-                    if j == i {
-                        b.add_css_class("active");
-                    } else {
-                        b.remove_css_class("active");
-                    }
-                }
-            }
-        ));
+        let activate_tab = activate_tab.clone();
+        row.connect_clicked(move |_| activate_tab(name));
         nav_buttons.borrow_mut().push(row.clone());
         sidebar.append(&row);
     }
@@ -215,15 +222,8 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     // Restore the persisted active tab (matches Windows `activeTab` / the macOS
     // RawValue persistence) — unknown values keep the Library default.
     if let Some(tab) = crate::app_settings::active_tab() {
-        if let Some(active_index) = nav_defs.iter().position(|(name, _, _)| *name == tab) {
-            stack.set_visible_child_name(&tab);
-            for (j, b) in nav_buttons.borrow().iter().enumerate() {
-                if j == active_index {
-                    b.add_css_class("active");
-                } else {
-                    b.remove_css_class("active");
-                }
-            }
+        if nav_defs.iter().any(|(name, _, _)| *name == tab) {
+            activate_tab(&tab);
         }
     }
 
@@ -276,8 +276,8 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     // (animated show/hide + overlay when collapsed) and lets the window resize
     // down to a small width.
     let split = adw::OverlaySplitView::builder()
-        .min_sidebar_width(230.0)
-        .max_sidebar_width(300.0)
+        .min_sidebar_width(260.0)
+        .max_sidebar_width(260.0)
         .sidebar_width_fraction(0.24)
         .show_sidebar(crate::app_settings::sidebar_visible())
         .build();

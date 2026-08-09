@@ -8,6 +8,70 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-08 — Family Photos face clustering is label-calibrated and deterministic
+
+Windows SFace clustering was recalibrated against an isolated clone of the 41,855-face
+`Family Photos` catalog after the old defaults merged visually confirmed siblings, unrelated
+adults and children, and a non-face object. Production defaults are now `0.66` for pass 1,
+`0.54` for pass 2, `0.33` for pre-clustering quality, and `0.30` for centroid outlier removal;
+mutual-kNN remains enabled. Intel's Apache-2.0 `face-reidentification-retail-0095` was evaluated
+and rejected because it separated the labelled newborn pair worse than SFace, so no model or
+dependency was added.
+
+The default-only labelled sweep is GREEN: all reviewed different-person pairs are separated, the
+same-person pair is retained, 17,909 of 24,737 eligible faces are assigned, 838 raw clusters remain,
+and 170 are displayable at the existing six-face unnamed People boundary. The largest cluster is
+3,318 faces; top-cluster minimum cohesion is 0.3894 at p01 and 0.4742 at p05. A canonical two-run
+harness produced identical partitions and assigned counts, clean engine shutdown and Job Object
+teardown, healthy SQLite, stable source/model/crop fingerprints, and no failed checks. The release
+engine used for that evidence is 19,241,984 bytes with SHA-256
+`5dd4f596cab5b6103da5a0ca6da0c40847a5a1d7e5814dbf24e99b212fa03717`.
+
+Focused identity tests, Rust formatting, Python compilation, diff hygiene, and the optimized x64
+engine build are green. The remaining Windows acceptance work is a complete strict engine/.NET
+rerun, native WinUI regression (including all five naming fields and person tags), and a refreshed
+all-format Mistral Deep Analyze run against this exact engine. Signing, hosted CI, ARM64/vendor
+hardware, and native Linux screenshot parity remain external gates.
+
+## 2026-08-08 — Linux native artifact and terminal front-end verification
+
+Hardened Linux Deep Analyze tag application so Apply All is one single-flight job, waits for
+each `applyTags` bulk result, reports partial failures, and re-enables controls after an engine
+exit or 15-second timeout. Named-person extraction includes all structured fields, and tag/file
+grouping is deterministic and set-based to prevent duplicate requests. Added regression coverage
+for structured names and duplicate file IDs.
+
+Native Debian/WSL validation is green: Linux GTK app 60 tests, Linux CLI 58 unit + 12 smoke,
+Linux TUI 111 tests, all with locked dependencies; strict Clippy is clean for the Linux app,
+CLI, and TUI. The Windows CLI/TUI suites also pass (57 + 12 and 111 respectively), while the
+Windows engine passes 740 tests / 3 ignored with strict Clippy, the x64 app suite passes 452, and
+the IPC suite passes 53. `platforms/linux/build/build.sh` rebuilt and staged x86-64 PIE ELF
+`fileid-linux` and `FileIDEngine`; the binary privacy gate is clean.
+
+## 2026-08-07 — Linux parity pass: People flow and native validation gate
+
+The Linux People tab now mirrors the Windows/macOS naming handoff: after faces are grouped it
+surfaces the same continue/skip Deep Analyze action, routes the action through the shared IPC
+payload, and updates the active sidebar row when switching tabs. Person cards use the reference
+180px card geometry and retain the explicit Edit name affordance; the Linux detail sheet exposes
+all five structured name fields plus the unknown-person toggle. Shared glass-card spacing/radius,
+typography, and the fixed 260px sidebar were aligned with the reference tokens.
+
+`cargo fmt --manifest-path platforms/linux/Cargo.toml -- --check`, Linux clippy with warnings as
+errors, `git diff --check`, and the Linux workspace tests are green in the repaired Debian WSL
+instance (58 app tests; shared engine 712 passed / 2 ignored). Windows engine tests are green at
+1,439 passed / 8 ignored / 0 failed, with strict clippy clean.
+
+The shared `SleepGuard` now covers the complete scan lifetime, Deep Analyze, face clustering, and
+model prewarm/download work. Windows holds `ES_SYSTEM_REQUIRED` on a dedicated thread and clears
+it on that same thread; Linux holds a `systemd-inhibit --what=sleep:idle` child with parent-death
+cleanup. The display may dim, but idle/system sleep cannot interrupt active work, and the lease is
+released on success, cancellation, failure, or engine shutdown. A Linux acquire/drop smoke test
+covers systems without logind as well as normal WSL builds.
+
+The Linux GTK runtime and screenshot identity remain unverified: source/build checks are not a
+pixel comparison, and fixed-size native Linux/macOS/Windows captures still need state-by-state
+comparison before claiming screenshot parity.
 ## 2026-08-08 — macOS large-library performance pass and full terminal verification
 
 Final v0.1.0 release polish makes every Settings card span the same content width while preserving

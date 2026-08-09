@@ -189,6 +189,9 @@ pub(crate) async fn handle_prewarm_model(
         kind: model_kind.clone(),
         set: in_flight,
     };
+    // Model downloads and warm-up can outlive the user's active session.
+    // Keep the machine awake, while still allowing the display to dim.
+    let _sleep = platform::SleepGuard::acquire();
 
     // Per-model cancel flag (reset to un-cancelled for this fresh prewarm).
     // download_parallel below polls it after every chunk.

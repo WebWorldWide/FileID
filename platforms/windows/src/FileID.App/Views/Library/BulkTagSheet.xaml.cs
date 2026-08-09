@@ -102,7 +102,7 @@ public sealed partial class BulkTagSheet : UserControl
             var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "applyTags",
                 () => EngineClient.Instance.ApplyTagsAsync(_fileIds, tags, mode),
-                TimeSpan.FromSeconds(30));
+                Services.BulkActionTimeout.ForFileCount(_fileIds.Count));
             var confirmedFileIds = Services.BulkActionResultTruth
                 .ConfirmedSuccessfulFileIds(result, _fileIds);
 

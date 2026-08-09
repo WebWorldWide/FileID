@@ -3369,6 +3369,32 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/symphonia-codec-adpcm/symphonia-codec-adpcm-0.5.5.crate",
+    "sha256": "2dddc50e2bbea4cfe027441eece77c46b9f319748605ab8f3443350129ddd07f",
+    "dest": "cargo/vendor/symphonia-codec-adpcm-0.5.5"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"2dddc50e2bbea4cfe027441eece77c46b9f319748605ab8f3443350129ddd07f\",\"files\":{}}",
+    "dest": "cargo/vendor/symphonia-codec-adpcm-0.5.5",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/symphonia-codec-alac/symphonia-codec-alac-0.5.5.crate",
+    "sha256": "8413fa754942ac16a73634c9dfd1500ed5c61430956b33728567f667fdd393ab",
+    "dest": "cargo/vendor/symphonia-codec-alac-0.5.5"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"8413fa754942ac16a73634c9dfd1500ed5c61430956b33728567f667fdd393ab\",\"files\":{}}",
+    "dest": "cargo/vendor/symphonia-codec-alac-0.5.5",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/symphonia-codec-pcm/symphonia-codec-pcm-0.5.5.crate",
     "sha256": "4e89d716c01541ad3ebe7c91ce4c8d38a7cf266a3f7b2f090b108fb0cb031d95",
     "dest": "cargo/vendor/symphonia-codec-pcm-0.5.5"
@@ -3408,6 +3434,19 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/symphonia-format-caf/symphonia-format-caf-0.5.5.crate",
+    "sha256": "b8faf379316b6b6e6bbc274d00e7a592e0d63ff1a7e182ce8ba25e24edd3d096",
+    "dest": "cargo/vendor/symphonia-format-caf-0.5.5"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"b8faf379316b6b6e6bbc274d00e7a592e0d63ff1a7e182ce8ba25e24edd3d096\",\"files\":{}}",
+    "dest": "cargo/vendor/symphonia-format-caf-0.5.5",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/symphonia-format-isomp4/symphonia-format-isomp4-0.5.5.crate",
     "sha256": "243739585d11f81daf8dac8d9f3d18cc7898f6c09a259675fc364b382c30e0a5",
     "dest": "cargo/vendor/symphonia-format-isomp4-0.5.5"
@@ -3416,6 +3455,19 @@
     "type": "inline",
     "contents": "{\"package\":\"243739585d11f81daf8dac8d9f3d18cc7898f6c09a259675fc364b382c30e0a5\",\"files\":{}}",
     "dest": "cargo/vendor/symphonia-format-isomp4-0.5.5",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/symphonia-format-mkv/symphonia-format-mkv-0.5.5.crate",
+    "sha256": "122d786d2c43a49beb6f397551b4a050d8229eaa54c7ddf9ee4b98899b8742d0",
+    "dest": "cargo/vendor/symphonia-format-mkv-0.5.5"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"122d786d2c43a49beb6f397551b4a050d8229eaa54c7ddf9ee4b98899b8742d0\",\"files\":{}}",
+    "dest": "cargo/vendor/symphonia-format-mkv-0.5.5",
     "dest-filename": ".cargo-checksum.json"
   },
   {

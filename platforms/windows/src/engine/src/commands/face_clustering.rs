@@ -12,6 +12,7 @@ use std::time::Instant;
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, FaceClusteringResult, IpcEvent, Wrap,
 };
+use crate::platform::SleepGuard;
 use crate::pipeline::face_clustering::{cluster, ClusterAnchor, ClusterAssignment, FaceRow};
 use rusqlite::OptionalExtension;
 
@@ -532,6 +533,7 @@ pub(crate) async fn handle_run_face_clustering(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     active: Arc<AtomicBool>,
 ) {
+    let _sleep = SleepGuard::acquire();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
 
@@ -560,23 +562,19 @@ pub(crate) async fn handle_run_face_clustering(
             // cluster. `face_quality` = YuNet det.score × landmark geometry, so this
             // naturally keeps well-detected frontal faces on any corpus. 0 disables.
             //
-            // TRADE-OFF, recalibrated on the full 84,582-face Adlon corpus
-            // (2026-07-14 re-cluster sweep, RTX 5080 box): the old 0.35 default —
-            // tuned for precision on a 185-face labelled subset — sat at the top
-            // of the geometry-capped 0.23–0.42 real-world quality range and left
-            // 67% of detected faces unassigned. 0.25 with k_nn=32 doubles
-            // assigned faces (27,921 → 53,955) while the biggest clusters get
-            // TIGHTER (top-cluster mean cosine-to-centroid 0.606 → 0.642), i.e.
-            // the recovered faces are the same people, not contamination. Faces
-            // below 0.25 still embed as noise (same-person cosine ~0.14) and
-            // stay gated. Raise it for precision-critical small libraries; 0
-            // disables the gate entirely.
+            // Recalibrated on the isolated 41,855-face Family Photos catalog
+            // (2026-08-08): 0.25 admitted visually confirmed sibling, unrelated-
+            // adult, and object contamination. 0.33 separated every labelled
+            // negative, retained the clear same-person pair, cut displayable
+            // People groups from about 420 to 170, and improved every top-cluster
+            // cohesion floor. Lower-quality detections remain searchable and can
+            // be reviewed, but do not manufacture identities. 0 disables.
             let min_cluster_quality: f32 = std::env::var("FILEID_FACE_CLUSTER_MIN_QUALITY")
                 .ok()
                 .and_then(|s| s.trim().parse::<f32>().ok())
                 .filter(|v| v.is_finite())
                 .map(|v| v.clamp(0.0, 1.0))
-                .unwrap_or(0.25);
+                .unwrap_or(0.33);
             {
                 let mut stmt = conn.prepare(
                     "SELECT fp.id, fp.file_id, f.content_hash, fp.arcface_embedding, \

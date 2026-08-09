@@ -68,7 +68,9 @@ public partial class App : Application
             // ConcurrentDictionary and _cachedBytes uses Interlocked, so a write
             // landing before Prime finishes is race-safe (worst case a transient
             // diagnostics blip, not an eviction-correctness bug).
-            _ = Task.Run(ThumbnailDiskCache.Prime);
+            _ = Task.Run(() => DebugLog.SafeRun(
+                "ThumbnailDiskCache.Prime",
+                ThumbnailDiskCache.Prime));
             // last-session breadcrumb. Detects whether the
             // previous session died via a native fast-fail (which
             // bypasses every managed crash sink) and writes a
