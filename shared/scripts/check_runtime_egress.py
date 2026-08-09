@@ -851,10 +851,10 @@ def known_blocker_violations(registry: Path, downloader: Path) -> list[str]:
 def release_wiring_violations(release_workflow: Path) -> list[str]:
     text = release_workflow.read_text(encoding="utf-8")
     step = (
-        "      - name: Enforce Hugging Face-only runtime egress before publication\n"
+        "      - name: Enforce reviewed runtime egress before publication\n"
         "        if: steps.mode.outputs.publish == 'true'\n"
         "        shell: pwsh\n"
-        "        run: python ../../shared/scripts/check_runtime_egress.py\n"
+        "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n"
         "\n"
         "      - name: Download signed/non-Windows CLI/TUI bundles\n"
     )

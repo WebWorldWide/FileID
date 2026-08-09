@@ -261,10 +261,10 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
-      - name: Enforce Hugging Face-only runtime egress before publication
+      - name: Enforce reviewed runtime egress before publication
         if: steps.mode.outputs.publish == 'true'
         shell: pwsh
-        run: python ../../shared/scripts/check_runtime_egress.py
+        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers
 
       - name: Download signed/non-Windows CLI/TUI bundles
         if: steps.mode.outputs.publish == 'true'
