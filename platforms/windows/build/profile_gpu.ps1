@@ -11,7 +11,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Corpus = "F:\TrueNAS\iMac Documents"
+    [string]$Corpus = "G:\TrueNAS\iMac Documents"
 )
 $ErrorActionPreference = 'Stop'
 $csv = Join-Path $env:TEMP "fileid_gpu_profile.csv"
@@ -32,7 +32,7 @@ finally {
     Stop-Process -Id $smi.Id -Force -ErrorAction SilentlyContinue
 }
 
-if (-not (Test-Path $csv)) { Write-Host "NO SAMPLES - nvidia-smi -lms unsupported?" -ForegroundColor Red; exit 1 }
+if (-not (Test-Path $csv)) { Write-Host "NO SAMPLES — nvidia-smi -lms unsupported?" -ForegroundColor Red; exit 1 }
 $rows = @(Get-Content $csv | Where-Object { $_ -match ',' } | ForEach-Object {
     $p = $_ -split ',' | ForEach-Object { $_.Trim() }
     if ($p.Count -ge 5 -and $p[0] -match '^\d+$') {

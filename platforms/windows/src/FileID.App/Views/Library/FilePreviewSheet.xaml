@@ -42,18 +42,6 @@
     MinWidth="880"
     MinHeight="520">
 
-    <!-- Arrow-key sibling navigation as ACCELERATORS in addition to the
-         host dialog's tunneling PreviewKeyDown handler: accelerators are
-         processed on the input-preprocessing path (ProcessKeyboardAccelerators),
-         which still fires when the ContentDialog's own key handling or a
-         focused media/transport control swallows the routed KeyDown. The
-         Invoked handlers keep the typing guard (a focused TextBox gets the
-         caret keys back by leaving Handled=false). -->
-    <UserControl.KeyboardAccelerators>
-        <KeyboardAccelerator Key="Left" Invoked="OnLeftAccelerator" />
-        <KeyboardAccelerator Key="Right" Invoked="OnRightAccelerator" />
-    </UserControl.KeyboardAccelerators>
-
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -121,11 +109,11 @@
                     Click="OnAnalyzeClicked"
                     ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file"
                     AutomationProperties.Name="Analyze this file"
-                    AutomationProperties.HelpText="Runs Deep Analyze with the vision-language model on this file. While running, this button cancels the analysis."
+                    AutomationProperties.HelpText="Runs Deep Analyze with the vision-language model on this file"
                     Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                    <FontIcon x:Name="AnalyzeGlyph" Glyph="&#xE945;" FontSize="13" />
-                    <TextBlock x:Name="AnalyzeLabel" Text="Analyze" />
+                    <FontIcon Glyph="&#xE945;" FontSize="13" />
+                    <TextBlock Text="Analyze" />
                 </StackPanel>
             </Button>
 

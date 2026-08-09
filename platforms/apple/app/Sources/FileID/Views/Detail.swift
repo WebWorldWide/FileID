@@ -11,6 +11,9 @@ struct Detail: View {
     /// When the sidebar is hidden, Detail shows a toggle button in the
     /// top safe-area inset to bring it back.
     @Binding var sidebarVisible: Bool
+    /// Reserved for future cross-tab navigation. Currently unused
+    /// but kept on the API surface so wiring it up later doesn't
+    /// require threading a new closure through MainWindow.
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
 
     var body: some View {
@@ -26,11 +29,11 @@ struct Detail: View {
         // ⌘Space search results fresh.
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed {
-                Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+                Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
             }
         }
         .onChange(of: engine.deepAnalyzeComplete?.processed ?? -1) { _, _ in
-            Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
+            Task.detached { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 28 pt strip at the top for traffic-light buttons + the sidebar
@@ -104,8 +107,7 @@ struct Detail: View {
             case .cleanup:     CleanupView(engine: engine, store: store)
             case .deep:        DeepAnalyzeView(engine: engine, store: store,
                                                 onSwitchTab: onSwitchTab)
-            case .restructure: RestructureView(store: store, engine: engine,
-                                                selectedRoot: pickedURL)
+            case .restructure: RestructureView(store: store, engine: engine)
             case .settings:    SettingsTab(engine: engine, store: store)
             }
         }

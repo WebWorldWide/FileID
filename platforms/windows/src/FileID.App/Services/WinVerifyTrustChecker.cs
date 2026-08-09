@@ -1,14 +1,15 @@
 ﻿// WinVerifyTrustChecker — Authenticode integrity check on the engine binary.
 //
-// Mirrors macOS SecCode/SecStaticCode validation. On every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
+//'s SecCode/SecStaticCode validation. On
+// every spawn, the app verifies that FileIDEngine.exe's Authenticode chain
 // is intact AND chains to a publisher we trust. Refuses to spawn on
 // mismatch — same threat model as macOS (a malicious replacement engine
 // next to FileID.exe should not be loadable).
 //
 // The check runs and surfaces the verdict via the IntegrityVerdict enum.
 // For dev builds (unsigned binaries) the verdict is `Unsigned`; the
-// EngineClient logs a warning and proceeds. Signed releases verify against
-// a publisher subject embedded at build time.
+// EngineClient logs a warning and proceeds. Signed releases must verify
+// against an EV cert thumbprint pinned here (set at ship time).
 //
 // References:
 //   docs.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust
@@ -22,7 +23,7 @@ internal enum IntegrityVerdict
     /// <summary>Signature present, chain valid, publisher trusted (or skipped per policy).</summary>
     Trusted,
 
-    /// <summary>Binary is unsigned. Acceptable in dev builds; rejected in signed releases.</summary>
+    /// <summary>Binary is unsigned. Acceptable in dev builds; rejected on shipped EV-signed releases.</summary>
     Unsigned,
 
     /// <summary>Signature is present but failed verification (revoked cert, tamper, etc).</summary>
@@ -36,16 +37,12 @@ internal static class WinVerifyTrustChecker
 {
     /// <summary>
     /// Verify the Authenticode signature on a file. The optional
-    /// <paramref name="expectedThumbprintHex"/> optionally pins one leaf
-    /// certificate, <paramref name="expectedSignerSubject"/> checks publisher
-    /// display identity, and <paramref name="expectedSignerPublicKeySha256"/>
-    /// cryptographically binds companion FileID artifacts to the same signer.
+    /// <paramref name="expectedThumbprintHex"/> pins the publisher cert SHA-1
+    /// thumbprint; pass null to accept any trusted publisher. Until an EV
+    /// cert is provisioned, call sites pass null and act on the
+    /// `Trusted` / `Unsigned` distinction.
     /// </summary>
-    public static IntegrityVerdict Verify(
-        string path,
-        string? expectedThumbprintHex = null,
-        string? expectedSignerSubject = null,
-        string? expectedSignerPublicKeySha256 = null)
+    public static IntegrityVerdict Verify(string path, string? expectedThumbprintHex = null)
     {
         // File.Exists wrapped — paths with invalid chars or
         // denied access on the parent dir would throw.
@@ -118,12 +115,7 @@ internal static class WinVerifyTrustChecker
             Marshal.StructureToPtr(afterVerify, trustDataPtr, fDeleteOld: true);
             _ = NativeWinVerifyTrust(IntPtr.Zero, ref WINTRUST_ACTION_GENERIC_VERIFY_V2, trustDataPtr);
 
-            return InterpretResult(
-                hr,
-                expectedThumbprintHex,
-                expectedSignerSubject,
-                expectedSignerPublicKeySha256,
-                path);
+            return InterpretResult(hr, expectedThumbprintHex, path);
         }
         finally
         {
@@ -136,12 +128,7 @@ internal static class WinVerifyTrustChecker
         }
     }
 
-    private static IntegrityVerdict InterpretResult(
-        int hr,
-        string? expectedThumbprintHex,
-        string? expectedSignerSubject,
-        string? expectedSignerPublicKeySha256,
-        string path)
+    private static IntegrityVerdict InterpretResult(int hr, string? expectedThumbprintHex, string path)
     {
         // S_OK (0) = Trusted. TRUST_E_NOSIGNATURE = Unsigned.
         // Anything else = Untrusted (revoked, tampered, expired, etc).
@@ -152,26 +139,13 @@ internal static class WinVerifyTrustChecker
         {
             // Optional cert-pinning. If a thumbprint is supplied, walk the
             // certificate chain and confirm the leaf matches.
-            if (!string.IsNullOrWhiteSpace(expectedThumbprintHex)
-                && !CertificateThumbprintMatches(path, expectedThumbprintHex))
+            if (!string.IsNullOrWhiteSpace(expectedThumbprintHex))
             {
-                DebugLog.Warn($"WinVerifyTrust: signed but thumbprint mismatch for {PathRedactor.Redact(path)}");
-                return IntegrityVerdict.Untrusted;
-            }
-            if (!string.IsNullOrWhiteSpace(expectedSignerSubject)
-                && !CertificateSubjectMatches(path, expectedSignerSubject))
-            {
-                DebugLog.Warn($"WinVerifyTrust: signed but publisher mismatch for {PathRedactor.Redact(path)}");
-                return IntegrityVerdict.Untrusted;
-            }
-            if (!string.IsNullOrWhiteSpace(expectedSignerPublicKeySha256)
-                && !string.Equals(
-                    GetSignerPublicKeySha256(path),
-                    NormalizeHex(expectedSignerPublicKeySha256),
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                DebugLog.Warn($"WinVerifyTrust: signed but signer public key mismatch for {PathRedactor.Redact(path)}");
-                return IntegrityVerdict.Untrusted;
+                if (!CertificateThumbprintMatches(path, expectedThumbprintHex))
+                {
+                    DebugLog.Warn($"WinVerifyTrust: signed but thumbprint mismatch for {PathRedactor.Redact(path)}");
+                    return IntegrityVerdict.Untrusted;
+                }
             }
             return IntegrityVerdict.Trusted;
         }
@@ -194,7 +168,7 @@ internal static class WinVerifyTrustChecker
             var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
             using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
             var actualHex = cert2.Thumbprint;
-            return string.Equals(actualHex, NormalizeHex(expectedHex), StringComparison.OrdinalIgnoreCase);
+            return string.Equals(actualHex, expectedHex.Replace(" ", "").Replace(":", ""), StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception ex)
         {
@@ -203,50 +177,10 @@ internal static class WinVerifyTrustChecker
         }
     }
 
-    private static bool CertificateSubjectMatches(string path, string expectedSubject)
-    {
-        try
-        {
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
-            using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
-            return string.Equals(cert2.Subject, expectedSubject.Trim(), StringComparison.OrdinalIgnoreCase);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Cert subject check failed: " + ex.Message);
-            return false;
-        }
-    }
-
-    internal static string? GetSignerPublicKeySha256(string path)
-    {
-        try
-        {
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
-            using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
-            var publicKeyIdentity = string.Join(
-                '|',
-                cert2.PublicKey.Oid.Value,
-                Convert.ToBase64String(cert2.PublicKey.EncodedParameters.RawData),
-                Convert.ToBase64String(cert2.PublicKey.EncodedKeyValue.RawData));
-            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(publicKeyIdentity)));
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Cert public-key check failed: " + ex.Message);
-            return null;
-        }
-    }
-
-    private static string NormalizeHex(string value)
-        => value.Replace(" ", "", StringComparison.Ordinal)
-            .Replace(":", "", StringComparison.Ordinal)
-            .Trim();
-
     // ─── Win32 interop ─────────────────────────────────────────────────────
 
     private const uint WTD_UI_NONE = 2;
+    private const uint WTD_REVOKE_NONE = 0;
     private const uint WTD_REVOKE_WHOLECHAIN = 1; // SEC-4: actually checks revocation
     private const uint WTD_CHOICE_FILE = 1;
     private const uint WTD_STATEACTION_VERIFY = 1;

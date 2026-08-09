@@ -56,13 +56,7 @@ public enum Tagging {
             tagged = await processVideo(discovered: discovered, worker: worker, started: started)
         case .pdf:
             tagged = await processPDF(discovered: discovered, worker: worker, started: started)
-        case .doc:
-            tagged = await processDoc(discovered: discovered, worker: worker, started: started)
-        case .audio:
-            tagged = await processAudio(discovered: discovered, started: started)
-        case .model:
-            tagged = await processModel(discovered: discovered, started: started)
-        case .other:
+        case .doc, .audio, .other:
             tagged = TaggedFile(
                 url: url, kind: kind, extension: ext, sizeBytes: discovered.sizeBytes,
                 createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
@@ -71,110 +65,11 @@ public enum Tagging {
                 tagsEvaluated: true
             )
         }
-        if tagged.contentHash == nil && !Task.isCancelled {
-            let contentSize = UInt64(max(0, discovered.sizeBytes))
-            let state = ContentHashContinuation()
-            tagged.contentHash = await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    state.install(continuation)
-                    visionQueue.async {
-                        state.finish(ContentHash.compute(url: url, size: contentSize))
-                    }
-                    visionQueue.asyncAfter(deadline: .now() + 30) {
-                        state.finish(nil)
-                    }
-                }
-            } onCancel: {
-                state.finish(nil)
-            }
-        }
+        // Single choke point: stamp the volume-local identity (st_ino) computed
+        // at discovery onto every TaggedFile so DBWriter's rename/move heal can
+        // re-bind a moved file's row instead of orphaning its tags/faces/OCR.
         tagged.fileRef = discovered.fileRef
         return tagged
-    }
-
-    // MARK: - Audio pipeline
-
-    /// Read embedded ID3/Vorbis/MP4 metadata (artist/album/title) at SCAN and surface
-    /// them as auto tags, so audio clusters by artist/album in the non-image restructure
-    /// pass — lockstep with the Windows engine, which reads the same metadata (symphonia)
-    /// at scan and stores it as tags. The read re-opens the file, so it's bounded against
-    /// a stalled network volume (the same NAS caution as the video-keyframe path).
-    private static func processAudio(
-        discovered: DiscoveredFile,
-        started: CFAbsoluteTime
-    ) async -> TaggedFile {
-        let url = discovered.url
-        let ext = url.pathExtension.lowercased()
-        var tags = ["Audio"]
-        let meta = await boundedAudioTags(url: url, timeoutMs: 5_000)
-        // Artist + album are the shared tokens the clusterer groups on (tracks from one
-        // album/artist share them); title rides along to mirror the Windows tag set.
-        for value in [meta.artist, meta.album, meta.title] {
-            guard let v = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !v.isEmpty, !tags.contains(v) else { continue }
-            tags.append(v)
-        }
-        return TaggedFile(
-            url: url, kind: "audio", extension: ext, sizeBytes: discovered.sizeBytes,
-            createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
-            visionTags: tags,
-            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
-            tagsEvaluated: true
-        )
-    }
-
-    /// Race `extractAudioTags` against a timeout so a metadata read on a stalled volume
-    /// can't park a scan worker. Empties on timeout → the file just clusters by filename.
-    private static func boundedAudioTags(
-        url: URL, timeoutMs: Int
-    ) async -> (title: String?, artist: String?, album: String?) {
-        await withTaskGroup(of: (title: String?, artist: String?, album: String?)?.self) { group in
-            group.addTask { await DeepAnalyzeNaming.extractAudioTags(url: url) }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first ?? (nil, nil, nil)
-        }
-    }
-
-    // MARK: - 3D model pipeline
-
-    /// Render a 3D model to a thumbnail and CLIP-embed it at SCAN — so a `.obj` clusters by
-    /// its rendered shape like a photo (it joins the image/video visual pass). Restricted to
-    /// `.obj` to stay lockstep with the Windows engine, whose `obj_render` only parses
-    /// Wavefront `.obj`; the other recognized 3D formats are grouped under `3D Models/` by the
-    /// rule cascade and named by Deep Analyze (which renders them via QuickLook on demand).
-    /// `quickLookThumbnail` is itself watchdog-bounded (8 s), and runs on `visionQueue`.
-    private static func processModel(
-        discovered: DiscoveredFile,
-        started: CFAbsoluteTime
-    ) async -> TaggedFile {
-        await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
-            visionQueue.async {
-                let url = discovered.url
-                let ext = url.pathExtension.lowercased()
-                var tagged = TaggedFile(
-                    url: url, kind: "model", extension: ext, sizeBytes: discovered.sizeBytes,
-                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
-                    visionTags: ["3D Model"],
-                    tagsEvaluated: true
-                )
-                if ext == "obj",
-                   let cg = DeepAnalyze.quickLookThumbnail(url: url, maxPixelSize: 512),
-                   let blob = MobileCLIPService.shared.embedImage(cg)
-                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
-                    tagged.clipEmbeddingBlob = blob
-                }
-                // The content-derivation stage (render attempt) ran — stops the model
-                // CLIP-backfill carve-out re-walking an un-renderable .obj forever.
-                tagged.textStageDone = true
-                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
-                cont.resume(returning: tagged)
-            }
-        }
     }
 
     // MARK: - Image pipeline
@@ -270,11 +165,7 @@ public enum Tagging {
                     // tags.score; the Vision fallback has none. The OCR doc-hint
                     // above keeps using pass.classifyTags (its heuristic was tuned
                     // for the Vision vocab).
-                    let ramStart = CFAbsoluteTimeGetCurrent()
-                    let ramTags = RamPlusService.scanTaggingEnabled
-                        ? RamPlusService.shared.tag(cgImage) : []
-                    let ramMs = RamPlusService.scanTaggingEnabled
-                        ? (CFAbsoluteTimeGetCurrent() - ramStart) * 1000 : 0
+                    let ramTags = RamPlusService.shared.tag(cgImage)
                     var tagScores: [String: Double]? = nil
                     var primaryTags: [String]
                     if !ramTags.isEmpty {
@@ -297,23 +188,13 @@ public enum Tagging {
                         hasOCR: ocr?.isEmpty == false,
                         hasLocation: exif.lat != nil && exif.lon != nil
                     ))
-                    // Case-insensitive dedup (keep first-seen casing) then cap to 16 —
-                    // mirrors the Windows engine's pre-DB-write retain(seen)+truncate(16)
-                    // (tagging.rs) so a library's stored tag set is identical cross-platform.
-                    var seenTagKeys = Set<String>()
-                    var dedupedTags: [String] = []
-                    for tag in enrichedTags {
-                        guard seenTagKeys.insert(tag.lowercased()).inserted else { continue }
-                        dedupedTags.append(tag)
-                        if dedupedTags.count >= 16 { break }
-                    }
 
                     var tagged = TaggedFile(
                         url: url, kind: "image", extension: ext,
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
-                        visionTags: dedupedTags,
+                        visionTags: enrichedTags,
                         tagScores: tagScores,
                         phash: phash,
                         contentHash: contentHash,
@@ -324,7 +205,6 @@ public enum Tagging {
                         faceQualities: pass.faceQualities,
                         faceYaws: pass.faceYaws,
                         facePitches: pass.facePitches,
-                        faceMinDimPx: pass.faceMinDimPx,
                         ocrText: ocr,
                         cameraModel: exif.cameraModel,
                         locationLat: exif.lat,
@@ -338,7 +218,6 @@ public enum Tagging {
                     tagged.loadMs = loadMs
                     tagged.visionMs = visionMs
                     tagged.clipMs = clipMs
-                    tagged.ramMs = ramMs
                     tagged.ocrMs = ocrMs
                     return tagged
                 }
@@ -349,137 +228,40 @@ public enum Tagging {
 
     // MARK: - Video pipeline
 
-    /// Video processing — metadata + a CLIP keyframe embedding (for restructure's content
-    /// pass). We deliberately do NOT run Vision on a video frame: it deadlocks
-    /// `VNControlledCapacityTasksQueue` on some inputs and Vision's perform is synchronous
-    /// GCD that Task cancellation can't reach. CLIP/ORT has no such queue, and the keyframe
-    /// extract is hard-bounded; visual tags + captions are still produced by Deep Analyze
-    /// on demand.
+    /// Video processing — metadata-only. Running Vision on a decoded
+    /// video frame deadlocks `VNControlledCapacityTasksQueue` on some
+    /// inputs and Vision's perform is synchronous GCD that Task
+    /// cancellation can't reach. We record kind/size/dates only;
+    /// captions are produced by Deep Analyze on demand.
     private static func processVideo(
         discovered: DiscoveredFile,
         worker: VisionWorker,
         started: CFAbsoluteTime
     ) async -> TaggedFile {
+        // No AVFoundation on the scan hot path — `AVURLAsset.load`
+        // can hang for seconds on NAS-resident files. Duration is
+        // recovered on-demand by the UI's QL preview when needed.
+        let url = discovered.url
+        var tagged = TaggedFile(
+            url: url, kind: "video", extension: url.pathExtension.lowercased(),
+            sizeBytes: discovered.sizeBytes,
+            createdAt: discovered.creationDate,
+            modifiedAt: discovered.modificationDate,
+            visionTags: ["Video"],
+            tagsEvaluated: true
+        )
         _ = worker  // unused — kept for signature parity with image/pdf paths
-        // Hop onto visionQueue (a growable GCD queue) like processImage/processPDF, so the
-        // blocking keyframe wait + ORT embed run there instead of parking a narrow
-        // cooperative-pool worker (which would throttle the other workers + the DB/IPC).
-        return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
-            visionQueue.async {
-                let url = discovered.url
-                var tagged = TaggedFile(
-                    url: url, kind: "video", extension: url.pathExtension.lowercased(),
-                    sizeBytes: discovered.sizeBytes,
-                    createdAt: discovered.creationDate,
-                    modifiedAt: discovered.modificationDate,
-                    visionTags: ["Video"],
-                    tagsEvaluated: true
-                )
-                // Content-cluster videos like images: embed a ~25%-duration keyframe with the
-                // same CLIP model, so restructure's content pass groups a vacation's videos
-                // WITH its photos (it selects kind IN ('image','video')). BOUNDED — the extract
-                // runs off-thread with a hard timeout, since AVFoundation duration/decode can
-                // hang on a NAS file; on timeout the video clusters by filename, as before.
-                // Mirrors the Windows engine, which CLIP-embeds the video keyframe at scan.
-                if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
-                   let blob = MobileCLIPService.shared.embedImage(cg)
-                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
-                    tagged.clipEmbeddingBlob = blob
-                }
-                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
-                cont.resume(returning: tagged)
-            }
-        }
-    }
-
-    /// Extract a video keyframe with a hard wall-clock bound. AVFoundation duration/decode
-    /// can hang on an unresponsive NAS file, so it runs in a detached task and is cancelled
-    /// when the caller's timeout expires.
-    private static func boundedVideoKeyframe(url: URL, maxPixelSize: Int, timeout: TimeInterval) -> CGImage? {
-        let box = KeyframeBox()
-        let sema = DispatchSemaphore(value: 0)
-        let task = Task.detached(priority: .utility) {
-            box.set(await DeepAnalyze.extractVideoKeyframe(url: url, maxPixelSize: maxPixelSize))
-            sema.signal()
-        }
-        if sema.wait(timeout: .now() + timeout) == .timedOut {
-            task.cancel()
-            return nil
-        }
-        return box.get()
-    }
-
-    private final class KeyframeBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: CGImage?
-        func set(_ v: CGImage?) { lock.lock(); value = v; lock.unlock() }
-        func get() -> CGImage? { lock.lock(); defer { lock.unlock() }; return value }
-    }
-
-    // MARK: - Document pipeline
-
-    /// Document (docx/pptx/xlsx/txt/md/…) processing — metadata + a BGE content embedding
-    /// for restructure's document pass, cached at scan so the plan reads it instead of
-    /// re-embedding every run (mirrors the Windows engine). Runs on visionQueue (the
-    /// extraction subprocess + ORT inference are blocking).
-    private static func processDoc(
-        discovered: DiscoveredFile,
-        worker: VisionWorker,
-        started: CFAbsoluteTime
-    ) async -> TaggedFile {
-        _ = worker
-        return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
-            visionQueue.async {
-                let url = discovered.url
-                var tagged = TaggedFile(
-                    url: url, kind: "doc", extension: url.pathExtension.lowercased(),
-                    sizeBytes: discovered.sizeBytes,
-                    createdAt: discovered.creationDate, modifiedAt: discovered.modificationDate,
-                    visionTags: ["Doc"],
-                    tagsEvaluated: true
-                )
-                let extracted = bgeTextAndEmbedding(url: url)
-                tagged.docText = extracted.text
-                tagged.textEmbeddingBlob = extracted.blob
-                if let text = extracted.text {
-                    let keywords = DocumentKeywords.extract(text)
-                    tagged.visionTags.append(contentsOf: keywords.map(\.label))
-                    tagged.tagScores = Dictionary(
-                        uniqueKeysWithValues: keywords.map { ($0.label, $0.score) }
-                    )
-                }
-                tagged.textStageDone = true   // attempted — stops the backfill carve-out re-walk
-                tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
-                cont.resume(returning: tagged)
-            }
-        }
-    }
-
-    /// Extract a document's text ONCE and return both the raw text (for `doc_text` /
-    /// doc_fts full-text search) and its BGE semantic embedding blob (for `text_embeddings`).
-    /// Extraction — PDFKit on a large PDF especially — is the expensive step, so the two
-    /// consumers share a single `DocText.extract` (never extract twice). The text is captured
-    /// even when BGE isn't installed (blob nil), so doc_fts keyword search still works —
-    /// mirrors the Windows decoder-thread extract + optional BGE embed (tagging.rs). Bounded
-    /// by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
-    static func bgeTextAndEmbedding(url: URL) -> (text: String?, blob: Data?) {
-        guard let text = DocText.extract(path: url.path),
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return (nil, nil)
-        }
-        guard BGETextService.shared.load(modelDir: BGETextService.defaultModelDir),
-              let emb = BGETextService.shared.embed(text) else {
-            return (text, nil)
-        }
-        return (text, MobileCLIPService.embeddingToBlob(emb))
+        tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
+        return tagged
     }
 
     // MARK: - PDF pipeline
 
     private static let maxPDFRenderPixels: CGFloat = 50_000_000
 
-    /// Large PDFs take the metadata-only fast path before PDFKit. Smaller PDFs extract
-    /// a text layer first, then use OCR for up to three pages when no text is available.
+    /// First-page OCR (fast tier), 3-page cap, skip files > 20 MB.
+    /// Mirrors v1's Batch 10 heuristics — anything bigger is usually a
+    /// scanned manual where filename + Large_Document tag is enough.
     private static func processPDF(
         discovered: DiscoveredFile,
         worker: VisionWorker,
@@ -487,6 +269,8 @@ public enum Tagging {
     ) async -> TaggedFile {
         let url = discovered.url
         let sizeMB = Double(discovered.sizeBytes) / 1_048_576
+        // Skip OCR on large PDFs — usually scanned manuals where OCR cost
+        // far exceeds the value of the indexable text.
         if sizeMB > 20 {
             return TaggedFile(
                 url: url, kind: "pdf", extension: "pdf",
@@ -498,36 +282,10 @@ public enum Tagging {
                 tagsEvaluated: true
             )
         }
+
         return await withCheckedContinuation { (cont: CheckedContinuation<TaggedFile, Never>) in
             visionQueue.async {
-                // De-dup the NAS read: extract the PDF's text layer ONCE (PDFKit via
-                // DocText) and reuse it for both doc_fts and the BGE embedding. A
-                // text-layer PDF — the common case — yields text here, so the
-                // CGPDFDocument rasterize + OCR pass is SKIPPED: that pass exists only
-                // to recover text from image-only/scanned PDFs, so re-opening the file
-                // to OCR pages whose text we already have is pure redundant I/O (the
-                // user's 1039-PDF NAS corpus). Mirrors the Windows engine, which gets
-                // PDF text via pdfium and never raster-OCRs a PDF.
-                let extracted = bgeTextAndEmbedding(url: url)
-                var result = autoreleasepool { () -> TaggedFile in
-                    if let docText = extracted.text, !docText.isEmpty {
-                        let keywords = DocumentKeywords.extract(docText)
-                        return TaggedFile(
-                            url: url, kind: "pdf", extension: "pdf",
-                            sizeBytes: discovered.sizeBytes,
-                            createdAt: discovered.creationDate,
-                            modifiedAt: discovered.modificationDate,
-                            visionTags: ["PDF"] + keywords.map(\.label),
-                            tagScores: Dictionary(
-                                uniqueKeysWithValues: keywords.map { ($0.label, $0.score) }
-                            ),
-                            perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
-                            tagsEvaluated: true
-                        )
-                    }
-                    // No extractable text → scanned/image-only PDF: fall back to the
-                    // CGPDFDocument rasterize + first-pages OCR (the macOS recovery the
-                    // Windows pdfium path lacks).
+                let result = autoreleasepool { () -> TaggedFile in
                     guard let pdf = CGPDFDocument(url as CFURL) else {
                         // R3-13: a transient open failure must be recorded as a
                         // FAILURE (not a success with tagsEvaluated:true) — mirrors
@@ -548,7 +306,7 @@ public enum Tagging {
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
                     var fullText: [String] = []
-                    for pageNum in 1..<(pageCount + 1) {
+                    for pageNum in 1...pageCount {
                         guard let page = pdf.page(at: pageNum) else { continue }
                         let bounds = page.getBoxRect(.mediaBox)
                         guard bounds.width > 0, bounds.height > 0 else { continue }
@@ -596,15 +354,6 @@ public enum Tagging {
                         ocrStageRan: true
                     )
                 }
-                // Cache the BGE content embedding for restructure (PDFKit text, not the
-                // lossy OCR) — reusing the single extraction above — unless the file
-                // failed to open. textStageDone records the attempt (stops the backfill
-                // carve-out re-walk).
-                if !result.failed {
-                    result.docText = extracted.text
-                    result.textEmbeddingBlob = extracted.blob
-                    result.textStageDone = true
-                }
                 cont.resume(returning: result)
             }
         }
@@ -639,18 +388,27 @@ public enum Tagging {
         if effectiveSize > 0 && effectiveSize < 256 { return nil }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         // Iteration 5 perf finding: load (NAS I/O + decode) was P95 252ms — by
-        // far the dominant per-file cost. CLIP (256) / RAM++ (384) / phash / OCR all downsample
+        // far the dominant per-file cost. Two changes:
+        //   - `IfAbsent` (was `Always`): use embedded JPEG thumbnails when
+        //     present (every modern camera + iPhone photo embeds one). ~5-10x
+        //     faster read on photos-with-thumbs; ImageIO falls back to decoding
+        //     the full image only when the file lacks an embedded preview.
+        //   - Resolution: CLIP (256) / RAM++ (384) / phash / OCR all downsample
         //     internally, so they're unaffected by the source size — but face
         //     DETECTION is NOT: at 512 px a face that's ~10% of a 4000 px frame is
         //     only ~50 px, right at Vision's limit, so medium / group / background
         //     faces get missed. 1536 catches them (the prior 512 was the dominant
         //     "faces aren't detected" cause). Tunable via FILEID_SCAN_MAX_PIXELS —
         //     lower = faster scan + fewer faces, higher = slower + more faces.
-        // Always generate the bounded decode from the source: embedded JPEG
-        // previews are commonly only 160×120 and are too small for face gating.
         let maxPixels = ProcessInfo.processInfo.environment["FILEID_SCAN_MAX_PIXELS"]
             .flatMap { Int($0) }.map { max(256, min(4096, $0)) } ?? 1536
-        guard let img = decodeBoundedImage(src, maxPixelSize: maxPixels) else {
+        let opts: [CFString: Any] = [
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels
+        ]
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
             return nil
         }
         return (img, readEXIF(from: src))
@@ -747,35 +505,5 @@ public enum Tagging {
         if let lonRef = gps?[kCGImagePropertyGPSLongitudeRef] as? String, lonRef == "W",
            let l = lon { lon = -l }
         return (cameraModel, lat, lon)
-    }
-}
-
-private final class ContentHashContinuation: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data?, Never>?
-    private var finished = false
-
-    func install(_ continuation: CheckedContinuation<Data?, Never>) {
-        lock.lock()
-        if finished {
-            lock.unlock()
-            continuation.resume(returning: nil)
-            return
-        }
-        self.continuation = continuation
-        lock.unlock()
-    }
-
-    func finish(_ value: Data?) {
-        lock.lock()
-        guard !finished else {
-            lock.unlock()
-            return
-        }
-        finished = true
-        let continuation = continuation
-        self.continuation = nil
-        lock.unlock()
-        continuation?.resume(returning: value)
     }
 }

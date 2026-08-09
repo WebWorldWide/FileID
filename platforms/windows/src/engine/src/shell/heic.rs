@@ -11,8 +11,8 @@
 // always tries image-rs first (faster, no COM apartment cost). If image-
 // rs returns an error AND the file extension is .heic / .heif, we route
 // here. When the codec isn't installed (BitmapDecoder::CreateAsync
-// errors), the call reports whether the decoder is absent or the individual
-// file is malformed/unsupported — never panics, never blocks.
+// errors), the call surfaces as an Err the caller maps to a friendly
+// "install HEIF Image Extensions" message — never panics, never blocks.
 //
 // Output shape matches `decode_image_sync`: tightly packed RGB8 + (w,h).
 
@@ -57,42 +57,10 @@ impl Drop for ComScope {
     }
 }
 
-fn heif_decoder_available() -> Result<bool> {
-    let codecs = BitmapDecoder::GetDecoderInformationEnumerator()
-        .context("enumerate installed bitmap decoders")?;
-    for codec in codecs {
-        let extensions = codec
-            .FileExtensions()
-            .context("read bitmap decoder extensions")?;
-        if extensions.into_iter().any(|extension| {
-            matches!(
-                extension.to_string_lossy().to_ascii_lowercase().as_str(),
-                ".heic" | ".heif" | ".heics" | ".heifs"
-            )
-        }) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn decoder_creation_error(error: windows::core::Error) -> anyhow::Error {
-    match heif_decoder_available() {
-        Ok(true) => anyhow::anyhow!(
-            "HEIC/HEIF image is malformed or uses unsupported encoding features ({error})"
-        ),
-        Ok(false) => anyhow::anyhow!(
-            "HEIF decoder unavailable — install HEIF Image Extensions from the Microsoft Store ({error})"
-        ),
-        Err(probe_error) => anyhow::anyhow!(
-            "HEIC/HEIF decode failed ({error}); decoder availability check failed ({probe_error:#})"
-        ),
-    }
-}
-
 /// Decode a HEIC / HEIF file off disk into tightly packed RGB8 + (w,h).
-/// Returns a classified `Err` when the codec is absent or the file cannot be
-/// decoded by an installed HEIF provider.
+/// Returns `Err` when the HEIF Image Extensions codec isn't installed.
+/// Caller is expected to upgrade that error message to "install HEIF
+/// Image Extensions from the Microsoft Store" for the user.
 pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     // Scoped COM apartment for the WinRT activations below — held for the whole
     // function (the decoder + pixel-data async ops all need it live). Without it every
@@ -117,9 +85,10 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         .get()
         .context("await OpenAsync")?;
 
-    let decoder_operation = BitmapDecoder::CreateAsync(&stream)
-        .context("create HEIC/HEIF bitmap decoder operation")?;
-    let decoder = decoder_operation.get().map_err(decoder_creation_error)?;
+    let decoder = BitmapDecoder::CreateAsync(&stream)
+        .context("BitmapDecoder::CreateAsync (HEIF codec missing?)")?
+        .get()
+        .context("await BitmapDecoder build")?;
 
     let pw = decoder.PixelWidth().context("PixelWidth")?;
     let ph = decoder.PixelHeight().context("PixelHeight")?;

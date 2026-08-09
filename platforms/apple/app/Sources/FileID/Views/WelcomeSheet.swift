@@ -11,12 +11,9 @@ struct WelcomeSheet: View {
     @State private var clip = CLIPModelInstaller.shared
     @State private var ramplus = RamPlusModelInstaller.shared
     @State private var arcface = ArcFaceModelInstaller.shared
-    @State private var bge = BGEModelInstaller.shared
 
     private let recommendedFace: FaceEmbedderKind
-    private let hardwareRecommendedVLM: AIModelKind
-    private let availableDiskBytes: Int64?
-    @State private var selectedVLM: AIModelKind
+    private let recommendedVLM: AIModelKind
 
     @State private var vlmRequested = false
     @State private var vlmRequestedAt: Date?
@@ -33,22 +30,8 @@ struct WelcomeSheet: View {
     init(engine: EngineClient) {
         self.engine = engine
         let ram = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
-        let freeDisk = (try? FileManager.default.homeDirectoryForCurrentUser
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage
         self.recommendedFace = FaceEmbedderKind.defaultFor(ramGB: ram)
-        self.availableDiskBytes = freeDisk
-        let recommended = AIModelKind.safeDefaultFor(ramGB: ram,
-                                                      freeDiskBytes: freeDisk)
-        self.hardwareRecommendedVLM = recommended
-        self._selectedVLM = State(initialValue: AIModelKind.onboardingSelection(
-            persistedRawValue: UserDefaults.standard.string(forKey: "deepAnalyzeActiveModel"),
-            ramGB: ram,
-            freeDiskBytes: freeDisk))
-    }
-
-    private var systemRAMGB: Double {
-        Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        self.recommendedVLM = AIModelKind.safeDefaultFor(ramGB: ram)
     }
 
     var body: some View {
@@ -56,12 +39,10 @@ struct WelcomeSheet: View {
             header
             Divider().opacity(0.3)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
             modelRow(
                 title: "Semantic search (CLIP ViT-B/32)",
                 detail: "Type queries like \"sunset at the beach\" — FileID ranks every photo by visual relevance.",
-                size: "~\(CLIPModelInstaller.approxDownloadBytes / 1_048_576) MB",
+                size: "~210 MB",
                 installed: clipInstalled,
                 inProgress: clipInProgress,
                 progressLabel: clipProgressLabel,
@@ -95,51 +76,8 @@ struct WelcomeSheet: View {
                 cancel: { arcface.cancel(recommendedFace) }
             )
             modelRow(
-                title: "Document understanding (BGE-small)",
-                detail: "Reads document content so semantic search and Restructure group files by what they say, not only by filename.",
-                size: "~129 MB",
-                installed: bgeInstalled,
-                inProgress: bgeInProgress,
-                progressLabel: bgeProgressLabel,
-                progressFrac: bgeProgressFrac,
-                rateETA: bgeRateETA,
-                action: { bge.install() },
-                cancel: { bge.cancel() }
-            )
-            Menu {
-                ForEach(AIModelKind.allCases, id: \.rawValue) { kind in
-                    Button {
-                        selectedVLM = kind
-                    } label: {
-                        HStack {
-                            Text("\(kind.displayName) · \(kind.licenseName)")
-                            if kind == selectedVLM {
-                                Image(systemName: "checkmark").accessibilityHidden(true)
-                            }
-                        }
-                    }
-                    .accessibilityAddTraits(kind == selectedVLM ? .isSelected : [])
-                    .disabled(!vlmChoiceAvailable(kind))
-                }
-            } label: {
-                HStack {
-                    Text("Deep Analyze model")
-                    Spacer()
-                    Text(selectedVLM.displayName)
-                    Image(systemName: "chevron.up.chevron.down")
-                }
-            }
-            .disabled(vlmInProgress)
-            .accessibilityLabel("Deep Analyze model")
-            .accessibilityValue(selectedVLM.displayName)
-            Text(selectedVLM == hardwareRecommendedVLM
-                 ? "Recommended for this Mac's \(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB unified memory."
-                 : "Custom model choice. FileID will keep this selection for Deep Analyze.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            modelRow(
-                title: "Deep Analyze (\(selectedVLM.displayName))",
-                detail: "On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames.",
+                title: "Deep Analyze (\(recommendedVLM.displayName))",
+                detail: "On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames. Recommended pick for this Mac.",
                 size: vlmSizeLabel,
                 installed: vlmInstalled,
                 inProgress: vlmInProgress,
@@ -154,22 +92,11 @@ struct WelcomeSheet: View {
                     // otherwise re-show the spinner.
                     vlmRequested = false
                     resetVLMTracking()
-                    // Drop the engine's last mid-download fraction for this model
-                    // too — it isn't cleared by a Cancel and would otherwise fool a
-                    // fresh retry's watchdogs into thinking a download is underway.
-                    engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
                     engine.cancelPrewarm()
                 }
             )
-            .disabled(!vlmInstalled && !vlmInProgress && !selectedVLMCanInstall)
-            if let selectedVLMInstallBlocker {
-                Text(selectedVLMInstallBlocker)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
-                }
-            }
-            .frame(maxHeight: 560)
+
+            Spacer(minLength: 4)
 
             footer
         }
@@ -179,7 +106,6 @@ struct WelcomeSheet: View {
             clip.refreshStatus()
             ramplus.refreshStatus()
             arcface.refreshStatus()
-            bge.refreshStatus()
         }
         .onDisappear { installAllRequested = false }
         .onChange(of: anyInProgress) { _, inProgress in
@@ -188,9 +114,6 @@ struct WelcomeSheet: View {
             // missing and idle — re-enable the button instead of latching it
             // disabled for the rest of the session. (F-C4-017)
             if !inProgress && !allInstalled { installAllRequested = false }
-        }
-        .onChange(of: selectedVLM) { _, kind in
-            DeepAnalyzeSettings.shared.activeKind = kind
         }
         .onChange(of: vlmInstalled) { _, nowInstalled in
             if nowInstalled {
@@ -209,7 +132,7 @@ struct WelcomeSheet: View {
         .onChange(of: engine.modelDownloadProgress?.fraction ?? -1) { _, _ in
             guard vlmRequested,
                   let p = engine.modelDownloadProgress,
-                  p.modelKind == selectedVLM.rawValue else { return }
+                  p.modelKind == recommendedVLM.rawValue else { return }
             vlmLastProgressAt = Date()   // R6-07: feed the stall watchdog
             updateVLMRate(progress: p)
         }
@@ -224,13 +147,13 @@ struct WelcomeSheet: View {
             // Files already on disk → error is post-download MLX load,
             // not an install failure. Real load issues resurface on
             // first VLM use, where the banner has actual context.
-            if ModelInstallStatus.isInstalled(kind: selectedVLM) { return }
+            if ModelInstallStatus.isInstalled(kind: recommendedVLM) { return }
             // `unknown_model` is the canonical unrecognized-model-kind error
             // (renamed from the macOS-only `prewarm_invalid_kind` for cross-
             // platform parity, audit F-C2-003); route it like the prewarm_*
             // family so the row flips to Failed instead of spinning.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
-                || err.message.contains(selectedVLM.displayName) {
+                || err.message.contains(recommendedVLM.displayName) {
                 vlmLastError = err.message
                 vlmRequested = false
             }
@@ -256,13 +179,11 @@ struct WelcomeSheet: View {
                 if !clipInstalled, !clipInProgress { clip.install() }
                 if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
                 if !arcfaceInstalled, !arcfaceInProgress { arcface.install(recommendedFace) }
-                if !bgeInstalled, !bgeInProgress { bge.install() }
                 if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.gold)
-            .disabled(allInstalled || installAllRequested
-                      || (!vlmInstalled && !selectedVLMCanInstall))
+            .disabled(allInstalled || installAllRequested)
 
             Button(allInstalled ? "Done" : "Skip for now") { dismiss() }
                 .buttonStyle(.bordered)
@@ -306,8 +227,6 @@ struct WelcomeSheet: View {
                         Text(rateETA).font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
                     }
-                } else if let label = progressLabel {
-                    Text(label).font(.caption2.monospaced()).foregroundStyle(.red)
                 }
             }
             if installed {
@@ -327,22 +246,11 @@ struct WelcomeSheet: View {
 
     private func triggerVLMInstall() {
         guard !vlmInProgress else { return }
-        guard selectedVLMCanInstall else {
-            vlmLastError = selectedVLMInstallBlocker ?? "This model cannot be installed safely on this Mac."
-            return
-        }
-        guard ModelLicenseGate.ensureAccepted(for: selectedVLM) else { return }
         resetVLMTracking()
-        // Clear any residual progress from a just-cancelled attempt at the same
-        // model so both watchdogs below arm against a clean slate — otherwise a
-        // lingering fraction makes the 30 s "no response" guard see the old
-        // modelKind and bail, and a genuinely-hung retry spins forever. (R6-07)
-        engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
         vlmRequested = true
         let started = Date()
         vlmRequestedAt = started
-        DeepAnalyzeSettings.shared.activeKind = selectedVLM
-        engine.prewarmModel(selectedVLM.rawValue)
+        engine.prewarmModel(recommendedVLM.rawValue)
         // If the engine never reports progress, surface a clear error
         // after 30 s rather than spinning forever. A real download
         // sends a fraction event well within that window.
@@ -350,7 +258,7 @@ struct WelcomeSheet: View {
             try? await Task.sleep(for: .seconds(30))
             guard vlmRequested,
                   vlmRequestedAt == started,
-                  engine.modelDownloadProgress?.modelKind != selectedVLM.rawValue else { return }
+                  engine.modelDownloadProgress?.modelKind != recommendedVLM.rawValue else { return }
             vlmLastError = "No response from engine — try again."
             vlmRequested = false
         }
@@ -437,34 +345,6 @@ struct WelcomeSheet: View {
         return nil
     }
 
-    private var bgeInstalled: Bool {
-        if case .installed = bge.status { return true }
-        return false
-    }
-    private var bgeInProgress: Bool {
-        if case .downloading = bge.status { return true }
-        return false
-    }
-    private var bgeProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = bge.status { return frac }
-        return nil
-    }
-    private var bgeProgressLabel: String? {
-        switch bge.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var bgeRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = bge.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
     private var arcfaceInstalled: Bool {
         if case .installed = arcface.status[recommendedFace] { return true }
         return false
@@ -496,38 +376,19 @@ struct WelcomeSheet: View {
     }
 
     private var vlmInstalled: Bool {
-        ModelInstallStatus.isInstalled(kind: selectedVLM)
-    }
-    private func vlmChoiceAvailable(_ kind: AIModelKind) -> Bool {
-        kind.fits(ramGB: systemRAMGB)
-            && (ModelInstallStatus.isInstalled(kind: kind)
-                || kind.fits(freeDiskBytes: availableDiskBytes))
-    }
-    private var selectedVLMCanInstall: Bool {
-        vlmChoiceAvailable(selectedVLM)
-    }
-    private var selectedVLMInstallBlocker: String? {
-        guard !vlmInstalled else { return nil }
-        if !selectedVLM.fits(ramGB: systemRAMGB) {
-            return "\(selectedVLM.displayName) needs more unified memory than this Mac can safely provide. Choose a lighter model."
-        }
-        if !selectedVLM.fits(freeDiskBytes: availableDiskBytes) {
-            let gib = Double(selectedVLM.requiredFreeBytes) / 1_073_741_824.0
-            return "Free space on the models drive before installing (about \(gib.formatted(.number.precision(.fractionLength(1)))) GB required while files are verified)."
-        }
-        return nil
+        ModelInstallStatus.isInstalled(kind: recommendedVLM)
     }
     private var vlmInProgress: Bool {
         guard vlmRequested else { return false }
         if vlmInstalled { return false }
-        if let p = engine.modelDownloadProgress, p.modelKind == selectedVLM.rawValue {
+        if let p = engine.modelDownloadProgress, p.modelKind == recommendedVLM.rawValue {
             return p.fraction < 1.0
         }
         return true
     }
     private var vlmProgressFrac: Double? {
         guard vlmRequested else { return nil }
-        if let p = engine.modelDownloadProgress, p.modelKind == selectedVLM.rawValue {
+        if let p = engine.modelDownloadProgress, p.modelKind == recommendedVLM.rawValue {
             return p.fraction
         }
         return nil
@@ -535,7 +396,7 @@ struct WelcomeSheet: View {
     private var vlmProgressLabel: String? {
         if let err = vlmLastError { return "Failed: \(err)" }
         guard vlmRequested else { return nil }
-        if let p = engine.modelDownloadProgress, p.modelKind == selectedVLM.rawValue {
+        if let p = engine.modelDownloadProgress, p.modelKind == recommendedVLM.rawValue {
             return p.message
         }
         return "Starting…"
@@ -549,13 +410,13 @@ struct WelcomeSheet: View {
     private var resolvedVLMTotalBytes: Int64 {
         if let locked = vlmLockedTotalBytes { return locked }
         if let p = engine.modelDownloadProgress,
-           p.modelKind == selectedVLM.rawValue,
+           p.modelKind == recommendedVLM.rawValue,
            p.fraction > 0.05,
            let t = p.totalBytes,
-           t >= Int64(Double(selectedVLM.approxBytes) * 0.9) {
+           t >= Int64(Double(recommendedVLM.approxBytes) * 0.9) {
             return t
         }
-        return selectedVLM.approxBytes
+        return recommendedVLM.approxBytes
     }
 
     private var vlmSizeLabel: String {
@@ -565,7 +426,7 @@ struct WelcomeSheet: View {
 
     private var vlmRateETA: String? {
         guard let p = engine.modelDownloadProgress,
-              p.modelKind == selectedVLM.rawValue,
+              p.modelKind == recommendedVLM.rawValue,
               p.fraction > 0, p.fraction < 1.0 else { return nil }
         let total = resolvedVLMTotalBytes
         let written = Int64(Double(total) * p.fraction)
@@ -582,7 +443,7 @@ struct WelcomeSheet: View {
     /// would jump to a tiny total every time a new file starts.
     private func updateVLMRate(progress p: ModelDownloadProgress) {
         if vlmLockedTotalBytes == nil,
-           let t = p.totalBytes, t > selectedVLM.approxBytes / 2 {
+           let t = p.totalBytes, t > recommendedVLM.approxBytes / 2 {
             vlmLockedTotalBytes = t
         }
         let now = Date().timeIntervalSinceReferenceDate
@@ -625,13 +486,13 @@ struct WelcomeSheet: View {
     }
 
     private var allInstalled: Bool {
-        clipInstalled && ramplusInstalled && arcfaceInstalled && bgeInstalled && vlmInstalled
+        clipInstalled && ramplusInstalled && arcfaceInstalled && vlmInstalled
     }
 
     /// True while any of the three onboarding downloads is still running.
     /// Drives "Install all" re-enablement once a cancel/failure settles
     /// everything back to idle. (F-C4-017)
     private var anyInProgress: Bool {
-        clipInProgress || ramplusInProgress || arcfaceInProgress || bgeInProgress || vlmInProgress
+        clipInProgress || ramplusInProgress || arcfaceInProgress || vlmInProgress
     }
 }

@@ -17,120 +17,25 @@ fileprivate struct SpotlightRow: Sendable {
     let tags: [String]
 }
 
-private actor SpotlightIndexCoordinator {
-    static let shared = SpotlightIndexCoordinator()
-
-    private var draining = false
-    private var pendingDBPath: String?
-    private var pendingDeindex = Set<Int64>()
-    private var pendingWipe = false
-
-    func requestIndex(dbPath: String) {
-        pendingDBPath = dbPath
-        startDrainingIfNeeded()
-    }
-
-    func requestDeindex(ids: [Int64]) {
-        pendingDeindex.formUnion(ids)
-        startDrainingIfNeeded()
-    }
-
-    func requestWipe() {
-        pendingWipe = true
-        pendingDeindex.removeAll(keepingCapacity: true)
-        pendingDBPath = nil
-        startDrainingIfNeeded()
-    }
-
-    private func startDrainingIfNeeded() {
-        guard !draining else { return }
-        draining = true
-        Task { await drain() }
-    }
-
-    private func drain() async {
-        while true {
-            if pendingWipe {
-                pendingWipe = false
-                let wiped = await SpotlightIndexer.performWipe()
-                if !wiped {
-                    pendingWipe = true
-                    try? await Task.sleep(for: .seconds(5))
-                }
-                continue
-            }
-            if !pendingDeindex.isEmpty {
-                let ids = Array(pendingDeindex)
-                pendingDeindex.removeAll(keepingCapacity: true)
-                let deindexed = await SpotlightIndexer.performDeindex(ids: ids)
-                if !deindexed {
-                    pendingDeindex.formUnion(ids)
-                    try? await Task.sleep(for: .seconds(5))
-                }
-                continue
-            }
-            if let dbPath = pendingDBPath {
-                pendingDBPath = nil
-                let indexed = await SpotlightIndexer.indexPass(dbPath: dbPath)
-                if !indexed {
-                    pendingDBPath = dbPath
-                    try? await Task.sleep(for: .seconds(5))
-                }
-                continue
-            }
-            draining = false
-            return
-        }
-    }
-}
-
 public enum SpotlightIndexer {
 
     public static let domainIdentifier = "com.fileid.photos"
 
-    static let batchSize = 500
-
-    /// Coalesce overlapping requests and index in stable-ID pages so database rows
-    /// and CoreSpotlight objects never scale in memory with the whole library.
+    /// Bulk re-index every file currently in the DB. Idempotent —
+    /// CSSearchableIndex de-duplicates by uniqueIdentifier, so calling
+    /// this repeatedly keeps the index in sync.
     public static func indexAll(dbPath: String) async {
-        await SpotlightIndexCoordinator.shared.requestIndex(dbPath: dbPath)
-    }
-
-    fileprivate static func indexPass(dbPath: String) async -> Bool {
-        var afterID: Int64 = -1
-        while true {
-            let pageStart = afterID
-            var rows: [SpotlightRow]?
-            for attempt in 0..<2 {
-                let result = await Task.detached(priority: .background) {
-                    Result {
-                        try readRows(dbPath: dbPath, afterID: pageStart, limit: batchSize)
-                    }
-                }.value
-                switch result {
-                case .success(let page):
-                    rows = page
-                case .failure(let error):
-                    if attempt == 0 {
-                        try? await Task.sleep(for: .milliseconds(250))
-                    } else {
-                        let ns = error as NSError
-                        NSLog("FileID Spotlight: page read failed — \(ns.domain) \(ns.code)")
-                    }
-                }
-                if rows != nil { break }
-            }
-            guard let rows else { return false }
-            guard !rows.isEmpty else { return true }
-            let items = rows.map(makeItem)
-            do {
-                try await CSSearchableIndex.default().indexSearchableItems(items)
-            } catch {
-                let ns = error as NSError
-                NSLog("FileID Spotlight: batch index failed — \(ns.domain) \(ns.code)")
-                return false
-            }
-            afterID = rows[rows.count - 1].id
+        let rows: [SpotlightRow] = await Task.detached(priority: .background) {
+            readRows(dbPath: dbPath)
+        }.value
+        guard !rows.isEmpty else { return }
+        let items = rows.map(makeItem)
+        do {
+            try await CSSearchableIndex.default().indexSearchableItems(items)
+        } catch {
+            // Log silently — Spotlight failures shouldn't surface as
+            // user errors; the app still works.
+            NSLog("FileID Spotlight: bulk index failed — \(error)")
         }
     }
 
@@ -138,25 +43,9 @@ public enum SpotlightIndexer {
     /// wipe-library flow (EngineClient.deleteLibraryFiles) so wiped
     /// files' captions/tags/paths leave ⌘Space with the library.
     public static func wipe() {
-        Task { await SpotlightIndexCoordinator.shared.requestWipe() }
-    }
-
-    fileprivate static func performWipe() async -> Bool {
-        for attempt in 0..<3 {
-            let error: Error? = await withCheckedContinuation { continuation in
-                CSSearchableIndex.default().deleteSearchableItems(
-                    withDomainIdentifiers: [domainIdentifier]
-                ) { continuation.resume(returning: $0) }
-            }
-            guard let error else { return true }
-            if attempt < 2 {
-                try? await Task.sleep(for: .milliseconds(250))
-            } else {
-                let ns = error as NSError
-                NSLog("FileID Spotlight: wipe failed — \(ns.domain) \(ns.code)")
-            }
-        }
-        return false
+        CSSearchableIndex.default().deleteSearchableItems(
+            withDomainIdentifiers: [domainIdentifier]
+        )
     }
 
     /// Drop the Spotlight items for deleted rows — `indexAll` only
@@ -164,46 +53,26 @@ public enum SpotlightIndexer {
     /// queryable in ⌘Space indefinitely.
     public static func deindex(ids: [Int64]) {
         guard !ids.isEmpty else { return }
-        Task { await SpotlightIndexCoordinator.shared.requestDeindex(ids: ids) }
-    }
-
-    fileprivate static func performDeindex(ids: [Int64]) async -> Bool {
-        for attempt in 0..<3 {
-            let error: Error? = await withCheckedContinuation { continuation in
-                CSSearchableIndex.default().deleteSearchableItems(
-                    withIdentifiers: ids.map { "fileid-\($0)" }
-                ) { continuation.resume(returning: $0) }
-            }
-            guard let error else { return true }
-            if attempt < 2 {
-                try? await Task.sleep(for: .milliseconds(250))
-            } else {
-                let ns = error as NSError
-                NSLog("FileID Spotlight: deindex failed — \(ns.domain) \(ns.code)")
-            }
-        }
-        return false
+        CSSearchableIndex.default().deleteSearchableItems(
+            withIdentifiers: ids.map { "fileid-\($0)" }
+        )
     }
 
     // MARK: - Internals
 
-    private static func readRows(
-        dbPath: String, afterID: Int64, limit: Int
-    ) throws -> [SpotlightRow] {
+    private static func readRows(dbPath: String) -> [SpotlightRow] {
         var c = Configuration()
         c.readonly = true
-        let q = try DatabaseQueue(path: dbPath, configuration: c)
-        return try q.read { db -> [SpotlightRow] in
+        guard let q = try? DatabaseQueue(path: dbPath, configuration: c) else { return [] }
+        return (try? q.read { db -> [SpotlightRow] in
             let raw = try Row.fetchAll(db, sql: """
                 SELECT files.id, files.path_text, files.kind,
                        files.vlm_proposed_name, files.vlm_description,
                        (SELECT GROUP_CONCAT(tag, '|')
                           FROM tags WHERE tags.file_id = files.id) AS taglist
                 FROM files
-                WHERE files.failed = 0 AND files.id > ?
-                ORDER BY files.id
-                LIMIT ?
-                """, arguments: [afterID, limit])
+                WHERE files.failed = 0
+                """)
             return raw.compactMap { r -> SpotlightRow? in
                 guard let id: Int64 = r["id"],
                       let path: String = r["path_text"],
@@ -217,7 +86,7 @@ public enum SpotlightIndexer {
                     tags: tags
                 )
             }
-        }
+        }) ?? []
     }
 
     private static func makeItem(_ r: SpotlightRow) -> CSSearchableItem {

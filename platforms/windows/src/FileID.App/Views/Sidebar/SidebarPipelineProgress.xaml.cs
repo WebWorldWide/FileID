@@ -41,6 +41,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
     private SolidColorBrush? _fadedGold;
     private SolidColorBrush? _goldStroke;
     private Brush? _primaryText;
+    private Brush? _secondaryText;
     private Brush? _tertiaryText;
     private SolidColorBrush? _inactiveDot;
     private SolidColorBrush? _inactiveDotStroke;
@@ -56,6 +57,7 @@ public sealed partial class SidebarPipelineProgress : UserControl
         _fadedGold = new SolidColorBrush(Color.FromArgb(0x99, 0xFF, 0xCC, 0x00));
         _goldStroke = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00));
         _primaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorPrimaryBrush");
+        _secondaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
         _tertiaryText = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorTertiaryBrush");
         _inactiveDot = InactiveDotBrush();
         _inactiveDotStroke = InactiveDotStrokeBrush();
@@ -281,53 +283,15 @@ public sealed partial class SidebarPipelineProgress : UserControl
             ui.TryEnqueue(() =>
             {
                 _dbDerivedIndex = derived;
-                _lastRenderedActiveIndex = int.MinValue;
-                _lastRenderedCompletedThrough = int.MinValue;
+                _lastRenderedIndex = int.MinValue;
                 SyncStage();
             });
         });
     }
 
-    private int _lastRenderedActiveIndex = int.MinValue;
-    private int _lastRenderedCompletedThrough = int.MinValue;
-
-    internal static (int ActiveIndex, int CompletedThrough) ResolveStageState(
-        ScanPhase? phase,
-        bool peopleDone,
-        bool captionsRunning,
-        bool captionsDone,
-        int dbDerivedIndex)
-    {
-        int activeIndex = phase switch
-        {
-            ScanPhase.Discovering => 0,
-            ScanPhase.Tagging => 1,
-            ScanPhase.PostScan => 2,
-            _ => -1,
-        };
-        int completedThrough = activeIndex > 0 ? activeIndex - 1 : -1;
-        if (activeIndex >= 0)
-        {
-            return (activeIndex, completedThrough);
-        }
-        if (captionsDone)
-        {
-            return (-1, 4);
-        }
-        if (captionsRunning)
-        {
-            return (3, 2);
-        }
-        if (peopleDone)
-        {
-            return (-1, 2);
-        }
-        if (phase == ScanPhase.Completed)
-        {
-            return (2, 1);
-        }
-        return dbDerivedIndex >= 0 ? (-1, dbDerivedIndex) : (-1, -1);
-    }
+    // Last activeIndex actually rendered; lets SyncStage early-return on the
+    // ~10 Hz LastProgress storm when the pipeline stage hasn't changed.
+    private int _lastRenderedIndex = int.MinValue;
 
     private void SyncStage()
     {
@@ -346,24 +310,41 @@ public sealed partial class SidebarPipelineProgress : UserControl
         // at Captions when the user cancels.
         bool captionsDone = EngineClient.Instance.DeepAnalyzeComplete is not null;
 
-        var (activeIndex, completedThrough) = ResolveStageState(
-            phase,
-            peopleDone,
-            captionsRunning,
-            captionsDone,
-            _dbDerivedIndex);
-        if (activeIndex == _lastRenderedActiveIndex
-            && completedThrough == _lastRenderedCompletedThrough)
+        int activeIndex = phase switch
         {
-            return;
+            ScanPhase.Discovering => 0,
+            ScanPhase.Tagging => 1,
+            ScanPhase.PostScan => 2,
+            _ => -1,
+        };
+        if (activeIndex < 0)
+        {
+            if (captionsDone) activeIndex = 4;
+            else if (captionsRunning) activeIndex = 3;
+            else if (peopleDone) activeIndex = 2;
+            // A finished scan never regresses below the People stage: face
+            // clustering auto-runs right after ScanComplete, so before its event
+            // lands all the latches above are still unset and activeIndex would
+            // stay -1 — blanking the whole strip to grey for a beat on EVERY scan
+            // completion. Hold at People (2) instead of going dark.
+            else if (phase == ScanPhase.Completed) activeIndex = 2;
+            // No live engine signal at all (fresh launch of an existing library):
+            // fall back to the persisted DB-derived stage so the strip reflects a
+            // prior session's scan instead of blanking to grey.
+            else if (_dbDerivedIndex >= 0) activeIndex = _dbDerivedIndex;
         }
-        _lastRenderedActiveIndex = activeIndex;
-        _lastRenderedCompletedThrough = completedThrough;
+
+        // The rendered strip is a pure function of activeIndex, but LastProgress
+        // fires ~10 Hz throughout a scan while activeIndex changes only a handful
+        // of times. Skip the redundant 5-cell rewrite (Fill/Width/Height + a
+        // per-cell AutomationProperties string allocation) when nothing changed.
+        if (activeIndex == _lastRenderedIndex) return;
+        _lastRenderedIndex = activeIndex;
 
         // brushes cached at ctor time — see field comments.
         for (int i = 0; i < Stages.Length; i++)
         {
-            bool filled = i <= completedThrough;
+            bool filled = i < activeIndex || activeIndex == 4;
             bool active = i == activeIndex;
 
             // Dot fill + stroke.
@@ -400,12 +381,8 @@ public sealed partial class SidebarPipelineProgress : UserControl
             // Connectors: a half is "filled" iff the dot it connects to AND
             // the dot it leads from are filled (or the half belongs to the
             // active dot extending toward a filled side).
-            bool leftFilled = i > 0
-                && i - 1 <= completedThrough
-                && (filled || active);
-            bool rightFilled = i < Stages.Length - 1
-                && filled
-                && (i + 1 <= completedThrough || i + 1 == activeIndex);
+            bool leftFilled = i > 0 && (i - 1 < activeIndex || activeIndex == 4);
+            bool rightFilled = i < Stages.Length - 1 && filled;
 
             if (_leftConnectors[i] is { } lc)
                 lc.Fill = leftFilled ? _goldBrush : _inactiveConnector;

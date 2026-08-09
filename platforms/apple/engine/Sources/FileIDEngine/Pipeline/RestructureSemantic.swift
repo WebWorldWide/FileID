@@ -24,11 +24,8 @@ public enum RestructureSemantic {
         case auto, review, ask
     }
 
-    /// Per-file signals. `clip` is the L2-normalized representative vector for the
-    /// pass that built it: the 512-d CLIP image embedding (image pass), or a
-    /// filename+tag bag-of-words signature for the non-image pass (PDFs, video,
-    /// audio — see `nonImageSignatures`). Empty only in the raw input to the
-    /// non-image pass, before `nonImageSignatures` fills it.
+    /// Per-file signals. `clip` is the L2-normalized 512-d CLIP image embedding;
+    /// callers only pass files that have one (images), so it is never empty.
     public struct SemanticFile: Sendable {
         public let fileID: Int64
         public let source: String
@@ -105,23 +102,11 @@ public enum RestructureSemantic {
     }
 
     // Image pass — representative is the L2-normalized 512-d CLIP image embedding.
-    // Thresholds calibrated 2026-06-17 against a real ~3.3k-image personal-photo library
-    // (the "Adlon" corpus). Finding: CLIP cosines for personal photos compress into a HIGH
-    // band — intra-folder cohesion median ≈ 0.80, inter-folder centroid p90 ≈ 0.84 — so the
-    // original folderMatchCos 0.55 / autoFolderCos 0.72 sat BELOW the entire distribution
-    // and auto-routed every photo into the nearest catch-all folder (109 event folders →
-    // one "Camera Roll"). The new bar sits between the inter-folder p90 (don't merge across
-    // events) and the intra-folder median (still group a real event). Env-overridable for
-    // further owner tuning, mirroring the non-image knobs. (RESTRUCTURE.md R3 calibration)
-    public static var imageProfile: Profile {
-        Profile(
-            wClip: 0.70, wTags: 0.22, wTime: 0.08,
-            folderMatchCos: envFloat("FILEID_RESTRUCTURE_IMG_FOLDER_COS", 0.80),
-            autoFolderCos: envFloat("FILEID_RESTRUCTURE_IMG_AUTO_FOLDER_COS", 0.86),
-            autoCohesion: envFloat("FILEID_RESTRUCTURE_IMG_AUTO_COH", 0.78),
-            reviewCohesion: envFloat("FILEID_RESTRUCTURE_IMG_REVIEW_COH", 0.70),
-            minMargin: 0.05, autoMinMembers: 4)
-    }
+    // Values are unchanged from the original calibrated constants.
+    public static let imageProfile = Profile(
+        wClip: 0.70, wTags: 0.22, wTime: 0.08,
+        folderMatchCos: 0.55, autoFolderCos: 0.72, autoCohesion: 0.62,
+        reviewCohesion: 0.50, minMargin: 0.05, autoMinMembers: 4)
 
     private static let tagVocabCap = 256
     // Filenames tokenize into many one-off terms, so the non-image bag-of-words
@@ -169,20 +154,11 @@ public enum RestructureSemantic {
     }
 
     private static func fileHyperparams() -> IdentityClustering.Hyperparameters {
-        // Cluster-merge cosines calibrated 2026-06-17 on the real ~3.3k-image Adlon
-        // corpus. The original 0.50/0.40/0.42 were tuned for DIVERSE images; CLIP cosines
-        // for a coherent personal library compress into a high band (typical pair ≈ 0.71+,
-        // within-event ≈ 0.80), so those low bars merged the ENTIRE photo set into one
-        // cluster that then routed to a single catch-all folder. The new bars sit at the
-        // within-event cohesion so a cluster ≈ one event. Env-overridable for owner tuning;
-        // the single-knob GRANULARITY delta still shifts all three together.
+        // Looser than faces: a semantic group is broader than one identity.
         let d = granularityDelta()
         return IdentityClustering.Hyperparameters(
-            pass1Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P1", 0.84) + d,
-            pass2Cosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P2", 0.76) + d,
-            pass2Margin: 0.08 + d * 0.5,  // delta scales margin proportionally
-            pass3VarianceThreshold: 0.06,
-            pass3MinMeanCosine: envFloat("FILEID_RESTRUCTURE_CLUSTER_P3", 0.76) + d,
+            pass1Cosine: 0.50 + d, pass2Cosine: 0.40 + d, pass2Margin: 0.08,
+            pass3VarianceThreshold: 0.06, pass3MinMeanCosine: 0.42 + d,
             pass3MaxSplits: 5, kNN: 12)
     }
 
@@ -214,94 +190,29 @@ public enum RestructureSemantic {
     /// distinctively-named group under `libraryRoot`. Density-noise / singleton
     /// files are not returned — the caller routes the rest through its rule
     /// cascade fallback.
-    ///
-    /// The image pass pre-segments files by capture-time gap before clustering so
-    /// events separated by > `FILEID_RESTRUCTURE_TIME_GAP` seconds (default 2 h)
-    /// never compete in the same cluster. Time gaps are the strongest natural
-    /// album-boundary signal; CLIP handles within-event appearance separation.
     public static func classify(
         files: [SemanticFile],
         prototypes: [FolderPrototype],
         libraryRoot: String,
         profile: Profile = imageProfile
     ) -> [Move] {
-        let hp = fileHyperparams()
-        // Shared name registry created ONCE here and threaded through every
-        // segment, so segment 1's "Beach" cluster doesn't collide with segment
-        // 2's independent "Beach" cluster into the same folder — names stay
-        // globally unique across the whole reorg. (BL-01)
-        var usedGroupNames = Set<String>()
-        // Non-default profile (document / non-image pass): skip time segmentation —
-        // docs lack reliable timestamps and the passage handles them separately.
-        guard profile.wTime == imageProfile.wTime && profile.wClip == imageProfile.wClip else {
-            return classifyProfiled(files: files, prototypes: prototypes,
-                                    libraryRoot: libraryRoot, profile: profile, hp: hp,
-                                    usedGroupNames: &usedGroupNames)
-        }
-        var moves: [Move] = []
-        for segment in timeSegments(files) {
-            moves.append(contentsOf: classifyProfiled(
-                files: segment, prototypes: prototypes,
-                libraryRoot: libraryRoot, profile: profile, hp: hp,
-                usedGroupNames: &usedGroupNames))
-        }
-        return moves
-    }
-
-    /// Default time-gap threshold: 2 hours between consecutive photos signals a
-    /// new event. Configurable via `FILEID_RESTRUCTURE_TIME_GAP` (seconds).
-    static func timeGapSeconds() -> Double {
-        ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_TIME_GAP"]
-            .flatMap(Double.init) ?? 7_200
-    }
-
-    /// Pre-segment photos by capture-time gap. Files separated by > `timeGapSeconds()`
-    /// go into independent segments that are clustered on their own — time gaps are
-    /// the primary event-boundary signal. Files without a timestamp cluster last.
-    /// (RESTRUCTURE.md §2 — "time-gap event segmentation cascade")
-    static func timeSegments(_ files: [SemanticFile]) -> [[SemanticFile]] {
-        guard files.count >= 2 else { return [files] }
-        let gap = timeGapSeconds()
-        let timed = files.filter { $0.timeUnix > 0 }.sorted { $0.timeUnix < $1.timeUnix }
-        let untimed = files.filter { $0.timeUnix <= 0 }
-        var segments: [[SemanticFile]] = []
-        var cur: [SemanticFile] = []
-        for f in timed {
-            if let last = cur.last, f.timeUnix - last.timeUnix > gap {
-                segments.append(cur)
-                cur = [f]
-            } else { cur.append(f) }
-        }
-        if !cur.isEmpty { segments.append(cur) }
-        if !untimed.isEmpty { segments.append(untimed) }
-        return segments
-    }
-
-    static func classifyProfiled(
-        files: [SemanticFile],
-        prototypes: [FolderPrototype],
-        libraryRoot: String,
-        profile: Profile,
-        hp: IdentityClustering.Hyperparameters,
-        usedGroupNames: inout Set<String>
-    ) -> [Move] {
         guard !files.isEmpty else { return [] }
         let globalFreq = tagFrequencies(files)
         let vocab = vocabFromFreq(globalFreq, cap: tagVocabCap)
         let fused = files.map { fuse($0, vocab: vocab, profile: profile) }
-        let clusterIDs = cluster(fused, hp)
+        let clusterIDs = cluster(fused)
 
         var clusters: [Int: [Int]] = [:]
         for (i, cid) in clusterIDs.enumerated() { clusters[cid, default: []].append(i) }
 
         var moves: [Move] = []
-        // `usedGroupNames` (an inout param) is the shared registry of names
-        // already claimed by a *different* new-group cluster — this run AND
-        // every prior time-segment, so two segments that both mint "Beach" get
-        // distinct folders (BL-01, #9). Consulted ONLY by the new-group branch;
-        // the existing-folder branch legitimately routes many clusters into one
+        // Group names already claimed by a *different* new-group cluster this
+        // run. Without this, two clusters with identical top tags collapse into
+        // one folder (#9). Consulted ONLY by the new-group branch; the
+        // existing-folder branch legitimately routes many clusters into one
         // user folder. Tracked in the SANITIZED namespace that actually backs
         // the directory. (F-C3-014)
+        var usedGroupNames = Set<String>()
         // Stable cluster iteration (smallest id first) so the dedup below is
         // deterministic across runs.
         for cid in clusters.keys.sorted() {
@@ -426,56 +337,8 @@ public enum RestructureSemantic {
         // already is. Real user folders ("Taxes", "Invoices") still anchor.
         // (RESTRUCTURE.md R1)
         let protos = folderPrototypes(sigs, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
-        var usedGroupNames = Set<String>()
-        return classifyProfiled(files: sigs, prototypes: protos,
-                                libraryRoot: libraryRoot, profile: nonImageProfile,
-                                hp: fileHyperparams(), usedGroupNames: &usedGroupNames)
-    }
-
-    /// Document-content pass — cluster documents by their BGE text embedding (in `clip`),
-    /// which reads the content rather than the filename. Mirrors the Windows engine's
-    /// `classify_documents`. Each `file.clip` MUST be the 384-d BGE vector; the caller
-    /// supplies only docs it could extract text for + embed. Doc-specific thresholds
-    /// because BGE cosines sit lower than CLIP-image cosines. (RESTRUCTURE.md R3)
-    public static func classifyDocuments(
-        files: [SemanticFile],
-        libraryRoot: String
-    ) -> [Move] {
-        guard files.count >= 2 else { return [] }
-        let protos = folderPrototypes(files, minFiles: 4).filter { !isJunkPrototypeFolder($0.path) }
-        var usedGroupNames = Set<String>()
-        return classifyProfiled(files: files, prototypes: protos,
-                                libraryRoot: libraryRoot, profile: docProfile,
-                                hp: docHyperparams(), usedGroupNames: &usedGroupNames)
-    }
-
-    /// Document content-embedding profile (byte-faithful with Rust `doc_profile`). The
-    /// representative IS the 384-d BGE vector (`wClip` dominates). Thresholds CALIBRATED
-    /// 2026-06-17 on the owner's real ~1.4k-doc corpus: the engine MEAN-pools BGE, whose
-    /// cosines compress high (within-folder cohesion ≈ 0.786, inter p90 ≈ 0.80), so the bars
-    /// sit there — NOT at the lower CLS-pooled A/B values, which collapsed docs into one
-    /// folder. Validated: doc folder-agreement 46%→53%. Env-overridable.
-    static var docProfile: Profile {
-        Profile(
-            wClip: 0.92, wTags: 0.06, wTime: 0.02,
-            folderMatchCos: envFloat("FILEID_RESTRUCTURE_DOC_FOLDER_COS", 0.78),
-            autoFolderCos: envFloat("FILEID_RESTRUCTURE_DOC_AUTO_FOLDER_COS", 0.84),
-            autoCohesion: envFloat("FILEID_RESTRUCTURE_DOC_AUTO_COH", 0.78),
-            reviewCohesion: envFloat("FILEID_RESTRUCTURE_DOC_REVIEW_COH", 0.70),
-            minMargin: 0.05, autoMinMembers: 4)
-    }
-
-    /// Cluster-merge cosines for the MEAN-pooled BGE document space (compresses high, like
-    /// the image space). Byte-faithful with Rust `doc_hyperparams`. Env-overridable.
-    static func docHyperparams() -> IdentityClustering.Hyperparameters {
-        let d = granularityDelta()
-        return IdentityClustering.Hyperparameters(
-            pass1Cosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P1", 0.82) + d,
-            pass2Cosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P2", 0.74) + d,
-            pass2Margin: 0.06,
-            pass3VarianceThreshold: 0.06,
-            pass3MinMeanCosine: envFloat("FILEID_RESTRUCTURE_DOC_CLUSTER_P3", 0.74) + d,
-            pass3MaxSplits: 5, kNN: 12)
+        return classify(files: sigs, prototypes: protos,
+                        libraryRoot: libraryRoot, profile: nonImageProfile)
     }
 
     /// A folder that must never act as a learn-your-style prototype — a generic
@@ -602,7 +465,7 @@ public enum RestructureSemantic {
     /// L2-normalize the whole so the clusterer's cosine is meaningful.
     private static func fuse(_ file: SemanticFile, vocab: [String: Int], profile: Profile) -> [Float] {
         var out: [Float] = []
-        out.reserveCapacity(file.clip.count + vocab.count + 5)
+        out.reserveCapacity(file.clip.count + vocab.count + 2)
 
         let clip = l2Normalized(file.clip)
         out.append(contentsOf: clip.map { $0 * profile.wClip })
@@ -612,36 +475,25 @@ public enum RestructureSemantic {
         let tagsN = l2Normalized(tags)
         out.append(contentsOf: tagsN.map { $0 * profile.wTags })
 
-        let tf = timeFeatures(file.timeUnix)
-        for v in tf { out.append(v * profile.wTime) }
+        let (s, c) = dayOfYearCyclical(file.timeUnix)
+        out.append(s * profile.wTime)
+        out.append(c * profile.wTime)
 
         return l2Normalized(out)
     }
 
-    /// Five time features: day-of-year cyclical (2), time-of-day cyclical (2),
-    /// log-compressed absolute year (1). Together they separate:
-    /// - events in different seasons (day-of-year cyclical)
-    /// - morning vs evening sessions (time-of-day cyclical)
-    /// - same calendar day in different years (log-year, monotonic)
-    /// Byte-faithful with the Rust engine. (RESTRUCTURE.md §2)
-    static func timeFeatures(_ timeUnix: Double) -> [Float] {
-        guard timeUnix > 0 else { return [Float](repeating: 0, count: 5) }
-        let secs = Int64(timeUnix)
-        let day = Int((secs / 86_400) % 365)
-        let dayAngle = 2 * Double.pi * Double(day) / 365
-        let secondOfDay = Int(secs % 86_400)
-        let todAngle = 2 * Double.pi * Double(secondOfDay) / 86_400
-        // log1p(years) / log1p(100): monotonic 0→1 over a 100-year range;
-        // separates same-calendar-day events in different years.
-        let years = max(0, min(100, timeUnix / (365.25 * 86_400)))
-        let logYear = Float(log(1 + years) / log(101))
-        return [Float(sin(dayAngle)), Float(cos(dayAngle)),
-                Float(sin(todAngle)), Float(cos(todAngle)), logYear]
+    /// sin/cos of the day-of-year angle (captures seasonality without raw epoch).
+    private static func dayOfYearCyclical(_ timeUnix: Double) -> (Float, Float) {
+        guard timeUnix > 0 else { return (0, 0) }
+        let day = (Int(timeUnix) / 86_400) % 365
+        let angle = 2 * Double.pi * Double(day) / 365
+        return (Float(sin(angle)), Float(cos(angle)))
     }
 
     // MARK: - Clustering (reuse IdentityClustering)
 
-    private static func cluster(_ fused: [[Float]], _ params: IdentityClustering.Hyperparameters) -> [Int] {
+    private static func cluster(_ fused: [[Float]]) -> [Int] {
+        let params = fileHyperparams()
         let n = fused.count
         // Can't request more neighbors than other points exist; k_nn >= n made the
         // kNN over an all-tied set arch-sensitive (see nonImageSignatures). (lockstep)

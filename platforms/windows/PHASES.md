@@ -188,7 +188,7 @@ The user picks a folder, hits Start Scan. Files start streaming into a thumbnail
 - [ ] PnP solve from SCRFD landmarks → roll/yaw/pitch (~50 LoC standard math) for face quality
 - [ ] Face quality score: bbox confidence + Laplacian sharpness on the crop OR optional `face_quality_assessment.onnx`
 - [ ] `models/clip_text.rs` — OpenAI CLIP text ONNX + BPE tokenizer port from `CLIPTokenizer.swift` (~150 LoC, deterministic, unit-tested against Swift output bytes)
-- [x] `platform.rs` — `SleepGuard` holds `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` on a dedicated thread during scans, Deep Analyze, face clustering, and model prewarm, then clears it on that same thread
+- [ ] `shell/sleep.rs` — `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` RAII guard during scan
 - [ ] Process priority elevation: `SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` on scan start, reset on scan end
 - [ ] Battery-aware throttle: `GetSystemPowerStatus` — if on battery + <20%, halve worker count (off by default on desktops)
 
@@ -683,7 +683,7 @@ The tabs work. Now sand off the "feels Windows-native" rough edges.
 - [ ] WiX bootstrapper that detects host arch and runs the matching MSI (optional; users can also download the right MSI directly)
 
 ### 11.2 Authenticode code-signing
-- [ ] Public-trust signing provider onboarded with an independently pinnable signer key (`shared/docs/WINDOWS_SIGNING.md`)
+- [ ] EV cert procured (user — gating; budget $300–500 + ~3 weeks lead time per ARCHITECTURE.md note)
 - [ ] `signtool` integrated into `publish.ps1`: signs `FileIDEngine.exe`, `FileID.exe`, every shipped DLL, the MSI itself
 - [ ] Timestamping via `http://timestamp.digicert.com` (or equivalent)
 - [ ] Signature verified post-build via `signtool verify /pa`
@@ -710,7 +710,7 @@ The tabs work. Now sand off the "feels Windows-native" rough edges.
 
 ### 11.7 Acceptance for Phase 11
 - [ ] `FileID-x64.msi` + `FileID-arm64.msi` install + uninstall on clean Windows 10 22H2 + Windows 11 + Windows 11 ARM64 VMs
-- [ ] Authenticode chain + timestamp verify on a clean machine; record SmartScreen result without assuming reputation bypass
+- [ ] Authenticode chain verifies on a clean machine (no SmartScreen "unknown publisher" prompt with EV cert)
 - [ ] All 11 corpus regression assertions pass on a clean install
 - [ ] CI privacy gate is a hard gate on the release tag
 

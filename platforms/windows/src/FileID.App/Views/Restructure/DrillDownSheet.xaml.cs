@@ -7,7 +7,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using FileID.IpcSchema;
-using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -17,8 +16,6 @@ namespace FileID.Views.Restructure;
 
 public sealed partial class DrillDownSheet : UserControl
 {
-    private Action<RestructureFileRowVm, bool>? _selectionChanged;
-
     // Badge colors are a small fixed set (confidence: auto/review/hold,
     // tier: Anchor/Mixed/Junk). Pill() formerly allocated 3 SolidColorBrush
     // per badge per file; with a large move list that's thousands of
@@ -104,57 +101,42 @@ public sealed partial class DrillDownSheet : UserControl
         Render(moves);
     }
 
-    /// <summary>Show the exact row instances rendered by the owning plan so
-    /// selection changes update the same apply payload and count.</summary>
-    internal void SetOutcomeFilter(
-        IReadOnlyList<RestructureFileRowVm> rows,
-        string title,
-        Action<RestructureFileRowVm, bool> selectionChanged)
+    /// <summary>Filter to the moves whose proposed destination starts with the given path.</summary>
+    public void SetTreeFilter(RestructurePlan plan, string proposedPath)
     {
-        HeaderText.Text = title;
-        _selectionChanged = selectionChanged;
-        var selectableRows = PrepareSelectableRows(rows);
-        CountText.Text =
-            $"{selectableRows.Count:N0} file{(selectableRows.Count == 1 ? "" : "s")} affected. " +
-            "Check or uncheck any file before applying.";
-        FileRepeater.ItemsSource = null;
-        FileRepeater.Visibility = Visibility.Collapsed;
-        SelectionRepeater.ItemsSource = selectableRows;
-        SelectionRepeater.Visibility = Visibility.Visible;
+        HeaderText.Text = $"Proposed: {proposedPath}";
+        var moves = new List<RestructureMove>();
+        var libRoot = plan.LibraryRoot ?? "";
+        foreach (var m in plan.Moves)
+        {
+            var dstRel = TrimRoot(m.Destination, libRoot);
+            if (dstRel.StartsWith(proposedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                moves.Add(m);
+            }
+        }
+        Render(moves);
     }
 
-    internal static IReadOnlyList<RestructureFileRowVm> PrepareSelectableRows(
-        IReadOnlyList<RestructureFileRowVm> rows)
-        => rows;
-
-    private void OnSelectionElementPrepared(
-        ItemsRepeater sender,
-        ItemsRepeaterElementPreparedEventArgs args)
-        => FileID.Services.DebugLog.SafeRun(nameof(OnSelectionElementPrepared), () =>
-        {
-            if (args.Element is not FrameworkElement element) return;
-            element.DataContext =
-                RestructureView.ResolveRepeaterItem<RestructureFileRowVm>(
-                    sender.ItemsSource,
-                    args.Index);
-        });
-
-    private void OnSelectionCheckClicked(object sender, RoutedEventArgs e)
+    /// <summary>Filter to the moves whose engine Tier maps to the given outcome
+    /// (Tidy = Mixed-tier, Reorganize = Junk-tier). Backs a recommendation card's
+    /// "See all N files" — mirrors macOS drillDownSheet(.outcome(...)).</summary>
+    internal void SetOutcomeFilter(RestructurePlan plan, FileID.ViewModels.RestructureOutcome outcome, string title)
     {
-        if (sender is not CheckBox { DataContext: RestructureFileRowVm row } checkBox)
+        HeaderText.Text = title;
+        var moves = new List<RestructureMove>();
+        foreach (var m in plan.Moves)
         {
-            return;
+            if (FileID.ViewModels.RestructureGrouping.OutcomeForTier(m.Tier) == outcome)
+            {
+                moves.Add(m);
+            }
         }
-        _selectionChanged?.Invoke(row, checkBox.IsChecked == true);
-        checkBox.IsChecked = row.IsSelected;
+        Render(moves);
     }
 
     private void Render(IList<RestructureMove> moves)
     {
-        _selectionChanged = null;
-        SelectionRepeater.ItemsSource = null;
-        SelectionRepeater.Visibility = Visibility.Collapsed;
-        FileRepeater.Visibility = Visibility.Visible;
         int shown = Math.Min(moves.Count, MaxRenderedRows);
         CountText.Text = moves.Count > shown
             ? $"{moves.Count:N0} files - showing the first {shown:N0}"

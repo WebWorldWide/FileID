@@ -99,13 +99,11 @@ public sealed partial class BulkRenameSheet : UserControl
 
     public async Task<bool> CommitAsync()
     {
-        var submittedPlans = _items
+        var entries = _items
             .Where(p => p.Include
                         && !string.IsNullOrWhiteSpace(p.ProposedName)
                         && !p.ProposedName.Contains('/')
                         && !p.ProposedName.Contains('\\'))
-            .ToArray();
-        var entries = submittedPlans
             .Select(p => new RenameEntry(p.FileId, p.ProposedName.Trim()))
             .ToArray();
 
@@ -118,43 +116,44 @@ public sealed partial class BulkRenameSheet : UserControl
         StatusText.Text = "Renaming...";
         try
         {
+            // Snapshot the inverse rename (file_id → previous filename) so
+            // Ctrl+Z can undo. We push BEFORE the rename fires so the user
+            // sees the entry available even on partial failure (the engine
+            // emits per-file ok/fail in the BulkActionResult).
+            var inverse = _items
+                .Where(p => p.Include
+                            && !string.IsNullOrWhiteSpace(p.ProposedName)
+                            && !p.ProposedName.Contains('/')
+                            && !p.ProposedName.Contains('\\'))
+                .Select(p => new RenameEntry(p.FileId, System.IO.Path.GetFileName(p.CurrentPath)))
+                .ToArray();
+            Services.UndoStack.Instance.Push(
+                $"rename {entries.Length} file{(entries.Length == 1 ? "" : "s")}",
+                async () =>
+                {
+                    try
+                    {
+                        await EngineClient.Instance.RenameFilesAsync(inverse);
+                        return true;
+                    }
+                    catch { return false; }
+                });
+
             var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "renameFiles",
                 () => EngineClient.Instance.RenameFilesAsync(entries),
-                Services.BulkActionTimeout.ForFileCount(entries.Length));
-            var inverse = BuildConfirmedInverse(submittedPlans, result);
-            if (inverse.Length > 0)
-            {
-                Services.UndoStack.Instance.Push(
-                    $"rename {inverse.Length} file{(inverse.Length == 1 ? "" : "s")}",
-                    Services.ChangeKind.Rename,
-                    async () =>
-                    {
-                        var confirmed = await ReverseConfirmedAsync(
-                            inverse,
-                            renames => EngineClient.Instance.WaitForBulkActionResultAsync(
-                                "renameFiles",
-                                () => EngineClient.Instance.RenameFilesAsync(renames),
-                                Services.BulkActionTimeout.ForFileCount(renames.Count))).ConfigureAwait(false);
-                        if (!confirmed)
-                        {
-                            throw new InvalidOperationException(
-                                "The engine did not confirm every reverse rename.");
-                        }
-                        return true;
-                    });
-            }
+                TimeSpan.FromSeconds(30));
 
-            if (!Services.BulkActionResultTruth.ConfirmsExactSuccess(
-                    result,
-                    entries.Select(entry => entry.FileId).ToArray()))
+            if (result.Failed > 0)
             {
+                // Surface per-file engine failures (in use, permission, name
+                // collision). Keep the sheet open so the user can fix + retry;
+                // do NOT report success.
                 var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message
-                            ?? "the engine did not confirm every requested rename";
-                var notConfirmed = entries.Length - inverse.Length;
-                var body = inverse.Length > 0
-                    ? $"Renamed {inverse.Length}; {notConfirmed} not confirmed — {first}"
-                    : $"No renames were confirmed — {first}";
+                            ?? "see logs for details";
+                var body = result.Succeeded > 0
+                    ? $"Renamed {result.Succeeded}; {result.Failed} failed — {first}"
+                    : $"{result.Failed} rename(s) failed — {first}";
                 StatusText.Text = body;
                 await ShowAlertAsync("Rename incomplete", body);
                 return false;
@@ -170,34 +169,6 @@ public sealed partial class BulkRenameSheet : UserControl
             await ShowAlertAsync("Rename failed", msg);
             return false;
         }
-    }
-
-    internal static RenameEntry[] BuildConfirmedInverse(
-        IReadOnlyList<RenamePlan> submittedPlans,
-        BulkActionResult result)
-    {
-        var byId = submittedPlans
-            .GroupBy(plan => plan.FileId)
-            .ToDictionary(group => group.Key, group => group.First());
-        return Services.BulkActionResultTruth
-            .ConfirmedSuccessfulFileIds(result, submittedPlans.Select(plan => plan.FileId))
-            .Select(fileId =>
-            {
-                var plan = byId[fileId];
-                return new RenameEntry(fileId, Path.GetFileName(plan.CurrentPath));
-            })
-            .ToArray();
-    }
-
-    internal static async Task<bool> ReverseConfirmedAsync(
-        IReadOnlyList<RenameEntry> inverse,
-        Func<IReadOnlyList<RenameEntry>, Task<BulkActionResult>> reverse)
-    {
-        if (inverse.Count == 0) return false;
-        var result = await reverse(inverse).ConfigureAwait(false);
-        return Services.BulkActionResultTruth.ConfirmsExactSuccess(
-            result,
-            inverse.Select(entry => entry.FileId).ToArray());
     }
 
     private async Task ShowAlertAsync(string title, string body)

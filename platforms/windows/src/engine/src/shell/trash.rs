@@ -28,29 +28,13 @@ use windows::Win32::UI::Shell::{
 /// is treated as success (the file is "already not on disk").
 #[cfg(windows)]
 pub fn trash_path(path: &Path) -> Result<()> {
-    trash_path_checked(path, None)
-}
-
-#[cfg(windows)]
-fn trash_path_checked(
-    path: &Path,
-    expected: Option<crate::platform::FileIdentity>,
-) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     // Verbatim (\\?\) probe: a bare `path.exists()` misses >260-char paths the
     // verbatim discovery walk indexed, silently no-opping the delete (#28).
     let probe = crate::util::path_safety::to_extended_length(path);
     if std::fs::symlink_metadata(&probe).is_err() {
-        if expected.is_some() {
-            anyhow::bail!("claimed Trash source disappeared before the Recycle Bin operation");
-        }
         return Ok(());
-    }
-    if let Some(expected) = expected {
-        if crate::platform::file_identity(path) != Some(expected) {
-            anyhow::bail!("claimed Trash source identity changed before the Recycle Bin operation");
-        }
     }
 
     let wide: Vec<u16> = path
@@ -75,28 +59,8 @@ fn trash_path_checked(
             let item: IShellItem =
                 SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
                     .context("SHCreateItemFromParsingName")?;
-            if let Some(expected) = expected {
-                if crate::platform::file_identity(path) != Some(expected) {
-                    anyhow::bail!("claimed Trash source identity changed while binding the Recycle Bin item");
-                }
-            }
             op.DeleteItem(&item, None).context("DeleteItem queue")?;
-            if let Some(expected) = expected {
-                if crate::platform::file_identity(path) != Some(expected) {
-                    anyhow::bail!("claimed Trash source identity changed before Recycle Bin execution");
-                }
-            }
             op.PerformOperations().context("PerformOperations")?;
-            if op
-                .GetAnyOperationsAborted()
-                .context("GetAnyOperationsAborted")?
-                .as_bool()
-            {
-                anyhow::bail!("Recycle Bin operation was aborted");
-            }
-            if std::fs::symlink_metadata(&probe).is_ok() {
-                anyhow::bail!("Recycle Bin operation completed without removing the claimed file");
-            }
             Ok(())
         })();
 
@@ -129,28 +93,11 @@ pub fn trash_path(_path: &Path) -> Result<()> {
     anyhow::bail!("trash not available on this platform")
 }
 
-pub(crate) fn trash_path_as(
-    source: &Path,
-    _original_path: &Path,
-    expected: crate::platform::FileIdentity,
-) -> Result<()> {
-    #[cfg(windows)]
-    {
-        trash_path_checked(source, Some(expected))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = expected;
-        trash_path(source)
-    }
-}
-
 /// Batch wrapper. Trashes each path; returns one bool per input, true = success.
 /// 8-parallel STA worker pool: each OS thread initializes COM apartment-
 /// threaded once + stays in the pool for the batch's lifetime, amortizing
 /// the ~1-2 ms CoInitialize cost across N files. Matches macOS's 8-way
 /// async trash pattern. Order of `paths` is preserved in the result.
-#[allow(dead_code)]
 pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
     if paths.is_empty() {
         return Vec::new();

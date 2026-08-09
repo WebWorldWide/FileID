@@ -19,17 +19,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
-use ort::tensor::Shape;
 use ort::value::Tensor;
 
 use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+    classify_inference_error, configure_session_builder, execution_providers_for_chain,
+    priority_chain, RuntimeProbe,
 };
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 const INPUT_SIZE: u32 = 384;
-const INV_255: f32 = 1.0 / 255.0;
 
 /// Default sigmoid-probability cutoff. RAM++ is calibrated with per-class
 /// thresholds (~0.68 mean); a single global cutoff is the v1 approximation,
@@ -130,7 +129,6 @@ pub struct RamPlusTagger {
     /// Extra suppressed tags from the `ram_plus_suppress.txt` sidecar (lowercased),
     /// merged with the built-in SUPPRESSED_TAGS at tag time.
     suppress_extra: HashSet<String>,
-    supports_dynamic_batch: bool,
     max_tags: usize,
 }
 
@@ -158,13 +156,28 @@ impl RamPlusTagger {
             anyhow::bail!("RAM++ tag list {} is empty", tag_list.display());
         }
 
-        tracing::info!(model = "RAM++", tags = tags.len(), "tag list loaded");
-        let (session, input_name) = commit_chain_session("RAM++", onnx)?;
-        let supports_dynamic_batch = session
+        let probe = RuntimeProbe::shared();
+        let chain = priority_chain(probe.vendor);
+        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+        let builder = Session::builder().context("ORT session builder")?;
+        let mut builder =
+            configure_session_builder(builder).context("configure session (RAM++)")?;
+        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .context("register execution providers (RAM++)")?;
+        }
+        tracing::info!(model = "RAM++", tags = tags.len(), chain = ?chain_labels, "EP priority chain registered");
+        let session = builder
+            .commit_from_file(onnx)
+            .context("ORT session commit (RAM++)")?;
+        let input_name = session
             .inputs
             .first()
-            .and_then(|input| input.input_type.tensor_shape())
-            .is_some_and(ram_plus_shape_has_dynamic_batch);
+            .ok_or_else(|| anyhow::anyhow!("RAM++ ONNX has no inputs"))?
+            .name
+            .clone();
 
         // A set FILEID_RAMPLUS_THRESHOLD forces a single global cutoff (per-class
         // disabled — handy for threshold sweeps). Otherwise load the per-class
@@ -235,7 +248,6 @@ impl RamPlusTagger {
             per_class_threshold,
             precision_floor,
             suppress_extra,
-            supports_dynamic_batch,
             max_tags: DEFAULT_MAX_TAGS,
         };
 
@@ -248,10 +260,6 @@ impl RamPlusTagger {
             "warmup complete"
         );
         Ok(model)
-    }
-
-    pub fn supports_dynamic_batch(&self) -> bool {
-        self.supports_dynamic_batch
     }
 
     /// Tag one decoded RGB8 image (any size — resized internally). Returns
@@ -295,7 +303,6 @@ impl RamPlusTagger {
         // — calling select_tags in the same scope is the E0502 the old
         // closure-locals workaround sidestepped; the block drops it first.
         let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
             let outputs: SessionOutputs = self
                 .session
                 .run(vec![(input_name, SessionInputValue::from(input))])
@@ -351,7 +358,6 @@ impl RamPlusTagger {
         let input_name = self.input_name.clone();
         let num_tags = self.tags.len();
         let logits_vec: Vec<f32> = {
-            ensure_gpu_inference_alive()?;
             let outputs: SessionOutputs = self
                 .session
                 .run(vec![(input_name, SessionInputValue::from(input))])
@@ -424,31 +430,16 @@ impl RamPlusTagger {
         );
         let n = INPUT_SIZE as usize;
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
-        fill_imagenet_chw(&mut chw, 0, resized.as_raw(), n);
+        for y in 0..n {
+            for x in 0..n {
+                let px = resized.get_pixel(x as u32, y as u32);
+                chw[[0, 0, y, x]] = (px[0] as f32 / 255.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+                chw[[0, 1, y, x]] = (px[1] as f32 / 255.0 - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+                chw[[0, 2, y, x]] = (px[2] as f32 / 255.0 - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+            }
+        }
         Ok(chw)
     }
-}
-
-fn fill_imagenet_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: usize) {
-    let plane = n * n;
-    let base = image_index * 3 * plane;
-    let out = chw
-        .as_slice_mut()
-        .expect("fresh Array4 input tensor is contiguous");
-    let mut src = 0usize;
-    for p in 0..plane {
-        let r = rgb[src] as f32 * INV_255;
-        let g = rgb[src + 1] as f32 * INV_255;
-        let b = rgb[src + 2] as f32 * INV_255;
-        out[base + p] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-        out[base + plane + p] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-        out[base + (2 * plane) + p] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
-        src += 3;
-    }
-}
-
-fn ram_plus_shape_has_dynamic_batch(shape: &Shape) -> bool {
-    shape.first().is_some_and(|dim| *dim < 0)
 }
 
 fn sigmoid(z: f32) -> f32 {
@@ -473,46 +464,6 @@ pub fn default_tags_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn norm(v: u8, channel: usize) -> f32 {
-        ((v as f32 * INV_255) - IMAGENET_MEAN[channel]) / IMAGENET_STD[channel]
-    }
-
-    fn assert_close(actual: f32, expected: f32) {
-        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
-    }
-
-    #[test]
-    fn fill_imagenet_chw_writes_contiguous_channel_planes() {
-        let rgb = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
-        let mut chw = Array4::<f32>::zeros((1, 3, 2, 2));
-
-        fill_imagenet_chw(&mut chw, 0, &rgb, 2);
-
-        let out = chw.as_slice().expect("test tensor is contiguous");
-        assert_eq!(out.len(), 12);
-        assert_close(out[0], norm(10, 0));
-        assert_close(out[1], norm(40, 0));
-        assert_close(out[2], norm(70, 0));
-        assert_close(out[3], norm(100, 0));
-        assert_close(out[4], norm(20, 1));
-        assert_close(out[5], norm(50, 1));
-        assert_close(out[6], norm(80, 1));
-        assert_close(out[7], norm(110, 1));
-        assert_close(out[8], norm(30, 2));
-        assert_close(out[9], norm(60, 2));
-        assert_close(out[10], norm(90, 2));
-        assert_close(out[11], norm(120, 2));
-    }
-
-    #[test]
-    fn batch_guard_accepts_only_dynamic_batch_axis() {
-        assert!(ram_plus_shape_has_dynamic_batch(&Shape::new([-1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([1, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([4, 3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new([3, 384, 384])));
-        assert!(!ram_plus_shape_has_dynamic_batch(&Shape::new(Vec::<i64>::new())));
-    }
 
     #[test]
     fn sigmoid_monotone() {

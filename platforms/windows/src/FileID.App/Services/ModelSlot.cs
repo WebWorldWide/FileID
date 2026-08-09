@@ -7,7 +7,6 @@
 
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using FileID.IpcSchema;
 using Microsoft.UI.Dispatching;
 
@@ -27,9 +26,6 @@ internal enum ModelInstallStatus
 /// </summary>
 internal sealed class ModelSlot : INotifyPropertyChanged
 {
-    private const int ClassNotRegistered = unchecked((int)0x80040154);
-    private const int ClassNotAvailable = unchecked((int)0x80040111);
-
     private string _displayLabel;
     public string DisplayLabel
     {
@@ -64,19 +60,7 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         _displayLabel = displayLabel;
         _approxBytes = approxBytes;
         _installAction = installAction;
-        _ui = CaptureDispatcherQueue();
-    }
-
-    private static DispatcherQueue? CaptureDispatcherQueue()
-    {
-        try
-        {
-            return DispatcherQueue.GetForCurrentThread();
-        }
-        catch (COMException error) when (error.HResult is ClassNotRegistered or ClassNotAvailable)
-        {
-            return null;
-        }
+        _ui = DispatcherQueue.GetForCurrentThread();
     }
 
     private ModelInstallStatus _status;
@@ -139,15 +123,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// silent for 30+ s mid-download.</summary>
     public DateTime LastProgressAt { get; set; } = DateTime.MinValue;
 
-    /// <summary>Single-owner guard for ModelInstallerService's no-progress
-    /// watchdog (0 = none running, 1 = one live). Manipulated only via
-    /// Interlocked so exactly one watchdog loop watches this slot at a time;
-    /// the loop clears it when it exits so the next Downloading transition
-    /// (including a late-progress Failed→Downloading revert in <see cref="Apply"/>)
-    /// re-arms a fresh watchdog. Kept here (not in the service) so it lives with
-    /// the slot it guards.</summary>
-    internal int WatchdogLive;
-
     // EMA bandwidth tracking — mirrors macOS's `updateVLMRate` in
     // WelcomeSheet.swift. Sample every 500 ms; smooth with α=0.3.
     private DateTime _rateSampleAt;
@@ -163,19 +138,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// </summary>
     public void Apply(ModelDownloadProgress p, Func<bool> sentinelExists)
     {
-        // A stale/redundant sub-100% event must not knock an already-Installed
-        // slot back to Downloading. The engine emits an unconditional "Queued"
-        // fraction=0 event before it discovers the model is already on disk and
-        // replies already_installed — honoring it flipped Installed→Downloading
-        // for a frame (the visible Settings/Welcome flicker). A genuine reinstall
-        // still works: ResetForRetry()/InstallAsync pre-stamp Downloading before
-        // the engine dispatches, so Status is no longer Installed when real
-        // progress lands.
-        if (Status == ModelInstallStatus.Installed && p.Fraction < 1.0 && sentinelExists())
-        {
-            return;
-        }
-
         // Clamp the displayed Fraction non-decreasing while Downloading. The
         // GPU (multi-pack) bundle runs as TWO sequential installs into ONE
         // slot (cuDNN pack, then the ORT-CUDA provider); the engine emits a
@@ -203,13 +165,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         else
         {
             TotalBytes = newTotal;
-        }
-        // The engine's total is an estimate; real bytes can overshoot it (the
-        // user's 15 GB VLM install ended at "15.21 GB of 15.18 GB"). Grow the
-        // displayed total so the label never claims more-done-than-total.
-        if (BytesDone is { } done && TotalBytes is { } t && done > t)
-        {
-            TotalBytes = done;
         }
         Message = p.Message;
         LastProgressAt = DateTime.UtcNow;
@@ -368,3 +323,4 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         }
     }
 }
+

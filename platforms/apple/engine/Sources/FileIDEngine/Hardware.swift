@@ -64,11 +64,6 @@ public enum Hardware {
     /// the sweet spot for this hardware tier — keeps ANE fed without
     /// overwhelming the file source. Faster local SSDs may benefit from
     /// more workers; revisit per-storage tier if needed.
-    /// Default ONNX/CoreML model inference concurrency. Bounded at 4 to keep
-    /// the Apple Neural Engine (ANE) and GPU pipeline from thrashing under
-    /// concurrent worker load (see DECISIONS.md 2026-08-02).
-    public static let defaultInferenceConcurrency: Int = 4
-
     public static let workerCap: Int = computeWorkerCap(
         performanceCores: performanceCoreCount,
         efficiencyCores: efficiencyCoreCount,
@@ -100,7 +95,7 @@ public enum Hardware {
     /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
     /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
     /// runtime pressure adaptation is the separate F-3 item.
-    public enum MemoryTier: Sendable { case low, balanced, high }
+    public enum MemoryTier { case low, balanced, high }
 
     public static let memoryTier: MemoryTier = {
         let gb = physicalMemoryGB
@@ -111,15 +106,15 @@ public enum Hardware {
 
     /// Resident-set MB of the current process.
     public static func residentMB() -> Int {
-        // proc_pidinfo(getpid(), …) avoids the Darwin `mach_task_self_` global
-        // var, which Swift 6 on the Xcode 16 SDK rejects as shared mutable state
-        // (and there is no use-site annotation that suppresses reading it). getpid()
-        // is a plain function and is concurrency-safe on every toolchain.
-        var info = proc_taskinfo()
-        let size = Int32(MemoryLayout<proc_taskinfo>.size)
-        let got = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &info, size)
-        guard got == size else { return 0 }
-        return Int(info.pti_resident_size / (1024 * 1024))
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return Int(info.resident_size / (1024 * 1024))
     }
 
     /// Available system memory in MB (free + inactive + speculative pages).

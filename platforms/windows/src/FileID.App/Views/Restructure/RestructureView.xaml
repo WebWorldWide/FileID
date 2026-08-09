@@ -102,8 +102,8 @@
     <Grid Padding="32,32,32,24" RowSpacing="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Spacing="6">
@@ -115,13 +115,7 @@
                        Text="FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply."/>
         </StackPanel>
 
-        <!-- ApplyBar moved to the top (Grid.Row 1, above the scrollable plan
-             list) so committing a plan is the first thing visible, not a
-             strip the user has to scroll past unread moves to find. It was
-             previously docked at the bottom (Grid.Row 2) — see the port note
-             on the Border below. -->
-
-        <ScrollViewer Grid.Row="2"
+        <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="16">
@@ -131,23 +125,12 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0"
-                                Orientation="Horizontal"
-                                Spacing="10"
-                                VerticalAlignment="Center">
-                        <ProgressRing x:Name="PlanBusyIndicator"
-                                      Width="18"
-                                      Height="18"
-                                      IsActive="False"
-                                      Visibility="Collapsed"
-                                      AutomationProperties.Name="Planning reorganization"/>
-                        <TextBlock x:Name="PlanStatusText"
-                                   VerticalAlignment="Center"
-                                   TextWrapping="Wrap"
-                                   Style="{StaticResource BodyTextBlockStyle}"
-                                   Text="Computing plan&#x2026;"
-                                   AutomationProperties.LiveSetting="Polite"/>
-                    </StackPanel>
+                    <TextBlock Grid.Column="0"
+                               x:Name="PlanStatusText"
+                               VerticalAlignment="Center"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Text="Computing plan&#x2026;"/>
                     <Button Grid.Column="1"
                             x:Name="ReplanButton"
                             Click="OnPlanClicked"
@@ -213,221 +196,6 @@
                                     HorizontalAlignment="Right" />
                         </StackPanel>
                     </Grid>
-                </Border>
-
-                <Border x:Name="MissingContentModelsBanner"
-                        Visibility="Collapsed"
-                        CornerRadius="10"
-                        Padding="12,10"
-                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
-                        BorderThickness="1">
-                    <Grid ColumnSpacing="10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <FontIcon Grid.Column="0"
-                                  Glyph="&#xE7BA;"
-                                  FontSize="16"
-                                  Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                                  VerticalAlignment="Top"
-                                  Margin="0,2,0,0"/>
-                        <StackPanel Grid.Column="1" Spacing="2">
-                            <TextBlock Text="Content-aware organization is limited"
-                                       FontWeight="SemiBold"/>
-                            <TextBlock Text="Fewer than 80% of supported images, videos, 3D models, and documents in this library have usable content embeddings. Proposals may fall back to names and dates. Check the content models in Settings, then run a fresh scan before trusting Restructure."
-                                       TextWrapping="Wrap"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                        </StackPanel>
-                        <Button Grid.Column="2"
-                                Content="Open AI Models"
-                                Click="OnOpenModelsSettingsClicked"
-                                Padding="12,6"
-                                VerticalAlignment="Center"
-                                AutomationProperties.Name="Open AI Models settings"/>
-                    </Grid>
-                </Border>
-
-                <Border x:Name="LargePlanCard"
-                        Visibility="Collapsed"
-                        CornerRadius="12"
-                        Padding="20"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource GoldDimBrush}"
-                        BorderThickness="1">
-                    <StackPanel Spacing="16">
-                        <Grid ColumnSpacing="14">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0"
-                                    Width="44"
-                                    Height="44"
-                                    CornerRadius="12"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                                <FontIcon Glyph="&#xEC31;"
-                                          FontSize="21"
-                                          Foreground="{ThemeResource GoldBrush}"
-                                          HorizontalAlignment="Center"
-                                          VerticalAlignment="Center"/>
-                            </Border>
-                            <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
-                                <TextBlock Text="Large plan ready"
-                                           Style="{StaticResource SubtitleTextBlockStyle}"
-                                           AutomationProperties.HeadingLevel="Level2"/>
-                                <TextBlock x:Name="LargePlanSummaryText"
-                                           TextWrapping="Wrap"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="2"
-                                        Spacing="0"
-                                        VerticalAlignment="Center"
-                                        HorizontalAlignment="Right">
-                                <TextBlock x:Name="LargePlanMoveCount"
-                                           FontSize="28"
-                                           FontWeight="Bold"
-                                           Foreground="{ThemeResource GoldBrush}"
-                                           TextAlignment="Right"/>
-                                <TextBlock Text="proposals stored"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                           TextAlignment="Right"/>
-                            </StackPanel>
-                        </Grid>
-
-                        <Grid ColumnSpacing="8">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0"
-                                    CornerRadius="8"
-                                    Padding="12,10"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="LargePlanAutoCount"
-                                               FontSize="20"
-                                               FontWeight="Bold"
-                                               Foreground="{ThemeResource SystemFillColorSuccessBrush}"/>
-                                    <TextBlock Text="Auto · applies"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="1"
-                                    CornerRadius="8"
-                                    Padding="12,10"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="LargePlanReviewCount"
-                                               FontSize="20"
-                                               FontWeight="Bold"
-                                               Foreground="{ThemeResource GoldBrush}"/>
-                                    <TextBlock Text="Review · held back"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="2"
-                                    CornerRadius="8"
-                                    Padding="12,10"
-                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                                <StackPanel Spacing="2">
-                                    <TextBlock x:Name="LargePlanAskCount"
-                                               FontSize="20"
-                                               FontWeight="Bold"/>
-                                    <TextBlock Text="Needs approval · held back"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                                </StackPanel>
-                            </Border>
-                        </Grid>
-                        <TextBlock x:Name="LargePlanConfidenceDetailText"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap"/>
-
-                        <Border CornerRadius="8"
-                                Padding="12,10"
-                                Background="{ThemeResource SubtleFillColorSecondaryBrush}">
-                            <Grid ColumnSpacing="10">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <FontIcon Grid.Column="0"
-                                          Glyph="&#xE7BA;"
-                                          FontSize="15"
-                                          Foreground="{ThemeResource GoldBrush}"
-                                          VerticalAlignment="Top"
-                                          Margin="0,2,0,0"/>
-                                <TextBlock Grid.Column="1"
-                                           x:Name="LargePlanSafetyText"
-                                           Text="The UI sample does not prove the stored plan is safe. Immediately before the first change, the engine preflights every stored proposal. Apply then runs only Auto moves as one crash-journaled batch; Review and Needs approval stay put."
-                                           TextWrapping="Wrap"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            </Grid>
-                        </Border>
-
-                        <StackPanel Spacing="8">
-                            <Grid>
-                                <TextBlock Text="Top organization buckets"
-                                           Style="{StaticResource BodyStrongTextBlockStyle}"
-                                           AutomationProperties.HeadingLevel="Level3"/>
-                                <TextBlock x:Name="LargePlanBucketCount"
-                                           HorizontalAlignment="Right"
-                                           Style="{StaticResource CaptionTextBlockStyle}"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            </Grid>
-                            <ItemsRepeater ItemsSource="{x:Bind _largePlanCategories, Mode=OneWay}">
-                                <ItemsRepeater.Layout>
-                                    <StackLayout Orientation="Vertical" Spacing="4"/>
-                                </ItemsRepeater.Layout>
-                                <ItemsRepeater.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:RestructureLargePlanCategoryVm">
-                                        <Grid Padding="10,7"
-                                              ColumnSpacing="12"
-                                              Background="{ThemeResource SubtleFillColorTertiaryBrush}"
-                                              AutomationProperties.Name="{x:Bind AutomationName}">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="Auto"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <FontIcon Grid.Column="0"
-                                                      Glyph="&#xE8B7;"
-                                                      FontSize="13"
-                                                      Foreground="{ThemeResource GoldBrush}"
-                                                      VerticalAlignment="Center"/>
-                                            <TextBlock Grid.Column="1"
-                                                       Text="{x:Bind Category}"
-                                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       VerticalAlignment="Center"/>
-                                            <TextBlock Grid.Column="2"
-                                                       Text="{x:Bind CountText}"
-                                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                                       FontWeight="SemiBold"
-                                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                                       VerticalAlignment="Center"/>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ItemsRepeater.ItemTemplate>
-                            </ItemsRepeater>
-                            <TextBlock x:Name="LargePlanMoreBucketsText"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap"/>
-                        </StackPanel>
-                    </StackPanel>
                 </Border>
 
                 <!-- Stat hero — three big-number tiles. Hover cross-highlights
@@ -563,8 +331,7 @@
                                        Margin="0,0,0,8"
                                        AutomationProperties.HeadingLevel="Level2" />
                             <ItemsRepeater x:Name="RecommendationsRepeater"
-                                           ItemsSource="{x:Bind _recommendations, Mode=OneWay}"
-                                           ElementPrepared="OnRecommendationElementPrepared">
+                                           ItemsSource="{x:Bind _recommendations, Mode=OneWay}">
                                 <ItemsRepeater.Layout>
                                     <StackLayout Orientation="Vertical" Spacing="6" />
                                 </ItemsRepeater.Layout>
@@ -660,8 +427,7 @@
                                                 <StackPanel Margin="52,10,0,0"
                                                             Spacing="6"
                                                             Visibility="{x:Bind ExpandedVisibility, Mode=OneWay}">
-                                                    <ItemsRepeater ItemsSource="{x:Bind Files, Mode=OneWay}"
-                                                                   ElementPrepared="OnFileElementPrepared">
+                                                    <ItemsRepeater ItemsSource="{x:Bind Files, Mode=OneWay}">
                                                         <ItemsRepeater.Layout>
                                                             <StackLayout Orientation="Vertical" Spacing="4" />
                                                         </ItemsRepeater.Layout>
@@ -770,10 +536,8 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- ApplyBar — port of macOS RestructureApplyBar.swift. Docked at the
-             top (Grid.Row 1) instead of the bottom so committing a plan is
-             the first thing the user sees, per the 2026-07-29 audit. -->
-        <Border Grid.Row="1"
+        <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift. -->
+        <Border Grid.Row="2"
                 CornerRadius="16"
                 BorderBrush="{ThemeResource GoldDimBrush}"
                 BorderThickness="1">
@@ -804,8 +568,7 @@
                                    FontSize="18"
                                    FontWeight="Bold"
                                    Foreground="{ThemeResource GoldBrush}" />
-                        <TextBlock x:Name="ApplyBarOfText"
-                                   Text="of"
+                        <TextBlock Text="of"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    VerticalAlignment="Bottom" />
@@ -815,8 +578,7 @@
                                    FontWeight="SemiBold"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    VerticalAlignment="Bottom" />
-                        <TextBlock x:Name="ApplyBarSelectionLabel"
-                                   Text="selected"
+                        <TextBlock Text="selected"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    VerticalAlignment="Bottom" />
@@ -851,10 +613,10 @@
                                        VerticalAlignment="Center"/>
                         </Border>
                         <StackPanel Spacing="0">
-                            <TextBlock Text="Create shortcuts"
+                            <TextBlock Text="Apply as shortcuts"
                                        FontSize="12"
                                        FontWeight="SemiBold" />
-                            <TextBlock Text="Remove links manually"
+                            <TextBlock Text="Safe preview"
                                        FontSize="9"
                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                         </StackPanel>
@@ -910,33 +672,13 @@
                             <TextBlock Text="Undo last run" Foreground="{ThemeResource GoldBrush}" />
                         </StackPanel>
                     </Button>
-                    <Button x:Name="CancelApplyButton"
-                            Visibility="Collapsed"
-                            Click="OnCancelApplyClicked"
-                            Background="Transparent"
-                            BorderBrush="{ThemeResource SystemFillColorCriticalBrush}"
-                            BorderThickness="1"
-                            Padding="12,7"
-                            CornerRadius="10"
-                            ToolTipService.ToolTip="Stop after the current file. Completed moves remain journaled and can be undone."
-                            AutomationProperties.Name="Stop applying restructure"
-                            AutomationProperties.HelpText="Stop after the current file. Completed moves remain journaled and can be undone.">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon Glyph="&#xE71A;"
-                                      FontSize="12"
-                                      Foreground="{ThemeResource SystemFillColorCriticalBrush}"/>
-                            <TextBlock Text="Stop"
-                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"/>
-                        </StackPanel>
-                    </Button>
                     <TextBlock x:Name="ApplyStatusText"
                                Text=""
                                VerticalAlignment="Center"
                                TextAlignment="Right"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="NoWrap"
-                               TextTrimming="CharacterEllipsis"
-                               AutomationProperties.LiveSetting="Polite"/>
+                               TextTrimming="CharacterEllipsis" />
                 </StackPanel>
 
                 <Button x:Name="ApplyMovesButton"
@@ -953,9 +695,7 @@
                         AutomationProperties.Name="Apply restructure as real moves">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE8AB;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
-                        <TextBlock x:Name="ApplyMovesButtonText"
-                                   Text="Convert to real moves"
-                                   Foreground="{ThemeResource GoldBrush}" />
+                        <TextBlock Text="Convert to real moves" Foreground="{ThemeResource GoldBrush}" />
                     </StackPanel>
                 </Button>
 
@@ -965,8 +705,8 @@
                         Click="OnApplySymlinksClicked"
                         Padding="16,9"
                         CornerRadius="10"
-                    ToolTipService.ToolTip="Create symlinks at the proposed paths while originals stay put. FileID records the run; remove the links manually."
-                    AutomationProperties.Name="Create restructure shortcuts">
+                        ToolTipService.ToolTip="Lay down symlinks instead of moving files. Reversible &#x2014; delete the symlinked tree to undo."
+                        AutomationProperties.Name="Preview restructure as symlinks">
                     <Button.Background>
                         <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
                             <GradientStop Offset="0" Color="{ThemeResource ApplyBarGoldStopColor}" />
@@ -979,7 +719,7 @@
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE71B;" FontSize="13" Foreground="Black" />
                         <TextBlock x:Name="ApplySymlinkButtonText"
-                                   Text="Create shortcuts"
+                                   Text="Apply as shortcuts"
                                    FontWeight="SemiBold"
                                    Foreground="Black" />
                     </StackPanel>

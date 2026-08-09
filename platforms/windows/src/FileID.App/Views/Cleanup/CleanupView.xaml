@@ -19,8 +19,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Spacing="14">
-            <Grid>
+        <Grid Grid.Row="0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
@@ -50,16 +49,15 @@
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Button Click="OnResetKeepersClicked"
-                            AutomationProperties.Name="Reset cleanup choices"
-                            AutomationProperties.HelpText="Restore default keeper choices and clear Similar-mode trash selections."
-                            ToolTipService.ToolTip="Restore default keeper choices and clear Similar-mode trash selections.">
+                            AutomationProperties.Name="Reset keepers"
+                            AutomationProperties.HelpText="Re-mark the first member of every group as keeper, clearing any user overrides."
+                            ToolTipService.ToolTip="Re-mark the first member of every group as keeper, clearing any user overrides.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE7A7;" />
                             <TextBlock Text="Reset" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnTrashNonKeepersClicked"
-                            Visibility="{x:Bind TrashNonKeepersVisibility, Mode=OneWay}"
                             AutomationProperties.Name="Trash non-keepers"
                             AutomationProperties.HelpText="Move every non-keeper duplicate to the Recycle Bin."
                             ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
@@ -79,47 +77,7 @@
                     </Button>
                 </StackPanel>
             </ScrollViewer>
-            </Grid>
-
-            <!-- Mode toggle (Exact | Similar) — macOS parity. Default Exact keeps
-                 current behavior unchanged; Similar groups visually near-identical
-                 images by perceptual-hash (dHash) Hamming distance. -->
-            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                <RadioButton x:Name="ExactModeRadio"
-                             GroupName="CleanupMode"
-                             Content="Exact"
-                             IsChecked="True"
-                             Checked="OnExactModeChecked"
-                             AutomationProperties.Name="Exact duplicates"
-                             ToolTipService.ToolTip="Byte-for-byte identical copies (same content hash)." />
-                <RadioButton x:Name="SimilarModeRadio"
-                             GroupName="CleanupMode"
-                             Content="Similar"
-                             Checked="OnSimilarModeChecked"
-                             AutomationProperties.Name="Visually similar images"
-                             ToolTipService.ToolTip="Visually near-identical images (resizes, re-encodes, crops, light edits) found by perceptual hash — review before deleting; they are NOT byte-identical." />
-            </StackPanel>
-
-            <!-- CRITICAL safety UX: Similar groups are NOT byte-identical. Shown
-                 only in Similar mode. Mirrors macOS CleanupView's orange warning. -->
-            <Border Visibility="{x:Bind SimilarWarningVisibility, Mode=OneWay}"
-                    Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
-                    BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
-                    BorderThickness="1"
-                    CornerRadius="6"
-                    Padding="12,10">
-                <StackPanel Orientation="Horizontal" Spacing="10">
-                    <FontIcon Glyph="&#xE7BA;"
-                              FontSize="16"
-                              Foreground="{ThemeResource SystemFillColorCautionBrush}"
-                              VerticalAlignment="Top" />
-                    <TextBlock TextWrapping="Wrap"
-                               FontSize="12"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Visually similar — review before deleting (not identical). These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected — open each, confirm it's a true duplicate, then trash the copies you don't want." />
-                </StackPanel>
-            </Border>
-        </StackPanel>
+        </Grid>
 
         <ScrollViewer Grid.Row="1"
                       VerticalScrollBarVisibility="Auto"
@@ -137,12 +95,17 @@
                               Padding="16"
                               Tag="{x:Bind ContentHash}"
                               AutomationProperties.Name="{x:Bind Caption, Mode=OneWay}"
-                              AutomationProperties.HelpText="Duplicate group. Open the context menu for review and trash actions.">
+                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions."
+                              RightTapped="OnGroupRightTapped">
+                            <!-- Per-group right-click action menu.
+                                 RightTapped seeds the current-group cache so
+                                 MenuFlyoutItem clicks (which don't inherit
+                                 DataContext on WinUI 3) can resolve to the
+                                 correct DuplicateGroup. -->
                             <Grid.ContextFlyout>
-                                <MenuFlyout Opening="OnGroupFlyoutOpening">
+                                <MenuFlyout>
                                     <MenuFlyoutItem Text="Keep first"
                                                     Click="OnGroupKeepFirst"
-                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Mark only the first member as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
@@ -150,7 +113,6 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Keep shallowest path"
                                                     Click="OnGroupKeepShallowest"
-                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Mark the copy in the least-nested folder as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE8AB;" />
@@ -158,16 +120,14 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Invert keeper"
                                                     Click="OnGroupInvert"
-                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Pick the next member as keeper.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE72C;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutSeparator Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}" />
+                                    <MenuFlyoutSeparator />
                                     <MenuFlyoutItem Text="Skip group"
                                                     Click="OnGroupSkip"
-                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Exclude this group from 'Trash non-keepers'.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE894;" />
@@ -175,16 +135,15 @@
                                     </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Unskip group"
                                                     Click="OnGroupUnskip"
-                                                    Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}"
                                                     ToolTipService.ToolTip="Re-include this group in 'Trash non-keepers'.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutSeparator Visibility="{x:Bind ExactActionsVisibility, Mode=OneTime}" />
-                                    <MenuFlyoutItem Text="{x:Bind TrashActionText, Mode=OneTime}"
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Text="Trash this group only"
                                                     Click="OnGroupTrashNow"
-                                                    ToolTipService.ToolTip="{x:Bind TrashActionHelpText, Mode=OneTime}">
+                                                    ToolTipService.ToolTip="Move every non-keeper member to the Recycle Bin.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE74D;" />
                                         </MenuFlyoutItem.Icon>
@@ -192,25 +151,9 @@
                                 </MenuFlyout>
                             </Grid.ContextFlyout>
                             <StackPanel Spacing="6">
-                                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                                    <!-- Per-group "Visually similar" caution badge — visible
-                                         only for perceptual groups (Similar mode). macOS parity. -->
-                                    <Border Visibility="{x:Bind SimilarBadgeVisibility, Mode=OneWay}"
-                                            Background="{ThemeResource SystemFillColorCautionBackgroundBrush}"
-                                            BorderBrush="{ThemeResource SystemFillColorCautionBrush}"
-                                            BorderThickness="1"
-                                            CornerRadius="10"
-                                            Padding="8,2"
-                                            VerticalAlignment="Center">
-                                        <TextBlock Text="Visually similar"
-                                                   FontSize="11"
-                                                   Foreground="{ThemeResource SystemFillColorCautionBrush}"/>
-                                    </Border>
-                                    <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
-                                               AutomationProperties.HeadingLevel="Level2"
-                                               Style="{StaticResource BodyStrongTextBlockStyle}"
-                                               VerticalAlignment="Center"/>
-                                </StackPanel>
+                                <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
+                                           AutomationProperties.HeadingLevel="Level2"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                 <!-- Horizontal strip of thumbnail tiles (macOS CopyTile
                                      parity). Thumbnails load lazily via the members
                                      repeater's ElementPrepared (like LibraryView). -->
@@ -254,19 +197,12 @@
                                                                Style="{StaticResource CaptionTextBlockStyle}"
                                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                                                HorizontalAlignment="Center" />
-                                                     <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
-                                                                  IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
-                                                                  Visibility="{x:Bind KeeperVisibility, Mode=OneTime}"
-                                                                  Content="Keep"
+                                                    <RadioButton GroupName="{x:Bind GroupKey, Mode=OneTime}"
+                                                                 IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
+                                                                 Content="Keep"
                                                                  AutomationProperties.Name="{x:Bind FileName}"
-                                                                  AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
-                                                                  HorizontalAlignment="Center" />
-                                                     <CheckBox IsChecked="{x:Bind IsSelectedForTrash, Mode=TwoWay}"
-                                                               Visibility="{x:Bind TrashSelectionVisibility, Mode=OneTime}"
-                                                               Content="Trash"
-                                                               AutomationProperties.Name="{x:Bind FileName}"
-                                                               AutomationProperties.HelpText="Explicitly select this visually similar copy to move to the Recycle Bin."
-                                                               HorizontalAlignment="Center" />
+                                                                 AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
+                                                                 HorizontalAlignment="Center" />
                                                 </StackPanel>
                                             </DataTemplate>
                                         </ItemsRepeater.ItemTemplate>

@@ -1,4 +1,4 @@
-﻿// Custom entry point for the WinUI 3 unpackaged desktop app.
+// Custom entry point for the WinUI 3 unpackaged desktop app.
 //
 // Why we replace the XAML-generated Main:
 //   1. Run the WinAppSDK bootstrapper before XAML touches anything. Unpackaged
@@ -14,9 +14,6 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
-using System.Diagnostics;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using WinRT;
 
@@ -34,7 +31,6 @@ internal static class Program
     /// reuse it for anything else.
     /// </summary>
     private const string SingleInstanceMutexName = "Local\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
-    private const int ShowWindowRestore = 9;
 
     /// <summary>harness hook. When the app is launched with
     /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a
@@ -68,14 +64,22 @@ internal static class Program
 
         // Single-instance gate. Hold the mutex for the lifetime of the
         // process — `using` ensures it releases on any exit path.
-        var instanceMutexName = ResolveInstanceMutexName(
-            System.Environment.GetEnvironmentVariable("FILEID_TEST_INSTANCE_KEY"),
-            System.Environment.GetEnvironmentVariable("FILEID_DB"),
-            System.Environment.GetEnvironmentVariable("LOCALAPPDATA"));
-        using var instanceMutex = new Mutex(initiallyOwned: true, name: instanceMutexName, out bool createdNew);
+        using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
         if (!createdNew)
         {
-            TryActivateExistingInstance();
+            // Another FileID is already running. Bring its window to the front and exit.
+            try
+            {
+                var current = System.Diagnostics.Process.GetCurrentProcess();
+                foreach (var p in System.Diagnostics.Process.GetProcessesByName("FileID"))
+                {
+                    if (p.Id != current.Id)
+                    {
+                        FocusProcessWindow(p.Id);
+                    }
+                }
+            }
+            catch { }
             return 0;
         }
 
@@ -99,8 +103,8 @@ internal static class Program
         // file so when the app "opens then closes" we can diagnose without
         // a debugger attached. Cleared at the start of each launch.
         var traceLogPath = System.IO.Path.Combine(
-            Services.AppPaths.LogsDir,
-            "startup-trace.txt");
+            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+            "FileID", "logs", "startup-trace.txt");
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(traceLogPath)!);
@@ -162,28 +166,6 @@ internal static class Program
         return 0;
     }
 
-    internal static string ResolveInstanceMutexName(
-        string? testInstanceKey,
-        string? databaseOverride,
-        string? localAppDataOverride)
-    {
-#if DEBUG
-        if (!string.IsNullOrWhiteSpace(testInstanceKey))
-        {
-            if (string.IsNullOrWhiteSpace(databaseOverride) ||
-                string.IsNullOrWhiteSpace(localAppDataOverride))
-            {
-                throw new InvalidOperationException(
-                    "FILEID_TEST_INSTANCE_KEY requires isolated FILEID_DB and LOCALAPPDATA values.");
-            }
-
-            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(testInstanceKey.Trim()));
-            return $"Local\\FileID-Test-{Convert.ToHexString(digest.AsSpan(0, 16))}";
-        }
-#endif
-        return SingleInstanceMutexName;
-    }
-
     /// <summary>
     /// Win32 MessageBox for fatal pre-XAML errors. Local-only surface; never
     /// transmits.
@@ -195,50 +177,31 @@ internal static class Program
         _ = NativeMessageBox(System.IntPtr.Zero, message, title, 0x10u);
     }
 
-    private static void TryActivateExistingInstance()
-    {
-        using var current = Process.GetCurrentProcess();
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            foreach (var candidate in Process.GetProcessesByName(current.ProcessName))
-            {
-                using (candidate)
-                {
-                    try
-                    {
-                        if (candidate.Id == current.Id || candidate.SessionId != current.SessionId) continue;
-                        candidate.Refresh();
-                        var hwnd = candidate.MainWindowHandle;
-                        if (hwnd == IntPtr.Zero) continue;
-
-                        if (IsIconic(hwnd)) _ = ShowWindowAsync(hwnd, ShowWindowRestore);
-                        if (!SetForegroundWindow(hwnd)) _ = FlashWindow(hwnd, invert: true);
-                        return;
-                    }
-                    catch (InvalidOperationException) { }
-                    catch (System.ComponentModel.Win32Exception) { }
-                }
-            }
-            Thread.Sleep(100);
-        }
-    }
-
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int NativeMessageBox(System.IntPtr hWnd, string text, string caption, uint type);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-    private static extern bool IsIconic(IntPtr hWnd);
-
+    private static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-    private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
-
+    private static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
+    private static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
     [System.Runtime.InteropServices.DllImport("user32.dll")]
-    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-    private static extern bool FlashWindow(IntPtr hWnd, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)] bool invert);
+    private static extern bool SetForegroundWindow(System.IntPtr hWnd);
+    private delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+    private static void FocusProcessWindow(int processId)
+    {
+        EnumWindows((hWnd, _) =>
+        {
+            uint threadId = GetWindowThreadProcessId(hWnd, out uint pid);
+            if (threadId != 0 && pid == (uint)processId)
+            {
+                ShowWindow(hWnd, 9); // SW_RESTORE
+                ShowWindow(hWnd, 5); // SW_SHOW
+                SetForegroundWindow(hWnd);
+            }
+            return true;
+        }, System.IntPtr.Zero);
+    }
 }

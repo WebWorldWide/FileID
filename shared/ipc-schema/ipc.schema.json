@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
-  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nThe platform DTOs are hand-maintained in platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift, platforms/windows/src/engine/src/ipc/mod.rs, and platforms/windows/src/FileID.IpcSchema/. Swift, Rust, and C# conformance suites lock those DTOs to this schema.",
-  "version": "1.3.0",
+  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nGenerator targets: Swift (platforms/apple/shared/Sources/FileIDShared/IPCProtocol_Generated.swift), Rust (platforms/windows/src/engine/src/ipc/generated.rs), C# (platforms/windows/src/FileID.IpcSchema/Generated.cs).",
+  "version": "1.0.0",
 
   "$defs": {
     "IPCCommand": {
@@ -11,7 +11,7 @@
       "additionalProperties": false,
       "required": ["id", "payload"],
       "properties": {
-        "id": { "type": "string", "description": "App-assigned UUID for client-side correlation/logging only; the engine does NOT echo it (engine→app messages are IPCEvent, which has no id field)." },
+        "id": { "type": "string", "description": "App-assigned UUID; engine echoes in any reply." },
         "payload": { "$ref": "#/$defs/CommandPayload" }
       }
     },
@@ -41,8 +41,7 @@
               "properties": {
                 "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
                 "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." },
-                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." },
-                "excludedPaths": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Optional absolute folder paths to prune from the walk. Compared case-insensitively after trimming trailing separators and stripping any \\\\?\\ prefix. Entries outside rootPath (or equal to it) are ignored. Rows already cataloged under an excluded path are purged at scan start. Omitted/null = no exclusions. Additive optional field — clients/engines that omit or ignore it remain conformant." }
+                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." }
               }
             }
           }
@@ -50,22 +49,6 @@
         { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
-        { "type": "object", "required": ["cancelRestructure"],  "additionalProperties": false, "properties": { "cancelRestructure":  { "type": "object", "additionalProperties": false, "description": "Cooperatively cancel only the active restructure plan, apply, or undo operation. Must not cancel a library scan." } } },
-        {
-          "type": "object",
-          "required": ["healthCheck"],
-          "additionalProperties": false,
-          "properties": {
-            "healthCheck": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["requestID"],
-              "properties": {
-                "requestID": { "type": "string", "minLength": 1, "description": "Client-generated nonce echoed verbatim by healthCheckResult so readiness cannot be satisfied by a stale event from an earlier engine generation." }
-              }
-            }
-          }
-        },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
@@ -113,11 +96,9 @@
               "required": ["modelKind", "skipExisting"],
               "properties": {
                 "modelKind":    { "type": "string" },
-                "skipExisting": { "type": "boolean", "description": "If true, skip files already processed by this model (files.vlm_model matches modelKind)." },
-                "fileIDs":      { "type": "array", "items": { "type": "integer" }, "maxItems": 10000, "uniqueItems": true, "description": "Optional bounded selection. When present, analyze only these file IDs through the same persistent batch runner; absent means the whole library." },
+                "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
                 "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
-                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." },
-                "excludedFolders": { "type": "array", "items": { "type": "string" }, "maxItems": 256, "description": "Absolute folder paths to skip when scanning the whole library (fileIDs absent). A file is excluded when its path falls under one of these folders (path-segment-boundary matching, not a raw substring — excluding '/Photos' does not exclude '/PhotosBackup'). Ignored when fileIDs is present: an explicit selection is a deliberate per-file action and is never silently filtered. Optional; absent/empty means no folder exclusions." }
+                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
               }
             }
           }
@@ -143,17 +124,13 @@
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": {
-              "libraryRoot": { "type": "string" },
-              "supportsPagedPlans": { "type": "boolean", "default": false, "description": "Opt in to a bounded move preview backed by an engine-owned plan spool. Older clients omit this and receive the legacy full plan." }
-            } } } },
+            "properties": { "libraryRoot": { "type": "string" } } } } },
 
         { "type": "object", "required": ["applyRestructure"], "additionalProperties": false,
           "properties": { "applyRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot", "moves", "useSymlinks"],
             "properties": {
               "libraryRoot": { "type": "string" },
-              "planID": { "type": ["string", "null"], "description": "Engine-owned paged plan to apply in full. When present, moves is normally empty." },
               "moves": { "type": "array", "items": {
                 "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
@@ -173,14 +150,7 @@
         { "type": "object", "required": ["undoRestructure"], "additionalProperties": false,
           "properties": { "undoRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": {
-              "libraryRoot": { "type": "string" },
-              "shortcutUndoToken": {
-                "type": ["string", "null"],
-                "format": "uuid",
-                "description": "When present, undo only the shortcut-mode run identified by this opaque token; never consume the real-move undo journal."
-              }
-            } } } },
+            "properties": { "libraryRoot": { "type": "string" } } } } },
 
         { "type": "object", "required": ["applyTags"], "additionalProperties": false,
           "properties": { "applyTags": { "type": "object", "additionalProperties": false,
@@ -208,22 +178,7 @@
         { "type": "object", "required": ["trashFiles"], "additionalProperties": false,
           "properties": { "trashFiles": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs"],
-            "properties": {
-              "fileIDs": { "type": "array", "items": { "type": "integer" } },
-              "exactIdentities": { "description": "Optional complete exact-cleanup authorization. Each requested victim must have one entry, and its sizeBytes and decoded sha256Hex must equal the unselected keeperSizeBytes and keeperSha256Hex.", "type": ["array", "null"], "items": {
-                "type": "object", "additionalProperties": false,
-                "required": ["fileID", "path", "sizeBytes", "sha256Hex", "keeperPath", "keeperSizeBytes", "keeperSha256Hex"],
-                "properties": {
-                  "fileID":    { "type": "integer" },
-                  "path":      { "type": "string", "minLength": 1 },
-                  "sizeBytes": { "type": "integer", "minimum": 0 },
-                  "sha256Hex":       { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
-                  "keeperPath":       { "type": "string", "minLength": 1 },
-                  "keeperSizeBytes":  { "type": "integer", "minimum": 0 },
-                  "keeperSha256Hex":  { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
-                }
-              } }
-            } } } },
+            "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
 
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
           "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,
@@ -251,15 +206,6 @@
               "middleName": { "type": ["string", "null"] },
               "lastName": { "type": ["string", "null"] },
               "suffix": { "type": ["string", "null"] }
-            } } } },
-
-        { "type": "object", "required": ["reassignFace"], "additionalProperties": false,
-          "properties": { "reassignFace": { "type": "object", "additionalProperties": false,
-            "required": ["faceID"],
-            "properties": {
-              "faceID": { "type": "integer" },
-              "destinationPersonID": { "type": ["integer", "null"] },
-              "createNewPerson": { "type": "boolean", "default": false }
             } } } },
 
         { "type": "object", "required": ["markPersonsAsUnknown"], "additionalProperties": false,
@@ -311,13 +257,7 @@
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
             } } } },
 
-        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } },
-
-        { "type": "object", "required": ["purgeExcluded"], "additionalProperties": false,
-          "properties": { "purgeExcluded": { "type": "object", "additionalProperties": false,
-            "description": "Remove cataloged rows under the given excluded folders immediately (files on disk untouched; cascades tags/faces/captions/embeddings). Sent when the user adds an exclusion so the Library reflects it without waiting for a rescan. Replies with a bulkActionResult (action 'purgeExcluded', succeeded = purged row count).",
-            "required": ["excludedPaths"],
-            "properties": { "excludedPaths": { "type": "array", "items": { "type": "string" } } } } } }
+        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } }
       ]
     },
 
@@ -325,7 +265,6 @@
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
-        { "type": "object", "required": ["healthCheckResult"],       "additionalProperties": false, "properties": { "healthCheckResult":       { "$ref": "#/$defs/SinglePositional/HealthCheckResult" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
         {
@@ -404,23 +343,6 @@
               "workerCap":        { "type": "integer", "minimum": 1 },
               "physicalMemoryGB": { "type": "number", "minimum": 0 },
               "hardware":         { "type": ["object", "null"], "description": "HardwareInfo snapshot — same shape as the hardwareReprobed event's hardware field. V15.9+ engines additionally populate: pCores, eCores, logicalCpuCores, workerCap, ramTotalMB, ramAvailableMB, memoryTier (low|balanced|high), vramMB, npuPresent, powerSource (ac|battery|unknown), batteryPercent, activeProfile (eco|auto|performance). Older engines omit those fields; consumers must default them." }
-            }
-          }
-        }
-      },
-
-      "HealthCheckResult": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["_0"],
-        "properties": {
-          "_0": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["requestID", "pid"],
-            "properties": {
-              "requestID": { "type": "string", "minLength": 1, "description": "Exact nonce from the corresponding healthCheck command." },
-              "pid":       { "type": "integer", "minimum": 0, "description": "Process ID of the engine that handled the health check." }
             }
           }
         }
@@ -538,7 +460,7 @@
             "additionalProperties": false,
             "required": ["kind", "message"],
             "properties": {
-              "kind":      { "type": "string", "description": "Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | runtime_not_installed | face_clustering_failed | unknown_model | unknown | … . `runtime_not_installed` is macOS-engine-only (the `load-dynamic` ONNX Runtime dylib isn't installed — see `ort_runtime.rs`); like `model_load_failed` it surfaces a missing ML prerequisite, but points at the one-time runtime install rather than a model download. `face_clustering_failed` (Windows form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine; the macOS engine surfaces those conditions through its scan-completion flow rather than as distinct error kinds." },
+              "kind":      { "type": "string", "description": "Stable cross-platform error-kind vocabulary: both engines MUST emit the SAME string for the same condition (audit F-C2-003); the app single-flight gates + toasts key on these exact strings. Canonical kinds: discovery_failed | vision_failed | db_failed | model_load_failed | model_download_failed | download_tls_pin_failed | pack_not_available | face_clustering_failed | unknown_model | unknown | … . `face_clustering_failed` (Windows form) is the canonical face-clustering failure kind on BOTH engines — the macOS legacy `face_cluster_failed` was renamed to it. `unknown_model` is the canonical 'engine doesn't recognize this model id' kind on BOTH engines — the macOS legacy `prewarm_invalid_kind` was renamed to it. Scan-discovery notices (rescan_no_changes | empty_folder | discovery_partial) are emitted by the Windows engine; the macOS engine surfaces those conditions through its scan-completion flow rather than as distinct error kinds." },
               "message":   { "type": "string" },
               "path":      { "type": ["string", "null"] },
               "modelKind": { "type": ["string", "null"], "description": "For errors pertaining to a specific model/pack install (e.g. mobileclip_s2, cuda_pack_x64), the model id. Lets the app route errors to the right install slot without path-string heuristics." }
@@ -711,9 +633,6 @@
             "required": ["libraryRoot", "moves", "categoryCounts"],
             "properties": {
               "libraryRoot":           { "type": "string" },
-              "planID":                { "type": ["string", "null"], "description": "Opaque engine-owned plan handle. Present only for an opt-in truncated preview." },
-              "totalMoves":            { "type": ["integer", "null"], "minimum": 0, "description": "Exact move count when moves is a bounded preview." },
-              "truncated":             { "type": "boolean", "default": false, "description": "True when moves contains only a bounded preview; apply using planID rather than echoing moves." },
               "moves":                 { "type": "array", "items": { "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
                 "properties": {
@@ -730,21 +649,6 @@
                 "required": ["category", "count"],
                 "properties": { "category": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } }
               } },
-              "confidenceCounts": {
-                "anyOf": [
-                  { "type": "null" },
-                  { "type": "object", "additionalProperties": false,
-                    "required": ["auto", "review", "ask", "unknown"],
-                    "properties": {
-                      "auto": { "type": "integer", "minimum": 0 },
-                      "review": { "type": "integer", "minimum": 0 },
-                      "ask": { "type": "integer", "minimum": 0 },
-                      "unknown": { "type": "integer", "minimum": 0 }
-                    }
-                  }
-                ],
-                "description": "Engine-authoritative confidence totals for the complete plan, including rows omitted from a bounded preview. Apply-time integrity is revalidated immediately before the first move."
-              },
               "folderClassifications": {
                 "anyOf": [
                   { "type": "null" },
@@ -776,18 +680,14 @@
             "properties": {
               "applied":        { "type": "integer", "minimum": 0 },
               "failed":         { "type": "integer", "minimum": 0 },
-              "privilegeError": { "type": ["string", "null"] },
-              "cancelled":      { "type": "boolean", "default": false, "description": "True when cooperative cancellation stopped the operation before every planned row was processed." },
-              "planned":        { "type": ["integer", "null"], "minimum": 0, "description": "Authoritative number of rows eligible for this apply or undo operation." },
-              "remaining":      { "type": ["integer", "null"], "minimum": 0, "description": "Eligible rows not processed because cancellation stopped the operation. Present when cancelled is true." },
-              "shortcutUndoToken": { "type": ["string", "null"], "format": "uuid", "description": "Opaque token for undoing only the shortcuts created by this apply. Present only for shortcut-mode runs that created at least one new shortcut." }
+              "privilegeError": { "type": ["string", "null"] }
             }
           }
         }
       },
 
       "BulkActionResult": {
-        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / markPersonsDifferent / restoreFromTrash / revertMerge / purgeExcluded). `action` is the originating command's discriminator. A platform that implements restore-from-trash may append its undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'); platforms without restore support emit bare 'trashFiles'. messages carries per-file results.",
+        "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
@@ -797,7 +697,7 @@
             "additionalProperties": false,
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
-              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|markPersonsDifferent|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
+              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge)(:[0-9a-fA-F-]+)?$" },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,

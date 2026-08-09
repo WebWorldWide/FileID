@@ -21,8 +21,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:svc="using:FileID.Services"
     mc:Ignorable="d"
-    MinWidth="320"
-    MaxWidth="600">
+    Width="600">
 
     <Grid Padding="28">
         <Grid.RowDefinitions>
@@ -93,20 +92,16 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Clip.Message, Svc.Clip.Fraction, Svc.Clip.BytesDone, Svc.Clip.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Clip.BytesPerSecond, Svc.Clip.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Clip.Status), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Clip.Status, Svc.Clip.HasStarted), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Clip.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -167,20 +162,16 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.RamPlus.Message, Svc.RamPlus.Fraction, Svc.RamPlus.BytesDone, Svc.RamPlus.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.RamPlus.BytesPerSecond, Svc.RamPlus.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.RamPlus.Status), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.RamPlus.Status, Svc.RamPlus.HasStarted), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.RamPlus.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -240,20 +231,16 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.Arcface.Message, Svc.Arcface.Fraction, Svc.Arcface.BytesDone, Svc.Arcface.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Arcface.BytesPerSecond, Svc.Arcface.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Arcface.Status), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Arcface.Status, Svc.Arcface.HasStarted), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Arcface.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -274,8 +261,8 @@
                     </Grid>
                 </Grid>
 
-                <!-- Deep Analyze VLM — hardware recommendation plus an explicit
-                     Gemma / Qwen / Mistral picker. -->
+                <!-- Qwen 2.5-VL — Deep Analyze (hardware-tiered 3B / 7B, set by
+                     ModelInstallerService.UpdateDeepVlmRecommendation). -->
                 <Grid Padding="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="28" />
@@ -307,19 +294,6 @@
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ComboBox x:Name="VlmPicker"
-                                  Header="Vision model"
-                                  HorizontalAlignment="Stretch"
-                                  SelectionChanged="OnVlmSelectionChanged"
-                                  AutomationProperties.Name="Deep Analyze vision model">
-                            <ComboBoxItem Content="Gemma 3 4B — lightest" Tag="gemma_3_4b" />
-                            <ComboBoxItem Content="Qwen2.5-VL 7B — balanced" Tag="qwen2_5_vl_7b" />
-                            <ComboBoxItem Content="Mistral-Small 3.2 24B — max quality" Tag="mistral_small_3_2" />
-                        </ComboBox>
-                        <TextBlock Text="{x:Bind Svc.DeepVlmRecommendation, Mode=OneWay}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
-                                   TextWrapping="Wrap" />
                         <ProgressBar Maximum="1"
                                      Value="{x:Bind Svc.DeepVlm.Fraction, Mode=OneWay}"
                                      IsIndeterminate="{x:Bind IsStarting(Svc.DeepVlm.Status, Svc.DeepVlm.HasStarted), Mode=OneWay}"
@@ -327,20 +301,16 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind ProgressLabel(Svc.DeepVlm.Message, Svc.DeepVlm.Fraction, Svc.DeepVlm.BytesDone, Svc.DeepVlm.TotalBytes), Mode=OneWay}"
                                    Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.DeepVlm.BytesPerSecond, Svc.DeepVlm.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.DeepVlm.Status), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.DeepVlm.Status, Svc.DeepVlm.HasStarted), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.DeepVlm.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -358,157 +328,6 @@
                                 MinWidth="86"
                                 AutomationProperties.HelpText="Deep Analyze vision model"
                                 Visibility="{x:Bind ShowActionButton(Svc.DeepVlm.Status), Mode=OneWay}" />
-                    </Grid>
-                </Grid>
-
-                <!-- BGE-small — document-content embeddings for semantic search
-                     and Restructure. Optional for scanning, but a real installable
-                     capability and therefore visible in first-run setup. -->
-                <Grid Padding="0,4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="28" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="{x:Bind GlyphFor(Svc.Bge.Status), Mode=OneWay}"
-                              Foreground="{x:Bind IconBrushFor(Svc.Bge.Status), Mode=OneWay}"
-                              FontSize="22"
-                              VerticalAlignment="Top"
-                              AutomationProperties.AccessibilityView="Raw" />
-                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       Text="Document understanding (BGE-small)"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{x:Bind VlmSize(Svc.Bge.ApproxBytes), Mode=OneWay}"
-                                       Margin="12,0,0,0"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        </Grid>
-                        <TextBlock Text="Reads document content so semantic search and Restructure group files by what they say, not only by filename."
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <ProgressBar Maximum="1"
-                                     Value="{x:Bind Svc.Bge.Fraction, Mode=OneWay}"
-                                     IsIndeterminate="{x:Bind IsStarting(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
-                                     Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
-                                   Text="{x:Bind ProgressLabel(Svc.Bge.Message, Svc.Bge.Fraction, Svc.Bge.BytesDone, Svc.Bge.TotalBytes), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
-                                   Text="{x:Bind RateEtaLabel(Svc.Bge.BytesPerSecond, Svc.Bge.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
-                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Bge.LastError), Mode=OneWay}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                   Visibility="{x:Bind VisibleIfFailed(Svc.Bge.Status), Mode=OneWay}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
-                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   VerticalAlignment="Center"
-                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Bge.Status), Mode=OneWay}" />
-                        <Button Click="OnBgeActionClicked"
-                                Content="{x:Bind ButtonLabel(Svc.Bge.Status), Mode=OneWay}"
-                                MinWidth="86"
-                                AutomationProperties.HelpText="Document understanding (BGE-small) model"
-                                Visibility="{x:Bind ShowActionButton(Svc.Bge.Status), Mode=OneWay}" />
-                    </Grid>
-                </Grid>
-
-                <!-- Whisper — speech transcription (OPTIONAL Deep Analyze
-                     enhancement; own Install button, does not gate onboarding
-                     completion / "Install all"). Surfaced here so it's
-                     discoverable at first launch, not buried in Settings. -->
-                <Grid Padding="0,4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="28" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <FontIcon Grid.Column="0"
-                              Glyph="{x:Bind GlyphFor(Svc.Whisper.Status), Mode=OneWay}"
-                              Foreground="{x:Bind IconBrushFor(Svc.Whisper.Status), Mode=OneWay}"
-                              FontSize="22"
-                              VerticalAlignment="Top"
-                              AutomationProperties.AccessibilityView="Raw" />
-                    <StackPanel Grid.Column="1" Spacing="4" Margin="12,0,0,0" VerticalAlignment="Center">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0"
-                                       Text="Speech transcription (Whisper)"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{x:Bind VlmSize(Svc.Whisper.ApproxBytes), Mode=OneWay}"
-                                       Margin="12,0,0,0"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        </Grid>
-                        <TextBlock Text="Optional. Transcribes speech in audio + video files so Deep Analyze can name them by what's said. Install now or later from Settings."
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                        <ProgressBar Maximum="1"
-                                     Value="{x:Bind Svc.Whisper.Fraction, Mode=OneWay}"
-                                     IsIndeterminate="{x:Bind IsStarting(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
-                                     Foreground="{StaticResource GoldBrush}"
-                                     Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}" />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
-                                   Text="{x:Bind ProgressLabel(Svc.Whisper.Message, Svc.Whisper.Fraction, Svc.Whisper.BytesDone, Svc.Whisper.TotalBytes), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
-                        <TextBlock FontFamily="Consolas"
-                                   FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
-                                   Text="{x:Bind RateEtaLabel(Svc.Whisper.BytesPerSecond, Svc.Whisper.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
-                        <TextBlock Text="{x:Bind ErrorLabel(Svc.Whisper.LastError), Mode=OneWay}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                   Visibility="{x:Bind VisibleIfFailed(Svc.Whisper.Status), Mode=OneWay}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
-                                   Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   VerticalAlignment="Center"
-                                   Visibility="{x:Bind VisibleIfInstalled(Svc.Whisper.Status), Mode=OneWay}" />
-                        <Button Click="OnWhisperActionClicked"
-                                Content="{x:Bind ButtonLabel(Svc.Whisper.Status), Mode=OneWay}"
-                                MinWidth="86"
-                                AutomationProperties.HelpText="Speech transcription (Whisper) model"
-                                Visibility="{x:Bind ShowActionButton(Svc.Whisper.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
 
@@ -553,12 +372,10 @@
                                      Visibility="{x:Bind VisibleIfDownloading(Svc.Accelerator.Status), Mode=OneWay}" />
                         <TextBlock FontFamily="Consolas"
                                    FontSize="11"
-                                   MaxLines="1"
-                                   TextTrimming="CharacterEllipsis"
                                    Text="{x:Bind RateEtaLabel(Svc.Accelerator.BytesPerSecond, Svc.Accelerator.EtaSeconds), Mode=OneWay}"
-                                   Visibility="{x:Bind VisibleIfDownloading(Svc.Accelerator.Status), Mode=OneWay}"
+                                   Visibility="{x:Bind ShowRateEta(Svc.Accelerator.Status, Svc.Accelerator.HasStarted), Mode=OneWay}"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   />
+                                   TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ErrorLabel(Svc.Accelerator.LastError), Mode=OneWay}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
@@ -570,17 +387,12 @@
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
-                                   Visibility="{x:Bind ShowAcceleratorInstalledBadge(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall, Svc.AcceleratorRestartRequired), Mode=OneWay}" />
+                                   Visibility="{x:Bind ShowAcceleratorInstalledBadge(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
                         <Button Click="OnAcceleratorActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Accelerator.Status), Mode=OneWay}"
                                 MinWidth="86"
                                 AutomationProperties.HelpText="GPU Acceleration Pack"
                                 Visibility="{x:Bind ShowAcceleratorButton(Svc.Accelerator.Status, Svc.AcceleratorIsRealInstall), Mode=OneWay}" />
-                        <Button Click="OnRestartAcceleratorClicked"
-                                Content="Restart engine"
-                                MinWidth="112"
-                                AutomationProperties.HelpText="Restart the engine to activate the installed GPU provider"
-                                Visibility="{x:Bind ShowAcceleratorRestartButton(Svc.AcceleratorRestartRequired, Svc.IsBusy), Mode=OneWay}" />
                     </Grid>
                 </Grid>
             </StackPanel>

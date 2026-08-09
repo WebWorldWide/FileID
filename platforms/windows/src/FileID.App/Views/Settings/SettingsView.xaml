@@ -239,131 +239,6 @@
                         </Grid>
                     </Grid>
 
-                    <!-- Whisper speech transcription. Optional Deep Analyze enhancement —
-                         names voice memos / podcasts / lectures from their spoken content.
-                         Binds to Svc.Whisper like the other cards. -->
-                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
-                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="Speech transcription (Whisper)"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Deep Analyze names voice memos, podcasts &amp; lectures from what's said (MIT)"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            <ProgressBar Maximum="1"
-                                         Value="{x:Bind Svc.Whisper.Fraction, Mode=OneWay}"
-                                         IsIndeterminate="{x:Bind IsStarting(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
-                                         Foreground="{StaticResource GoldBrush}"
-                                         Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
-                                         Margin="0,4,0,0"
-                                         Height="4"/>
-                            <TextBlock FontFamily="Consolas"
-                                       FontSize="11"
-                                       Text="{x:Bind ProgressLabel(Svc.Whisper.Message, Svc.Whisper.Fraction, Svc.Whisper.BytesDone, Svc.Whisper.TotalBytes), Mode=OneWay}"
-                                       Visibility="{x:Bind VisibleIfDownloading(Svc.Whisper.Status), Mode=OneWay}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       Margin="0,2,0,0"
-                                       TextWrapping="Wrap"/>
-                            <TextBlock FontFamily="Consolas"
-                                       FontSize="11"
-                                       Text="{x:Bind RateEtaLabel(Svc.Whisper.BytesPerSecond, Svc.Whisper.EtaSeconds), Mode=OneWay}"
-                                       Visibility="{x:Bind ShowRateEta(Svc.Whisper.Status, Svc.Whisper.HasStarted), Mode=OneWay}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap"/>
-                            <TextBlock Text="{x:Bind ErrorLabel(Svc.Whisper.LastError), Mode=OneWay}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                       Visibility="{x:Bind VisibleIfFailed(Svc.Whisper.Status), Mode=OneWay}"
-                                       TextWrapping="Wrap"/>
-                        </StackPanel>
-                        <TextBlock Grid.Column="1"
-                                   Text="~154 MB"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   VerticalAlignment="Center"
-                                   Margin="0,0,8,0"/>
-                        <Grid Grid.Column="2" VerticalAlignment="Center">
-                            <TextBlock Text="✓ Installed"
-                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       VerticalAlignment="Center"
-                                       Visibility="{x:Bind VisibleIfInstalled(Svc.Whisper.Status), Mode=OneWay}"/>
-                            <Button Content="{x:Bind ButtonLabel(Svc.Whisper.Status), Mode=OneWay}"
-                                    Tag="whisper"
-                                    Click="OnInstallModelClicked"
-                                    MinWidth="86"
-                                    Visibility="{x:Bind ShowActionButton(Svc.Whisper.Status), Mode=OneWay}"
-                                    AutomationProperties.Name="Install speech transcription"/>
-                        </Grid>
-                    </Grid>
-
-                    <!-- BGE document embedder. Optional restructure enhancement — clusters
-                         documents by their content instead of their filename. Binds to Svc.Bge. -->
-                    <Grid ColumnSpacing="12" Padding="14,12" CornerRadius="10"
-                          Background="{ThemeResource SubtleFillColorTertiaryBrush}">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="Document understanding (BGE)"
-                                       Style="{StaticResource BodyStrongTextBlockStyle}"/>
-                            <TextBlock Text="Restructure groups documents by what they say, not their filename (MIT)"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-                            <ProgressBar Maximum="1"
-                                         Value="{x:Bind Svc.Bge.Fraction, Mode=OneWay}"
-                                         IsIndeterminate="{x:Bind IsStarting(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
-                                         Foreground="{StaticResource GoldBrush}"
-                                         Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
-                                         Margin="0,4,0,0"
-                                         Height="4"/>
-                            <TextBlock FontFamily="Consolas"
-                                       FontSize="11"
-                                       Text="{x:Bind ProgressLabel(Svc.Bge.Message, Svc.Bge.Fraction, Svc.Bge.BytesDone, Svc.Bge.TotalBytes), Mode=OneWay}"
-                                       Visibility="{x:Bind VisibleIfDownloading(Svc.Bge.Status), Mode=OneWay}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       Margin="0,2,0,0"
-                                       TextWrapping="Wrap"/>
-                            <TextBlock FontFamily="Consolas"
-                                       FontSize="11"
-                                       Text="{x:Bind RateEtaLabel(Svc.Bge.BytesPerSecond, Svc.Bge.EtaSeconds), Mode=OneWay}"
-                                       Visibility="{x:Bind ShowRateEta(Svc.Bge.Status, Svc.Bge.HasStarted), Mode=OneWay}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap"/>
-                            <TextBlock Text="{x:Bind ErrorLabel(Svc.Bge.LastError), Mode=OneWay}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                       Visibility="{x:Bind VisibleIfFailed(Svc.Bge.Status), Mode=OneWay}"
-                                       TextWrapping="Wrap"/>
-                        </StackPanel>
-                        <TextBlock Grid.Column="1"
-                                   Text="~135 MB"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   VerticalAlignment="Center"
-                                   Margin="0,0,8,0"/>
-                        <Grid Grid.Column="2" VerticalAlignment="Center">
-                            <TextBlock Text="✓ Installed"
-                                       Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       VerticalAlignment="Center"
-                                       Visibility="{x:Bind VisibleIfInstalled(Svc.Bge.Status), Mode=OneWay}"/>
-                            <Button Content="{x:Bind ButtonLabel(Svc.Bge.Status), Mode=OneWay}"
-                                    Tag="bge_text"
-                                    Click="OnInstallModelClicked"
-                                    MinWidth="86"
-                                    Visibility="{x:Bind ShowActionButton(Svc.Bge.Status), Mode=OneWay}"
-                                    AutomationProperties.Name="Install document understanding"/>
-                        </Grid>
-                    </Grid>
-
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
@@ -512,7 +387,7 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
-                                           Text="~621 MB download. Runs Deep Analyze faster than the universal Vulkan build. No separate cuDNN install is required for this runtime."/>
+                                           Text="~200 MB download. Runs Deep Analyze 15-25% faster than the default Vulkan build. No separate cuDNN required."/>
                             </StackPanel>
                             <Button Grid.Column="1"
                                     x:Name="InstallCudaLlamaButton"
@@ -522,10 +397,12 @@
                                     ToolTipService.ToolTip="Downloads llama-bXXXX-bin-win-cuda-cu12.4-x64.zip from github.com/ggml-org/llama.cpp/releases." />
                         </Grid>
 
-                        <!-- Legacy setting retained for settings-file compatibility.
-                             Runtime downloads are now always user-initiated. -->
+                        <!-- Auto-install toggle. On by default — the CUDA
+                             llama.cpp prewarm fires silently when an NVIDIA
+                             GPU is detected on the first launch. Users who
+                             prefer the Vulkan build (smaller, identical UX)
+                             can opt out here. -->
                         <ToggleSwitch x:Name="AutoInstallCudaToggle"
-                                      Visibility="Collapsed"
                                       Header="Auto-install CUDA acceleration"
                                       OffContent="Off — leave Deep Analyze on Vulkan"
                                       OnContent="On — install CUDA llama.cpp on first launch"
@@ -545,7 +422,7 @@
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
-                                           Text="Install the pinned cuDNN + ONNX Runtime CUDA pack directly from NVIDIA and Microsoft to move scanning off DirectML. DirectML remains the built-in fallback." />
+                                           Text="Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site." />
                                 <!-- diagnostics line populated after a Verify install
                                      click when the engine reports cuDNN absent. Explains
                                      *why* (missing cudart64, wrong directory, etc.). -->
@@ -566,7 +443,7 @@
                                         Content="Install"
                                         Click="OnInstallCudnnClicked"
                                         AutomationProperties.Name="Install CUDA pack for scanning (cuDNN + ORT CUDA provider)"
-                                        ToolTipService.ToolTip="Downloads the pinned cuDNN and ONNX Runtime CUDA components. DirectML works without this; restart the engine after installation to activate CUDA." />
+                                        ToolTipService.ToolTip="Downloads cuDNN ~430 MB from NVIDIA's public CDN and registers it for the ORT CUDA EP. DirectML works fine without this — only install if you want the 10-15% scanning speedup." />
                                 <!-- re-probe after manual install. Engine doesn't
                                      restart; just re-runs the DLL probe and emits a
                                      hardwareReprobed event so the card flips to ✓ when
@@ -730,39 +607,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- Restructure folder-granularity. Mirrors macOS Settings' Restructure
-                 picker; the engine reads FILEID_RESTRUCTURE_GRANULARITY at spawn. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="14">
-                    <TextBlock Text="Restructure" Style="{StaticResource SubtitleTextBlockStyle}"
-                               AutomationProperties.HeadingLevel="Level2"/>
-                    <StackPanel Spacing="4">
-                        <TextBlock Text="Folder granularity"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   FontWeight="SemiBold"
-                                   CharacterSpacing="40" />
-                        <ComboBox x:Name="GranularityCombo"
-                                  Width="280"
-                                  SelectionChanged="OnGranularityChanged"
-                                  AutomationProperties.Name="Restructure folder granularity"
-                                  AutomationProperties.HelpText="Persisted across launches. Takes effect on the next engine start.">
-                            <ComboBoxItem Content="Looser — broader, fewer folders" Tag="loose"/>
-                            <ComboBoxItem Content="Balanced (default)" Tag="normal"/>
-                            <ComboBoxItem Content="Tighter — more, smaller folders" Tag="tight"/>
-                        </ComboBox>
-                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap"
-                                   Text="How finely Restructure splits your files into folders. Takes effect the next time the engine starts (Restart Engine below, or relaunch FileID)." />
-                    </StackPanel>
-                </StackPanel>
-            </Border>
-
             <!-- Storage. Shows where every on-disk artifact lives — DB,
                  thumbnail cache, model cache — so users know exactly what
                  to back up + can clear caches when needed. Mirrors macOS
@@ -833,70 +677,6 @@
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
                                Text="To uninstall FileID completely, delete the parent FileID folder under %LOCALAPPDATA% after quitting the app." />
-                </StackPanel>
-            </Border>
-
-            <!-- Excluded folders. User-managed subtrees the scan walk prunes.
-                 Adding one immediately purges its cataloged rows (files on
-                 disk untouched) via purgeExcluded, so the Library reflects
-                 the exclusion without waiting for a rescan. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="Excluded folders" Style="{StaticResource SubtitleTextBlockStyle}"
-                               AutomationProperties.HeadingLevel="Level2"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               TextWrapping="Wrap"
-                               Text="FileID skips these folders when scanning. Excluding a folder also removes its files from the library right away — nothing is ever deleted from your disk." />
-                    <InfoBar x:Name="ExcludedFoldersInfoBar"
-                             IsOpen="False"
-                             IsClosable="True" />
-                    <TextBlock x:Name="ExcludedFoldersEmptyText"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               Text="No folders are excluded."
-                               Visibility="Visible" />
-                    <ItemsControl x:Name="ExcludedFoldersList" />
-                    <Button Content="Add folder…"
-                            Click="OnAddExcludedFolderClicked"
-                            AutomationProperties.Name="Add an excluded folder" />
-                </StackPanel>
-            </Border>
-
-            <!-- Deep Analyze exclusions. Separate from the scan exclusion
-                 list above: a folder can be fine to catalog/tag/search but
-                 too slow or private to run the VLM over. Files stay in the
-                 library either way — this only skips the whole-library Deep
-                 Analyze pass (People/Restructure's auto-tag trigger and the
-                 Deep Analyze tab's own "Analyze all"); an explicit
-                 file/folder selection is never filtered by this list. -->
-            <Border CornerRadius="12"
-                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    Padding="20">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="Deep Analyze exclusions" Style="{StaticResource SubtitleTextBlockStyle}"
-                               AutomationProperties.HeadingLevel="Level2"/>
-                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               TextWrapping="Wrap"
-                               Text="FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list." />
-                    <InfoBar x:Name="DeepAnalyzeExcludedFoldersInfoBar"
-                             IsOpen="False" IsClosable="True" />
-                    <TextBlock x:Name="DeepAnalyzeExcludedFoldersEmptyText"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               Text="No folders are excluded from Deep Analyze."
-                               Visibility="Visible" />
-                    <ItemsControl x:Name="DeepAnalyzeExcludedFoldersList" />
-                    <Button Content="Add folder…"
-                            Click="OnAddDeepAnalyzeExcludedFolderClicked"
-                            AutomationProperties.Name="Add a folder excluded from Deep Analyze" />
                 </StackPanel>
             </Border>
 

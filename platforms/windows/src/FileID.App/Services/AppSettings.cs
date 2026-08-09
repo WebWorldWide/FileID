@@ -49,23 +49,11 @@ internal sealed class AppSettings
     /// <summary>Restructure view mode: false = cards, true = tree-diff.</summary>
     public bool RestructureTreeMode { get; set; } = false;
 
-    /// <summary>Restructure folder-granularity: "loose" | "normal" | "tight". The engine
-    /// reads FILEID_RESTRUCTURE_GRANULARITY (one knob shifting the cluster cosines —
-    /// HDBSCAN min_cluster_size philosophy); EngineClient forwards a non-default value
-    /// at spawn, so it applies on the next engine start. Mirrors the macOS
-    /// @AppStorage("restructure.granularity"). Sanitize() coerces any other value.</summary>
-    public string RestructureGranularity { get; set; } = "normal";
-
     /// <summary>Library kind filter (image / video / pdf / document / audio / all).</summary>
     public string LibraryKindFilter { get; set; } = "all";
 
     /// <summary>Hide marked-as-unknown clusters in People (matches macOS PeopleView toggle).</summary>
-    public bool PeopleHideUnknown { get; set; } = true;
-
-    /// <summary>The last person-name tag successfully written for each person id.
-    /// This lets a later rename replace only FileID's prior person tag while
-    /// preserving every unrelated user tag.</summary>
-    public Dictionary<string, string> PersonTagHistory { get; set; } = new();
+    public bool PeopleHideUnknown { get; set; } = false;
 
     /// <summary>
     /// Manual GPU execution provider override. Null = auto-detect (engine
@@ -88,21 +76,35 @@ internal sealed class AppSettings
     /// Once true the banner stays hidden across launches.</summary>
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings-file compatibility.
-    /// Runtime downloads are now always user-initiated from onboarding or
-    /// Settings; this value no longer starts a background network request.</summary>
+    /// <summary>Opt out of the silent CUDA llama.cpp install that fires
+    /// when the engine reports an NVIDIA GPU. False (the default) means
+    /// auto-install is enabled — Deep Analyze gets the 15-25% faster
+    /// CUDA build without the user finding a hidden Settings button.
+    /// True disables the auto-install entirely.</summary>
     public bool DisableAutoInstallCuda { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings-file compatibility.
-    /// The Vulkan runtime now installs only after an explicit VLM install.</summary>
+    /// <summary>Default false (auto-install enabled). On engine-ready,
+    /// the Vulkan llama.cpp runtime is fetched silently so Deep Analyze
+    /// works without the user finding the Install button. Vulkan ships
+    /// on every GPU vendor — no NVIDIA gate. True disables the
+    /// auto-install entirely (manual install still available via the
+    /// engine's PrewarmModel IPC if a user-facing button is added).</summary>
     public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings-file compatibility.
-    /// CUDA components now install only from an explicit accelerator action.</summary>
+    /// <summary>Default false (auto-install enabled). On engine-ready
+    /// AND NVIDIA hardware, cuDNN is fetched from NVIDIA's public CDN
+    /// (developer.download.nvidia.com) so the ORT CUDA EP can replace
+    /// DirectML for scanning (~10-15% throughput on RTX-class). True
+    /// disables; users can fall back to system-installed CUDA Toolkit
+    /// + cuDNN if they prefer the BYO path.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
-    /// <summary>Legacy preference retained for settings-file compatibility.
-    /// OpenVINO now installs only from an explicit accelerator action.</summary>
+    /// <summary>Default false (auto-install enabled). On engine-ready AND Intel
+    /// hardware, the ONNX Runtime OpenVINO pack (Apache-2.0) is fetched so the
+    /// scan pipeline runs on the OpenVINO EP instead of DirectML. True disables.
+    /// (Snapdragon's QNN is NOT auto-installed — the QNN SDK is proprietary and
+    /// can't be redistributed under the project's commercial-clean rule; QNN is
+    /// used only if the device already provides it.)</summary>
     public bool DisableAutoInstallOpenVino { get; set; } = false;
 
     /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
@@ -113,31 +115,6 @@ internal sealed class AppSettings
     /// anything else to the default qwen2_5_vl_7b. The non-commercial
     /// qwen2_5_vl_3b (Qwen Research License) was removed.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
-
-    /// <summary>Distinguishes a deliberate model pick from the historical Qwen
-    /// default. Hardware refreshes may update an automatic recommendation, but
-    /// never replace a model the user explicitly selected.</summary>
-    public bool SelectedVlmModelWasUserChosen { get; set; }
-
-    /// <summary>Folders excluded from scanning. Absolute paths; the engine
-    /// prunes them from the walk and purges already-cataloged rows under
-    /// them at scan start (plus immediately via purgeExcluded when one is
-    /// added). Sanitize() drops malformed entries, dedupes
-    /// case-insensitively, and caps the list.</summary>
-    public List<string> ExcludedFolders { get; set; } = new();
-
-    /// <summary>Folders excluded from the whole-library Deep Analyze pass
-    /// (deepAnalyzeAll with no fileIDs). Separate from ExcludedFolders —
-    /// deliberately: a folder can be fine to catalog/tag/search but too
-    /// slow or private to run the VLM over. Sent fresh with every
-    /// deepAnalyzeAll; an explicit selection (Analyze Selected) is never
-    /// filtered by this list. Same sanitization as ExcludedFolders.</summary>
-    public List<string> DeepAnalyzeExcludedFolders { get; set; } = new();
-
-    /// <summary>Show the "Review changes before closing?" prompt when the
-    /// session change log still has undoable entries at window close.
-    /// Cleared by the dialog's "Don't ask me again" checkbox.</summary>
-    public bool ConfirmCloseOnPendingChanges { get; set; } = true;
 
     /// <summary>Schema version of this settings.json. Fresh installs start at
     /// the current version so one-time Sanitize migrations only ever touch
@@ -160,10 +137,11 @@ internal sealed class AppSettings
         new(StringComparer.OrdinalIgnoreCase)
         { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
 
-    /// <summary>Restructure granularity values the engine accepts (anything else is the
-    /// calibrated default). Mirrors the macOS AppSettings.restructureGranularityValues.</summary>
-    private static readonly HashSet<string> AllowedGranularities =
-        new(StringComparer.Ordinal) { "loose", "normal", "tight" };
+    /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
+    /// can install. The Deep Analyze card guards use this to reject removed /
+    /// non-commercial models (e.g. the dropped qwen2_5_vl_3b).</summary>
+    public static bool IsAllowedVlmKind(string? kind) =>
+        kind is { } k && AllowedVlmKinds.Contains(k);
 
     public static AppSettings Load()
     {
@@ -195,18 +173,8 @@ internal sealed class AppSettings
     /// Analyze model. v4: SmolVLM removed — CLIP scene tags are the canonical
     /// auto-tagger. v5: non-commercial qwen2_5_vl_3b removed (Qwen Research
     /// License) — RAM++ is the auto-tagger and Qwen2.5-VL-7B (Apache) is the
-    /// default Deep Analyze model; any leftover 3B value migrates to 7B.
-    /// v6: ExcludedFolders + ConfirmCloseOnPendingChanges added.
-    /// v7: DeepAnalyzeExcludedFolders added.</summary>
-    private const int CurrentSchemaVersion = 7;
-
-    /// <summary>Tamper bound for ExcludedFolders / DeepAnalyzeExcludedFolders
-    /// — a hand-edited settings.json can't make every scan or Deep Analyze
-    /// run drag a giant exclusion list through IPC. Matches the schema's
-    /// deepAnalyzeAll.excludedFolders maxItems.</summary>
-    private const int MaxExcludedFolders = 256;
-    private const int MaxPersonTagHistoryEntries = 10_000;
-    private const int MaxPersonTagLength = 256;
+    /// default Deep Analyze model; any leftover 3B value migrates to 7B.</summary>
+    private const int CurrentSchemaVersion = 5;
 
     /// <summary>Defensive cleanup of fields a malicious settings.json
     /// could otherwise smuggle through. Currently scrubs the EP override
@@ -219,11 +187,6 @@ internal sealed class AppSettings
         {
             DebugLog.Warn($"AppSettings: GpuExecutionProviderOverride '{v}' is not a recognized value; coercing to null (auto-detect).");
             s.GpuExecutionProviderOverride = null;
-        }
-        if (!AllowedGranularities.Contains(s.RestructureGranularity))
-        {
-            DebugLog.Warn($"AppSettings: RestructureGranularity '{s.RestructureGranularity}' is not a recognized value; coercing to 'normal'.");
-            s.RestructureGranularity = "normal";
         }
         // One-time migration: SmolVLM was removed in v4. Any stored "smolvlm"
         // is now an invalid model_kind; migrate straight to the current default
@@ -268,91 +231,6 @@ internal sealed class AppSettings
         {
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }
-        s.ExcludedFolders = SanitizeExcludedFolders(s.ExcludedFolders);
-        s.DeepAnalyzeExcludedFolders = SanitizeExcludedFolders(s.DeepAnalyzeExcludedFolders);
-        s.PersonTagHistory = SanitizePersonTagHistory(s.PersonTagHistory);
-    }
-
-    internal string? LastPersonTag(long personId)
-    {
-        if (personId <= 0) return null;
-        return PersonTagHistory.TryGetValue(
-            personId.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            out var tag)
-            ? tag
-            : null;
-    }
-
-    internal void RecordPersonTag(long personId, string tag)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(personId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(tag);
-        var trimmed = tag.Trim();
-        if (trimmed.Length > MaxPersonTagLength)
-        {
-            throw new ArgumentException(
-                $"Person tags cannot exceed {MaxPersonTagLength} characters.",
-                nameof(tag));
-        }
-        PersonTagHistory[
-            personId.ToString(System.Globalization.CultureInfo.InvariantCulture)] = trimmed;
-    }
-
-    internal static Dictionary<string, string> SanitizePersonTagHistory(
-        IReadOnlyDictionary<string, string>? raw)
-    {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var pair in raw ?? new Dictionary<string, string>())
-        {
-            if (result.Count >= MaxPersonTagHistoryEntries) break;
-            if (!long.TryParse(
-                    pair.Key,
-                    System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out var personId)
-                || personId <= 0
-                || string.IsNullOrWhiteSpace(pair.Value))
-            {
-                continue;
-            }
-            var tag = pair.Value.Trim();
-            if (tag.Length > MaxPersonTagLength) continue;
-            result[personId.ToString(System.Globalization.CultureInfo.InvariantCulture)] = tag;
-        }
-        return result;
-    }
-
-    /// <summary>Drop null/whitespace/relative/invalid entries, trim trailing
-    /// separators, dedupe case-insensitively (NTFS), cap the list. Also used
-    /// by the Settings UI to normalize a freshly picked folder.</summary>
-    internal static List<string> SanitizeExcludedFolders(IEnumerable<string>? raw)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var result = new List<string>();
-        foreach (var entry in raw ?? Array.Empty<string>())
-        {
-            if (result.Count >= MaxExcludedFolders) break;
-            if (string.IsNullOrWhiteSpace(entry)) continue;
-            var trimmed = entry.Trim().TrimEnd('\\', '/');
-            if (trimmed.Length == 0) continue;
-            bool valid;
-            try
-            {
-                valid = Path.IsPathFullyQualified(trimmed)
-                    && trimmed.IndexOfAny(Path.GetInvalidPathChars()) < 0;
-            }
-            catch
-            {
-                valid = false;
-            }
-            if (!valid)
-            {
-                DebugLog.Warn("AppSettings: dropping malformed excluded folder entry.");
-                continue;
-            }
-            if (seen.Add(trimmed)) result.Add(trimmed);
-        }
-        return result;
     }
 
     // debounce + offload. The previous implementation ran every
@@ -367,7 +245,6 @@ internal sealed class AppSettings
     private static readonly SemaphoreSlim s_writeGate = new(1, 1);
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(200);
     private static CancellationTokenSource? s_pendingSaveCts;
-    private static long s_saveGeneration;
 
     public void Save()
     {
@@ -377,14 +254,13 @@ internal sealed class AppSettings
         var newCts = new CancellationTokenSource();
         var prior = Interlocked.Exchange(ref s_pendingSaveCts, newCts);
         try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
-        var generation = Interlocked.Increment(ref s_saveGeneration);
         var snapshot = CloneForWrite();
         _ = Task.Run(async () =>
         {
             try
             {
                 await Task.Delay(SaveDebounce, newCts.Token).ConfigureAwait(false);
-                await WriteAsync(snapshot, generation).ConfigureAwait(false);
+                await WriteAsync(snapshot).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { /* superseded */ }
             catch (Exception ex)
@@ -398,48 +274,34 @@ internal sealed class AppSettings
     /// pending debounced save actually lands on disk before exit.</summary>
     public void SaveImmediately()
     {
-        _ = SaveImmediatelyAsync().GetAwaiter().GetResult();
-    }
-
-    public async Task<bool> SaveImmediatelyAsync()
-    {
         try
         {
             // Cancel any debounced save — the synchronous write supersedes.
             var prior = Interlocked.Exchange(ref s_pendingSaveCts, null);
             try { prior?.Cancel(); prior?.Dispose(); } catch { /* swallow */ }
-            var generation = Interlocked.Increment(ref s_saveGeneration);
             var snapshot = CloneForWrite();
-            await WriteAsync(snapshot, generation).ConfigureAwait(false);
-            return true;
+            WriteAsync(snapshot).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {
             DebugLog.Warn("AppSettings.SaveImmediately failed: " + ex.Message);
-            return false;
         }
     }
 
     private AppSettings CloneForWrite()
     {
-        // Snapshot at the moment Save() was called so a setter mutating the
-        // original mid-debounce doesn't corrupt the write. MemberwiseClone
-        // copies primitives by value but shares reference-typed members —
-        // clone the list explicitly or a mid-debounce Add/Remove mutates
-        // the snapshot being serialized.
-        var clone = (AppSettings)MemberwiseClone();
-        clone.ExcludedFolders = new List<string>(ExcludedFolders);
-        clone.DeepAnalyzeExcludedFolders = new List<string>(DeepAnalyzeExcludedFolders);
-        clone.PersonTagHistory = new Dictionary<string, string>(PersonTagHistory, StringComparer.Ordinal);
-        return clone;
+        // Settings is value-shaped (all primitive properties). A shallow
+        // copy is enough for serialization — and importantly, the snapshot
+        // captures the state at the moment Save() was called so a setter
+        // mutating the original mid-debounce doesn't corrupt the write.
+        return (AppSettings)MemberwiseClone();
     }
 
-    private static async Task WriteAsync(AppSettings snapshot, long generation)
+    private static async Task WriteAsync(AppSettings snapshot)
     {
         await s_writeGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (generation != Interlocked.Read(ref s_saveGeneration)) return;
             AppPaths.EnsureDirectories();
             var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, s_jsonOptions);
             var tmp = AppPaths.SettingsPath + ".tmp";

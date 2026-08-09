@@ -26,18 +26,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
     // whenever a new BatchSummary lands, but throttled so a fast scan
-    // doesn't issue a grid requery + full ItemsRepeater re-realization
-    // burst several times a second. At the post-perf-work cadence the
-    // engine emits a batch every ~200 ms (~35 files/s); a 1 s throttle
-    // still drove a recycle/thumbnail-cancel storm sustained for the
-    // whole scan, which is the churn window the ~1h40m stowed-exception
-    // fast-fail surfaced in. 2 s halves the reload/recycle rate while
-    // keeping the grid visibly live; scan-complete still refreshes
-    // immediately (Phase==Completed → RequestLibraryRefresh(force:true),
-    // which bypasses this throttle).
+    // doesn't issue 30+ DB reads per second.
     private long _lastSeenBatchIndex = -1;
     private DateTime _lastReloadAt = DateTime.MinValue;
-    private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan LibraryReloadThrottle = TimeSpan.FromSeconds(1);
     private bool _unloaded;
     // BUG-12: ElementPrepared/ElementClearing fire on the UI thread, but
     // LoadThumbAsync's finally-block .Remove can resume on a worker thread
@@ -65,7 +57,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // (toggle select). The selection highlight doubles as the focus cue.
     private int _focusedIndex = -1;
     private Microsoft.UI.Xaml.Input.KeyEventHandler? _gridKeyHandler;
-    private int _trashInFlight;
 
     public LibraryView()
     {
@@ -143,15 +134,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName} batch={batchIndex}");
                     RequestLibraryRefresh(force: false);
                     break;
-                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
                 case nameof(EngineClient.DeepAnalyzeProgress):
                 case nameof(EngineClient.DeepAnalyzeStarting):
-                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
                 case nameof(EngineClient.LastFaceClustering):
-                case nameof(EngineClient.FaceClusteringInFlight):
-                    Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(SyncBanners);
                     break;
             }
@@ -185,14 +172,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Engine throttles Progress events to 4 Hz; once Processed == Total
         // (or DeepAnalyzeComplete arrives, clearing DeepAnalyzeProgress in
         // EngineClient.Apply), the banner collapses.
-        var engine = EngineClient.Instance;
-        var dap = engine.DeepAnalyzeProgress;
-        if (engine.DeepAnalyzeCommandInFlight && dap is null)
-        {
-            DeepAnalyzeBanner.Visibility = Visibility.Visible;
-            DeepAnalyzeBannerText.Text = "Deep Analyze preparing…";
-        }
-        else if (dap is not null && dap.Processed < dap.Total)
+        var dap = EngineClient.Instance.DeepAnalyzeProgress;
+        if (dap is not null && dap.Processed < dap.Total)
         {
             DeepAnalyzeBanner.Visibility = Visibility.Visible;
             var current = string.IsNullOrEmpty(dap.CurrentPath)
@@ -207,9 +188,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             DeepAnalyzeBanner.Visibility = Visibility.Collapsed;
         }
 
-        FaceClusteringBanner.Visibility = EngineClient.Instance.FaceClusteringInFlight
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        // Face clustering banner: simple — currently we don't get a
+        // progress event during clustering, so just show it briefly when
+        // the engine kicks off and clear it when LastFaceClustering lands.
+        // The auto-trigger after a scan completes runs in <2s on typical
+        // libraries so a short banner is enough.
+        FaceClusteringBanner.Visibility = Visibility.Collapsed;
     }
 
     private async void OnInstallClipFromBannerClicked(object sender, RoutedEventArgs e)
@@ -345,9 +329,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
         // in-flight reads use its connection — so the SQLite connection +
         // SemaphoreSlim are released instead of leaking per tab nav. (audit A7)
-        _ = DebugLog.SafeRunAsync(
-            "LibraryView.DisposeReadStore",
-            async () => await _store.DisposeAsync());
+        try { _store.Dispose(); } catch { /* swallow */ }
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -444,7 +426,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnSelectAllAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnSelectAllAccelerator), () =>
         {
-            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
             OnSelectAllClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -454,11 +435,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnUndoAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
-            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)
-                || !UndoStack.Instance.CanUndo)
-            {
-                return;
-            }
+            if (!UndoStack.Instance.CanUndo) return;
             OnUndoLastClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -487,7 +464,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // off-screen tiles don't hold visible BitmapImage refs that block GC.
     private void OnRepeaterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                             Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
-        => DebugLog.SafeRun(nameof(OnRepeaterElementPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         // x:Bind in the ItemsRepeater ItemTemplate does NOT populate the
@@ -501,7 +477,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var tile = (args.Index >= 0 && args.Index < ViewModel.Items.Count)
             ? ViewModel.Items[args.Index]
             : el.DataContext as FileTile;
-        Services.DebugLog.Trace(
+        Services.DebugLog.Debug(
             $"[THUMB] PREPARE idx={args.Index} dcWasNull={el.DataContext is null} resolved={tile is not null}");
         if (tile is null) return;
         el.DataContext = tile;
@@ -540,7 +516,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             return;
         }
         _ = LoadThumbAsync(tile, cts);
-    });
+    }
 
     /// <summary>macOS-parity tile-entry animation — a scale-in "pop"
     /// (0.96 → 1, Tight tokens 0.35/0.78). Runs at most once per element
@@ -623,7 +599,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private void OnRepeaterElementClearing(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                            Microsoft.UI.Xaml.Controls.ItemsRepeaterElementClearingEventArgs args)
-        => DebugLog.SafeRun(nameof(OnRepeaterElementClearing), () =>
     {
         if (args.Element is not FrameworkElement el || el.DataContext is not FileTile tile) return;
         // Release the bound bitmap BEFORE detaching. The Image binds
@@ -635,7 +610,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // bloat on large libraries). Must run while still attached — the
         // Thumbnail setter no-ops once IsDetached is set just below.
         tile.ClearThumbnailForRecycle();
-        Services.DebugLog.Trace($"[THUMB] RECYCLE_NULLED file={Services.PathRedactor.Redact(tile.Path)}");
+        Services.DebugLog.Debug($"[THUMB] RECYCLE_NULLED file={tile.Path}");
         // mark detached so a late-arriving thumbnail render
         // doesn't bind into a stale tile.
         tile.IsDetached = true;
@@ -650,7 +625,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // (not a stale bitmap) until its own thumbnail reloads. With the
         // identity-stable merge, on-screen tiles are no longer recycled on every
         // refresh — only on real scroll — so this fires far less often now.
-    });
+    }
 
     private async Task LoadThumbAsync(FileTile tile, CancellationTokenSource cts)
     {
@@ -669,21 +644,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             var bmp = await _thumbnails.RequestAsync(tile.Path, tile.ModifiedAt, ct).ConfigureAwait(false);
             if (bmp == null)
             {
-                // A CANCELLED request also completes null (a scrolled-away tile
-                // cancels its own load; a rapid clear→re-prepare of the same
-                // visible tile supersedes this load with a fresh one). That is a
-                // DROP, not a render failure — falling through to set
-                // ThumbnailFailed would strand a still-valid, re-attached tile
-                // under the broken-image placeholder (its re-prepare's own load
-                // is what will actually bind). Only a null from a LIVE token is a
-                // real failure. Mirrors the ct.IsCancellationRequested guard on
-                // the success path below.
-                if (ct.IsCancellationRequested)
-                {
-                    Services.DebugLog.Trace($"[THUMB] LOAD_DROPPED_NULL file={Services.PathRedactor.Redact(tile.Path)}");
-                    return;
-                }
-                Services.DebugLog.Trace($"[THUMB] LOAD_NULL file={Services.PathRedactor.Redact(tile.Path)}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_NULL file={tile.Path}");
                 // Hand off from shimmer to a broken-image placeholder so the
                 // tile doesn't shimmer forever. Setter is UI-thread-affined
                 // because it raises PropertyChanged; route through the
@@ -700,7 +661,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             if (ct.IsCancellationRequested || tile.IsDetached)
             {
-                Services.DebugLog.Trace($"[THUMB] LOAD_DROPPED file={Services.PathRedactor.Redact(tile.Path)} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
+                Services.DebugLog.Debug($"[THUMB] LOAD_DROPPED file={tile.Path} cancelled={ct.IsCancellationRequested} detached={tile.IsDetached}");
                 return;
             }
             var enqueued = DispatcherQueue.TryEnqueue(() =>
@@ -716,16 +677,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 // Pixel dims confirm the bitmap actually carries content. If a
                 // tile is still blank after this, px>0 here means the problem is
                 // layout (image row collapsed), not a 0-pixel decode.
-                Services.DebugLog.Trace($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={Services.PathRedactor.Redact(tile.Path)} px={bmp.PixelWidth}x{bmp.PixelHeight}");
+                Services.DebugLog.Debug($"[THUMB] TILE_THUMBNAIL_ASSIGNED file={tile.Path} px={bmp.PixelWidth}x{bmp.PixelHeight}");
             });
             if (!enqueued)
             {
-                Services.DebugLog.Trace($"[THUMB] ASSIGN_ENQUEUE_FAILED file={Services.PathRedactor.Redact(tile.Path)}");
+                Services.DebugLog.Debug($"[THUMB] ASSIGN_ENQUEUE_FAILED file={tile.Path}");
             }
         }
         catch (Exception ex)
         {
-            Services.DebugLog.Trace($"[THUMB] LOAD_EX file={Services.PathRedactor.Redact(tile.Path)} ex={ex.GetType().Name}");
+            Services.DebugLog.Debug($"[THUMB] LOAD_EX file={tile.Path} ex={ex.GetType().Name}");
         }
         finally
         {
@@ -765,7 +726,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             if (Math.Abs(el.Height - target) > 0.5)
             {
                 el.Height = target;
-                Services.DebugLog.Trace($"[THUMB] TILE_SIZED w={w:F0} h={target:F0}");
+                Services.DebugLog.Debug($"[THUMB] TILE_SIZED w={w:F0} h={target:F0}");
             }
         });
 
@@ -904,16 +865,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
             int cur = _focusedIndex >= 0 ? Math.Min(_focusedIndex, count - 1) : 0;
             int last = count - 1;
-            var shift = Microsoft.UI.Input.InputKeyboardSource
-                .GetKeyStateForCurrentThread(VirtualKey.Shift)
-                .HasFlag(CoreVirtualKeyStates.Down);
-
-            if (e.Key == VirtualKey.Application || (e.Key == VirtualKey.F10 && shift))
-            {
-                OpenContextAt(cur);
-                e.Handled = true;
-                return;
-            }
 
             switch (e.Key)
             {
@@ -954,6 +905,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 default: return;
             }
 
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
             MoveFocusTo(target, extend: shift);
             e.Handled = true;
         });
@@ -1036,23 +990,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         catch { /* realization raced a refresh — non-fatal */ }
     }
 
-    private void OpenContextAt(int index)
-    {
-        try
-        {
-            if (index < 0 || index >= ViewModel.Items.Count) return;
-            var target = Repeater.TryGetElement(index) as FrameworkElement
-                ?? Repeater.GetOrCreateElement(index) as FrameworkElement;
-            if (target?.ContextFlyout is not { } flyout) return;
-            target.UpdateLayout();
-            flyout.ShowAt(target);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Library keyboard context menu failed: " + ex.Message);
-        }
-    }
-
     private async void OpenPreviewAt(int index)
         => await DebugLog.SafeRunAsync(nameof(OpenPreviewAt), async () =>
         {
@@ -1071,7 +1008,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private async void OnTagSelectedClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnTagSelectedClicked), async () =>
     {
         var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
         if (ids.Length == 0) return;
@@ -1100,10 +1036,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // engine's now-updated rows; the identity-stable merge folds the new
         // tags onto the surviving tiles via MergeMutableFrom. (F-C5-004)
         if (committed) RequestLibraryRefresh(force: true);
-    });
+    }
 
     private async void OnRenameSelectedClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnRenameSelectedClicked), async () =>
     {
         var selected = ViewModel.SelectedItems.ToArray();
         if (selected.Length == 0) return;
@@ -1143,132 +1078,106 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // would keep the OLD name. Evict the renamed tiles first so the
             // re-query rebuilds them as fresh tiles carrying the new on-disk
             // name (a failed per-file rename just re-lands unchanged). (F-C5-004)
-            var renamedIds = new HashSet<long>(selected.Select(t => t.Id));
-            for (int i = ViewModel.Items.Count - 1; i >= 0; i--)
-            {
-                if (renamedIds.Contains(ViewModel.Items[i].Id))
-                {
-                    ViewModel.Items.RemoveAt(i);
-                }
-            }
+            foreach (var t in selected) ViewModel.Items.Remove(t);
             RequestLibraryRefresh(force: true);
         }
-    });
+    }
 
     private async void OnTrashSelectedClicked(object sender, RoutedEventArgs e)
     {
-        if (Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
+        var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
+        if (ids.Length == 0) return;
+
+        long totalBytes = ViewModel.SelectedItems.Sum(t => t.SizeBytes);
+        string sizeDisplay = FormatSize(totalBytes);
+        string countDisplay = ids.Length == 1 ? "1 file" : $"{ids.Length} files";
+
+        var confirm = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Move to Recycle Bin?",
+            Content = $"{countDisplay} ({sizeDisplay}) will be moved to the Recycle Bin. You can recover them from there.",
+            PrimaryButtonText = "Move to Recycle Bin",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        var choice = await confirm.ShowAsync();
+        if (choice != ContentDialogResult.Primary) return;
+
+        // Listen for the engine's BulkActionResult — it tags the
+        // action with "trashFiles:<batch_id>" so we can plumb undo. The
+        // UndoStack listener and WaitForBulkActionResultAsync below both
+        // subscribe independently for the same result; WaitFor resets
+        // LastBulkAction to null first (which CaptureNextBulkResult guards
+        // against), so they coexist.
+        Services.UndoStack.CaptureNextBulkResult(
+            "trashFiles:",
+            $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
+            async batchId =>
+            {
+                if (string.IsNullOrEmpty(batchId)) return false;
+                try
+                {
+                    await EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return true;
+                }
+                catch { return false; }
+            });
+
+        FileID.IpcSchema.BulkActionResult? result = null;
         try
         {
-            var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
-            if (ids.Length == 0) return;
-
-            long totalBytes = ViewModel.SelectedItems.Sum(t => t.SizeBytes);
-            string sizeDisplay = FormatSize(totalBytes);
-            string countDisplay = ids.Length == 1 ? "1 file" : $"{ids.Length} files";
-
-            var confirm = new ContentDialog
-            {
-                XamlRoot = XamlRoot,
-                Title = "Move to Recycle Bin?",
-                Content = $"{countDisplay} ({sizeDisplay}) will be moved to the Recycle Bin. You can recover them from there.",
-                PrimaryButtonText = "Move to Recycle Bin",
-                CloseButtonText = "Cancel",
-                DefaultButton = ContentDialogButton.Close,
-            };
-            // ShowAsync throws (COMException) when another ContentDialog is
-            // already open; this is an async-void handler, so an escape would
-            // land in App.UnhandledException. Treat a failed confirm as Cancel.
-            ContentDialogResult choice;
-            try { choice = await confirm.ShowAsync(); }
-            catch (Exception ex)
-            {
-                Services.DebugLog.Warn("Trash confirm dialog failed (another dialog open?): " + ex.Message);
-                return;
-            }
-            if (choice != ContentDialogResult.Primary) return;
-
-            // Listen for the engine's BulkActionResult — it tags the
-            // action with "trashFiles:<batch_id>" so we can plumb undo. The
-            // UndoStack listener and WaitForBulkActionResultAsync below both
-            // subscribe independently for the same result; WaitFor resets
-            // LastBulkAction to null first (which CaptureNextBulkResult guards
-            // against), so they coexist.
-            IDisposable CaptureUndo() => Services.UndoStack.CaptureNextBulkResult(
-                "trashFiles:",
-                $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
-                kind: Services.ChangeKind.Trash,
-                timeout: TimeSpan.FromMinutes(1),
-                reverse: async batchId =>
-                {
-                    if (string.IsNullOrEmpty(batchId)) return false;
-                    try
-                    {
-                        return await EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                    }
-                    catch { return false; }
-                });
-
-            FileID.IpcSchema.BulkActionResult? result = null;
-            try
-            {
-                // Await the engine's BulkActionResult instead of fire-and-forget:
-                // the dbwriter may fail to trash a file (open handle / permission),
-                // and unconditionally removing every selected tile told the user
-                // files were recycled when they're still on disk (silent-failure).
-                result = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                    "trashFiles",
-                    () => EngineClient.Instance.TrashFilesAsync(ids),
-                    BulkActionTimeout.ForFileCount(ids.Length),
-                    beforeSend: CaptureUndo);
-            }
-            catch (TimeoutException ex)
-            {
-                Services.DebugLog.Warn("Trash timed out: " + ex.Message);
-                await ShowAlertAsync(
-                    "Trash didn't confirm",
-                    "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                Services.DebugLog.Warn("Trash failed: " + ex.Message);
-                await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
-                return;
-            }
-
-            // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
-            // result. Files it couldn't recycle stay on the grid so the user sees
-            // they're still there.
-            var trashedIds = new HashSet<long>(
-                result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
-                    ?? Enumerable.Empty<long>());
-            foreach (var id in trashedIds)
-            {
-                var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
-                if (match is not null) ViewModel.Items.Remove(match);
-            }
-            UpdateSelectionBar();
-
-            // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
-            // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
-            // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
-            // that path silent. ids is non-empty here, so Succeeded==0 only happens on
-            // a real total failure — surface it + refresh, matching the sibling flows.
-            if (result.Failed > 0 || result.Succeeded == 0)
-            {
-                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
-                var body = result.Succeeded == 0 && result.Failed == 0
-                    ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
-                    : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
-                await ShowAlertAsync("Some files couldn't be recycled", body);
-                RequestLibraryRefresh(force: true);
-            }
+            // Await the engine's BulkActionResult instead of fire-and-forget:
+            // the dbwriter may fail to trash a file (open handle / permission),
+            // and unconditionally removing every selected tile told the user
+            // files were recycled when they're still on disk (silent-failure).
+            result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                "trashFiles",
+                () => EngineClient.Instance.TrashFilesAsync(ids),
+                TimeSpan.FromSeconds(30));
         }
-        finally
+        catch (TimeoutException ex)
         {
-            Interlocked.Exchange(ref _trashInFlight, 0);
+            Services.DebugLog.Warn("Trash timed out: " + ex.Message);
+            await ShowAlertAsync(
+                "Trash didn't confirm",
+                "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+            return;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("Trash failed: " + ex.Message);
+            await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+            return;
+        }
+
+        // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
+        // result. Files it couldn't recycle stay on the grid so the user sees
+        // they're still there.
+        var trashedIds = new HashSet<long>(
+            result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
+                ?? Enumerable.Empty<long>());
+        foreach (var id in trashedIds)
+        {
+            var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
+            if (match is not null) ViewModel.Items.Remove(match);
+        }
+        UpdateSelectionBar();
+
+        // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
+        // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
+        // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
+        // that path silent. ids is non-empty here, so Succeeded==0 only happens on
+        // a real total failure — surface it + refresh, matching the sibling flows.
+        if (result.Failed > 0 || result.Succeeded == 0)
+        {
+            var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+            var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+            var body = result.Succeeded == 0 && result.Failed == 0
+                ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
+                : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
+            await ShowAlertAsync("Some files couldn't be recycled", body);
+            RequestLibraryRefresh(force: true);
         }
     }
 
@@ -1367,7 +1276,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // toolbar X button + Esc key handle close inline, matching macOS's
     // self-contained preview chrome — no separate dialog CloseButton.
     private async void OnTileDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnTileDoubleTapped), async () =>
     {
         if (sender is not FrameworkElement el || el.Tag is not string path) return;
         FileTile? tile = null;
@@ -1378,7 +1286,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
         if (tile is null) return;
         await OpenPreview(tile, tileIndex);
-    });
+    }
 
     // Shared preview-open path — used by double-tap and by keyboard Enter
     // (OnGridPreviewKeyDown). Opens the FilePreviewSheet modal for the given
@@ -1391,6 +1299,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         var sheet = new FilePreviewSheet();
         sheet.SetSiblings(siblings, tileIndex);
+        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
 
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
@@ -1418,12 +1327,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
             handledEventsToo: true);
 
-        dialog.Opened += (_, _) =>
-            sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
-
-        try { await dialog.ShowAsync(); }
-        catch { /* dialog already open */ }
-        finally { sheet.CloseFromHost(); }
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
     }
 
     private void OnContextOpen(object sender, RoutedEventArgs e)
@@ -1454,11 +1358,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     // queryId. We bypass the search-bar UI and surface results directly
     // via the existing ViewModel.Items list.
     private async void OnContextFindSimilar(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnContextFindSimilar), async () =>
     {
         if (sender is not MenuFlyoutItem item || item.Tag is not long fileId) return;
         await ViewModel.FindSimilarAsync(fileId, System.Threading.CancellationToken.None);
-    });
+    }
 
     private void OnContextCopyPath(object sender, RoutedEventArgs e)
     {

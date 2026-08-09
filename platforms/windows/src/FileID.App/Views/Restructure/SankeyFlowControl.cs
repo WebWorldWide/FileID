@@ -47,7 +47,6 @@ public sealed class SankeyFlowControl : Control
     private readonly Dictionary<string, Rectangle> _categoryRects = new();
     private readonly Dictionary<Rectangle, Brush> _rectIdleFill = new();
     private TextBlock? _hoverTooltip;
-    private Ribbon? _hovered;
 
     // Pre-cached brushes. Render() used to allocate ~2 brushes per ribbon
     // (idle/hover) plus 1 per category rect plus 2 more on every hover
@@ -120,10 +119,6 @@ public sealed class SankeyFlowControl : Control
         PointerMoved += OnPointerMoved;
         PointerExited += OnPointerExited;
         Tapped += OnTapped;
-        // Stop the debounce timer when the control leaves the tree (e.g. a
-        // tab-swap mid-resize). A pending Tick otherwise holds this detached
-        // control alive via its RenderIfResized closure until it fires.
-        Unloaded += (_, _) => _renderDebounce?.Stop();
     }
 
     /// <summary>Fires (source, category) when the user clicks a ribbon.</summary>
@@ -132,34 +127,7 @@ public sealed class SankeyFlowControl : Control
     public void SetPlan(RestructurePlan? plan)
     {
         _plan = plan;
-        UpdateAccessibleSummary();
         Render();
-    }
-
-    // The Sankey is a custom Canvas-drawn control with no intrinsic UI-Automation
-    // surface, so a screen reader would otherwise see an empty box. Expose a live
-    // text summary of the flow (source folders → semantic organization buckets) as the
-    // control's accessible Name + HelpText, and make it keyboard-focusable so the
-    // supplementary "where do my files go" view is reachable without a mouse. The
-    // primary flow (stat tiles, file-row checkboxes, drill-down buttons) is
-    // already accessible in RestructureView; this closes the gap on the diagram.
-    private void UpdateAccessibleSummary()
-    {
-        IsTabStop = true;
-        var moves = _plan?.Moves;
-        if (moves is null || moves.Count == 0)
-        {
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, "Folder flow diagram (nothing to move)");
-            return;
-        }
-        var sources = moves.Select(m => m.Source).Distinct().Count();
-        var categories = moves.Select(m => m.Category).Distinct().Count();
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-            this,
-            $"Folder reorganization flow: {moves.Count} files from {sources} source folders into {categories} organization buckets.");
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(
-            this,
-            "Diagram of where files move. Use the recommendation list below to review and select individual moves.");
     }
 
     protected override void OnApplyTemplate()
@@ -199,7 +167,6 @@ public sealed class SankeyFlowControl : Control
         _categoryRects.Clear();
         _rectIdleFill.Clear();
         _hoverTooltip = null;
-        _hovered = null;
         if (_plan is null || _plan.Moves.Count == 0 || ActualWidth < 100 || ActualHeight < 60) return;
 
         var moves = _plan.Moves;
@@ -581,12 +548,6 @@ public sealed class SankeyFlowControl : Control
 
     private void ApplyHover(Ribbon? hovered)
     {
-        // Pointer moves fire continuously while the cursor stays over one ribbon;
-        // the highlight + tooltip depend only on which ribbon is hit, not on the
-        // exact position, so skip the full repaint/realloc when it is unchanged.
-        if (ReferenceEquals(hovered, _hovered)) return;
-        _hovered = hovered;
-
         // Reset all to idle.
         foreach (var r in _ribbons) r.Path.Fill = r.IdleFill;
         foreach (var (rect, fill) in _rectIdleFill) rect.Fill = fill;

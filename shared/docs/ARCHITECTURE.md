@@ -23,15 +23,11 @@ FileID is split across three platform implementations that share a contract, a d
 
 Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and stdout (engine → app). The app reads the DB via a read-only connection; the engine is the sole writer. SQLite WAL allows concurrent readers without blocking the writer.
 
-### Front-ends over the contract
-
-The SwiftUI / WinUI 3 / GTK4 apps are not the only clients. The cross-platform CLI and TUI share the same library and engine crate. Their read/query, model-free indexing, planning, and apply paths call the engine library in-process because those operations either have no IPC command or need the exact shared migrations/classifiers. Full-ML scans are different: `fileid scan --models` and the TUI scan flow spawn `FileIDEngine` and stream the canonical newline-JSON IPC because the engine owns the async and ONNX Runtime lifecycle. See `platforms/cli/README.md` and `platforms/tui/README.md`.
-
 When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16 s within a 60 s window). Three failures in a row puts the app in `.crashed` state; user dismisses or retries.
 
 ## Storage
 
-SQLite via WAL journaling. Schema migrations are append-only through v20 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` and the byte-faithful Rust mirror at `platforms/windows/src/engine/src/db/migrations.rs`). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned at v7 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`
@@ -42,7 +38,7 @@ PRAGMAs:
 - `wal_autocheckpoint = 10000` (~40 MB)
 - `foreign_keys = ON`
 
-Core tables include `files`, `tags`, `ocr_text`, `doc_text`, their FTS5 indexes, `persons`, `face_prints`, `face_verifications`, `clip_embeddings`, `text_embeddings`, `scan_sessions`, `usn_state`, `restructure_feedback`, and `grdb_migrations`.
+Tables: `files`, `tags`, `ocr_text`, `ocr_fts` (FTS5 virtual), `persons`, `face_prints`, `face_verifications`, `clip_embeddings`, `scan_sessions`, plus `grdb_migrations` for tracking.
 
 Embedding columns are raw `BLOB` of L2-normalized float32 little-endian arrays — 512-d for CLIP ViT-B/32 image/text (2048 bytes), 128-d for SFace face prints (512 bytes). Cross-platform compatible.
 
@@ -55,7 +51,7 @@ Single source of truth: `shared/ipc-schema/ipc.schema.json`. Per-platform DTOs h
 - Variants with no payload encode their body as `{}` (e.g. `{"shutdown": {}}`)
 - Variants whose Swift case has a single unnamed associated value wrap the body in `{"_0": ...}` (e.g. `{"ready": {"_0": {...}}}`)
 
-Object key order is not part of the contract; consumers validate decoded semantic JSON against the schema. Date fields are ISO8601 strings, binary blobs are base64, and each frame is newline-terminated.
+Object keys are emitted in alphabetical order on the macOS side for byte-deterministic round-trips. Date fields are ISO8601 strings; binary blobs are base64. Newline-terminated, one frame per line.
 
 ## Scan pipeline
 
@@ -87,29 +83,6 @@ Post-scan (orphan sweep, face clustering job auto-enqueued)
 ANE/GPU semaphores (3-4 for ORT inference, 2 for CLIP) bound concurrent ML calls. Sync mirrors (atomic-bool) for hot-path cancellation checks avoid the actor-hop tax inside tight loops.
 
 Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64 with DirectML, scaling per hardware tier (see `shared/docs/SHIP.md`).
-
-### Restructure apply (file moves + symlinks)
-
-`pipeline/restructure_apply.rs` executes an approved restructure plan: it relocates each file (real move) or, when the user picks the "use shortcuts/symlinks instead of moving" option, creates a link in place. The on-disk primitives are platform-gated:
-
-- **Windows** — `MoveFileExW` (with the `\\?\` extended-length prefix for >260-char paths, `MOVEFILE_COPY_ALLOWED`, no `REPLACE_EXISTING`) and `CreateSymbolicLinkW` (unprivileged-create flag).
-- **Non-Windows (Linux/macOS, `#[cfg(not(windows))]`)** — a portable `std`-only path: `std::fs::rename` for the common same-filesystem move, falling back to `std::fs::copy` + `remove_file` on `EXDEV` (cross-device, e.g. a NAS mount → local disk) so the file is preserved; `std::os::unix::fs::symlink` for the symlink option. Both arms create the destination parent on demand and never clobber an existing destination (parity with the Windows no-`REPLACE_EXISTING` contract). The collision-uniquify logic (case-folded `claimed` set) sits above this and is platform-agnostic.
-
-### Shell / system integrations (`engine/src/shell/`)
-
-`shell/mod.rs` is the per-platform surface for OS-level actions (reveal-in-file-manager, trash, file tags, OCR, video keyframes, thumbnails, HEIC decode). Each module is gated three ways with one identical public signature so every caller is platform-agnostic:
-
-- **Windows (`#[cfg(windows)]`)** — the real Win32/WinRT backends (`SHOpenFolderAndSelectItems`, `IFileOperation`, `IPropertyStore` `System.Keywords`, `Windows.Media.Ocr`, Media Foundation, `IThumbnailProvider`).
-- **Linux (`#[cfg(target_os = "linux")]`)** — dependency-free backends on **std + libc + subprocess** (no new crates):
-  - **trash** — freedesktop Trash spec via `std::fs`: move the file into `$XDG_DATA_HOME/Trash/files/` (default `~/.local/share/Trash`), write `Trash/info/<name>.trashinfo` (`Path=` percent-encoded, `DeletionDate=` local ISO-8601 from libc `localtime_r`), atomically claim the name with `create_new` + numeric suffix on collision, and copy-fallback on `EXDEV`.
-  - **reveal** — `org.freedesktop.FileManager1.ShowItems` over the session bus (spawning `dbus-send`, then `gdbus`), selecting the item; falls back to `xdg-open` on the parent directory.
-  - **tags** — the `user.xdg.tags` extended attribute (comma-separated, the Nautilus/Tracker convention) via libc `setxattr`/`getxattr`/`listxattr`/`removexattr`. Moves need no sidecar: `rename(2)` carries the xattr with the inode.
-  - **ocr** — best-effort: write the RGB buffer to a temp P6 PPM and run the `tesseract` CLI (`tesseract <ppm> stdout`); returns empty text (never an error) when tesseract is not on `PATH`.
-  - **video** — best-effort keyframe: `ffprobe` for the duration → `ffmpeg -ss <25%> … -vcodec ppm` to a temp P6 PPM we parse directly (no image decoder); graceful `Err` when ffmpeg is absent, which the callers already tolerate.
-  - **heic** — `heif-dec`/`heif-convert` to a bounded temporary PNG, then image-rs decode; requires a libheif HEVC/AV1 decoder plugin and fails gracefully when unavailable.
-- **macOS / other Unix (`#[cfg(all(not(windows), not(target_os = "linux")))]`)** — graceful stubs (bail or empty) so the macOS Rust engine compiles unchanged; macOS desktop file actions are handled app-side.
-
-The Linux arms compile and are clippy/test-gated only on the Linux target (`.github/workflows/linux.yml`); the macOS build parses but cfg-strips them.
 
 ## ML inference
 
@@ -151,7 +124,7 @@ Zero telemetry. Every guarantee is in `shared/docs/PRIVACY.md`. CI grep-gates sh
 
 Engine binary integrity verified at app spawn time:
 - macOS: `SecCode` / `SecStaticCode` against the embedded code-signing identity
-- Windows: `WinVerifyTrust` (Authenticode) against an independently pinned signer public-key identity for both app assembly and engine
+- Windows: `WinVerifyTrust` (Authenticode) against the EV cert thumbprint
 
 The app refuses to spawn the engine if the signature doesn't match.
 
@@ -159,6 +132,6 @@ The app refuses to spawn the engine if the signature doesn't match.
 
 Three rules every change should follow:
 
-1. **The IPC schema is the source of truth.** Changing a payload means editing `shared/ipc-schema/ipc.schema.json` first, then updating the Swift, Rust, and C# DTO mirrors in lockstep.
+1. **The IPC schema is the source of truth.** Changing a payload means editing `shared/ipc-schema/ipc.schema.json` first, then updating all three (current: two) DTO files in lockstep.
 2. **The macOS app is the visual reference.** The Windows port is 1:1 with macOS, not a "Windows-style reinterpretation". Linux will be the same against macOS.
 3. **No telemetry, ever.** Don't propose features that violate this even if the integration is "tiny". The privacy posture is a product feature.

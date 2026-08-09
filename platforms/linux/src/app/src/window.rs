@@ -1,592 +1,139 @@
-// Main window — the app shell. Mirror of macOS `MainWindow` / Windows
-// `MainWindow`: an `adw::ApplicationWindow` whose content is a `gtk::Overlay`
-// stack — the animated `LavaLampBackground` at the bottom, a muted material
-// scrim over it, and the UI on top (LavaLamp → frosting → content).
-//
-// Navigation is a **left sidebar** (260px), matching the macOS/Windows
-// reference — NOT a GNOME top `ViewSwitcher`. The sidebar carries the folder
-// picker (gold CTA), the six nav rows (Library / People / Cleanup / Deep
-// Analyze / Restructure / Settings) whose active row is gold-tinted, the
-// "Start scan" CTA, and the engine-status line. Each nav row flips the
-// `adw::ViewStack`; the six pages are 1:1 ports of the macOS views sharing the
-// one `EngineClient`.
+// Main window — minimal scaffold. Mirror of macOS ContentView /
+// Windows MainWindow. Phase 1 lands the 6 tabs (Library, People,
+// Cleanup, Deep Analyze, Restructure, Settings) as adw::NavigationPage
+// stacks. Today: HeaderBar + sidebar placeholder + main pane placeholder
+// + "Pick folder" + "Start scan" hooked up to the engine.
 
 use adw::prelude::*;
-use gtk::glib;
 use gtk::glib::clone;
+use gtk::glib;
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::engine_client::{EngineClient, EngineEvent};
-
-#[derive(Clone)]
-struct ActiveWindow {
-    window: adw::ApplicationWindow,
-    folder_label: gtk::Label,
-    start_button: gtk::Button,
-    selected_folder: Rc<RefCell<Option<String>>>,
-}
-
-thread_local! {
-    static ACTIVE_WINDOW: RefCell<Option<ActiveWindow>> = const { RefCell::new(None) };
-}
+use crate::engine_client::{EngineClient, EngineState};
 
 pub fn on_activate(app: &adw::Application) {
-    if !present_existing(None) {
-        build_window(app, None);
-    }
-}
-
-pub fn on_open(app: &adw::Application, files: &[gtk::gio::File]) {
-    let folder = files
-        .iter()
-        .filter_map(gtk::gio::File::path)
-        .find(|path| path.is_dir());
-    if !present_existing(folder.clone()) {
-        build_window(app, folder);
-    }
-}
-
-fn present_existing(folder: Option<PathBuf>) -> bool {
-    ACTIVE_WINDOW.with_borrow(|active| {
-        let Some(active) = active else { return false };
-        if let Some(path) = folder {
-            apply_folder(
-                &path,
-                &active.folder_label,
-                &active.start_button,
-                &active.selected_folder,
-            );
-        }
-        active.window.present();
-        true
-    })
-}
-
-fn apply_folder(
-    path: &std::path::Path,
-    folder_label: &gtk::Label,
-    start_button: &gtk::Button,
-    selected_folder: &Rc<RefCell<Option<String>>>,
-) {
-    let display = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    folder_label.set_text(&display);
-    folder_label.set_tooltip_text(Some(&path.to_string_lossy()));
-    selected_folder.replace(Some(path.to_string_lossy().into_owned()));
-    start_button.set_sensitive(true);
-    crate::app_settings::remember_folder(path);
-}
-
-fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
-    let (dw, dh) = std::env::var("FILEID_WIN_SIZE")
-        .ok()
-        .and_then(|s| {
-            let mut p = s.split('x');
-            Some((
-                p.next()?.trim().parse().ok()?,
-                p.next()?.trim().parse().ok()?,
-            ))
-        })
-        .unwrap_or((1320, 860));
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("FileID")
-        .default_width(dw)
-        .default_height(dh)
+        .default_width(1200)
+        .default_height(800)
         .build();
-    // Small minimum so the window can shrink freely (the sidebar collapses via
-    // the breakpoint below; the tabs are built to reflow narrow).
-    window.set_size_request(360, 320);
 
-    // Single shared engine client (single-threaded on the GTK main context).
+    // Single shared EngineClient. Wrapped in Rc<RefCell<>> for closure
+    // capture; GTK is single-threaded on the main context.
     let engine = Rc::new(RefCell::new(EngineClient::new()));
 
-    let stack = adw::ViewStack::new();
-    let nav_defs = [
-        ("library", "Library", "view-grid-symbolic"),
-        ("people", "People", "system-users-symbolic"),
-        ("cleanup", "Cleanup", "user-trash-symbolic"),
-        ("deep", "Deep Analyze", "starred-symbolic"),
-        ("restructure", "Restructure", "view-list-symbolic"),
-        ("settings", "Settings", "emblem-system-symbolic"),
-    ];
-    let nav_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
-    let activate_tab: Rc<dyn Fn(&str)> = {
-        let stack = stack.clone();
-        let nav_buttons = nav_buttons.clone();
-        let nav_defs_for_activation = nav_defs;
-        Rc::new(move |name| {
-            stack.set_visible_child_name(name);
-            crate::app_settings::remember_active_tab(name);
-            if let Some(index) = nav_defs_for_activation
-                .iter()
-                .position(|(tab, _, _)| *tab == name)
-            {
-                for (j, button) in nav_buttons.borrow().iter().enumerate() {
-                    if j == index {
-                        button.add_css_class("active");
-                    } else {
-                        button.remove_css_class("active");
-                    }
-                }
-            }
-        })
-    };
+    let header = adw::HeaderBar::builder().css_classes(["fileid-headerbar"]).build();
 
-    // ── Tabs (content pages) ─────────────────────────────────────────────────
-    let library = crate::tabs::library::build(engine.clone());
-    stack.add_titled_with_icon(&library, Some("library"), "Library", "view-grid-symbolic");
-    let people = crate::tabs::people::build(engine.clone(), activate_tab.clone());
-    stack.add_titled_with_icon(&people, Some("people"), "People", "system-users-symbolic");
-    let cleanup = crate::tabs::cleanup::build_cleanup_tab(engine.clone());
-    stack.add_titled_with_icon(&cleanup, Some("cleanup"), "Cleanup", "user-trash-symbolic");
-    let deep = crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone());
-    stack.add_titled_with_icon(&deep, Some("deep"), "Deep Analyze", "starred-symbolic");
-    let restructure = crate::tabs::restructure::build_restructure_tab(engine.clone());
-    stack.add_titled_with_icon(
-        &restructure,
-        Some("restructure"),
-        "Restructure",
-        "view-list-symbolic",
-    );
-    let settings = crate::tabs::settings::build(engine.clone());
-    stack.add_titled_with_icon(
-        &settings,
-        Some("settings"),
-        "Settings",
-        "emblem-system-symbolic",
-    );
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
-
-    // ── Sidebar ──────────────────────────────────────────────────────────────
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    sidebar.add_css_class("fileid-sidebar");
-
-    // Wordmark
-    let wordmark = gtk::Label::builder()
-        .label("FileID")
-        .css_classes(["title-2", "gold-accent"])
-        .halign(gtk::Align::Start)
-        .margin_start(8)
-        .margin_top(4)
-        .margin_bottom(8)
-        .build();
-    sidebar.append(&wordmark);
-
-    // FOLDER section
-    sidebar.append(&section_heading("FOLDER"));
-    let pick_btn = gtk::Button::builder()
-        .label("Pick folder…")
-        .css_classes(["gold-button"])
-        .build();
-    pick_btn.set_margin_start(8);
-    pick_btn.set_margin_end(8);
-    sidebar.append(&pick_btn);
+    // Folder display label on the left of the title — same idea as
+    // macOS SidebarFolderHeader / Windows SidebarFolderHeader.
     let folder_label = gtk::Label::builder()
         .label("No folder selected")
         .css_classes(["dim-label"])
-        .halign(gtk::Align::Start)
-        .ellipsize(gtk::pango::EllipsizeMode::Middle)
-        .margin_start(10)
-        .margin_top(4)
         .build();
-    sidebar.append(&folder_label);
+    header.set_title_widget(Some(&folder_label));
 
-    // NAVIGATE section — the six nav rows
-    sidebar.append(&section_heading("NAVIGATE"));
-    for (i, &(name, label, icon)) in nav_defs.iter().enumerate() {
-        let row = gtk::Button::builder().css_classes(["nav-row"]).build();
-        let h = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        h.append(&gtk::Image::from_icon_name(icon));
-        let lbl = gtk::Label::builder()
-            .label(label)
-            .halign(gtk::Align::Start)
-            .hexpand(true)
-            .build();
-        h.append(&lbl);
-        row.set_child(Some(&h));
-        if i == 0 {
-            row.add_css_class("active");
-        }
-        let activate_tab = activate_tab.clone();
-        row.connect_clicked(move |_| activate_tab(name));
-        nav_buttons.borrow_mut().push(row.clone());
-        sidebar.append(&row);
-    }
+    let pick_btn = gtk::Button::builder()
+        .label("Pick folder")
+        .css_classes(["suggested-action"])
+        .build();
+    header.pack_start(&pick_btn);
 
-    // Restore the persisted active tab (matches Windows `activeTab` / the macOS
-    // RawValue persistence) — unknown values keep the Library default.
-    if let Some(tab) = crate::app_settings::active_tab() {
-        if nav_defs.iter().any(|(name, _, _)| *name == tab) {
-            activate_tab(&tab);
-        }
-    }
-
-    // Flexible spacer pushes scan controls to the bottom.
-    let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    spacer.set_vexpand(true);
-    sidebar.append(&spacer);
-
-    // SCAN section
-    sidebar.append(&section_heading("SCAN"));
     let start_btn = gtk::Button::builder()
         .label("Start scan")
-        .css_classes(["gold-button"])
         .sensitive(false)
         .build();
-    start_btn.set_margin_start(8);
-    start_btn.set_margin_end(8);
-    sidebar.append(&start_btn);
+    header.pack_end(&start_btn);
+
     let status_label = gtk::Label::builder()
-        .label("Engine: starting…")
-        .css_classes(["dim-label"])
-        .halign(gtk::Align::Start)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .margin_start(10)
-        .margin_top(6)
+        .label("Engine: spawning…")
+        .css_classes(["caption"])
         .build();
-    sidebar.append(&status_label);
+    header.pack_end(&status_label);
 
-    // Slim gold scan-progress bar under the status line (visible only while a
-    // scan runs — mirrors the Windows sidebar pipeline progress).
-    let scan_progress = gtk::ProgressBar::builder()
-        .visible(false)
-        .margin_start(10)
-        .margin_end(10)
-        .margin_top(6)
+    // Main content area. Placeholder for the tab navigation that lands
+    // in Phase 1. Six adw::NavigationPage children, one per tab.
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["fileid-glass"])
+        .margin_top(16)
+        .margin_bottom(16)
+        .margin_start(16)
+        .margin_end(16)
         .build();
-    sidebar.append(&scan_progress);
 
-    // ── Header (thin, transparent — window controls + wordmark) ──────────────
-    let header = adw::HeaderBar::builder()
-        .css_classes(["fileid-headerbar"])
+    let placeholder = adw::StatusPage::builder()
+        .icon_name("folder-symbolic")
+        .title("FileID for Linux")
+        .description("Phase 0 scaffold. Library / People / Cleanup / Deep Analyze / Restructure / Settings tabs land in Phase 1. Engine is shared with the Windows port.")
         .build();
-    // Hidden title (macOS/Windows use a unified title bar) — the sidebar carries
-    // the wordmark. An empty title widget keeps the bar draggable without the
-    // duplicate centered "FileID".
-    header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+    content.append(&placeholder);
 
-    // ── Collapsible split: sidebar | content ─────────────────────────────────
-    // adw::OverlaySplitView gives a macOS-style collapsible sidebar for free
-    // (animated show/hide + overlay when collapsed) and lets the window resize
-    // down to a small width.
-    let split = adw::OverlaySplitView::builder()
-        .min_sidebar_width(260.0)
-        .max_sidebar_width(260.0)
-        .sidebar_width_fraction(0.24)
-        .show_sidebar(crate::app_settings::sidebar_visible())
-        .build();
-    split.set_sidebar(Some(&sidebar));
-    split.set_content(Some(&stack));
+    let root = adw::ToolbarView::new();
+    root.add_top_bar(&header);
+    root.set_content(Some(&content));
+    window.set_content(Some(&root));
 
-    // Sidebar toggle button in the header (macOS `sidebar.left`).
-    let sidebar_toggle = gtk::Button::builder()
-        .icon_name("sidebar-show-symbolic")
-        .css_classes(["flat"])
-        .tooltip_text("Toggle sidebar")
-        .build();
-    sidebar_toggle.connect_clicked(clone!(
-        #[weak]
-        split,
-        move |_| {
-            let show = !split.shows_sidebar();
-            split.set_show_sidebar(show);
-            crate::app_settings::remember_sidebar_visible(show);
-        }
-    ));
-    header.pack_start(&sidebar_toggle);
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&split));
-    toolbar.set_hexpand(true);
-    toolbar.set_vexpand(true);
-
-    // Auto-collapse the sidebar when the window gets narrow, so it can resize
-    // down small (and the sidebar overlays instead of squeezing the content).
-    let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-        adw::BreakpointConditionLengthType::MaxWidth,
-        720.0,
-        adw::LengthUnit::Px,
-    ));
-    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
-    window.add_breakpoint(breakpoint);
-
-    // ── Layering: LavaLamp → scrim → UI ──────────────────────────────────────
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&crate::lavalamp::build()));
-    let scrim = gtk::Box::builder()
-        .css_classes(["fileid-scrim"])
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-    scrim.set_can_target(false);
-    overlay.add_overlay(&scrim);
-    overlay.add_overlay(&toolbar);
-
-    window.set_content(Some(&overlay));
-
-    // ── Folder pick → enable scan ────────────────────────────────────────────
     let selected_folder: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    // Restore the last-picked folder (skipped when a folder was passed on the
-    // command line) — mirrors Windows `lastFolderPath` + macOS `@AppStorage`.
-    if let Some(path) = initial_folder.or_else(crate::app_settings::last_folder) {
-        apply_folder(&path, &folder_label, &start_btn, &selected_folder);
-    }
-    ACTIVE_WINDOW.with_borrow_mut(|active| {
-        *active = Some(ActiveWindow {
-            window: window.clone(),
-            folder_label: folder_label.clone(),
-            start_button: start_btn.clone(),
-            selected_folder: selected_folder.clone(),
-        });
-    });
-    let engine_for_close = engine.clone();
-    window.connect_close_request(move |_| {
-        ACTIVE_WINDOW.with_borrow_mut(|active| *active = None);
-        engine_for_close.borrow_mut().shutdown();
-        glib::Propagation::Proceed
-    });
+
+    // Pick folder → GTK native FileDialog (folder mode).
     pick_btn.connect_clicked(clone!(
-        #[weak]
-        window,
-        #[weak]
-        folder_label,
-        #[weak]
-        start_btn,
-        #[strong]
-        selected_folder,
-        move |_| {
+        @weak window, @weak folder_label, @weak start_btn, @strong selected_folder
+        => move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Pick a folder to organize")
                 .modal(true)
                 .build();
-            dialog.select_folder(
-                Some(&window),
-                gtk::gio::Cancellable::NONE,
-                clone!(
-                    #[weak]
-                    folder_label,
-                    #[weak]
-                    start_btn,
-                    #[strong]
-                    selected_folder,
-                    move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                apply_folder(&path, &folder_label, &start_btn, &selected_folder);
-                            }
+            dialog.select_folder(Some(&window), gtk::gio::Cancellable::NONE, clone!(
+                @weak folder_label, @weak start_btn, @strong selected_folder
+                => move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            let display = path.file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                            folder_label.set_label(&display);
+                            *selected_folder.borrow_mut() = Some(path.to_string_lossy().into_owned());
+                            start_btn.set_sensitive(true);
                         }
                     }
-                ),
-            );
+                }
+            ));
         }
     ));
 
-    // ── Start / Stop scan → engine ───────────────────────────────────────────
-    // One button, two states: idle → `startScan`; scanning → `cancelScan`
-    // (the same affordance the macOS sidebar has — without it a long scan can
-    // only be abandoned by quitting the app).
-    let scanning = Rc::new(std::cell::Cell::new(false));
-    let set_scan_ui = {
-        let start_btn = start_btn.clone();
-        let scanning = scanning.clone();
-        Rc::new(move |now_scanning: bool| {
-            scanning.set(now_scanning);
-            if now_scanning {
-                start_btn.set_label("Stop scan");
-                start_btn.remove_css_class("gold-button");
-                start_btn.add_css_class("destructive-action");
-            } else {
-                start_btn.set_label("Start scan");
-                start_btn.remove_css_class("destructive-action");
-                start_btn.add_css_class("gold-button");
-            }
-        })
-    };
+    // Start scan → IPC startScan to the engine.
     start_btn.connect_clicked(clone!(
-        #[strong]
-        engine,
-        #[strong]
-        selected_folder,
-        #[strong]
-        scanning,
-        #[strong]
-        set_scan_ui,
-        #[weak]
-        status_label,
-        move |_| {
-            if scanning.get() {
-                use fileid_engine::ipc::{CommandPayload, Empty};
-                match engine
-                    .borrow_mut()
-                    .send(CommandPayload::CancelScan(Empty {}))
-                {
-                    Ok(()) => status_label.set_label("Stopping scan…"),
-                    Err(err) => status_label.set_label(&format!("Engine: {err}")),
-                }
-                return;
-            }
-            let Some(folder) = selected_folder.borrow().clone() else {
-                return;
-            };
-            match engine.borrow_mut().start_scan(&folder, false) {
-                Ok(()) => {
-                    status_label.set_label("Engine: scanning…");
-                    set_scan_ui(true);
-                }
+        @strong engine, @strong selected_folder, @weak status_label
+        => move |_| {
+            let Some(folder) = selected_folder.borrow().clone() else { return; };
+            let mut e = engine.borrow_mut();
+            match e.start_scan(&folder) {
+                Ok(()) => status_label.set_label("Engine: scanning…"),
                 Err(err) => status_label.set_label(&format!("scan failed: {err}")),
             }
         }
     ));
 
-    // ── Engine status → sidebar status line + progress bar ───────────────────
-    let status_rx = engine.borrow_mut().subscribe();
+    // Spawn the engine + poll its state events back into the status label.
+    // EngineClient pushes events through an async_channel; we pump from
+    // the GTK main context so UI updates stay single-threaded.
+    let rx = engine.borrow_mut().spawn();
     glib::MainContext::default().spawn_local(clone!(
-        #[weak]
-        status_label,
-        #[weak]
-        scan_progress,
-        #[strong]
-        set_scan_ui,
-        async move {
-            while let Ok(ev) = status_rx.recv().await {
-                let text = match ev {
-                    EngineEvent::Spawning => "Engine: starting…".to_string(),
-                    EngineEvent::Ready => "Engine: ready".to_string(),
-                    EngineEvent::Progress(p) => {
-                        set_scan_ui(true);
-                        if p.total > 0 {
-                            scan_progress.set_fraction(p.processed as f64 / p.total as f64);
-                            scan_progress.set_visible(true);
-                            format!("Scanning… {} / {}", p.processed, p.total)
-                        } else {
-                            // Schema contract: total stays 0 until the discovery
-                            // walk completes — pulse instead of rendering "/ 0".
-                            scan_progress.set_visible(true);
-                            scan_progress.pulse();
-                            format!("Scanning… {} processed", p.processed)
-                        }
-                    }
-                    EngineEvent::BatchLanded(n) => {
-                        set_scan_ui(true);
-                        format!("Scanning… {n} files")
-                    }
-                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Failed) => {
-                        set_scan_ui(false);
-                        scan_progress.set_visible(false);
-                        "Scan failed".to_string()
-                    }
-                    EngineEvent::PhaseChanged(fileid_engine::ipc::ScanPhase::Cancelled) => {
-                        set_scan_ui(false);
-                        scan_progress.set_visible(false);
-                        "Scan cancelled".to_string()
-                    }
-                    EngineEvent::PhaseChanged(_) => continue,
-                    EngineEvent::ScanComplete(n) => {
-                        set_scan_ui(false);
-                        scan_progress.set_visible(false);
-                        format!("Scan complete — {n} files")
-                    }
-                    EngineEvent::ScanWarning(m) => format!("Scanning: {m}"),
-                    EngineEvent::Error(m) => {
-                        set_scan_ui(false);
-                        scan_progress.set_visible(false);
-                        format!("Engine: {m}")
-                    }
-                    // Model-download failures were split out of Error; without
-                    // this arm a failed download vanishes from the sidebar
-                    // (only the Settings/Deep Analyze cards would notice).
-                    EngineEvent::ModelDownloadFailed {
-                        model_kind,
-                        message,
-                    } => {
-                        format!("Model {model_kind}: {message}")
-                    }
-                    EngineEvent::Exited => {
-                        set_scan_ui(false);
-                        scan_progress.set_visible(false);
-                        "Engine: restarting…".to_string()
-                    }
-                    _ => continue,
+        @weak status_label => async move {
+            while let Ok(state) = rx.recv().await {
+                let label = match state {
+                    EngineState::Spawning => "Engine: spawning…".to_string(),
+                    EngineState::Ready    => "Engine: ready".to_string(),
+                    EngineState::Scanning => "Engine: scanning…".to_string(),
+                    EngineState::Done(n)  => format!("Scan complete — {n} files"),
+                    EngineState::Failed(m)=> format!("Engine: {m}"),
                 };
-                status_label.set_label(&text);
+                status_label.set_label(&label);
             }
         }
     ));
 
-    // Boot the engine + thumbnail worker + event fan-out pump.
-    EngineClient::start(&engine);
-
     window.present();
-
-    // First-launch onboarding: core-model install checklist + the machine-sized
-    // Deep Analyze recommendation (mirrors the Windows/macOS Welcome sheet;
-    // re-shows while any core model is missing).
-    if crate::welcome::should_show() && std::env::var("FILEID_SELF_SHOT").is_err() {
-        crate::welcome::present(&window, engine.clone());
-    }
-
-    // Dev-only self-capture: render the window to a PNG so the UI can be
-    // inspected on compositors that expose no screenshot API (e.g. cosmic-comp
-    // lacks wlr-screencopy). Gated by `FILEID_SELF_SHOT=<path>`; optional
-    // `FILEID_SELF_SHOT_TAB=<name>` selects a tab first. No effect otherwise.
-    if let Ok(path) = std::env::var("FILEID_SELF_SHOT") {
-        if let Ok(tab) = std::env::var("FILEID_SELF_SHOT_TAB") {
-            stack.set_visible_child_name(&tab);
-            for b in nav_buttons.borrow().iter() {
-                b.remove_css_class("active");
-            }
-        }
-        let win = window.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(2200), move || {
-            self_capture(&win, &path);
-        });
-    }
-}
-
-/// Render the window's current frame to a PNG via GTK's own renderer (no
-/// compositor screenshot needed). Dev diagnostic only.
-fn self_capture(window: &adw::ApplicationWindow, path: &str) {
-    let widget = window.upcast_ref::<gtk::Widget>();
-    let (w, h) = (widget.width(), widget.height());
-    if w <= 0 || h <= 0 {
-        eprintln!("[self_capture] window not sized yet ({w}x{h})");
-        return;
-    }
-    let Some(native) = widget.native() else {
-        eprintln!("[self_capture] no native");
-        return;
-    };
-    let Some(renderer) = native.renderer() else {
-        eprintln!("[self_capture] no renderer");
-        return;
-    };
-    let paintable = gtk::WidgetPaintable::new(Some(widget));
-    let snapshot = gtk::Snapshot::new();
-    gtk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(w), f64::from(h));
-    let Some(node) = snapshot.to_node() else {
-        eprintln!("[self_capture] empty render node");
-        return;
-    };
-    let texture = renderer.render_texture(&node, None);
-    match texture.save_to_png(path) {
-        Ok(()) => eprintln!("[self_capture] wrote {path} ({w}x{h})"),
-        Err(e) => eprintln!("[self_capture] save failed: {e}"),
-    }
-}
-
-/// An uppercase, letter-spaced section header for the sidebar (mirrors the
-/// macOS sidebar section labels).
-fn section_heading(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .css_classes(["sidebar-heading"])
-        .halign(gtk::Align::Start)
-        .build()
 }

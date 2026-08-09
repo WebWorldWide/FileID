@@ -20,8 +20,7 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBlock x:Name="HeaderText"
-                       Grid.Column="0"
+            <TextBlock Grid.Column="0"
                        Text="UP NEXT"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        FontWeight="SemiBold"
@@ -34,47 +33,6 @@
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
         </Grid>
 
-        <ScrollViewer MaxHeight="280"
-                      VerticalScrollBarVisibility="Auto"
-                      VerticalScrollMode="Auto"
-                      HorizontalScrollBarVisibility="Disabled"
-                      HorizontalScrollMode="Disabled">
-            <ItemsRepeater x:Name="JobsRepeater">
-                <ItemsRepeater.Layout>
-                    <StackLayout Spacing="4" />
-                </ItemsRepeater.Layout>
-                <ItemsRepeater.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Padding="8,6"
-                              CornerRadius="8"
-                              Background="{Binding Background}"
-                              AutomationProperties.Name="{Binding AutomationName}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Grid.Column="0"
-                                      Margin="0,0,8,0"
-                                      FontFamily="Segoe Fluent Icons"
-                                      Glyph="{Binding IconGlyph}"
-                                      FontSize="11"
-                                      Opacity="{Binding IconOpacity}" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{Binding Title}"
-                                       FontSize="11"
-                                       FontWeight="{Binding TitleWeight}"
-                                       VerticalAlignment="Center"
-                                       TextTrimming="CharacterEllipsis" />
-                            <TextBlock Grid.Column="2"
-                                       Text="{Binding Eta}"
-                                       FontSize="10"
-                                       Opacity="0.5"
-                                       VerticalAlignment="Center" />
-                        </Grid>
-                    </DataTemplate>
-                </ItemsRepeater.ItemTemplate>
-            </ItemsRepeater>
-        </ScrollViewer>
+        <ItemsRepeater x:Name="JobsRepeater" />
     </StackPanel>
 </UserControl>

@@ -1,4 +1,4 @@
-﻿// PeopleView code-behind. Cluster cards are draggable + drop targets;
+// PeopleView code-behind. Cluster cards are draggable + drop targets;
 // dropping cluster A onto cluster B emits engine `mergeClusters` IPC
 // (A's face_prints reassigned to B's person_id, A's person row deleted).
 
@@ -51,17 +51,11 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // RemoveAt/Insert, so without this a mid-selection re-cluster would run the
     // O(N) maintenance AND a whole-subtree visual walk once per delta (O(N^2)).
     private bool _selectMaintenancePending;
-    private bool _continueBannerRefreshPending;
-    private int _hiddenUnknownsRefreshGeneration;
-    private int _continueBannerRefreshGeneration;
 
     private bool _unloaded;
     public PeopleView()
     {
-        ViewModel = new PeopleViewModel(
-            AppPaths.DbPath,
-            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
-            () => AppViewModel.Instance.Settings.PeopleHideUnknown);
+        ViewModel = new PeopleViewModel(AppPaths.DbPath, Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         InitializeComponent();
         // Named handlers (not inline lambdas) so OnUnloaded can detach
         // them. Inline lambdas leak the view + VM graph (~hundreds of KB)
@@ -91,8 +85,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 if (_unloaded) return;
                 try { await ViewModel.RefreshAsync(CancellationToken.None); }
-                catch (OperationCanceledException) { /* benign: refresh superseded or view torn down */ }
-                catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex); }
+                catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
             });
         });
 
@@ -100,8 +93,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (_unloaded) return;
         try { await ViewModel.RefreshAsync(CancellationToken.None); }
-        catch (OperationCanceledException) { /* benign: refresh superseded or view torn down */ }
-        catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex); }
+        catch (Exception ex) { DebugLog.Warn("PeopleView.OnLoaded refresh threw: " + ex.Message); }
         UpdateHiddenUnknownsFooter();
         RefreshContinueToDeepAnalyzeBanner();
     }
@@ -112,16 +104,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // the user can flip the visibility without diving into Settings.
     // Matches macOS PeopleView's bottom-strip behavior.
 
-    private void UpdateHiddenUnknownsFooter()
-        => _ = DebugLog.SafeRunAsync(
-            nameof(UpdateHiddenUnknownsFooter),
-            UpdateHiddenUnknownsFooterAsync);
-
-    private async Task UpdateHiddenUnknownsFooterAsync()
+    private async void UpdateHiddenUnknownsFooter()
     {
         if (_unloaded) return;
-        var generation = System.Threading.Interlocked.Increment(
-            ref _hiddenUnknownsRefreshGeneration);
         int hiddenCount = 0;
         try
         {
@@ -142,27 +127,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     using var cmd = conn.CreateCommand();
                     cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE is_unknown = 1";
                     var v = cmd.ExecuteScalar();
-                    return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
+                    return v is null ? 0 : Convert.ToInt32(v);
                 }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn("UpdateHiddenUnknownsFooter query failed: " + ex.Message);
-                    return 0;
-                }
+                catch { return 0; }
             }).ConfigureAwait(true);
         }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("UpdateHiddenUnknownsFooter worker failed: " + ex.Message);
-            hiddenCount = 0;
-        }
+        catch { hiddenCount = 0; }
 
-        if (_unloaded
-            || generation != System.Threading.Volatile.Read(
-                ref _hiddenUnknownsRefreshGeneration))
-        {
-            return;
-        }
+        if (_unloaded) return;
         bool hideUnknown = false;
         try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
         // Defensive: view may have unloaded during the DB-read await.
@@ -193,16 +165,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // its captions + smart filenames. Mirrors macOS PeopleView's
     // continueToDeepAnalyzeRow.
 
-    private void RefreshContinueToDeepAnalyzeBanner()
-        => _ = DebugLog.SafeRunAsync(
-            nameof(RefreshContinueToDeepAnalyzeBanner),
-            RefreshContinueToDeepAnalyzeBannerAsync);
-
-    private async Task RefreshContinueToDeepAnalyzeBannerAsync()
+    private async void RefreshContinueToDeepAnalyzeBanner()
     {
         if (_unloaded) return;
-        var generation = System.Threading.Interlocked.Increment(
-            ref _continueBannerRefreshGeneration);
         int named = 0;
         try
         {
@@ -219,37 +184,20 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                         }.ToString());
                     conn.Open();
                     using var cmd = conn.CreateCommand();
-                    // A cluster is named when any legacy or structured name
-                    // component is non-blank, excluding marked unknowns.
-                    cmd.CommandText = """
-                        SELECT COUNT(*) FROM persons
-                        WHERE IFNULL(is_unknown, 0) = 0
-                          AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
-                                   COALESCE(first_name, '') || COALESCE(middle_name, '') ||
-                                   COALESCE(last_name, '') || COALESCE(suffix, '')) <> '';
-                        """;
+                    // A cluster is "named" when either `name` (legacy) or
+                    // `first_name` (v5) is set, excluding ones the user
+                    // explicitly marked unknown.
+                    cmd.CommandText =
+                        "SELECT COUNT(*) FROM persons WHERE (name IS NOT NULL OR first_name IS NOT NULL) AND IFNULL(is_unknown, 0) = 0";
                     var v = cmd.ExecuteScalar();
-                    return v is null ? 0 : (int)Math.Min(Convert.ToInt64(v), int.MaxValue);
+                    return v is null ? 0 : Convert.ToInt32(v);
                 }
-                catch (Exception ex)
-                {
-                    DebugLog.Warn("RefreshContinueToDeepAnalyzeBanner query failed: " + ex.Message);
-                    return 0;
-                }
+                catch { return 0; }
             }).ConfigureAwait(true);
         }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("RefreshContinueToDeepAnalyzeBanner worker failed: " + ex.Message);
-            named = 0;
-        }
+        catch { named = 0; }
 
-        if (_unloaded
-            || generation != System.Threading.Volatile.Read(
-                ref _continueBannerRefreshGeneration))
-        {
-            return;
-        }
+        if (_unloaded) return;
         try
         {
             ContinueToDeepAnalyzeBanner.Visibility =
@@ -261,34 +209,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private void ScheduleContinueToDeepAnalyzeBannerRefresh()
-    {
-        if (_unloaded || _continueBannerRefreshPending) return;
-        _continueBannerRefreshPending = true;
-        if (!DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
-            "PeopleView.RefreshContinueToDeepAnalyzeBanner",
-            () =>
-            {
-                _continueBannerRefreshPending = false;
-                if (!_unloaded) RefreshContinueToDeepAnalyzeBanner();
-            })))
-        {
-            _continueBannerRefreshPending = false;
-        }
-    }
-
     private void OnContinueToDeepAnalyzeClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun("PeopleView.OnContinueToDeepAnalyzeClicked", () =>
         {
             string model = "qwen2_5_vl_7b";
-            System.Collections.Generic.IReadOnlyList<string>? excludedFolders = null;
-            try
-            {
-                model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
-                excludedFolders = AppViewModel.Instance.Settings.DeepAnalyzeExcludedFolders;
-            }
-            catch { /* fall back to default model, no exclusions */ }
-            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true, excludedFolders: excludedFolders);
+            try { model = AppViewModel.Instance.Settings.SelectedVlmModelKind; }
+            catch { /* fall back to default model */ }
+            _ = EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
             AppViewModel.Instance.ActiveTab = SidebarTab.DeepAnalyze;
         });
 
@@ -315,69 +242,62 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         });
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("PeopleView.OnViewModelPropertyChanged", () =>
-        {
-            if (_unloaded) return;
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-        });
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+    }
 
     private void OnClustersCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
-        => DebugLog.SafeRun("PeopleView.OnClustersCollectionChanged", () =>
+    {
+        if (_unloaded) return;
+        OnPropertyChanged(nameof(StatusText));
+        OnPropertyChanged(nameof(FooterVisibility));
+        RefreshContinueToDeepAnalyzeBanner();
+
+        // Keep select-mode wiring consistent across refreshes. The
+        // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
+        // surviving instances and their IsSelected subscription, but a refresh
+        // can still Add brand-new clusters (which arrive unwired, with a
+        // Collapsed checkbox) or Remove gone ones (whose subscription would
+        // leak). Re-apply wiring + checkbox visibility + count so the select UI
+        // never goes stale after a re-cluster while the user is mid-selection.
+        if (!ViewModel.IsSelectMode) return;
+
+        // Detach handlers from any instances leaving the collection so a removed
+        // (or replaced) cluster's subscription can't leak past its lifetime.
+        if (e.OldItems != null)
         {
-            if (_unloaded) return;
-            OnPropertyChanged(nameof(StatusText));
-            OnPropertyChanged(nameof(FooterVisibility));
-            ScheduleContinueToDeepAnalyzeBannerRefresh();
-
-            // Keep select-mode wiring consistent across refreshes. The
-            // identity-stable merge (PeopleViewModel.MergeByClusterId) preserves
-            // surviving instances and their IsSelected subscription, but a refresh
-            // can still Add brand-new clusters (which arrive unwired, with a
-            // Collapsed checkbox) or Remove gone ones (whose subscription would
-            // leak). Re-apply wiring + checkbox visibility + count so the select UI
-            // never goes stale after a re-cluster while the user is mid-selection.
-            if (!ViewModel.IsSelectMode) return;
-
-            // Detach handlers from any instances leaving the collection so a removed
-            // (or replaced) cluster's subscription can't leak past its lifetime.
-            if (e.OldItems != null)
+            foreach (var removed in e.OldItems)
             {
-                foreach (var removed in e.OldItems)
-                {
-                    if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
-                }
+                if (removed is PersonCluster oc) oc.PropertyChanged -= OnClusterIsSelectedChanged;
             }
+        }
 
-            // MergeByClusterId fires this handler once per RemoveAt/Insert, so one
-            // Refresh that restructures the list raises it M times. The settled
-            // selection projection, checkbox visibility, and count depend only on the
-            // FINAL collection, so coalesce them to a single deferred pass guarded by
-            // a pending flag instead of O(N) work + a whole-subtree walk per delta
-            // (O(N^2) when a re-cluster replaces most instances mid-selection). The
-            // defer also lets the checkbox sweep see newly-realized cards.
-            if (_selectMaintenancePending) return;
-            _selectMaintenancePending = true;
-            if (!DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(
-                "PeopleView.OnClustersCollectionChanged.maintenance",
-                () =>
-                {
-                    _selectMaintenancePending = false;
-                    if (_unloaded || !ViewModel.IsSelectMode) return;
-                    // Detach-then-attach makes the reproject non-re-entrant and guards
-                    // against double-subscription; restores selection by stable ClusterId
-                    // so a mid-selection re-cluster never silently drops the user's
-                    // multi-select. Covers Add / Replace / Reset alike.
-                    foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
-                    ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
-                    foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
-                    UpdateCheckboxVisibility();
-                    UpdateSelectionCountText();
-                })))
-            {
-                _selectMaintenancePending = false;
-            }
+        // MergeByClusterId fires this handler once per RemoveAt/Insert, so one
+        // Refresh that restructures the list raises it M times. The settled
+        // selection projection, checkbox visibility, and count depend only on the
+        // FINAL collection, so coalesce them to a single deferred pass guarded by
+        // a pending flag instead of O(N) work + a whole-subtree walk per delta
+        // (O(N^2) when a re-cluster replaces most instances mid-selection). The
+        // defer also lets the checkbox sweep see newly-realized cards.
+        if (_selectMaintenancePending) return;
+        _selectMaintenancePending = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _selectMaintenancePending = false;
+            if (_unloaded || !ViewModel.IsSelectMode) return;
+            // Detach-then-attach makes the reproject non-re-entrant and guards
+            // against double-subscription; restores selection by stable ClusterId
+            // so a mid-selection re-cluster never silently drops the user's
+            // multi-select. Covers Add / Replace / Reset alike.
+            foreach (var c in ViewModel.Clusters) c.PropertyChanged -= OnClusterIsSelectedChanged;
+            ReprojectSelection(ViewModel.Clusters, _selectedClusterIds);
+            foreach (var c in ViewModel.Clusters) c.PropertyChanged += OnClusterIsSelectedChanged;
+            UpdateCheckboxVisibility();
+            UpdateSelectionCountText();
         });
+    }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
@@ -424,45 +344,24 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         || ViewModel.Clusters.Count == 0
             ? Visibility.Visible : Visibility.Collapsed;
 
-    private PersonCluster? ResolveCluster(object? sender, RoutedEventArgs? e = null)
-    {
-        FrameworkElement? cur = sender as FrameworkElement;
-        if (cur is null && e?.OriginalSource is FrameworkElement orig)
-        {
-            cur = orig;
-        }
-
-        while (cur is not null)
-        {
-            if (cur.DataContext is PersonCluster pc) return pc;
-            if (cur.Tag is int or long or string)
-            {
-                try
-                {
-                    long cid = Convert.ToInt64(cur.Tag);
-                    var found = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
-                    if (found is not null) return found;
-                }
-                catch { /* ignore non-numeric tag */ }
-            }
-            cur = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(cur) as FrameworkElement;
-        }
-        return null;
-    }
-
     private async void OnContextOpenDetails(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnContextOpenDetails), async () =>
     {
-        var cluster = ResolveCluster(sender, e);
+        if (ViewModel.IsSelectMode) return;
+        if (sender is not MenuFlyoutItem item || item.Tag is not int cid) return;
+        var cluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == cid);
         if (cluster is null) return;
         await OpenDetailSheetAsync(cluster);
-    });
+    }
 
     private void OnContextSuggestedMerges(object sender, RoutedEventArgs e)
-        => OnSuggestedMergesClicked(sender, e);
+    {
+        if (ViewModel.IsSelectMode) return;
+        OnSuggestedMergesClicked(sender, e);
+    }
 
     private async Task OpenDetailSheetAsync(PersonCluster pc)
     {
+        if (ViewModel.IsSelectMode) return;
         var sheet = new PersonDetailSheet();
         sheet.SetPerson(pc.ClusterId, pc.DisplayName);
         var dialog = new ContentDialog
@@ -496,7 +395,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             CloseButtonText = "Done",
             DefaultButton = ContentDialogButton.Close,
         };
-        _ = sheet.InitializeAsync();
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }
@@ -528,20 +426,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     // ItemsRepeater + x:Bind does NOT populate the realized element's
     // DataContext (compiled bindings bypass it — same gotcha that broke
     // Library thumbnails). Resolve the cluster from the authoritative
-    // repeater index and set DataContext so the drag / drop / tap
+    // repeater index and set DataContext so the drag / drop / double-tap
     // handlers that read el.DataContext resolve the right PersonCluster.
-    // OnClusterTapped has no Tag fallback, so without this bridge a tap
-    // silently returns and the person-detail sheet never opens.
+    // OnClusterDoubleTapped has no Tag fallback, so without this bridge a
+    // double-tap silently returns and the person-detail sheet never opens.
     // Mirrors LibraryView.OnRepeaterElementPrepared.
-    // SafeRun-wrapped: ItemsRepeater raises ElementPrepared from the native
-    // realization pass, so a synchronous throw here (an index race when
-    // ViewModel.Clusters was rebuilt by a post-tagging refresh, a VisualTreeHelper
-    // walk over a torn subtree) fast-fails the process across the ABI instead of
-    // being catchable — the exact V15.4/Library-twin stowed-crash class. Wrap the
-    // body AND the deferred tree-walk. Mirrors LibraryView.OnRepeaterElementPrepared.
     private void OnClusterElementPrepared(Microsoft.UI.Xaml.Controls.ItemsRepeater sender,
                                           Microsoft.UI.Xaml.Controls.ItemsRepeaterElementPreparedEventArgs args)
-        => DebugLog.SafeRun(nameof(OnClusterElementPrepared), () =>
     {
         if (args.Element is not FrameworkElement el) return;
         var cluster = (args.Index >= 0 && args.Index < ViewModel.Clusters.Count)
@@ -556,8 +447,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         // never appears (or a recycled card keeps a stale Visible). Apply the
         // CURRENT mode to this freshly-prepared card. Deferred to Low priority
         // so the card template (incl. the tagged CheckBox) is realized first.
-        el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-            () => DebugLog.SafeRun("OnClusterElementPrepared.applyMode", () =>
+        el.DispatcherQueue?.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             // Read the live mode at drain time, not a prepare-time snapshot: a
             // Select toggle can land between this card's prepare and the Low
@@ -570,8 +460,8 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 if (FindCheckBoxInTree(d) is { } cb) cb.Visibility = selectVisible;
             }
-        }));
-    });
+        });
+    }
 
     private static System.Collections.Generic.IEnumerable<DependencyObject> EnumerateDescendants(DependencyObject root)
     {
@@ -590,30 +480,28 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         }
     }
 
-    // SafeRun-wrapped: DataPackagePropertySet.Add throws ArgumentException on a
-    // duplicate key, and this fires on the native drag-start ABI callback.
     private void OnClusterDragStarting(UIElement sender, DragStartingEventArgs args)
-        => DebugLog.SafeRun(nameof(OnClusterDragStarting), () =>
     {
+        if (ViewModel.IsSelectMode) { args.Cancel = true; return; }
         if (sender is FrameworkElement el && el.DataContext is PersonCluster pc)
         {
-            args.Data.Properties[MergeFormatId] = (long)pc.ClusterId;
+            args.Data.Properties.Add(MergeFormatId, (long)pc.ClusterId);
             args.Data.RequestedOperation = DataPackageOperation.Move;
         }
-        else if (sender is FrameworkElement el2 && el2.Tag is int or long or string)
+        else if (sender is FrameworkElement el2 && el2.Tag is int pid)
         {
-            try
-            {
-                args.Data.Properties[MergeFormatId] = Convert.ToInt64(el2.Tag);
-                args.Data.RequestedOperation = DataPackageOperation.Move;
-            }
-            catch { /* non-numeric tag */ }
+            args.Data.Properties.Add(MergeFormatId, (long)pid);
+            args.Data.RequestedOperation = DataPackageOperation.Move;
         }
-    });
+    }
 
     private void OnClusterDragOver(object sender, DragEventArgs args)
-        => DebugLog.SafeRun(nameof(OnClusterDragOver), () =>
     {
+        if (ViewModel.IsSelectMode)
+        {
+            args.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
         if (args.DataView.Properties.ContainsKey(MergeFormatId))
         {
             args.AcceptedOperation = DataPackageOperation.Move;
@@ -629,94 +517,64 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             args.AcceptedOperation = DataPackageOperation.None;
         }
-    });
+    }
 
     private void OnClusterDragLeave(object sender, DragEventArgs args)
-        => DebugLog.SafeRun(nameof(OnClusterDragLeave), () =>
     {
         if (sender is Grid g)
         {
             g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
             g.BorderThickness = new Thickness(1);
         }
-    });
+    }
 
-    private async void OnClusterKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnClusterKeyDown), async () =>
+    private void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
-        if (sender is not FrameworkElement el) return;
-        if (e.Key == Windows.System.VirtualKey.Enter)
+        if (ViewModel.IsSelectMode)
         {
-            e.Handled = true;
-            await HandleClusterActivationAsync(sender);
+            if (e.OriginalSource is CheckBox) { e.Handled = true; return; }
+            if (sender is FrameworkElement el && el.DataContext is PersonCluster pc)
+            {
+                pc.IsSelected = !pc.IsSelected;
+                e.Handled = true;
+            }
         }
-        else if (e.Key == Windows.System.VirtualKey.Space && ViewModel.IsSelectMode && el.DataContext is PersonCluster cluster)
-        {
-            cluster.IsSelected = !cluster.IsSelected;
-            e.Handled = true;
-        }
-    });
-
-    // SafeRunAsync-wrapped: the whole handler, INCLUDING the synchronous
-    // prologue (new PersonDetailSheet() runs XamlReader.Load of the sheet
-    // template, which can throw synchronously on a resource-resolution failure).
-    // A DoubleTapped handler is invoked across the XAML input ABI, so an
-    // unguarded synchronous throw here fast-fails the process — the "click a
-    // face to open the person" stowed-crash path. XamlRoot may be null on a
-    // detached element; ShowAsync then throws, already caught below.
-    // Single tap (was DoubleTapped): seeing every face in a group is the primary
-    // thing users want from a cluster card, and behind a double-tap it was
-    // effectively undiscoverable. Safe to take the single tap — the card has no
-    // other click action (merging is drag-and-drop, and a drag suppresses Tapped).
-    // `_detailOpen` guards re-entrancy: ContentDialog.ShowAsync throws if a second
-    // dialog opens while one is up, and a habitual double-click would otherwise
-    // fire this twice.
-    private bool _detailOpen;
+    }
 
     private async void OnClusterDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
     {
-        if (IsEditNameButtonSource(e.OriginalSource)) return;
-        e.Handled = true;
-        await HandleClusterActivationAsync(sender);
-    }
-
-    private async void OnClusterTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
-    {
-        if (IsEditNameButtonSource(e.OriginalSource)) return;
-        e.Handled = true;
-        await HandleClusterActivationAsync(sender);
-    }
-
-    private async void OnClusterEditNameClicked(object sender, RoutedEventArgs e)
-    {
-        await HandleClusterActivationAsync(sender);
-    }
-
-    private async Task HandleClusterActivationAsync(object sender)
-        => await DebugLog.SafeRunAsync(nameof(HandleClusterActivationAsync), async () =>
-    {
-        PersonCluster? pc = ResolveCluster(sender);
-        if (pc is null) return;
-        if (XamlRoot is null || _detailOpen) return;
-        _detailOpen = true;
-        try { await OpenDetailSheetAsync(pc); }
-        finally { _detailOpen = false; }
-    });
-
-    private static bool IsEditNameButtonSource(object? source)
-    {
-        if (source is not DependencyObject current) return false;
-        while (current is not null)
+        if (ViewModel.IsSelectMode)
         {
-            if (current is Button button && button.Tag is int or long or string) return true;
-            current = VisualTreeHelper.GetParent(current);
+            e.Handled = true;
+            return;
         }
-        return false;
+        if (sender is not FrameworkElement el || el.DataContext is not PersonCluster pc) return;
+
+        var sheet = new PersonDetailSheet();
+        sheet.SetPerson(pc.ClusterId, pc.DisplayName);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "Person details",
+            Content = sheet,
+            PrimaryButtonText = "Save",
+            CloseButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+        };
+        dialog.PrimaryButtonClick += async (_, args2) =>
+        {
+            var deferral = args2.GetDeferral();
+            var ok = await sheet.CommitAsync();
+            if (!ok) args2.Cancel = true;
+            deferral.Complete();
+        };
+        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
     }
 
     private async void OnClusterDrop(object sender, DragEventArgs args)
-        => await DebugLog.SafeRunAsync(nameof(OnClusterDrop), async () =>
     {
+        if (ViewModel.IsSelectMode) return;
         if (sender is not Grid g) return;
         // Restore styling first so a failure mid-drop doesn't leave the gold ring.
         g.BorderBrush = FileID.Services.ThemeHelper.GetBrushSafe("CardStrokeColorDefaultBrush");
@@ -726,90 +584,60 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (raw is not long sourceId) return;
 
         long destId;
-        if (g.DataContext is PersonCluster pc)
-        {
-            destId = pc.ClusterId;
-        }
-        else if (g.Tag is int or long or string)
-        {
-            try { destId = Convert.ToInt64(g.Tag); }
-            catch { return; }
-        }
-        else
-        {
-            return;
-        }
+        if (g.Tag is int t) destId = t;
+        else if (g.DataContext is PersonCluster pc) destId = pc.ClusterId;
+        else return;
 
         if (sourceId == destId) return; // no-op self-drop
 
         if (System.Threading.Interlocked.CompareExchange(ref _bulkOpInFlight, 1, 0) != 0) return;
         try
         {
+            var srcCluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == sourceId);
+            var dstCluster = ViewModel.Clusters.FirstOrDefault(c => c.ClusterId == destId);
+            var srcName = srcCluster?.DisplayName ?? $"Person #{sourceId}";
+            var dstName = dstCluster?.DisplayName ?? $"Person #{destId}";
+
             var confirm = new ContentDialog
             {
                 XamlRoot = XamlRoot,
                 Title = "Merge clusters?",
-                Content = $"Move all faces from #{sourceId} into #{destId}? You can undo this from Recent changes.",
+                Content = $"Merge \"{srcName}\" ({srcCluster?.MemberCount ?? 0} faces) into \"{dstName}\" ({dstCluster?.MemberCount ?? 0} faces)?\n\nAll faces from {srcName} will be reassigned to {dstName}.",
                 PrimaryButtonText = "Merge",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Primary,
             };
-            // ShowAsync throws when another ContentDialog is already open; this is
-            // an async-void drop handler, so treat a failed confirm as Cancel.
-            ContentDialogResult choice;
-            try { choice = await confirm.ShowAsync(); }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("Merge confirm dialog failed (another dialog open?): " + ex.Message);
-                return;
-            }
+            var choice = await confirm.ShowAsync();
             if (choice != ContentDialogResult.Primary) return;
 
-            try
+            var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                "mergeClusters",
+                () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
+                TimeSpan.FromSeconds(30));
+            if (r.Failed > 0 || r.Succeeded == 0)
             {
-                // revertMerge needs the exact face ids that moved and the merge
-                // reply doesn't carry them — snapshot BEFORE the merge.
-                var movedFaceIds = await ReadFaceIdsForPersonAsync(sourceId);
-                // Await the engine's bulkActionResult instead of fire-and-forget:
-                // a swallowed merge made the user think the merge happened, then
-                // the refresh re-showed the old state. Surface any failure.
-                var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
-                    "mergeClusters",
-                    () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
-                    TimeSpan.FromSeconds(30));
-                if (r.Failed > 0 || r.Succeeded == 0)
-                {
-                    var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
-                                 ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
-                                 ?? "The engine did not confirm the merge.";
-                    await ShowAlertAsync("Merge failed",
-                        $"Couldn't merge #{sourceId} into #{destId} — {detail}");
-                }
-                else
-                {
-                    PushMergeUndo(sourceId, destId, movedFaceIds,
-                        $"merge people #{sourceId} into #{destId}");
-                }
+                var detail = r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
+                             ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
+                             ?? "The engine did not confirm the merge.";
+                await ShowAlertAsync("Merge failed", detail);
             }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
-                await ShowAlertAsync("Merge failed",
-                    $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
-            }
-
-            await ViewModel.RefreshAsync(CancellationToken.None);
+            await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("MergeClusters drop IPC failed: " + ex.Message);
+            await ShowAlertAsync("Merge failed",
+                $"Couldn't merge #{sourceId} into #{destId} — {SqliteErrorTranslator.Humanize(ex)}");
         }
         finally
         {
             System.Threading.Interlocked.Exchange(ref _bulkOpInFlight, 0);
         }
-    });
+    }
 
     // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
 
     private void OnToggleSelectMode(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnToggleSelectMode), () =>
     {
         ViewModel.IsSelectMode = !ViewModel.IsSelectMode;
         SelectButtonText.Text = ViewModel.IsSelectMode ? "Done" : "Select";
@@ -837,21 +665,20 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 c.IsSelected = false;
             }
         }
-    });
+    }
 
     private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
-        => DebugLog.SafeRun("PeopleView.OnClusterIsSelectedChanged", () =>
+    {
+        if (e.PropertyName != nameof(PersonCluster.IsSelected)) return;
+        // Keep the id-keyed selection set in sync as the user toggles cards, so a
+        // later instance-replacing refresh can re-project selection by id.
+        if (sender is PersonCluster pc)
         {
-            if (_unloaded || e.PropertyName != nameof(PersonCluster.IsSelected)) return;
-            // Keep the id-keyed selection set in sync as the user toggles cards, so a
-            // later instance-replacing refresh can re-project selection by id.
-            if (sender is PersonCluster pc)
-            {
-                if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
-                else _selectedClusterIds.Remove(pc.ClusterId);
-            }
-            UpdateSelectionCountText();
-        });
+            if (pc.IsSelected) _selectedClusterIds.Add(pc.ClusterId);
+            else _selectedClusterIds.Remove(pc.ClusterId);
+        }
+        UpdateSelectionCountText();
+    }
 
     // Re-project id-keyed selection onto the supplied cluster instances. Pulled
     // out as a static so the survives-an-instance-replacing-refresh behavior is
@@ -861,8 +688,6 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         System.Collections.Generic.IEnumerable<PersonCluster> clusters,
         System.Collections.Generic.ISet<int> selectedIds)
     {
-        var activeIds = new System.Collections.Generic.HashSet<int>(clusters.Select(c => c.ClusterId));
-        selectedIds.IntersectWith(activeIds);
         foreach (var c in clusters)
         {
             bool want = selectedIds.Contains(c.ClusterId);
@@ -927,38 +752,72 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         {
             var ids = ViewModel.SelectedClusterIds;
             if (ids.Count < 2) return;
-            // Merge cluster ids[1..N] into ids[0] (the first selected).
-            // Engine `mergeClusters` is 1:1; loop the call N-1 times.
-            var dest = ids[0];
+
+            var selectedClusters = ViewModel.Clusters.Where(c => ids.Contains(c.ClusterId)).ToList();
+            if (selectedClusters.Count < 2) return;
+
+            var combo = new ComboBox
+            {
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(0, 12, 0, 0),
+                DisplayMemberPath = nameof(PersonCluster.DisplayNameWithCount),
+                ItemsSource = selectedClusters,
+                SelectedIndex = 0,
+            };
+
+            var stack = new StackPanel { Spacing = 6 };
+            stack.Children.Add(new TextBlock
+            {
+                Text = "Who is this merging into?",
+                Style = Application.Current.Resources["BodyStrongTextBlockStyle"] as Style,
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"Combine {selectedClusters.Count} selected people into one person. Choose the destination person below:",
+                Style = Application.Current.Resources["CaptionTextBlockStyle"] as Style,
+                Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
+                TextWrapping = TextWrapping.Wrap,
+            });
+            stack.Children.Add(combo);
+
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Merge People",
+                Content = stack,
+                PrimaryButtonText = "Merge",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+            };
+
+            var choice = await dialog.ShowAsync();
+            if (choice != ContentDialogResult.Primary || combo.SelectedItem is not PersonCluster targetCluster) return;
+
+            int dest = targetCluster.ClusterId;
+            var sourcesToMerge = ids.Where(id => id != dest).ToList();
+
             int merged = 0;
             int failed = 0;
             string? firstFailure = null;
-            for (int i = 1; i < ids.Count; i++)
+            for (int i = 0; i < sourcesToMerge.Count; i++)
             {
-                if (_unloaded) break;
+                var srcId = sourcesToMerge[i];
                 try
                 {
-                    // Snapshot the source's face ids for revertMerge before they move.
-                    var movedFaceIds = await ReadFaceIdsForPersonAsync(ids[i]);
-                    // Await each merge's bulkActionResult so a swallowed failure
-                    // can't masquerade as success (the refresh would then re-show
-                    // the unmerged clusters with no explanation).
                     var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
                         "mergeClusters",
-                        () => EngineClient.Instance.MergeClustersAsync(ids[i], dest),
+                        () => EngineClient.Instance.MergeClustersAsync(srcId, dest),
                         TimeSpan.FromSeconds(30));
                     if (r.Failed > 0 || r.Succeeded == 0)
                     {
                         failed++;
                         firstFailure ??= r.Messages.FirstOrDefault(m => m is not null && !m.Ok)?.Message
                                          ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
-                                         ?? $"#{ids[i]} could not be merged.";
+                                         ?? $"#{srcId} could not be merged.";
                     }
                     else
                     {
                         merged++;
-                        PushMergeUndo(ids[i], dest, movedFaceIds,
-                            $"merge people #{ids[i]} into #{dest}");
                     }
                 }
                 catch (Exception ex)
@@ -1026,20 +885,12 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     $"Couldn't mark {ids.Count} cluster{(ids.Count == 1 ? "" : "s")} as unknown — {SqliteErrorTranslator.Humanize(ex)}");
                 return;
             }
-            try
-            {
-                var s = AppViewModel.Instance.Settings;
-                s.PeopleHideUnknown = true;
-                s.Save();
-            }
-            catch (Exception ex) { DebugLog.Warn("BulkMarkUnknown setting save threw: " + ex.Message); }
             ViewModel.IsSelectMode = false;
             _selectedClusterIds.Clear();
             BulkActionBar.Visibility = Visibility.Collapsed;
             SelectButtonText.Text = "Select";
             UpdateCheckboxVisibility();
             await ViewModel.RefreshAsync(CancellationToken.None);
-            UpdateHiddenUnknownsFooter();
         }
         finally
         {
@@ -1078,54 +929,5 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
-        => DebugLog.SafeRun("PeopleView.OnPropertyChanged",
-            () => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name)));
-
-    // ─── Session change log: merge undo capture ─────────────────────────
-    // Engine `revertMerge` recreates the merged-away person and moves the
-    // given face ids back, but it needs the exact ids that moved — and the
-    // mergeClusters reply doesn't carry them. Snapshot them from the
-    // read-only DB BEFORE the merge (same ad-hoc connection pattern as
-    // PersonDetailSheet.Load). Shared by PeopleView drag/bulk merges and
-    // SuggestedMergesSheet.
-
-    internal static async Task<System.Collections.Generic.List<long>> ReadFaceIdsForPersonAsync(long personId)
-        => await Task.Run(() =>
-        {
-            var ids = new System.Collections.Generic.List<long>();
-            var connStr = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-            {
-                DataSource = AppPaths.DbPath,
-                Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-            }.ToString();
-            using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id";
-            cmd.Parameters.AddWithValue("@id", personId);
-            using var r = cmd.ExecuteReader();
-            while (r.Read()) ids.Add(r.GetInt64(0));
-            if (ids.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    $"Person #{personId} no longer has any faces; refresh People and try again.");
-            }
-            return ids;
-        }).ConfigureAwait(true);
-
-    internal static void PushMergeUndo(
-        long sourceId, long destId, System.Collections.Generic.List<long> movedFaceIds, string label)
-    {
-        if (movedFaceIds.Count == 0) return; // no snapshot → not undoable
-        UndoStack.Instance.Push(label, ChangeKind.PeopleMerge, async () =>
-        {
-            var engine = EngineClient.Instance;
-            await engine.WaitForReadyAsync(TimeSpan.FromSeconds(15));
-            var r = await engine.WaitForBulkActionResultAsync(
-                "revertMerge",
-                () => engine.RevertMergeAsync(sourceId, destId, movedFaceIds),
-                Timeout.InfiniteTimeSpan);
-            return r.Failed == 0 && r.Succeeded > 0;
-        });
-    }
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

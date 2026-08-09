@@ -38,7 +38,7 @@ public struct TaggedFile: Sendable {
     /// tags (no score). DBWriter writes a NULL score for any tag not present here.
     public var tagScores: [String: Double]?
     public var phash: UInt64?                // dHash (0 = none / failed)
-    public var contentHash: Data?            // SHA-256 full/sampled rename identity; nil on read error
+    public var contentHash: Data?            // SHA-256 byte-exact identity (item 1); nil for non-images / read error
     public var aestheticScore: Double?       // 0..1
     public var hasFaces: Bool
     public var facePrints: [Data]            // archived VNFaceObservation feature prints
@@ -46,13 +46,7 @@ public struct TaggedFile: Sendable {
     public var faceQualities: [Double]       // 0..1, parallel to faceBBoxes; -1 = unmeasured
     public var faceYaws: [Double?]           // radians, parallel to faceBBoxes; nil = missing
     public var facePitches: [Double?]        // radians, parallel to faceBBoxes; nil = missing
-    public var faceMinDimPx: [Double]        // min(w,h) absolute source px, parallel to faceBBoxes
     public var ocrText: String?              // empty/nil if no text or skipped
-    /// Extracted document/PDF text — the SAME text fed to BGE — persisted into the
-    /// `doc_text` table so the v15 AFTER INSERT trigger fills `doc_fts` for full-text
-    /// search. nil for non-documents or when extraction yielded nothing. Mirrors the
-    /// Windows `doc_text` row field (tagging.rs / dbwriter.rs).
-    public var docText: String?
     public var cameraModel: String?
     public var locationLat: Double?
     public var locationLon: Double?
@@ -64,17 +58,11 @@ public struct TaggedFile: Sendable {
     public var loadMs: Double = 0
     public var visionMs: Double = 0
     public var clipMs: Double = 0
-    public var ramMs: Double = 0
     public var ocrMs: Double = 0
 
     // M3 — CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
     public var clipEmbeddingBlob: Data?
-
-    // BGE document text embedding (raw float32 LE). nil for non-documents, or when the
-    // BGE model isn't installed / extraction failed. Restructure's document pass reads it
-    // (cached at scan, so the plan doesn't re-embed) — parallel to clipEmbeddingBlob.
-    public var textEmbeddingBlob: Data?
 
     // Stage-ran gates (port of the Windows tags_evaluated / faces_evaluated /
     // ocr_stage_ran flags, dbwriter.rs). Each is TRUE only when its producing
@@ -86,12 +74,6 @@ public struct TaggedFile: Sendable {
     public var tagsEvaluated: Bool
     public var facesEvaluated: Bool
     public var ocrStageRan: Bool
-    /// The content-derivation stage ran this session — doc/pdf text extraction OR a 3D-model
-    /// render (whether or not it produced an embeddable result). Persisted to
-    /// `files.text_stage_done` so the BGE doc carve-out AND the model CLIP carve-out stop
-    /// re-walking a file that can never produce its embedding (a text-less doc, an
-    /// un-renderable .obj).
-    public var textStageDone: Bool
 
     public init(
         url: URL, kind: String, extension ext: String, sizeBytes: Int64,
@@ -103,17 +85,14 @@ public struct TaggedFile: Sendable {
         facePrints: [Data] = [], faceBBoxes: [String] = [],
         faceQualities: [Double] = [],
         faceYaws: [Double?] = [], facePitches: [Double?] = [],
-        faceMinDimPx: [Double] = [],
-        ocrText: String? = nil, docText: String? = nil, cameraModel: String? = nil,
+        ocrText: String? = nil, cameraModel: String? = nil,
         locationLat: Double? = nil, locationLon: Double? = nil,
         failed: Bool = false, errorMessage: String? = nil,
         perFileTotalMs: Double = 0,
         clipEmbeddingBlob: Data? = nil,
-        textEmbeddingBlob: Data? = nil,
         tagsEvaluated: Bool = false,
         facesEvaluated: Bool = false,
-        ocrStageRan: Bool = false,
-        textStageDone: Bool = false
+        ocrStageRan: Bool = false
     ) {
         self.url = url
         self.kind = kind
@@ -133,9 +112,7 @@ public struct TaggedFile: Sendable {
         self.faceQualities = faceQualities
         self.faceYaws = faceYaws
         self.facePitches = facePitches
-        self.faceMinDimPx = faceMinDimPx
         self.ocrText = ocrText
-        self.docText = docText
         self.cameraModel = cameraModel
         self.locationLat = locationLat
         self.locationLon = locationLon
@@ -143,11 +120,9 @@ public struct TaggedFile: Sendable {
         self.errorMessage = errorMessage
         self.perFileTotalMs = perFileTotalMs
         self.clipEmbeddingBlob = clipEmbeddingBlob
-        self.textEmbeddingBlob = textEmbeddingBlob
         self.tagsEvaluated = tagsEvaluated
         self.facesEvaluated = facesEvaluated
         self.ocrStageRan = ocrStageRan
-        self.textStageDone = textStageDone
     }
 }
 
@@ -374,7 +349,6 @@ public actor DBWriter {
         let loadTimes = batchFiles.map(\.loadMs).filter { $0 > 0 }.sorted()
         let visionTimes = batchFiles.map(\.visionMs).filter { $0 > 0 }.sorted()
         let clipTimes = batchFiles.map(\.clipMs).filter { $0 > 0 }.sorted()
-        let ramTimes = batchFiles.map(\.ramMs).filter { $0 > 0 }.sorted()
         let ocrTimes = batchFiles.map(\.ocrMs).filter { $0 > 0 }.sorted()
         // Worker utilization: what fraction of the 14-worker × wall time was
         // actually spent doing per-file work. <50% = workers idle (we have
@@ -407,8 +381,6 @@ public actor DBWriter {
                 "visionP95Ms":   AnyCodable(percentile(visionTimes, 0.95)),
                 "clipP50Ms":     AnyCodable(percentile(clipTimes, 0.50)),
                 "clipP95Ms":     AnyCodable(percentile(clipTimes, 0.95)),
-                "ramP50Ms":      AnyCodable(percentile(ramTimes, 0.50)),
-                "ramP95Ms":      AnyCodable(percentile(ramTimes, 0.95)),
                 "ocrP50Ms":      AnyCodable(percentile(ocrTimes, 0.50)),
                 "ocrP95Ms":      AnyCodable(percentile(ocrTimes, 0.95)),
                 "imagesInBatch": AnyCodable(visionTimes.count)
@@ -505,10 +477,9 @@ public actor DBWriter {
         // upsert below then takes its DO UPDATE branch and `fileID` resolves to
         // the preserved id. A pure move keeps size+mtime, so `unchanged` is true
         // and the carried-over children are left intact (no re-detect).
-        if existing == nil, (file.fileRef != nil || file.contentHash != nil),
+        if existing == nil, let ref = file.fileRef,
            try Self.healMovedRow(
-               fileRef: file.fileRef, contentHash: file.contentHash,
-               newSize: file.sizeBytes, newPath: file.url.path,
+               fileRef: ref, newSize: file.sizeBytes, newPath: file.url.path,
                newPathHash: pathHash,
                newPathSearch: file.url.path.precomposedStringWithCanonicalMapping,
                oldPathExists: oldPathExists, db: db) != nil {
@@ -558,10 +529,12 @@ public actor DBWriter {
         //   DO UPDATE set (matches Windows): a rescan must not clobber the
         //   originally-recorded creation time, and aesthetic is scored elsewhere.
         //   file_ref binds the volume-local inode (st_ino) computed at discovery,
-        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:));
-        //   content_hash is the persisted SHA-256 full/sampled identity shared with
-        //   the Rust engine. COALESCE preserves a previously-stored identity when the
-        //   incoming value is NULL.
+        //   stored bit-for-bit as the Windows `r as i64` (Int64(bitPattern:)) for
+        //   cross-platform byte-parity; content_hash is SHA-256 (item 1) — the
+        //   structure matches Windows (full ≤16 MB; composite above) but the
+        //   primitive is SHA-256 not BLAKE3, so the values are macOS-local while
+        //   the dedup behavior matches. COALESCE preserves a previously-stored
+        //   identity when the incoming value is NULL.
         try db.cachedStatement(sql: """
             INSERT INTO files
               (path_text, path_hash, path_search, size_bytes, created_at,
@@ -624,16 +597,6 @@ public actor DBWriter {
         // faces, OCR, CLIP) attach to the correct, surviving row on a rescan.
         let fileID: Int64 = (existing?["id"]) ?? db.lastInsertedRowID
 
-        // Mark the doc/pdf text stage attempted (idempotent) so the BGE backfill carve-out
-        // stops re-walking a doc that yields no embeddable text. Placed before the
-        // unchanged early-return so it fires on BOTH the unchanged-backfill and full-write
-        // paths; the `= 0` guard avoids a redundant write once it's set. (R-14)
-        if file.textStageDone {
-            try db.cachedStatement(sql: """
-                UPDATE files SET text_stage_done = 1 WHERE id = ? AND text_stage_done = 0
-                """).execute(arguments: [fileID])
-        }
-
         // Unchanged file: leave every child row exactly as-is. Re-detecting
         // would either duplicate rows or destroy manual person assignments for
         // a file that didn't change. One exception: a CLIP model installed
@@ -654,20 +617,6 @@ public actor DBWriter {
                     arguments: [fileID]) ?? false
                 if !hasEmbedding {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
-                }
-            }
-            // Backfill a doc's BGE embedding too (a rescan after BGE was installed
-            // post-scan — the common case, since BGE is opt-in). Kept reachable by
-            // discovery's `skipSetTextBackfillExclusionSQL` carve-out, exactly like the
-            // CLIP branch above; without it size+mtime would skip the doc upstream.
-            if let blob = file.textEmbeddingBlob {
-                let hasText = try Bool.fetchOne(
-                    db.cachedStatement(sql: """
-                        SELECT EXISTS(SELECT 1 FROM text_embeddings WHERE file_id = ?)
-                        """),
-                    arguments: [fileID]) ?? false
-                if !hasText {
-                    try insertTextEmbedding(fileID: fileID, blob: blob, db: db)
                 }
             }
             return
@@ -720,24 +669,6 @@ public actor DBWriter {
             }
         }
 
-        // 3b. Document text → doc_text (+doc_fts via the v15 AFTER INSERT trigger). Same
-        // stage-ran-gated delete-then-conditional-insert as ocr_text above: gate on
-        // textStageDone (the doc/pdf text-extraction stage ran this session) so a
-        // re-process that now yields empty text clears phantom doc_fts postings, while a
-        // doc/pdf timeout (stage didn't run) leaves prior text intact. The extracted text
-        // is byte-identical to the BGE input, so doc_text round-trips with the Windows
-        // engine's doc_stage_ran-gated write (dbwriter.rs). Model files set textStageDone
-        // too but carry no docText, so their DELETE is a harmless no-op.
-        if file.textStageDone {
-            try db.cachedStatement(sql: "DELETE FROM doc_text WHERE file_id = ?")
-                .execute(arguments: [fileID])
-            if let text = file.docText, !text.isEmpty {
-                try db.cachedStatement(sql: """
-                    INSERT INTO doc_text (file_id, text) VALUES (?, ?)
-                    """).execute(arguments: [fileID, text])
-            }
-        }
-
         // 4. face_prints — write one row per detected face. ArcFace
         // embeddings + Vision feature prints are populated lazily during
         // Stage D (`extractPendingPrints`) so the per-file Vision pass
@@ -768,13 +699,8 @@ public actor DBWriter {
                     let yaw: Double? = i < file.faceYaws.count ? file.faceYaws[i] : nil
                     let pitch: Double? = i < file.facePitches.count ? file.facePitches[i] : nil
                     let bboxArea = Self.bboxArea(bboxes[i])
-                    // Missing (pre-migration or non-Vision-source) min-dim data
-                    // fails OPEN on the size gate — quality/area/pose still apply.
-                    let minDimPx: Double = i < file.faceMinDimPx.count
-                        ? file.faceMinDimPx[i] : Double.greatestFiniteMagnitude
                     let excluded = Self.isExcluded(quality: quality, yaw: yaw,
-                                                   pitch: pitch, bboxArea: bboxArea,
-                                                   bboxMinDimPx: minDimPx)
+                                                   pitch: pitch, bboxArea: bboxArea)
                     try db.cachedStatement(sql: """
                         INSERT INTO face_prints
                           (file_id, print_data, bbox, face_quality, excluded)
@@ -785,14 +711,10 @@ public actor DBWriter {
             }
         }
 
-        // 5. CLIP embedding (M3) — only present for images/video where the model
+        // 5. CLIP embedding (M3) — only present for images where the model
         // was loaded and inference succeeded.
         if let blob = file.clipEmbeddingBlob {
             try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
-        }
-        // 5b. BGE document text embedding — only present for docs where BGE is installed.
-        if let blob = file.textEmbeddingBlob {
-            try insertTextEmbedding(fileID: fileID, blob: blob, db: db)
         }
     }
 
@@ -812,35 +734,6 @@ public actor DBWriter {
             SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
         """
 
-    /// Doc/pdf analog of `skipSetClipBackfillExclusionSQL` for the BGE text embedder.
-    /// Keeps a doc/pdf that still LACKS a `text_embeddings` row OUT of the skip set so
-    /// `insertOne`'s unchanged-file BGE-backfill branch is reachable on an incremental
-    /// rescan after BGE is installed post-scan (the dominant case — BGE is opt-in, so
-    /// the first scan usually predates it). Discovery ANDs this only when BGE is on
-    /// disk (`BGETextService.isInstalledOnDisk`); otherwise no doc could ever embed and
-    /// it would force a full re-walk of every doc on every scan forever.
-    /// The `text_stage_done = 0` clause stops the re-walk once a doc has been text-
-    /// extracted but yielded no embeddable text (image-only PDF, iWork, empty file) —
-    /// otherwise such a doc, never able to get a `text_embeddings` row, would re-walk
-    /// forever (v19_files_text_stage_done).
-    static let skipSetTextBackfillExclusionSQL = """
-        NOT (files.kind IN ('doc', 'pdf') AND files.text_stage_done = 0 AND NOT EXISTS (
-            SELECT 1 FROM text_embeddings WHERE text_embeddings.file_id = files.id))
-        """
-
-    /// 3D-model analog: keep a `.obj` that still LACKS a `clip_embeddings` row OUT of the
-    /// skip set so its rendered-shape CLIP vector backfills on a rescan after the render→CLIP
-    /// feature shipped. Limited to `extension = 'obj'` (the only format both engines render).
-    /// The `text_stage_done = 0` clause stops the re-walk once a render has been ATTEMPTED but
-    /// failed (a corrupt / geometry-less .obj) — otherwise that .obj, never able to get a
-    /// `clip_embeddings` row, would re-walk forever (and a macOS QuickLook render can cost up
-    /// to 8 s each). CLIP ships by default, so Discovery ANDs this whenever CLIP is installed.
-    static let skipSetModelClipBackfillExclusionSQL = """
-        NOT (files.kind = 'model' AND files.extension = 'obj' AND files.text_stage_done = 0
-             AND NOT EXISTS (
-            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
-        """
-
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
         // `blob` is the worker's already-finalized Data; bind it straight to the
         // cached statement (no re-copy on the writer side). The remaining
@@ -852,38 +745,35 @@ public actor DBWriter {
             """).execute(arguments: [fileID, blob, "mobileclip_s2"])
     }
 
-    // BGE document text embedding → text_embeddings (parallel to clip_embeddings, a
-    // different 384-d vector space). `model` matches the Windows engine's stored value so a
-    // library round-trips. (RESTRUCTURE.md R3 — document content clustering)
-    private static func insertTextEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
-        try db.cachedStatement(sql: """
-            INSERT OR REPLACE INTO text_embeddings (file_id, embedding, model)
-            VALUES (?, ?, ?)
-            """).execute(arguments: [fileID, blob, "bge_small_en_v1_5"])
-    }
-
     // MARK: - Rename/move heal
 
     /// Lookup + gate + re-bind for a moved file. Returns the healed row id, or
     /// nil if nothing healed. Port of the Windows HEAL_LOOKUP_SQL +
-    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs): prefer same-volume
-    /// file_ref, and fall back to cross-volume content_hash.
+    /// heal_candidate_moved + HEAL_UPDATE_SQL (dbwriter.rs). file_ref-only on
+    /// macOS — content_hash isn't computed by the scan path, and file_ref alone
+    /// covers same-volume rename/move, the dominant case.
     private static func healMovedRow(
-        fileRef: UInt64?, contentHash: Data?, newSize: Int64, newPath: String, newPathHash: Int64,
+        fileRef: UInt64, newSize: Int64, newPath: String, newPathHash: Int64,
         newPathSearch: String, oldPathExists: [String: Bool], db: GRDB.Database
     ) throws -> Int64? {
-        let refInt = fileRef.map { Int64(bitPattern: $0) }
+        // Stored bit-for-bit as Windows binds it (`r as i64`) so the lookup keys
+        // match across a cross-platform DB round-trip.
+        let refInt = Int64(bitPattern: fileRef)
+        // Candidate rows: same volume-local identity AND same size, DIFFERENT
+        // path. NULL file_ref never matches. The size corroboration is the
+        // R-10 caution made real: st_ino carries no generation number, so APFS/
+        // HFS reuse a deleted file's inode freely — without a second signal a
+        // reused inode would re-bind a deleted row onto an unrelated new file and
+        // hand it stale tags/faces/OCR. A genuine move preserves size, so
+        // requiring size_bytes match blocks the reuse case while keeping true
+        // moves healable. (audit F-A2)
         let candidates = try Row.fetchAll(
             db.cachedStatement(sql: """
-                SELECT id, path_text,
-                       (?2 IS NOT NULL AND file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4) AS by_ref
-                FROM files
-                WHERE path_text != ?1
-                  AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
-                       OR (content_hash IS NOT NULL AND content_hash = ?3))
-                ORDER BY by_ref DESC
+                SELECT id, path_text FROM files
+                WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                  AND size_bytes = ?
                 """),
-            arguments: [newPath, refInt, contentHash, newSize])
+            arguments: [newPath, refInt, newSize])
         for row in candidates {
             let oldPath: String = row["path_text"]
             // Heal ONLY a genuine move: the candidate's old path must be GONE.
@@ -937,14 +827,13 @@ public actor DBWriter {
         let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
             var paths: Set<String> = []
             for file in batchFiles {
-                guard file.fileRef != nil || file.contentHash != nil else { continue }
-                let refInt = file.fileRef.map { Int64(bitPattern: $0) }
+                guard let ref = file.fileRef else { continue }
+                let refInt = Int64(bitPattern: ref)
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT path_text FROM files
-                    WHERE path_text != ?1
-                      AND ((file_ref IS NOT NULL AND file_ref = ?2 AND size_bytes = ?4)
-                           OR (content_hash IS NOT NULL AND content_hash = ?3))
-                    """, arguments: [file.url.path, refInt, file.contentHash, file.sizeBytes])
+                    WHERE path_text != ? AND file_ref IS NOT NULL AND file_ref = ?
+                      AND size_bytes = ?
+                    """, arguments: [file.url.path, refInt, file.sizeBytes])
                 for row in rows { paths.insert(row["path_text"]) }
             }
             return paths
@@ -973,46 +862,12 @@ public actor DBWriter {
     /// positive from the detector.
     static let qualityFloor: Double = 0.02
 
-    /// Minimum bbox area (fraction of image) for clustering — a backstop
-    /// against degenerate detections only (near-zero-area boxes), not the
-    /// real size gate. A relative-area fraction alone is anti-correlated
-    /// with actual face resolvability: it's scale-invariant, so it can't
-    /// tell a small-but-large-fraction face in a low-res source from a
-    /// well-resolved face in a high-megapixel photo. `minBBoxMinDimPx`
-    /// below is the real gate; this was lowered from 0.002 to 0.0002
-    /// alongside it (Windows FACE_MIN_BBOX_AREA_FRACTION, same change).
-    static let minBBoxAreaFraction: Double = 0.0002
-
-    /// Minimum bbox size in absolute pixels of the DECODED image handed to
-    /// Vision (not the source file's native resolution). Mirrors the Windows
-    /// gate (platforms/windows/.../pipeline/tagging.rs
-    /// FACE_MIN_BBOX_MIN_DIM_PX = 40.0): a relative-area fraction alone keeps
-    /// small-but-large-fraction faces from low-res sources while discarding
-    /// well-resolved faces on a high-megapixel photo, so an absolute floor is
-    /// the only gate that tracks whether a crop carries identity at all.
-    ///
-    /// 40.0 is calibrated on a PER-SOURCE-KIND sweep of the 2026-07-29 Adlon
-    /// catalog, because decode resolution is not uniform: measured
-    /// min-dimension p50 was 159px for image faces but only 52px for video
-    /// faces (keyframes decode at a 1280px cap). A 64px floor looked optimal
-    /// on the pooled distribution but silently dropped EVERY clusterable face
-    /// in 30% of face-bearing videos; 40px keeps nearly all of the image-side
-    /// recovery (+28,051 faces) without regressing video (+134). See
-    /// DECISIONS.md 2026-07-29.
-    ///
-    /// Cross-platform caveat that remains: macOS's own decode ceiling is
-    /// `loadImageAndEXIF`'s `FILEID_SCAN_MAX_PIXELS` (default 1536px long
-    /// edge), which is lower than Windows' [2048, 4096) for stills — so this
-    /// shared constant is a somewhat stricter relative gate on macOS for
-    /// large photos. Kept numerically identical anyway (like the yaw/pitch/
-    /// area constants above, which are nominally shared despite Vision's and
-    /// SCRFD's metrics differing) rather than inventing a second
-    /// uncalibrated constant: there is no macOS ground truth to calibrate
-    /// against, and this file could not be compiled or run in the Windows dev
-    /// env. Re-measure on real Mac hardware before treating 40.0 as final
-    /// here; raising FILEID_SCAN_MAX_PIXELS is the cleaner lever if macOS
-    /// under-detects.
-    static let minBBoxMinDimPx: Double = 40.0
+    /// Minimum bbox area (fraction of image) for clustering. Faces
+    /// under 0.2% of the frame produce noisy ArcFace embeddings —
+    /// crowd extras don't carry enough identity signal. ArcFace's
+    /// 8-pixel crop minimum + 112×112 rescale handles small faces
+    /// in high-res group photos.
+    static let minBBoxAreaFraction: Double = 0.002
 
     /// |yaw| beyond this is "heavy profile" — same identity at frontal vs
     /// 60° profile lands far apart in embedding space, polluting clusters.
@@ -1033,11 +888,10 @@ public actor DBWriter {
     /// Vision couldn't measure it — usually low-confidence detection,
     /// so we exclude (admitting them lets noise into clusters).
     static func isExcluded(quality: Double?, yaw: Double?, pitch: Double?,
-                           bboxArea: Double, bboxMinDimPx: Double) -> Bool {
+                           bboxArea: Double) -> Bool {
         guard let q = quality else { return true }
         if q < qualityFloor { return true }
         if bboxArea < minBBoxAreaFraction { return true }
-        if bboxMinDimPx < minBBoxMinDimPx { return true }
         if let y = yaw, abs(y) > maxYawRadians { return true }
         if let p = pitch, abs(p) > maxPitchRadians { return true }
         return false
@@ -1046,5 +900,16 @@ public actor DBWriter {
 
 // MARK: - ScanCoordinator additions for batched bumps
 
-// bumpProcessed(by:) and bumpFailed(by:) are defined in ScanCoordinator.swift
-// (where they have access to the private(set) `current` property).
+extension ScanCoordinator {
+    /// Bump processed by N at once. Avoids N actor-hops per file in the DB
+    /// writer's tight commit loop.
+    public func bumpProcessed(by n: Int) {
+        guard n > 0 else { return }
+        for _ in 0..<n { bumpProcessed() }
+    }
+
+    public func bumpFailed(by n: Int) {
+        guard n > 0 else { return }
+        for _ in 0..<n { bumpFailed() }
+    }
+}

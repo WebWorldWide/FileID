@@ -8,64 +8,42 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-pub fn available_disk_bytes(path: &Path) -> Option<u64> {
-    let mut probe = path.to_path_buf();
-    while !probe.exists() {
-        if !probe.pop() {
-            return None;
-        }
-    }
-    available_disk_bytes_existing(&probe)
-}
-
-#[cfg(windows)]
-fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut available = 0u64;
-    unsafe {
-        GetDiskFreeSpaceExW(
-            PCWSTR(wide.as_ptr()),
-            Some(&mut available),
-            None,
-            None,
-        )
-        .ok()?;
-    }
-    Some(available)
-}
-
-#[cfg(unix)]
-fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let raw = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(raw.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let stat = unsafe { stat.assume_init() };
-    // statvfs field widths differ by platform: f_bavail/f_frsize are u64 on
-    // Linux glibc but f_bavail is u32 on macOS. `u64::from` widens on macOS and
-    // is an identity on Linux — allow the (Linux-only) useless_conversion so the
-    // one expression stays correct on both without a cast clippy flags either way.
-    #[allow(clippy::useless_conversion)]
-    let bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
-    Some(bytes)
-}
-
-#[cfg(not(any(windows, unix)))]
-fn available_disk_bytes_existing(_path: &Path) -> Option<u64> {
-    None
-}
-
-/// Redact a path for persistent logs, retaining only its last two components.
+/// Redact a user path for logs: keep last two components; pass
+/// app-structural paths verbatim.
 pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     use std::path::Component;
+    let s = path.as_ref().to_string_lossy().to_string();
+    let s_lower = s.to_lowercase();
+    // App-structural paths: pass through ONLY the engine's own state dir
+    // (`%LOCALAPPDATA%\FileID\…` / the per-OS equivalent). ENG-97: the old broad
+    // `\fileid\` / `/fileid/` substring match leaked any USER path that merely
+    // contained a folder named "FileID" (e.g. a dev checkout at C:\Code\FileID\…)
+    // verbatim, username and all — defeating redaction for a whole class of real
+    // paths. Anchor on the actual resolved root instead.
+    if let Ok(root) = crate::paths::root() {
+        let mut root_prefix = root.to_string_lossy().to_lowercase();
+        if !root_prefix.is_empty() {
+            if s_lower == root_prefix {
+                return s;
+            }
+            // Require a path-separator boundary so a sibling dir whose name
+            // merely STARTS with the app root (e.g. `…\Local\FileIDBackup\…`)
+            // does not string-prefix-match and leak. (ENG-97)
+            if !root_prefix.ends_with(['\\', '/']) {
+                root_prefix.push(std::path::MAIN_SEPARATOR);
+            }
+            if s_lower.starts_with(&root_prefix) {
+                return s;
+            }
+        }
+    }
+    // NOTE: no `contains("appdata\\local\\fileid\\")` fallback. The `root()`
+    // branch above already passes through THIS engine's own state tree (root()
+    // resolves from LOCALAPPDATA to exactly `…\AppData\Local\FileID`). A path
+    // under a DIFFERENT `AppData\Local\FileID` (another user, or a backup like
+    // `D:\Backups\AppData\Local\FileID\…`) is NOT this engine's tree and MUST be
+    // redacted — the old unanchored `contains` leaked those verbatim (#26).
+    //
     // Only Normal components are PII candidates — Prefix (drive letter,
     // UNC server\share) and RootDir are protocol/topology, never PII.
     // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
@@ -146,12 +124,18 @@ mod redaction_tests {
     }
 
     #[test]
-    fn redacts_app_structural_path() {
+    fn passes_through_app_structural_path() {
+        // The engine's OWN state tree (under the resolved root) passes through
+        // for debugging — derive it from root() rather than hardcoding a
+        // username, since only THIS engine's tree is exempt from redaction (#26).
         if let Ok(root) = crate::paths::root() {
-            let path = root.join("Models").join("arcface").join("weights.onnx");
-            let redacted = redact_path_for_log(&path);
-            assert_eq!(redacted, "…/arcface/weights.onnx");
-            assert!(!redacted.contains(&root.to_string_lossy().to_string()));
+            let s = root
+                .join("Models")
+                .join("arcface")
+                .join("weights.onnx")
+                .to_string_lossy()
+                .to_string();
+            assert_eq!(redact_path_for_log(&s), s);
         }
     }
 
@@ -180,11 +164,15 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log(r"C:\"), "…");
     }
 
+    /// App structural paths are returned UNCHANGED — they refer to
+    /// FileID's own dirs (logs, models, sentinels) and are useful for
+    /// debugging without redaction. Derived from the resolved root so the
+    /// passthrough is keyed on THIS engine's tree, not a hardcoded username.
     #[test]
-    fn app_structural_logs_path_is_redacted() {
+    fn app_structural_logs_path_unchanged() {
         if let Ok(root) = crate::paths::root() {
-            let path = root.join("logs").join("app.log");
-            assert_eq!(redact_path_for_log(path), "…/logs/app.log");
+            let s = root.join("logs").join("app.log").to_string_lossy().to_string();
+            assert_eq!(redact_path_for_log(&s), s);
         }
     }
 
@@ -690,17 +678,12 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
 // volumes the id can collide, so a cross-volume move falls through to the
 // content-hash lookup.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct FileIdentity {
-    pub(crate) volume: u64,
-    pub(crate) file: u64,
-}
-
-/// Volume-qualified file identity for `path`, or `None` if the entry cannot be
-/// opened. Unlike `file_ref`, this is safe to persist as mutation authority
-/// because identical file indexes on different volumes remain distinct.
+/// 64-bit volume-local file identity for `path`, or `None` if the file can't
+/// be opened (permission, deletion mid-scan, ...). Cheap: just opens with
+/// `FILE_FLAG_BACKUP_SEMANTICS` (works for both files and directories without
+/// triggering OneDrive hydration) and reads the metadata; no content I/O.
 #[cfg(windows)]
-pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
+pub fn file_ref(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::CloseHandle;
@@ -736,53 +719,13 @@ pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     if result.is_err() {
         return None;
     }
-    Some(FileIdentity {
-        volume: u64::from(info.dwVolumeSerialNumber),
-        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    })
+    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
 }
 
 #[cfg(not(windows))]
-pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    Some(FileIdentity {
-        volume: metadata.dev(),
-        file: metadata.ino(),
-    })
-}
-
-#[cfg(windows)]
-pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
-    use std::os::windows::io::AsRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-    };
-
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
-    Some(FileIdentity {
-        volume: u64::from(info.dwVolumeSerialNumber),
-        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    })
-}
-
-#[cfg(not(windows))]
-pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata().ok()?;
-    Some(FileIdentity {
-        volume: metadata.dev(),
-        file: metadata.ino(),
-    })
-}
-
-/// 64-bit volume-local file identity for rename/move heuristics. This legacy DB
-/// value intentionally omits the volume; destructive journals use
-/// [`file_identity`] instead.
-pub fn file_ref(path: &Path) -> Option<u64> {
-    file_identity(path).map(|identity| identity.file)
+pub fn file_ref(_path: &Path) -> Option<u64> {
+    // Linux/macOS would use libc::stat::st_ino; deferred until the Linux port.
+    None
 }
 
 // ─── Battery / AC power detection ───────────────────────────────────────────
@@ -993,34 +936,13 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
-    use tokio::time::{Duration, MissedTickBehavior};
-
-    let mut poll = tokio::time::interval(Duration::from_secs(1));
-    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // POSIX fallback: poll getppid every 5 s; if it changes (i.e. our parent
+    // was reaped and we got reparented to init) trigger shutdown.
+    let _ = parent_pid;
+    let _ = shutdown;
     loop {
-        tokio::select! {
-            _ = shutdown.notified() => {
-                tracing::info!("watch_parent cancelled by shutdown signal");
-                return;
-            }
-            _ = poll.tick() => {
-                match get_parent_pid() {
-                    Some(current) if current == parent_pid => {}
-                    Some(current) => {
-                        tracing::info!(
-                            "parent process changed (was {parent_pid}, now {current}); signaling shutdown"
-                        );
-                        shutdown.notify_waiters();
-                        return;
-                    }
-                    None => {
-                        tracing::warn!(
-                            "could not read parent pid; falling back to stdin EOF detection"
-                        );
-                    }
-                }
-            }
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // TODO(linux): real implementation.
     }
 }
 
@@ -1042,59 +964,6 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // it no matter which Tokio worker runs Drop.
 
 /// RAII guard. While alive, prevents Windows from sleeping the system.
-/// Configure a Linux helper as a process-group leader and have the kernel kill
-/// it if the engine disappears before normal cleanup can run.
-#[cfg(target_os = "linux")]
-pub(crate) fn configure_child_lifetime(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-
-    let parent_pid = unsafe { libc::getpid() };
-    command.process_group(0);
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != parent_pid {
-                return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn configure_child_lifetime(_command: &mut std::process::Command) {}
-
-pub(crate) fn terminate_child_tree(child: &mut std::process::Child) {
-    #[cfg(target_os = "linux")]
-    if let Ok(pid) = i32::try_from(child.id()) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-pub(crate) fn start_kill_tokio_child_tree(child: &mut tokio::process::Child) {
-    #[cfg(target_os = "linux")]
-    if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-    let _ = child.start_kill();
-}
-
-pub(crate) async fn terminate_tokio_child_tree(child: &mut tokio::process::Child) {
-    start_kill_tokio_child_tree(child);
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
-}
-
 /// Drop = release the assertion. The set and clear both run on a dedicated
 /// owned thread so the thread-scoped assertion is released on the same thread
 /// that armed it, independent of which Tokio worker polls/drops the guard.
@@ -1103,14 +972,6 @@ pub struct SleepGuard {
     stop: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(windows)]
     thread: Option<std::thread::JoinHandle<()>>,
-    // Linux: a held `systemd-inhibit … sleep infinity` child. Alive => the
-    // sleep/idle inhibitor lock is held; killed on drop => released. `None`
-    // when systemd-inhibit is absent or failed to spawn (best-effort, matching
-    // the shell/* backends — a headless box without logind just isn't inhibited).
-    #[cfg(target_os = "linux")]
-    child: Option<std::process::Child>,
-    #[cfg(target_os = "linux")]
-    inhibit_stdin: Option<std::process::ChildStdin>,
 }
 
 impl SleepGuard {
@@ -1155,52 +1016,8 @@ impl SleepGuard {
         }
     }
 
-    // Linux: hold a logind sleep+idle inhibitor for the guard's lifetime by
-    // keeping a `systemd-inhibit … cat` child alive over a private stdin pipe. This is the
-    // documented, dependency-free way to block suspend without linking libsystemd
-    // (mirrors the shell/* subprocess backends). Best-effort: if systemd-inhibit
-    // is missing or spawn fails (no logind, e.g. a bare container), the guard is
-    // simply inert — a scan on such a box just isn't sleep-protected, same as the
-    // pre-existing non-Windows no-op.
-    #[cfg(target_os = "linux")]
-    pub fn acquire() -> Self {
-        use std::process::{Command, Stdio};
-        let mut command = Command::new("systemd-inhibit");
-        command
-            .args([
-                "--what=sleep:idle",
-                "--who=FileID",
-                "--why=FileID is processing your library",
-                "--mode=block",
-                // The held command exits on pipe EOF, including abrupt engine
-                // death, so no infinite descendant can be orphaned.
-                "cat",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        configure_child_lifetime(&mut command);
-        let mut child = command.spawn().ok();
-        let inhibit_stdin = child.as_mut().and_then(|process| process.stdin.take());
-        Self { child, inhibit_stdin }
-    }
-
-    #[cfg(all(not(windows), not(target_os = "linux")))]
+    #[cfg(not(windows))]
     pub fn acquire() -> Self { Self {} }
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for SleepGuard {
-    fn drop(&mut self) {
-        // Kill the held systemd-inhibit child; that drops its inhibitor lock and
-        // lets the machine sleep normally again. Best-effort — if the child
-        // already exited there's nothing to release. `wait` reaps the zombie so
-        // long-running engines don't leak defunct children across many scans.
-        drop(self.inhibit_stdin.take());
-        if let Some(mut child) = self.child.take() {
-            terminate_child_tree(&mut child);
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -1216,17 +1033,6 @@ impl Drop for SleepGuard {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod sleep_guard_linux_tests {
-    use super::SleepGuard;
-
-    #[test]
-    fn acquire_and_drop_is_safe_without_logind() {
-        let guard = SleepGuard::acquire();
-        drop(guard);
     }
 }
 
@@ -1330,10 +1136,10 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
         wide.push(0);
         let cookie = unsafe { AddDllDirectory(PCWSTR(wide.as_ptr())) };
         if cookie.is_null() {
-            tracing::warn!(dir = %redact_path_for_log(dir), "AddDllDirectory returned null");
+            tracing::warn!(dir = %dir.display(), "AddDllDirectory returned null");
             false
         } else {
-            tracing::info!(dir = %redact_path_for_log(dir), "[EP] AddDllDirectory registered pack dir");
+            tracing::info!(dir = %dir.display(), "[EP] AddDllDirectory registered pack dir");
             true
         }
     }
@@ -1358,35 +1164,6 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
     let mut failed: Vec<std::path::PathBuf> = Vec::new();
     walk(root, MAX_DEPTH, &mut failed);
     failed
-}
-
-/// Load a DLL by full path so its module identity is pinned before anything
-/// else (ORT's CUDA EP, cuDNN's dispatch shim) resolves the same name through
-/// the unordered AddDllDirectory search set. Windows resolves an import by
-/// name against already-loaded modules first, so whichever copy we load here
-/// is the one every later consumer binds. Returns the Win32 error code on
-/// failure (126 = a dependency of the DLL itself is missing).
-#[cfg(windows)]
-pub fn preload_dll(path: &std::path::Path) -> Result<(), u32> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::System::LibraryLoader::{
-        LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-    };
-
-    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    wide.push(0);
-    unsafe {
-        LoadLibraryExW(
-            PCWSTR(wide.as_ptr()),
-            None,
-            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
-        )
-    }
-    .map(|_| ())
-    // HRESULT_FROM_WIN32 shape (0x8007xxxx) → surface the familiar Win32 code
-    // (126 ERROR_MOD_NOT_FOUND, 127 ERROR_PROC_NOT_FOUND) in logs.
-    .map_err(|e| (e.code().0 as u32) & 0xFFFF)
 }
 
 #[cfg(not(windows))]
@@ -1503,111 +1280,6 @@ pub fn set_worker_background_priority() {
 #[cfg(not(windows))]
 pub fn set_worker_background_priority() {}
 
-/// Suppress Windows hard-error dialogs process-wide. A headless engine must
-/// never block on a modal error box: a llama.cpp binary that loads against a
-/// missing/mismatched CUDA DLL raises a critical-error message box
-/// (STATUS_DLL_NOT_FOUND) that would otherwise wait forever for a click that
-/// can never come, wedging Deep Analyze. `SEM_FAILCRITICALERRORS` turns that
-/// into an ordinary load failure the child reports via its exit code;
-/// `SEM_NOGPFAULTERRORBOX` suppresses the WER crash dialog on a native fault.
-/// Spawned children inherit this mode by default (no `CREATE_DEFAULT_ERROR_MODE`),
-/// so setting it once at startup covers the CLI, server, and device probes.
-/// `SetErrorMode` *replaces* the mode, so we OR onto whatever the loader set.
-#[cfg(windows)]
-pub fn suppress_hard_error_dialogs() {
-    use windows::Win32::System::Diagnostics::Debug::{
-        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
-    };
-    let want = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
-    unsafe {
-        let prev = SetErrorMode(want);
-        let _ = SetErrorMode(prev | want);
-    }
-}
-
-#[cfg(not(windows))]
-pub fn suppress_hard_error_dialogs() {}
-
-/// Process-lifetime Win32 Job Object that every spawned llama.cpp child
-/// (persistent server, per-file CLI, device probe, `--version` probe) is
-/// assigned to. Created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so when the
-/// engine process dies — including a non-unwinding fast-fail or an external
-/// `taskkill`, which the parent-PID watchdog and `kill_on_drop` cannot cover —
-/// the OS terminates the children instead of leaving a 9-14 GB-VRAM
-/// llama-server orphaned to wedge the next run and the next scan's GPU.
-///
-/// The handle is memoized as a `usize` in a `OnceLock` and never closed for the
-/// life of the process: closing it would trip KILL_ON_JOB_CLOSE and reap the
-/// children early. The OS closes it on process exit — exactly when we want the
-/// children reaped. Returns None if the job can't be created (best-effort: the
-/// watchdog + kill_on_drop remain the graceful-death cleanup path).
-#[cfg(windows)]
-fn engine_job_handle() -> Option<windows::Win32::Foundation::HANDLE> {
-    use std::sync::OnceLock;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows::Win32::System::JobObjects::{
-        CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    };
-
-    static JOB: OnceLock<Option<usize>> = OnceLock::new();
-    let addr = *JOB.get_or_init(|| unsafe {
-        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
-            Ok(h) if !h.is_invalid() => h,
-            _ => {
-                tracing::warn!("[JOB] CreateJobObjectW failed; llama.cpp children not tied to engine lifetime");
-                return None;
-            }
-        };
-        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            &info as *const _ as *const core::ffi::c_void,
-            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-        .is_err()
-        {
-            tracing::warn!("[JOB] SetInformationJobObject failed; closing job (children stay un-tied)");
-            let _ = CloseHandle(job);
-            return None;
-        }
-        Some(job.0 as usize)
-    });
-    addr.map(|a| HANDLE(a as *mut core::ffi::c_void))
-}
-
-/// Warm the engine job at startup so it exists (and any creation failure is
-/// logged once) before the first child is spawned. See [`engine_job_handle`].
-#[cfg(windows)]
-pub fn init_engine_job() {
-    let _ = engine_job_handle();
-}
-
-#[cfg(not(windows))]
-pub fn init_engine_job() {}
-
-/// Assign a freshly spawned child process to the engine job (see
-/// [`engine_job_handle`]) so it is force-killed if the engine dies ungracefully.
-/// Call immediately after spawn. Best-effort — a failure just leaves the child
-/// to the existing `kill_on_drop` + watchdog cleanup. Nested jobs are supported
-/// on Windows 8+, so this succeeds even when the engine itself runs inside a job.
-#[cfg(windows)]
-pub fn assign_child_to_engine_job(child: std::os::windows::io::RawHandle) {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::JobObjects::AssignProcessToJobObject;
-    if child.is_null() {
-        return;
-    }
-    if let Some(job) = engine_job_handle() {
-        let child_handle = HANDLE(child);
-        if let Err(err) = unsafe { AssignProcessToJobObject(job, child_handle) } {
-            tracing::warn!(?err, "[JOB] could not assign llama.cpp child to engine job object");
-        }
-    }
-}
-
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
@@ -1707,11 +1379,5 @@ mod adaptive_tests {
         let cwd = std::env::current_dir().unwrap();
         let _ = storage_type_for_path(&cwd);
         let _ = walk_concurrency_for(&cwd);
-    }
-
-    #[test]
-    fn available_disk_space_resolves_a_missing_child_to_its_volume() {
-        let child = std::env::temp_dir().join("fileid-space-probe").join("not-created");
-        assert!(available_disk_bytes(&child).is_some_and(|bytes| bytes > 0));
     }
 }

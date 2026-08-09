@@ -4,7 +4,7 @@ What we've audited, what's enforced today, and the hardening that gates the v1.0
 
 ## Threat model
 
-Each FileID desktop app uses two local binaries that talk newline-delimited JSON over stdio: a Rust engine with WinUI 3/.NET on Windows, a Swift engine with SwiftUI on macOS, and the shared Rust engine with GTK4 on Linux. The engine owns a single-writer SQLite WAL database and runs ML inference on-device. Unix PATH-provided model/tool executables are part of the user's local trust boundary. Shipping egress policy is documented in `PRIVACY.md`. Three attacker classes are in scope:
+FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) and the app (WinUI 3 / .NET 8 on Windows, SwiftUI on macOS) — that talk newline-delimited JSON over stdio. The engine owns a single-writer SQLite WAL database and runs all ML inference on-device. The only network egress is user-initiated model and runtime downloads (see `PRIVACY.md` for the host list). Three attacker classes are in scope:
 
 - **Local untrusted process / privileged local adversary.** Can write to the user's filesystem or to FileID's install + data directories. Goals: swap the engine binary the app spawns, replace a model file on disk, or escalate via the engine's stdio IPC.
 - **Network MITM.** Intercepting a model or runtime download to substitute a malicious bundle.
@@ -14,17 +14,17 @@ Each FileID desktop app uses two local binaries that talk newline-delimited JSON
 
 ### Enforced today
 
-- **Engine binary integrity before spawn (Windows).** `EngineClient.Start()` refuses to launch the engine unless it passes `WinVerifyTrustChecker.Verify`:
+- **Engine binary integrity before spawn (Windows).** `EngineClient.Start()` refuses to launch the engine unless it passes `WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex)`:
   - `NotFound` / `Untrusted` → refuse and surface a crash reason.
-  - `Unsigned` → refused when the signed-release assembly metadata requires Authenticode; allowed with a warning in development builds.
-  - `Trusted` → proceed only after verifying both the signed app assembly and engine against the independently pinned signer subject/public-key SHA-256 identity embedded at release build time. In signed mode, the app opens the engine with a deny-write/delete sharing lease before `WinVerifyTrust` and retains that lease through `Process.Start`, preventing path replacement between verification and launch. A leaf-thumbprint environment override remains available for local testing, but production policy does not depend on a mutable environment variable.
+  - `Unsigned` → refused when an EV thumbprint is pinned (release builds, via `FILEID_EV_THUMBPRINT`); allowed with a warning in dev builds (no thumbprint pinned, so Visual Studio rebuilds aren't blocked).
+  - `Trusted` → proceed. When a thumbprint is pinned, the app SHA256-hashes the binary after the verdict and re-hashes immediately before `Process.Start`; a mismatch aborts the spawn (TOCTOU mitigation against a binary swapped between verify and launch).
   - On macOS the equivalent guard lives in `EngineClient.start()`: the engine path must resolve inside the app bundle's `Contents/MacOS/`, and the engine's signing Team ID (`kSecCodeInfoTeamIdentifier`) must match the app's (or both unsigned/ad-hoc for dev).
 - **Single-writer database.** The engine holds the only writer connection; all writes serialize through it. Reads fan out via fresh read-only connections. No cross-process write race on the DB.
-- **Parameterized SQL.** Every `rusqlite` call in the engine uses bound parameters (`params![...]`, `query_row(sql, [args], …)`) — values are never string-interpolated into SQL. The migration runner (`db/migrations.rs`) binds the migration identifier as `?1`. Migrations v1–v19 are append-only and byte-faithful with the macOS GRDB schema (same `grdb_migrations` table + identifier strings, chain pinned by tests on both platforms) so a DB written by either platform opens on the other; a DB migrated beyond the local registry is refused with `db_newer_than_engine` instead of silently written. On macOS, GRDB's typed API enforces the same discipline.
+- **Parameterized SQL.** Every `rusqlite` call in the engine uses bound parameters (`params![...]`, `query_row(sql, [args], …)`) — values are never string-interpolated into SQL. The migration runner (`db/migrations.rs`) binds the migration identifier as `?1`. Migrations v1–v16 are append-only and byte-faithful with the macOS GRDB schema (same `grdb_migrations` table + identifier strings, chain pinned by tests on both platforms) so a DB written by either platform opens on the other; a DB migrated beyond the local registry is refused with `db_newer_than_engine` instead of silently written. On macOS, GRDB's typed API enforces the same discipline.
 - **Restructure path containment.** Restructure proposals are built by joining sanitized components onto the user-picked library root (`pipeline/restructure.rs::classify`); `sanitize_path_component` strips the Windows-reserved set `< > : " / \ | ? *` (which also defuses `..`-style traversal via separators), and only the original file's own `file_name()` is reused as the leaf. VLM-proposed names from Deep Analyze pass through `sanitize_proposed_name` (`pipeline/deep_analyze.rs`), which strips quotes/punctuation, lowercases, hyphen-joins, caps length at a word boundary, and falls back to `untitled` on empty input.
 - **Download transport hardening.** The engine's downloader (`downloader.rs`) is the only network code in the engine. It uses HTTPS only, a generic non-fingerprinting User-Agent, a bounded retry/back-off (1 s / 4 s / 16 s, `Retry-After` honored, capped at 60 s), a global in-flight request cap, and writes to `.part` files renamed atomically into place only on success.
 - **Path redaction in logs.** Logs are local-only (`%LOCALAPPDATA%\FileID\logs\` / `~/Library/Application Support/FileID/logs/`). User file paths are redacted before they reach a log call site: `redact_path_for_log` (Rust, `platform.rs`), `PathRedactor.Redact` (C#), and `redactPathForLog(_:)` (Swift) all strip the user's home/username, keeping only enough tail to stay useful. App-structural FileID paths pass through unredacted.
-- **No shell-string command construction.** Every subprocess uses an executable plus argument array, never user content interpolated into a shell string. Windows Deep Analyze uses the managed llama.cpp runtime; Unix may use an externally supplied `llama-mtmd-cli` from `PATH` after ELF/Mach-O and size/`--version` validation, so that executable is part of the user's local trust boundary. The optional server binds only an ephemeral `127.0.0.1` port. Linux integrations may invoke local `dbus-send`/`gdbus`/`xdg-open`, `tesseract`, `ffmpeg`/`ffprobe`, and HEIC conversion tools with bounded output/deadlines; these operate on local paths and are not network egress.
+- **No shell command construction.** The engine shells out only to the bundled `llama-server` (Deep Analyze) and uses argument-array process spawning, never a shell string. The llama server binds an ephemeral port on `127.0.0.1`; that's loopback IPC, not egress (the CI URL allowlist exempts loopback explicitly).
 
 ### Confirmed clean (no fix needed)
 
@@ -48,7 +48,7 @@ residual risk and rationale are in `DECISIONS.md`).
 
 CA-allowlist pinning (root SPKI set + backups, NOT leaf pins) for the model-download hosts.
 Pins live in `shared/security/tls-pins.json` + `pinned-roots/*.pem` (11 roots covering
-Hugging Face/CDNs plus the release-blocked legacy GitHub runtime baseline); `shared/scripts/check_tls_pins.sh` asserts the
+huggingface.co, its CDNs, and GitHub releases); `shared/scripts/check_tls_pins.sh` asserts the
 two representations match in CI. macOS: `TLSPinning.swift` challenge handler (system trust
 first, then chain∩pin-set). Windows: `reqwest` built with `.tls_built_in_root_certs(false)` +
 only the embedded roots; the fail-closed fallback client has no roots at all. Escape hatch
@@ -73,8 +73,7 @@ both platforms.
 
 ## Open hardening — gates the v1.0 release (NOT yet shipped)
 
-- **Mirror six Windows runtime archives to Hugging Face.** Current development sources retain hash-pinned GitHub/NVIDIA llama.cpp, Whisper, cuDNN, CUDA, and ONNX Runtime archives. CI permits only that exact reviewed baseline; strict signed publication fails before staging until byte-identical mirrors replace every URL and the downloader redirect allowlist is reduced to Hugging Face-owned hosts.
-- **Configure a public-trust signing provider (Windows).** The provider-neutral build path, complete PE/MSI/Burn signing order, common verification, and embedded publisher policy are implemented. GitHub tagged publishing remains blocked until a provider-specific protected authentication step is selected. See `WINDOWS_SIGNING.md`.
+- **EV signing + thumbprint pin in release builds (Windows).** The engine-integrity guard is only as strong as a real Authenticode/EV signature and a pinned `FILEID_EV_THUMBPRINT`; today's builds run unsigned-with-warning. Ship signed, with the thumbprint pinned, so the strict path (refuse unsigned + tamper-mismatched binaries) is live. Tracked with WiX MSI packaging in `SHIP.md`.
 - **macOS Developer ID signing + notarization (user-gated).** The full pipeline exists and dry-runs green (`platforms/apple/scripts/release.sh --skip-notarize` produces a hardened-runtime, ad-hoc-signed DMG). The real signing pass needs the Developer ID certificate + `notarytool store-credentials fileid-notary` on the owner's machine — steps documented in the script header.
 
 ## CI enforcement

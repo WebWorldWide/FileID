@@ -58,10 +58,6 @@ pub enum CommandPayload {
     ResumeScan(Empty),
     #[serde(rename = "cancelScan")]
     CancelScan(Empty),
-    #[serde(rename = "cancelRestructure")]
-    CancelRestructure(Empty),
-    #[serde(rename = "healthCheck")]
-    HealthCheck(HealthCheckPayload),
     #[serde(rename = "requestStatus")]
     RequestStatus(Empty),
     #[serde(rename = "shutdown")]
@@ -126,12 +122,6 @@ pub enum CommandPayload {
     #[serde(rename = "renamePerson")]
     RenamePerson(RenamePersonPayload),
 
-    /// Reassign one face through the engine's single-writer transaction.
-    /// A null destination removes it from a person; create_new_person creates
-    /// a new unnamed person before assigning the face.
-    #[serde(rename = "reassignFace")]
-    ReassignFace(ReassignFacePayload),
-
     /// FEAT-CRIT-1: bulk mark-as-unknown for multi-select People mode.
     /// Sets `persons.is_unknown = 1` and clears name fields for every id.
     #[serde(rename = "markPersonsAsUnknown")]
@@ -191,174 +181,12 @@ pub enum CommandPayload {
     /// time, carried through so the app can key its thumbnail cache.
     #[serde(rename = "generateVideoThumbnail")]
     GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
-
-    /// Remove cataloged rows under the given excluded folders immediately
-    /// (files on disk untouched; cascades tags/faces/captions/embeddings).
-    /// Sent when the user adds an exclusion so the Library reflects it without
-    /// waiting for a rescan. Replies with a `bulkActionResult`
-    /// (action `purgeExcluded`, succeeded = purged row count).
-    #[serde(rename = "purgeExcluded")]
-    PurgeExcluded(PurgeExcludedPayload),
-}
-
-const MAX_BULK_ITEMS: usize = 100_000;
-const MAX_RESTRUCTURE_MOVES: usize = 250_000;
-const MAX_EXCLUDED_PATHS: usize = 10_000;
-const MAX_TAGS_PER_COMMAND: usize = 1_024;
-const MAX_APPLY_TAG_OPERATIONS: usize = 100_000;
-const MAX_EXACT_TRASH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-
-pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Result<(), String> {
-    fn check_len(field: &str, len: usize, max: usize) -> Result<(), String> {
-        if len > max {
-            Err(format!("{field} contains {len} items; maximum is {max}"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn dedupe_ids(ids: &mut Vec<i64>) {
-        let mut seen = std::collections::HashSet::with_capacity(ids.len());
-        ids.retain(|id| seen.insert(*id));
-    }
-
-    fn dedupe_strings(values: &mut Vec<String>) {
-        let mut seen = std::collections::HashSet::with_capacity(values.len());
-        values.retain(|value| seen.insert(value.clone()));
-    }
-
-    match payload {
-        CommandPayload::StartScan(payload) => {
-            if let Some(paths) = &mut payload.excluded_paths {
-                check_len("startScan.excludedPaths", paths.len(), MAX_EXCLUDED_PATHS)?;
-                dedupe_strings(paths);
-            }
-        }
-        CommandPayload::PurgeExcluded(payload) => {
-            check_len("purgeExcluded.excludedPaths", payload.excluded_paths.len(), MAX_EXCLUDED_PATHS)?;
-            dedupe_strings(&mut payload.excluded_paths);
-        }
-        CommandPayload::DeepAnalyzeAll(payload) => {
-            // The schema caps excludedFolders at 256; enforce it here too so the
-            // bound doesn't depend solely on each app's own sanitizer (a
-            // hand-edited settings.json or a third-party client bypasses those).
-            if let Some(folders) = &mut payload.excluded_folders {
-                check_len(
-                    "deepAnalyzeAll.excludedFolders",
-                    folders.len(),
-                    MAX_EXCLUDED_PATHS,
-                )?;
-                dedupe_strings(folders);
-            }
-        }
-        CommandPayload::ApplyRestructure(payload) => {
-            check_len("applyRestructure.moves", payload.moves.len(), MAX_RESTRUCTURE_MOVES)?;
-            let mut seen = std::collections::HashSet::with_capacity(payload.moves.len());
-            payload.moves.retain(|entry| seen.insert(entry.file_id));
-        }
-        CommandPayload::ApplyTags(payload) => {
-            check_len("applyTags.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
-            check_len("applyTags.tags", payload.tags.len(), MAX_TAGS_PER_COMMAND)?;
-            dedupe_ids(&mut payload.file_ids);
-            dedupe_strings(&mut payload.tags);
-            let operations = payload.file_ids.len().saturating_mul(payload.tags.len());
-            if operations > MAX_APPLY_TAG_OPERATIONS {
-                return Err(format!(
-                    "applyTags expands to {operations} file/tag operations; maximum is {MAX_APPLY_TAG_OPERATIONS}"
-                ));
-            }
-        }
-        CommandPayload::RenameFiles(payload) => {
-            check_len("renameFiles.renames", payload.renames.len(), MAX_BULK_ITEMS)?;
-            let mut seen = std::collections::HashSet::with_capacity(payload.renames.len());
-            payload.renames.retain(|entry| seen.insert(entry.file_id));
-        }
-        CommandPayload::TrashFiles(payload) => {
-            check_len("trashFiles.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
-            if let Some(identities) = &payload.exact_identities {
-                check_len("trashFiles.exactIdentities", identities.len(), MAX_BULK_ITEMS)?;
-                let requested: std::collections::HashSet<i64> =
-                    payload.file_ids.iter().copied().collect();
-                let selected_paths: std::collections::HashSet<&str> =
-                    identities.iter().map(|identity| identity.path.as_str()).collect();
-                let mut seen = std::collections::HashSet::with_capacity(identities.len());
-                let mut exact_bytes = 0u64;
-                for identity in identities {
-                    if !requested.contains(&identity.file_id) {
-                        return Err(format!(
-                            "trashFiles exact identity #{} is not in fileIDs",
-                            identity.file_id
-                        ));
-                    }
-                    if !seen.insert(identity.file_id) {
-                        return Err(format!(
-                            "trashFiles contains duplicate exact identity #{}",
-                            identity.file_id
-                        ));
-                    }
-                    if identity.path.is_empty()
-                        || identity.size_bytes < 0
-                        || identity.sha256_hex.len() != 64
-                        || !identity.sha256_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-                        || identity.keeper_path.is_empty()
-                        || selected_paths.contains(identity.keeper_path.as_str())
-                        || identity.keeper_size_bytes < 0
-                        || identity.size_bytes != identity.keeper_size_bytes
-                        || !identity
-                            .sha256_hex
-                            .eq_ignore_ascii_case(&identity.keeper_sha256_hex)
-                        || identity.keeper_sha256_hex.len() != 64
-                        || !identity
-                            .keeper_sha256_hex
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit())
-                    {
-                        return Err(format!(
-                            "trashFiles exact identity #{} is invalid",
-                            identity.file_id
-                        ));
-                    }
-                    exact_bytes = exact_bytes
-                        .checked_add(identity.size_bytes as u64)
-                        .and_then(|total| total.checked_add(identity.keeper_size_bytes as u64))
-                        .ok_or_else(|| "trashFiles exact byte total overflowed".to_string())?;
-                }
-                if seen != requested {
-                    return Err(
-                        "trashFiles exactIdentities must cover every requested fileID".into(),
-                    );
-                }
-                if exact_bytes > MAX_EXACT_TRASH_BYTES {
-                    return Err(format!(
-                        "trashFiles exact verification needs {exact_bytes} bytes; maximum is {MAX_EXACT_TRASH_BYTES}"
-                    ));
-                }
-            }
-            dedupe_ids(&mut payload.file_ids);
-        }
-        CommandPayload::MarkPersonsAsUnknown(payload) => {
-            check_len("markPersonsAsUnknown.personIDs", payload.person_ids.len(), MAX_BULK_ITEMS)?;
-            dedupe_ids(&mut payload.person_ids);
-        }
-        CommandPayload::RevertMerge(payload) => {
-            check_len("revertMerge.faceIDsToRevert", payload.face_ids_to_revert.len(), MAX_BULK_ITEMS)?;
-            dedupe_ids(&mut payload.face_ids_to_revert);
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 /// Empty object — `{}`. Serde encodes a unit struct as `null`, which is wrong;
 /// an empty struct with no fields encodes as `{}` like Swift produces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheckPayload {
-    #[serde(rename = "requestID")]
-    pub request_id: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,17 +201,6 @@ pub struct StartScanPayload {
     /// rescan (skip already-current files).
     #[serde(default)]
     pub rescan: bool,
-    /// Folder subtrees to prune from the walk. Absent/None = no exclusions.
-    /// Entries outside `root_path` (or equal to it) are ignored; rows already
-    /// cataloged under an excluded path are purged at scan start.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub excluded_paths: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PurgeExcludedPayload {
-    pub excluded_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,8 +223,6 @@ pub struct DeepAnalyzeFolderPayload {
 pub struct DeepAnalyzeAllPayload {
     pub model_kind: String,
     pub skip_existing: bool,
-    #[serde(default, rename = "fileIDs", skip_serializing_if = "Option::is_none")]
-    pub file_ids: Option<Vec<i64>>,
     /// Tags-only fast path (background auto-tag): one VLM call/file instead of
     /// three. Defaults to false (manual Deep Analyze = full caption + rename +
     /// tags). `#[serde(default)]` keeps older clients that omit the field valid.
@@ -418,13 +233,6 @@ pub struct DeepAnalyzeAllPayload {
     /// caption + tags without the rename VLM call. Ignored when tags_only.
     #[serde(default = "default_true")]
     pub propose_renames: bool,
-    /// Absolute folder paths to skip when scanning the whole library
-    /// (ignored when `file_ids` is present — an explicit selection is never
-    /// silently filtered). Path-segment-boundary matching: excluding
-    /// "/Photos" does not exclude "/PhotosBackup". See
-    /// `commands::deep_analyze::exclusion_where_clause`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub excluded_folders: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -453,20 +261,12 @@ pub struct PlanRestructurePayload {
     /// destination is canonicalized + verified to fall inside this root
     /// (path-traversal guard before apply).
     pub library_root: String,
-    /// Opt in to a bounded preview backed by an engine-owned plan spool. Old
-    /// clients omit this and retain the legacy full-plan response.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub supports_paged_plans: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyRestructurePayload {
     pub library_root: String,
-    /// Apply an engine-owned paged plan in full. `moves` is empty in this mode.
-    #[serde(default, rename = "planID", skip_serializing_if = "Option::is_none")]
-    pub plan_id: Option<String>,
-    #[serde(default)]
     pub moves: Vec<RestructureMove>,
     /// `false` (default): real `MoveFileExW` move on disk + DB update.
     /// `true`: create a `CreateSymbolicLinkW` next to the original so the
@@ -481,8 +281,6 @@ pub struct UndoRestructurePayload {
     /// Same library root the apply used — the destinations the undo writes back
     /// to are containment-checked against it. (R2)
     pub library_root: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shortcut_undo_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,21 +349,6 @@ pub struct RenameEntry {
 pub struct TrashFilesPayload {
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exact_identities: Option<Vec<ExactTrashIdentity>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExactTrashIdentity {
-    #[serde(rename = "fileID")]
-    pub file_id: i64,
-    pub path: String,
-    pub size_bytes: i64,
-    pub sha256_hex: String,
-    pub keeper_path: String,
-    pub keeper_size_bytes: i64,
-    pub keeper_sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,17 +358,6 @@ pub struct MergeClustersPayload {
     pub source_person_id: i64,
     #[serde(rename = "destinationPersonID")]
     pub destination_person_id: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReassignFacePayload {
-    #[serde(rename = "faceID")]
-    pub face_id: i64,
-    #[serde(rename = "destinationPersonID", default)]
-    pub destination_person_id: Option<i64>,
-    #[serde(default)]
-    pub create_new_person: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -712,9 +484,6 @@ pub enum EventPayload {
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
 
-    #[serde(rename = "healthCheckResult")]
-    HealthCheckResult(Wrap<HealthCheckResult>),
-
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),
 
@@ -821,13 +590,6 @@ pub struct EngineInfo {
     /// Optional so older clients of this schema don't break.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware: Option<HardwareInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheckResult {
-    #[serde(rename = "requestID")]
-    pub request_id: String,
-    pub pid: i32,
 }
 
 /// Reply payload for the `verifyCudaPack` command. Mirrors the EngineInfo's
@@ -1013,9 +775,7 @@ pub struct ScanComplete {
 pub struct EngineError {
     /// Stable kind code: `discovery_failed`, `vision_failed`, `db_failed`,
     /// `model_load_failed`, `model_download_failed`, `download_tls_pin_failed`,
-    /// `pack_not_available`, `runtime_not_installed` (macOS: the `load-dynamic`
-    /// ONNX Runtime dylib isn't installed — see `ort_runtime.rs`),
-    /// `ipc_unknown_command`, `unknown`, ...
+    /// `pack_not_available`, `ipc_unknown_command`, `unknown`, ...
     pub kind: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,16 +901,8 @@ pub enum JobCategory { Scan, FaceCluster, DeepAnalyze }
 #[serde(rename_all = "camelCase")]
 pub struct RestructurePlan {
     pub library_root: String,
-    #[serde(default, rename = "planID", skip_serializing_if = "Option::is_none")]
-    pub plan_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_moves: Option<u64>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub truncated: bool,
     pub moves: Vec<RestructureMove>,
     pub category_counts: Vec<RestructureCategoryCount>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confidence_counts: Option<RestructureConfidenceCounts>,
     /// Engine-authoritative folder classification — Anchor / Mixed / Junk
     /// counts per RestructurePlan. None on older plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1163,15 +915,6 @@ pub struct FolderClassificationCounts {
     pub anchor_folders: u32,
     pub mixed_folders: u32,
     pub junk_folders: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct RestructureConfidenceCounts {
-    pub auto: u64,
-    pub review: u64,
-    pub ask: u64,
-    pub unknown: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1192,20 +935,12 @@ pub struct RestructureApplyResult {
     /// to the user via a one-shot dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privilege_error: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cancelled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planned: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remaining: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shortcut_undo_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BulkActionResult {
-    /// Bulk command discriminator, including person-verdict and restore actions.
+    /// "applyTags" | "renameFiles" | "trashFiles" | "mergeClusters".
     pub action: String,
     pub succeeded: u32,
     pub failed: u32,
@@ -1300,47 +1035,16 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
-                excluded_paths: None,
             }),
         };
         let j = serde_json::to_string(&cmd).unwrap();
-        assert!(!j.contains("excludedPaths"), "None must omit the key on the wire");
         let parsed: IpcCommand = serde_json::from_str(&j).unwrap();
         match parsed.payload {
             CommandPayload::StartScan(p) => {
                 assert_eq!(p.root_path, r"C:\Users\adam\Pictures");
                 assert_eq!(p.root_display.as_deref(), Some("Pictures"));
-                assert!(p.excluded_paths.is_none());
             }
             other => panic!("expected StartScan variant, got {other:?}"),
-        }
-    }
-
-    /// `excludedPaths` is additive-optional: legacy JSON without the key must
-    /// decode to `None`, and a populated list must round-trip verbatim.
-    #[test]
-    fn start_scan_excluded_paths_optional_roundtrip() {
-        let legacy = r#"{"id":"c-1","payload":{"startScan":{"rootPath":"C:\\pics"}}}"#;
-        match serde_json::from_str::<IpcCommand>(legacy).unwrap().payload {
-            CommandPayload::StartScan(p) => assert!(p.excluded_paths.is_none()),
-            other => panic!("expected StartScan, got {other:?}"),
-        }
-        let cmd = IpcCommand {
-            id: "c-2".into(),
-            payload: CommandPayload::StartScan(StartScanPayload {
-                root_path: r"C:\pics".into(),
-                root_display: None,
-                rescan: true,
-                excluded_paths: Some(vec![r"C:\pics\raw".into(), r"C:\pics\tmp\".into()]),
-            }),
-        };
-        let j = serde_json::to_string(&cmd).unwrap();
-        match serde_json::from_str::<IpcCommand>(&j).unwrap().payload {
-            CommandPayload::StartScan(p) => assert_eq!(
-                p.excluded_paths.as_deref(),
-                Some(&[r"C:\pics\raw".to_string(), r"C:\pics\tmp\".to_string()][..])
-            ),
-            other => panic!("expected StartScan, got {other:?}"),
         }
     }
 
@@ -1413,139 +1117,6 @@ mod tests {
         assert_eq!(j2, "\"postScan\"");
     }
 
-    #[test]
-    fn destructive_command_ids_are_deduplicated_before_dispatch() {
-        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7, 7, 9, 7, 9],
-            exact_identities: None,
-        });
-        normalize_and_validate_command(&mut payload).unwrap();
-        let CommandPayload::TrashFiles(payload) = payload else {
-            unreachable!();
-        };
-        assert_eq!(payload.file_ids, vec![7, 9]);
-    }
-
-    #[test]
-    fn exact_trash_identity_round_trips_and_must_belong_to_request() {
-        let exact = |file_id, path: &str, size_bytes| ExactTrashIdentity {
-            file_id,
-            path: path.into(),
-            size_bytes,
-            sha256_hex: "ab".repeat(32),
-            keeper_path: "/library/keeper.bin".into(),
-            keeper_size_bytes: size_bytes,
-            keeper_sha256_hex: "ab".repeat(32),
-        };
-        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7],
-            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
-        });
-        normalize_and_validate_command(&mut payload).unwrap();
-        let json = serde_json::to_value(&payload).unwrap();
-        assert_eq!(
-            json["trashFiles"]["exactIdentities"][0]["fileID"],
-            serde_json::json!(7)
-        );
-        assert_eq!(
-            json["trashFiles"]["exactIdentities"][0]["keeperSha256Hex"],
-            serde_json::json!("ab".repeat(32))
-        );
-
-        let mut invalid = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![9],
-            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
-        });
-        assert!(normalize_and_validate_command(&mut invalid)
-            .unwrap_err()
-            .contains("not in fileIDs"));
-
-        let mut partial = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7, 9],
-            exact_identities: Some(vec![exact(7, "/library/a.bin", 4)]),
-        });
-        assert!(normalize_and_validate_command(&mut partial)
-            .unwrap_err()
-            .contains("cover every"));
-
-        let mut unequal = exact(7, "/library/a.bin", 4);
-        unequal.keeper_sha256_hex = "cd".repeat(32);
-        let mut unequal_payload = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7],
-            exact_identities: Some(vec![unequal]),
-        });
-        assert!(normalize_and_validate_command(&mut unequal_payload)
-            .unwrap_err()
-            .contains("invalid"));
-
-        let mut wrong_size = exact(7, "/library/a.bin", 4);
-        wrong_size.keeper_size_bytes = 5;
-        let mut wrong_size_payload = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7],
-            exact_identities: Some(vec![wrong_size]),
-        });
-        assert!(normalize_and_validate_command(&mut wrong_size_payload)
-            .unwrap_err()
-            .contains("invalid"));
-
-        let mut over_budget = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![7],
-            exact_identities: Some(vec![exact(
-                7,
-                "/library/huge.bin",
-                (MAX_EXACT_TRASH_BYTES + 1) as i64,
-            )]),
-        });
-        assert!(normalize_and_validate_command(&mut over_budget)
-            .unwrap_err()
-            .contains("maximum"));
-    }
-
-    #[test]
-    fn destructive_command_rejects_max_plus_one_items() {
-        let mut payload = CommandPayload::TrashFiles(TrashFilesPayload {
-            file_ids: vec![1; MAX_BULK_ITEMS + 1],
-            exact_identities: None,
-        });
-        let error = normalize_and_validate_command(&mut payload).unwrap_err();
-        assert!(error.contains("maximum"));
-    }
-
-    #[test]
-    fn apply_tags_rejects_excessive_cartesian_work() {
-        let mut payload = CommandPayload::ApplyTags(ApplyTagsPayload {
-            file_ids: (0..1_001).collect(),
-            tags: (0..100).map(|index| format!("tag-{index}")).collect(),
-            mode: TagMode::Add,
-        });
-        let error = normalize_and_validate_command(&mut payload).unwrap_err();
-        assert!(error.contains("file/tag operations"));
-    }
-
-    #[test]
-    fn restructure_moves_dedupe_by_file_id() {
-        let move_for = |file_id| RestructureMove {
-            file_id,
-            source: format!("/source/{file_id}"),
-            destination: format!("/destination/{file_id}"),
-            category: "Documents".into(),
-            tier: None,
-            confidence: "auto".into(),
-            reason: None,
-        };
-        let mut payload = CommandPayload::ApplyRestructure(ApplyRestructurePayload {
-            library_root: "/".into(),
-            plan_id: None,
-            moves: vec![move_for(1), move_for(1), move_for(2)],
-            use_symlinks: false,
-        });
-        normalize_and_validate_command(&mut payload).unwrap();
-        let CommandPayload::ApplyRestructure(payload) = payload else {
-            unreachable!();
-        };
-        assert_eq!(payload.moves.iter().map(|entry| entry.file_id).collect::<Vec<_>>(), vec![1, 2]);
-    }
-
     /// Every CommandPayload variant must round-trip through serde without
     /// losing its discriminant. Catches:
     ///   - `#[serde(rename = "…")]` drift between Rust + Swift schema
@@ -1562,15 +1133,10 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
-                excluded_paths: Some(vec![r"C:\Users\adam\Pictures\node_backups".into()]),
             }),
             CommandPayload::PauseScan(Empty {}),
             CommandPayload::ResumeScan(Empty {}),
             CommandPayload::CancelScan(Empty {}),
-            CommandPayload::CancelRestructure(Empty {}),
-            CommandPayload::HealthCheck(HealthCheckPayload {
-                request_id: "health-check-1".into(),
-            }),
             CommandPayload::RequestStatus(Empty {}),
             CommandPayload::Shutdown(Empty {}),
             CommandPayload::RunFaceClustering(Empty {}),
@@ -1585,10 +1151,8 @@ mod tests {
             CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
                 model_kind: "qwen2_5_vl_7b".into(),
                 skip_existing: true,
-                file_ids: Some(vec![42, 99]),
                 tags_only: true,
                 propose_renames: true,
-                excluded_folders: Some(vec![r"C:\Users\adam\Private".into()]),
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {
@@ -1597,15 +1161,12 @@ mod tests {
             CommandPayload::CancelPrewarm(CancelPrewarmPayload { model_kind: None }),
             CommandPayload::PlanRestructure(PlanRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
-                supports_paged_plans: false,
             }),
             CommandPayload::UndoRestructure(UndoRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
-                shortcut_undo_token: None,
             }),
             CommandPayload::ApplyRestructure(ApplyRestructurePayload {
                 library_root: r"C:\Users\adam\Pictures".into(),
-                plan_id: None,
                 moves: vec![RestructureMove {
                     file_id: 1,
                     source: r"C:\Users\adam\Pictures\IMG_0001.jpg".into(),
@@ -1630,7 +1191,6 @@ mod tests {
             }),
             CommandPayload::TrashFiles(TrashFilesPayload {
                 file_ids: vec![1, 2, 3],
-                exact_identities: None,
             }),
             CommandPayload::MergeClusters(MergeClustersPayload {
                 source_person_id: 1,
@@ -1675,9 +1235,6 @@ mod tests {
             CommandPayload::GenerateVideoThumbnail(GenerateVideoThumbnailPayload {
                 path: r"C:\Users\adam\Videos\clip.mp4".into(),
                 modified_at: Some(1_700_000_000.0),
-            }),
-            CommandPayload::PurgeExcluded(PurgeExcludedPayload {
-                excluded_paths: vec![r"C:\Users\adam\Pictures\node_backups".into()],
             }),
         ];
 
@@ -1747,7 +1304,6 @@ mod tests {
                     root_path: path.clone(),
                     root_display: None,
                     rescan: false,
-                    excluded_paths: None,
                 }),
             };
             let json = serde_json::to_string(&cmd).expect("encode");

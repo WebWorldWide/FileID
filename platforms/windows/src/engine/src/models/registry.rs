@@ -311,42 +311,6 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Whisper (audio transcription, Deep Analyze). MIT (OpenAI Whisper +
-        // whisper.cpp). One install fetches the CPU runtime pack (extracted in place
-        // by the .zip suffix; ships `Release\main.exe` + ggml dlls) + the multilingual
-        // ggml-base model. The engine's `WhisperRunner` probes `Models\whisper.cpp\`
-        // for the CLI and `Models\whisper\` for the .bin.
-        "whisper" => {
-            let pack_dir = models_root.join("whisper.cpp");
-            let model_dir = models_root.join("whisper");
-            LookupResult::Found(Model {
-                id: "whisper",
-                display_name: "Whisper (audio transcription)",
-                files: vec![
-                    FileEntry {
-                        // whisper.cpp v1.9.0 CPU x64 pack (universal — no GPU runtime).
-                        url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
-                            .to_string(),
-                        dest: pack_dir.join("whisper-runtime.zip"),
-                        sha256: Some(
-                            "00c4304b6be363a224a4b69829df49009f74131df8c3ce6a5878b89a11cd26ef".into(),
-                        ),
-                        approx_bytes: 5_410_599,
-                    },
-                    FileEntry {
-                        // ggml-base multilingual (so `-l auto` works for non-English).
-                        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                            .to_string(),
-                        dest: model_dir.join("ggml-base.bin"),
-                        sha256: Some(
-                            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into(),
-                        ),
-                        approx_bytes: 147_951_465,
-                    },
-                ],
-            })
-        }
-
         // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
         // same channel NVIDIA's own developer site points at and the
         // redistributable URL the cuDNN docs publish. Installed ON DEMAND
@@ -366,16 +330,11 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                     // containing `cudnn64_9.dll` + friends. NVIDIA hosts
                     // each release under a stable filename pattern, so
                     // URL drift is unlikely between point releases.
-                    // 9.8.0 is the floor for consumer-Blackwell (sm_120)
-                    // kernels: measured on an RTX 5080, cuDNN 9.5.1 ran
-                    // Swin-L convolutions through arch-fallback kernels at
-                    // ~2 s/image with the GPU pinned at 100 % — the
-                    // 2026-07-20 overnight tagging regression.
-                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.8.0.87_cuda12-archive.zip"
+                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip"
                         .to_string(),
                     dest: dir.join("cudnn-runtime.zip"),
-                    sha256: Some("d8a23705e3884b137b7e05449fb2b61bfa524e7cfc3fda80743d633f423c6ce4".into()),
-                    approx_bytes: 675_349_654,
+                    sha256: Some("3a4cecc8b6d6aa7f6777620e6f2c129b76be635357c4506f2c4ccdbe0e2a1641".into()),
+                    approx_bytes: 430_000_000,
                 }],
             })
         }
@@ -389,61 +348,23 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // VERSION MUST MATCH the pyke ort-sys build (1.22.0 — read off the
         // shipped onnxruntime.dll ProductVersion); a mismatch silently fails to
         // bind. ORT is MIT and Microsoft hosts it on github.com (CI-allowlisted),
-        // so no HF hosting needed.
-        // The pack also carries the CUDA math runtime the CUDA EP hard-imports
-        // (cudart / cublas+cublasLt / cuFFT) plus NVRTC for cuDNN's
-        // runtime-compiled engines, from NVIDIA's redistributable archives
-        // (CUDA 12.9 line — first with native consumer-Blackwell sm_120
-        // kernels; the llama.cpp-cuda pack's 12.4 line predates them and its
-        // set omits cuFFT entirely, which made the provider DLL unloadable and
-        // silently stranded ML on CPU). cuDNN auto-installs separately.
-        // The zips extract under packs/cuda/…-archive/bin/ and lib/;
+        // so no HF hosting needed. cudart/cublas come from the llama.cpp-cuda
+        // pack (CUDA 12.4) or the system CUDA toolkit; cuDNN auto-installs.
+        // The zip extracts to packs/cuda/onnxruntime-win-x64-gpu-1.22.0/lib/*.dll;
         // main.rs registers packs/cuda for DLL search AND pins ORT_DYLIB_PATH to
-        // the pack's onnxruntime.dll so the provider binds against the same
-        // build; models::runtime::preload_cuda_math_stack loads this exact set
-        // by full path before any session build.
+        // the pack's onnxruntime.dll so the provider binds against the same build.
         "ort_cuda_x64" => {
             let dir = models_root.join("packs").join("cuda");
             LookupResult::Found(Model {
                 id: "ort_cuda_x64",
                 display_name: "ONNX Runtime CUDA pack",
-                files: vec![
-                    FileEntry {
-                        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
-                            .to_string(),
-                        dest: dir.join("ort-cuda.zip"),
-                        sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
-                        approx_bytes: 312_700_000,
-                    },
-                    FileEntry {
-                        url: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.9.79-archive.zip"
-                            .to_string(),
-                        dest: dir.join("cudart-redist.zip"),
-                        sha256: Some("179e9c43b0735ffe67207b3da556eb5a0c50f3047961882b7657d3b822d34ef8".into()),
-                        approx_bytes: 3_521_238,
-                    },
-                    FileEntry {
-                        url: "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-12.9.1.4-archive.zip"
-                            .to_string(),
-                        dest: dir.join("cublas-redist.zip"),
-                        sha256: Some("d534d98b0b453a98914dbf3adf47d7e84b55037abf02f87466439e1dcef581ed".into()),
-                        approx_bytes: 549_755_186,
-                    },
-                    FileEntry {
-                        url: "https://developer.download.nvidia.com/compute/cuda/redist/libcufft/windows-x86_64/libcufft-windows-x86_64-11.4.1.4-archive.zip"
-                            .to_string(),
-                        dest: dir.join("cufft-redist.zip"),
-                        sha256: Some("f26f80bb9abff3269c548e1559e8c2b4ba58ccb8acc6095bbc6404fc962d4b80".into()),
-                        approx_bytes: 198_361_265,
-                    },
-                    FileEntry {
-                        url: "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.9.86-archive.zip"
-                            .to_string(),
-                        dest: dir.join("nvrtc-redist.zip"),
-                        sha256: Some("1aa0644fa53c8ca34cdc73db17bcc73530557bdd3f582c7bfdbd7916c8b48f65".into()),
-                        approx_bytes: 314_608_748,
-                    },
-                ],
+                files: vec![FileEntry {
+                    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
+                        .to_string(),
+                    dest: dir.join("ort-cuda.zip"),
+                    sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
+                    approx_bytes: 312_700_000,
+                }],
             })
         }
 
@@ -661,115 +582,6 @@ pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     Some(keyed)
 }
 
-pub fn installation_complete(model: &Model) -> bool {
-    let Some(sentinel) = sentinel_path(model).filter(|path| path.is_file()) else {
-        return false;
-    };
-    if !model.files.iter().all(installed_artifact_is_plausible) {
-        return false;
-    }
-    if model.files.iter().any(is_zip_entry) {
-        let Some(expected) = installation_attestation(model) else {
-            return false;
-        };
-        return std::fs::read_to_string(sentinel).is_ok_and(|actual| actual == expected);
-    }
-    true
-}
-
-pub fn installation_attestation(model: &Model) -> Option<String> {
-    use std::fmt::Write as _;
-
-    let mut attestation = format!("v2:{}:{}\n", model.id, revision_token(model));
-    for file in model.files.iter().filter(|file| is_zip_entry(file)) {
-        let root = file.dest.parent()?;
-        let archive = file.dest.file_name()?.to_string_lossy();
-        for path in required_runtime_artifacts(file)? {
-            let relative = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
-            let hash = file_sha256(&path)?;
-            writeln!(attestation, "{archive}\t{relative}\t{hash}").ok()?;
-        }
-    }
-    Some(attestation)
-}
-
-fn is_zip_entry(file: &FileEntry) -> bool {
-    file.dest.extension().and_then(|ext| ext.to_str()) == Some("zip")
-}
-
-fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str]]> {
-    match name {
-        "llama-runtime.zip" => Some(&[
-            &["llama-server.exe", "llama-server"],
-            &["llama-mtmd-cli.exe", "llama-mtmd-cli"],
-            &["mtmd.dll", "libmtmd.so", "libmtmd.dylib"],
-        ]),
-        "cudart.zip" => Some(&[&["cudart64_12.dll"], &["cublas64_12.dll"]]),
-        "whisper-runtime.zip" => Some(&[&["main.exe", "whisper-cli.exe", "whisper-cli"]]),
-        "cudnn-runtime.zip" => Some(&[&["cudnn64_9.dll"]]),
-        "ort-cuda.zip" => Some(&[
-            &["onnxruntime.dll"],
-            &["onnxruntime_providers_cuda.dll"],
-        ]),
-        // CUDA math runtime the CUDA EP hard-imports (see
-        // models::runtime::CUDA_STACK_REQUIRED) + NVRTC for cuDNN's
-        // runtime-compiled engines. One marker per archive, mirroring the
-        // preload set — a zip that extracted without its DLL is not installed.
-        "cudart-redist.zip" => Some(&[&["cudart64_12.dll"]]),
-        "cublas-redist.zip" => Some(&[&["cublas64_12.dll"], &["cublasLt64_12.dll"]]),
-        "cufft-redist.zip" => Some(&[&["cufft64_11.dll"]]),
-        "nvrtc-redist.zip" => Some(&[&["nvrtc64_120_0.dll"]]),
-        "ort-openvino.zip" => Some(&[
-            &["onnxruntime.dll"],
-            &["onnxruntime_providers_openvino.dll"],
-        ]),
-        _ => None,
-    }
-}
-
-fn required_runtime_artifacts(file: &FileEntry) -> Option<Vec<PathBuf>> {
-    let root = file.dest.parent()?;
-    let name = file.dest.file_name()?.to_str()?;
-    let required = runtime_required_names(name)?;
-    let mut entries = walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .max_depth(8)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
-        .map(|entry| entry.into_path())
-        .collect::<Vec<_>>();
-    entries.sort();
-    required
-        .iter()
-        .map(|alternatives| {
-            entries.iter().find(|path| {
-                path.file_name().is_some_and(|name| {
-                    alternatives
-                        .iter()
-                        .any(|candidate| name.to_string_lossy().eq_ignore_ascii_case(candidate))
-                })
-            }).cloned()
-        })
-        .collect()
-}
-
-fn installed_artifact_is_plausible(file: &FileEntry) -> bool {
-    if file.dest.extension().and_then(|ext| ext.to_str()) == Some("zip") {
-        return required_runtime_artifacts(file).is_some();
-    }
-    let plausible_size = std::fs::metadata(&file.dest).is_ok_and(|metadata| {
-        let floor = (file.approx_bytes / 4).max(1);
-        metadata.is_file() && metadata.len() >= floor
-    });
-    plausible_size
-        && file
-            .sha256
-            .as_deref()
-            .is_some_and(|expected| file_sha256_matches(&file.dest, expected))
-}
-
 /// Heal a pre-revision-key install in place by renaming a legacy bare
 /// `{id}.installed` to the current `keyed` sentinel. No-op when the keyed
 /// sentinel already exists or no legacy marker is present. See [`sentinel_path`].
@@ -805,67 +617,30 @@ fn migrate_legacy_sentinel(dir: &Path, model: &Model, keyed: &Path) {
 /// True iff `path` exists and its SHA256 hex digest equals `expected`
 /// (case-insensitive). Streams the file so a multi-GB weight isn't read into RAM.
 fn file_sha256_matches(path: &Path, expected: &str) -> bool {
-    file_sha256(path).is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
-}
-
-fn file_sha256(path: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let mut file = std::fs::File::open(path).ok()?;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
+    let mut buf = [0u8; 64 * 1024];
     loop {
-        match std::io::Read::read(&mut file, &mut buffer) {
+        match std::io::Read::read(&mut f, &mut buf) {
             Ok(0) => break,
-            Ok(count) => hasher.update(&buffer[..count]),
-            Err(_) => return None,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(_) => return false,
         }
     }
-    Some(hex::encode(hasher.finalize()))
+    hex::encode(hasher.finalize()).eq_ignore_ascii_case(expected)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::Digest as _;
 
     /// Every artifact URL must be on huggingface.co — the engine's only egress
     /// (the privacy posture CI's source-URL allowlist also enforces). Only
     /// asserts on kinds that resolve, so guessing a wrong kind here can't
     /// false-fail.
-    /// The CUDA pack must declare the EP's full native dependency closure —
-    /// every archive with a `runtime_required_names` marker list. Shipping
-    /// the provider DLL without its math libraries (the pre-2026-07-21 shape:
-    /// no cuFFT anywhere) let the pack pass every install check while the
-    /// provider was unloadable, silently stranding ML inference on CPU.
-    #[test]
-    fn ort_cuda_pack_declares_math_runtime() {
-        let LookupResult::Found(m) = lookup_full("ort_cuda_x64") else {
-            panic!("ort_cuda_x64 not found");
-        };
-        let dests: Vec<String> = m
-            .files
-            .iter()
-            .filter_map(|f| f.dest.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect();
-        for expected in [
-            "ort-cuda.zip",
-            "cudart-redist.zip",
-            "cublas-redist.zip",
-            "cufft-redist.zip",
-            "nvrtc-redist.zip",
-        ] {
-            assert!(dests.iter().any(|d| d == expected), "pack missing {expected}");
-            assert!(
-                runtime_required_names(expected).is_some(),
-                "no runtime_required_names marker list for {expected}"
-            );
-        }
-        for f in &m.files {
-            assert!(f.sha256.is_some(), "unpinned pack file: {}", f.url);
-        }
-    }
-
     #[test]
     fn all_model_urls_are_huggingface() {
         // NOTE: the runtime/EP packs are intentionally NOT all on HF — cuDNN is
@@ -899,102 +674,12 @@ mod tests {
         }
     }
 
-    /// Both spellings of every VLM kind resolve to the SAME bundle, and the
-    /// bundle's files land under the dotted dir the installer writes — the
-    /// snake-vs-dotted split is what made vlm::find_weights (and the app's
-    /// Deep Analyze cards) report installed VLMs as missing.
-    #[test]
-    fn vlm_kind_aliases_and_dirs_agree() {
-        for (snake, dotted) in [
-            ("mistral_small_3_2", "mistral-small-3.2"),
-            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
-            ("gemma_3_4b", "gemma-3-4b"),
-        ] {
-            let LookupResult::Found(a) = lookup_full(snake) else {
-                panic!("{snake} did not resolve")
-            };
-            let LookupResult::Found(b) = lookup_full(dotted) else {
-                panic!("{dotted} did not resolve")
-            };
-            assert_eq!(a.id, b.id, "alias pair {snake}/{dotted} must be one model");
-            for f in &a.files {
-                let dir = f
-                    .dest
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .expect("vlm dest has a parent dir")
-                    .to_string_lossy()
-                    .into_owned();
-                assert_eq!(dir, dotted, "{snake} dest not under vlm/{dotted}: {}", f.dest.display());
-            }
-        }
-    }
-
     #[test]
     fn unknown_kind_is_unknown() {
         assert!(matches!(
             lookup_full("definitely_not_a_model_kind"),
             LookupResult::Unknown
         ));
-    }
-
-    #[test]
-    fn installed_artifact_rejects_missing_zero_length_and_truncated_files() {
-        let path = std::env::temp_dir().join(format!(
-            "fileid-artifact-status-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let file = FileEntry {
-            url: "https://huggingface.co/test".into(),
-            dest: path.clone(),
-            sha256: Some(hex::encode(sha2::Sha256::digest([0u8; 100]))),
-            approx_bytes: 400,
-        };
-        assert!(!installed_artifact_is_plausible(&file));
-        std::fs::write(&path, []).unwrap();
-        assert!(!installed_artifact_is_plausible(&file));
-        std::fs::write(&path, vec![0u8; 99]).unwrap();
-        assert!(!installed_artifact_is_plausible(&file));
-        std::fs::write(&path, vec![0u8; 100]).unwrap();
-        assert!(installed_artifact_is_plausible(&file));
-        std::fs::write(&path, vec![1u8; 100]).unwrap();
-        assert!(!installed_artifact_is_plausible(&file));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn runtime_attestation_detects_same_size_corruption_and_missing_leaf() {
-        let root = std::env::temp_dir().join(format!(
-            "fileid-runtime-attestation-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let server = root.join("llama-server");
-        let mtmd_cli = root.join("llama-mtmd-cli");
-        let mtmd = root.join("libmtmd.dylib");
-        std::fs::write(&server, b"server-a").unwrap();
-        std::fs::write(&mtmd_cli, b"cli").unwrap();
-        std::fs::write(&mtmd, b"library").unwrap();
-        let model = Model {
-            id: "test_runtime",
-            display_name: "Test runtime",
-            files: vec![FileEntry {
-                url: "https://huggingface.co/test/llama-runtime.zip".into(),
-                dest: root.join("llama-runtime.zip"),
-                sha256: Some("00".repeat(32)),
-                approx_bytes: 1,
-            }],
-        };
-
-        let before = installation_attestation(&model).unwrap();
-        std::fs::write(&server, b"server-b").unwrap();
-        let after = installation_attestation(&model).unwrap();
-        assert_ne!(before, after);
-        std::fs::remove_file(mtmd).unwrap();
-        assert!(installation_attestation(&model).is_none());
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -22,12 +22,14 @@ struct RedirectPolicyTests {
         URL(string: "\(scheme)://\(host)\(path)")!
     }
 
-    @Test("https redirects to Hugging Face transport hosts are followed")
+    @Test("https redirects to allowlisted (pin-covered) hosts are followed")
     func allowsHTTPSAllowlisted() {
         #expect(TLSPinning.allowsRedirect(to: u("huggingface.co")))
         #expect(TLSPinning.allowsRedirect(to: u("cdn-lfs.huggingface.co")))
         #expect(TLSPinning.allowsRedirect(to: u("cas-bridge.xethub.hf.co")))
-        #expect(TLSPinning.allowsExternalRequest(to: u("huggingface.co")))
+        #expect(TLSPinning.allowsRedirect(to: u("github.com")))
+        #expect(TLSPinning.allowsRedirect(to: u("release-assets.githubusercontent.com")))
+        #expect(TLSPinning.allowsRedirect(to: u("developer.download.nvidia.com")))
     }
 
     @Test("an https→http downgrade is rejected even on an allowlisted host")
@@ -41,10 +43,7 @@ struct RedirectPolicyTests {
         #expect(!TLSPinning.allowsRedirect(to: u("evil.example")))
         #expect(!TLSPinning.allowsRedirect(to: u("evilhuggingface.co")))
         #expect(!TLSPinning.allowsRedirect(to: u("huggingface.co.evil.example")))
-        #expect(!TLSPinning.allowsRedirect(to: u("github.com")))
-        #expect(!TLSPinning.allowsRedirect(to: u("release-assets.githubusercontent.com")))
-        #expect(!TLSPinning.allowsRedirect(to: u("developer.download.nvidia.com")))
-        // Bare wildcard roots and api.* are not in the external transport scope.
+        // Bare wildcard roots and api.* are not in the pin scope.
         #expect(!TLSPinning.allowsRedirect(to: u("hf.co")))
         #expect(!TLSPinning.allowsRedirect(to: u("api.github.com")))
     }

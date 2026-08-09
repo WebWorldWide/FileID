@@ -14,15 +14,6 @@ namespace FileID.App.Tests;
 
 public class BulkTagReplaceUndoGroupingTests
 {
-    private static readonly long[] s_ids123 = [1, 2, 3];
-    private static readonly long[] s_ids12 = [1, 2];
-    private static readonly string[] s_tagsAB = ["a", "b"];
-    private static readonly string[] s_tagsBA = ["b", "a"];
-    private static readonly string[] s_tagA = ["a"];
-    private static readonly string[] s_tagB = ["b"];
-    private static readonly string[] s_tagsAbC = ["ab", "c"];
-    private static readonly string[] s_tagsABc = ["a", "bc"];
-
     private static Dictionary<long, List<string>> Prior(params (long Id, string[] Tags)[] entries)
     {
         var map = new Dictionary<long, List<string>>();
@@ -33,18 +24,20 @@ public class BulkTagReplaceUndoGroupingTests
     [Fact]
     public void GroupByTagSet_FilesWithSameSet_ShareOneBatch()
     {
-        var prior = Prior((1, s_tagsAB), (2, s_tagsBA), (3, s_tagsAB));
-        var groups = BulkTagSheet.GroupByTagSet(s_ids123, prior);
+        var ids = new long[] { 1, 2, 3 };
+        var prior = Prior((1, new[] { "a", "b" }), (2, new[] { "b", "a" }), (3, new[] { "a", "b" }));
+        var groups = BulkTagSheet.GroupByTagSet(ids, prior);
         Assert.Single(groups);
-        Assert.Equal(s_ids123, groups[0].Ids.OrderBy(x => x).ToArray());
-        Assert.Equal(s_tagsAB, groups[0].Tags.OrderBy(x => x).ToArray());
+        Assert.Equal(new long[] { 1, 2, 3 }, groups[0].Ids.OrderBy(x => x).ToArray());
+        Assert.Equal(new[] { "a", "b" }, groups[0].Tags.OrderBy(x => x).ToArray());
     }
 
     [Fact]
     public void GroupByTagSet_DistinctSets_ProduceSeparateBatches()
     {
-        var prior = Prior((1, s_tagA), (2, s_tagB));
-        var groups = BulkTagSheet.GroupByTagSet(s_ids12, prior);
+        var ids = new long[] { 1, 2 };
+        var prior = Prior((1, new[] { "a" }), (2, new[] { "b" }));
+        var groups = BulkTagSheet.GroupByTagSet(ids, prior);
         Assert.Equal(2, groups.Count);
     }
 
@@ -53,8 +46,9 @@ public class BulkTagReplaceUndoGroupingTests
     {
         // A file with no prior user tags is absent from the snapshot; its undo
         // must replace-with-empty (clearing the tags the apply just added).
-        var prior = Prior((1, s_tagA)); // id 2 has no prior user tags
-        var groups = BulkTagSheet.GroupByTagSet(s_ids12, prior);
+        var ids = new long[] { 1, 2 };
+        var prior = Prior((1, new[] { "a" })); // id 2 has no prior user tags
+        var groups = BulkTagSheet.GroupByTagSet(ids, prior);
         var emptyBatch = groups.Single(g => g.Ids.Contains(2));
         Assert.Empty(emptyBatch.Tags);
     }
@@ -63,8 +57,9 @@ public class BulkTagReplaceUndoGroupingTests
     public void GroupByTagSet_DistinctSetsThatConcatAlike_DoNotCollide()
     {
         // The key delimiter must keep ["ab","c"] distinct from ["a","bc"].
-        var prior = Prior((1, s_tagsAbC), (2, s_tagsABc));
-        var groups = BulkTagSheet.GroupByTagSet(s_ids12, prior);
+        var ids = new long[] { 1, 2 };
+        var prior = Prior((1, new[] { "ab", "c" }), (2, new[] { "a", "bc" }));
+        var groups = BulkTagSheet.GroupByTagSet(ids, prior);
         Assert.Equal(2, groups.Count);
     }
 

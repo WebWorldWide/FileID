@@ -10,9 +10,6 @@ import FileIDShared
 struct DeepAnalyzeModelPickerCard: View {
     let engine: EngineClient
     @State private var settings = DeepAnalyzeSettings.shared
-    @State private var confirmRemoval: AIModelKind?
-    @State private var removalError: String?
-    @State private var removalInFlight = false
 
     private var ramGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
@@ -22,7 +19,7 @@ struct DeepAnalyzeModelPickerCard: View {
     }
 
     var body: some View {
-        GlassCard(fillsWidth: true) {
+        GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("AI Models — accuracy tier (Deep Analyze)").font(.headline)
@@ -55,30 +52,6 @@ struct DeepAnalyzeModelPickerCard: View {
                 .font(.caption)
             }
         }
-        .confirmationDialog(
-            "Remove Deep Analyze model?",
-            isPresented: Binding(
-                get: { confirmRemoval != nil },
-                set: { if !$0 { confirmRemoval = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: confirmRemoval
-        ) { kind in
-            Button("Remove \(kind.displayName)", role: .destructive) {
-                remove(kind)
-            }
-            Button("Keep", role: .cancel) { confirmRemoval = nil }
-        } message: { kind in
-            Text("Deletes this model's downloaded weights. Deep Analyze will download it again if you select and run it later.")
-        }
-        .alert("Model couldn't be removed", isPresented: Binding(
-            get: { removalError != nil },
-            set: { if !$0 { removalError = nil } }
-        )) {
-            Button("OK", role: .cancel) { removalError = nil }
-        } message: {
-            Text(removalError ?? "Unknown error")
-        }
     }
 
     @ViewBuilder
@@ -89,26 +62,8 @@ struct DeepAnalyzeModelPickerCard: View {
             installed: ModelInstallStatus.isInstalled(kind: kind),
             fits: kind.fits(ramGB: ramGB),
             ramGB: ramGB,
-            onPick: { settings.activeKind = kind },
-            onRemove: { confirmRemoval = kind },
-            removalInFlight: removalInFlight
+            onPick: { settings.activeKind = kind }
         )
-    }
-
-    private func remove(_ kind: AIModelKind) {
-        confirmRemoval = nil
-        removalInFlight = true
-        engine.stopForMaintenance()
-        Task {
-            let report = await Task.detached(priority: .userInitiated) {
-                ModelStorage.removeDeepAnalyzeModel(kind)
-            }.value
-            removalInFlight = false
-            if let failure = report.failureMessage {
-                removalError = failure
-            }
-            engine.start()
-        }
     }
 
 }
@@ -121,48 +76,36 @@ private struct ModelOptionRow: View {
     let fits: Bool
     let ramGB: Double
     let onPick: () -> Void
-    let onRemove: () -> Void
-    let removalInFlight: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Button {
-                guard fits else { return }
-                onPick()
-            } label: {
-                HStack(alignment: .top, spacing: 10) {
-                    indicatorIcon
-                    VStack(alignment: .leading, spacing: 2) {
-                        titleRow
-                        Text(kind.subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        statsLine
-                        if !fits {
-                            Text("Disabled — would OOM-kill the engine on a \(Int(ramGB)) GB Mac. Pick a smaller model.")
-                                .font(.caption2)
-                                .foregroundStyle(.orange)
-                        }
+        Button {
+            guard fits else { return }   // would OOM-kill the engine
+            onPick()
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                indicatorIcon
+                VStack(alignment: .leading, spacing: 2) {
+                    titleRow
+                    Text(kind.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    statsLine
+                    if !fits {
+                        Text("Disabled — would OOM-kill the engine on a \(Int(ramGB)) GB Mac. Pick a smaller model.")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
                     }
-                    Spacer()
                 }
-                .contentShape(Rectangle())
+                Spacer()
             }
-            .buttonStyle(.plain)
-            .disabled(!fits || removalInFlight)
-            .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. With your \(Int(ramGB)) GB Mac and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.")
-
-            if installed {
-                Button("Remove", role: .destructive, action: onRemove)
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .disabled(removalInFlight)
-            }
+            .padding(8)
+            .background(rowBackground)
+            .overlay(rowBorder)
+            .opacity(fits ? 1.0 : 0.55)
         }
-        .padding(8)
-        .background(rowBackground)
-        .overlay(rowBorder)
-        .opacity(fits ? 1.0 : 0.55)
+        .buttonStyle(.plain)
+        .disabled(!fits)
+        .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. With your \(Int(ramGB)) GB Mac and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.")
     }
 
     @ViewBuilder
@@ -233,10 +176,11 @@ private struct ModelOptionRow: View {
 // while gigabytes of safetensors are still streaming in.
 enum ModelInstallStatus {
     static func isInstalled(kind: AIModelKind) -> Bool {
-        guard let url = ModelStorage.deepAnalyzeDirectory(for: kind) else { return false }
-        let sentinel = url
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("huggingface/models", isDirectory: true)
+            .appendingPathComponent(kind.sourceRepo, isDirectory: true)
             .appendingPathComponent(".fileid-installed")
-        return FileManager.default.fileExists(atPath: sentinel.path)
+        return FileManager.default.fileExists(atPath: url.path)
     }
 }
 
@@ -259,10 +203,6 @@ struct DeepAnalyzeView: View {
     // actual files. Single in-flight gate + a short result line.
     @State private var applyInFlight = false
     @State private var applyStatus: String? = nil
-    // "Apply all" renames every pending file on disk in one tap with no review
-    // list (unlike BulkRenameSheet). The rename is the irreversible part, so gate
-    // it behind a confirmation that states the count. (HIGH #5)
-    @State private var confirmApplyAll = false
 
     // R6-02: cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
@@ -275,11 +215,6 @@ struct DeepAnalyzeView: View {
     /// names in captions, and "a person doing X" captions are nearly
     /// useless. User must visit People and name at least one cluster.
     @State private var hasNamedAnyone = false
-
-    /// Throttle state for the `store.version` refresh coalescer (see
-    /// `throttledRefresh`): leading-edge timestamp + trailing debounce.
-    @State private var lastReloadAt: Date = .distantPast
-    @State private var refreshDebounce: Task<Void, Never>?
 
     // Engine is alive (not crashed / mid-respawn); the live run cards key
     // off this so a crash mid-run tears them down at once (F-C4-016).
@@ -348,7 +283,10 @@ struct DeepAnalyzeView: View {
             refreshPendingRenameCount()
             refreshStatusCounts()
         }
-        .onChange(of: store.version) { _, _ in throttledRefresh() }
+        .onChange(of: store.version) { _, _ in
+            refreshPendingRenameCount()
+            refreshStatusCounts()
+        }
         .onChange(of: settings.activeKind.rawValue) { _, _ in
             refreshStatusCounts()   // pending is keyed by active model (R6-02)
         }
@@ -359,32 +297,6 @@ struct DeepAnalyzeView: View {
 
     private func refreshPendingRenameCount() {
         pendingRenameCount = store.countFilesWithProposedNames()
-    }
-
-    /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
-    /// most one refresh per second so the 3 status COUNT(*) queries
-    /// (countFilesWithProposedNames / deepAnalyzePending / namedPersonCount)
-    /// don't fire 1000× — including while this tab is off-screen. Leading
-    /// edge refreshes at once when the last was ≥1s ago; otherwise a trailing
-    /// debounce guarantees a final refresh after the burst settles. Mirrors
-    /// LibraryView's batch throttle + search debounce.
-    private func throttledRefresh() {
-        let now = Date()
-        if now.timeIntervalSince(lastReloadAt) >= 1.0 {
-            lastReloadAt = now
-            refreshDebounce?.cancel()
-            refreshPendingRenameCount()
-            refreshStatusCounts()
-        } else {
-            refreshDebounce?.cancel()
-            refreshDebounce = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                lastReloadAt = Date()
-                refreshPendingRenameCount()
-                refreshStatusCounts()
-            }
-        }
     }
 
     // R6-02: refresh the cached status counts off the 4 Hz body-eval path.
@@ -449,16 +361,7 @@ struct DeepAnalyzeView: View {
                     secondaryApplyButton("Apply people as tags", systemImage: "person.crop.square",
                                          disabled: applyInFlight || !hasNamedAnyone) { runApply(.people) }
                 }
-                Button {
-                    // Rename-on-disk is the destructive step; confirm first when
-                    // there are files to rename. A tag-only apply (no pending
-                    // renames) is additive/reversible, so let it run straight away.
-                    if pendingRenameCount > 0 {
-                        confirmApplyAll = true
-                    } else {
-                        runApply(.all)
-                    }
-                } label: {
+                Button { runApply(.all) } label: {
                     Label("Apply all", systemImage: "checkmark.circle.fill")
                         .font(.callout.bold())
                         .frame(maxWidth: .infinity)
@@ -468,18 +371,6 @@ struct DeepAnalyzeView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(applyInFlight)
-                .confirmationDialog(
-                    "Apply smart names to \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")?",
-                    isPresented: $confirmApplyAll,
-                    titleVisibility: .visible
-                ) {
-                    Button("Rename \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")", role: .destructive) {
-                        runApply(.all)
-                    }
-                    Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("This renames \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s") on disk and writes tags and people as Finder tags. Library's \"Undo last rename\" can revert the renames; tag writes are additive and can be removed individually.")
-                }
                 if let applyStatus {
                     Text(applyStatus).font(.caption).foregroundStyle(.secondary)
                 }
@@ -513,18 +404,11 @@ struct DeepAnalyzeView: View {
         Task { @MainActor in
             var summary: [String] = []
             if scope == .all {
-                let renamed: [ReadStore.RenameOutcome] = await Task.detached(priority: .userInitiated) {
+                let renamed = await Task.detached(priority: .userInitiated) {
                     let pending = store.filesWithProposedNames()
-                    guard !pending.isEmpty else { return [] }
-                    let result = store.applyProposedNamesBulk(pending)
-                    // Journal THIS batch so Library's "Undo last rename" reverts it,
-                    // not some older batch — matching every other rename call site
-                    // (BulkRenameSheet, per-file rename). saveLastBatch is
-                    // nonisolated, so it's safe to call from this detached task.
-                    BulkRenameSheet.saveLastBatch(result.renamed)
-                    return result.renamed
+                    return pending.isEmpty ? 0 : store.applyProposedNamesBulk(pending).renamed.count
                 }.value
-                if !renamed.isEmpty { summary.append("\(renamed.count) renamed") }
+                if renamed > 0 { summary.append("\(renamed) renamed") }
             }
             if scope == .tags || scope == .all {
                 let n = await Task.detached(priority: .userInitiated) {
@@ -549,7 +433,7 @@ struct DeepAnalyzeView: View {
 
     /// Additively write each file's tags as Finder tags. Returns the number of
     /// files that ended up modified. Runs on a detached task (FS writes).
-    nonisolated private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
+    private static func writeTags(_ items: [(url: URL, tags: [String])]) -> Int {
         var changed = 0
         for item in items where !item.tags.isEmpty {
             if (try? TagWriter.addTags(item.tags, at: item.url)) != nil { changed += 1 }
@@ -674,13 +558,11 @@ struct DeepAnalyzeView: View {
                 if !hasNamedAnyone, !engine.deepAnalyzeInFlight {
                     namingRequiredBanner
                 }
-                SettingToggleRow(
-                    "Skip files already analyzed by \(settings.activeKind.displayName)",
-                    isOn: $skipExisting
-                )
+                Toggle("Skip files already analyzed by \(settings.activeKind.displayName)",
+                       isOn: $skipExisting)
+                    .font(.callout)
                 HStack(spacing: 10) {
                     Button {
-                        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
                         engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
                                               skipExisting: skipExisting)
                     } label: {
@@ -758,7 +640,6 @@ struct DeepAnalyzeView: View {
                         .foregroundStyle(.tertiary)
 
                     Button {
-                        guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
                         engine.deepAnalyzeAll(modelKind: settings.activeKind.rawValue,
                                               skipExisting: skipExisting)
                     } label: {
@@ -923,11 +804,11 @@ struct DeepAnalyzeButton: View {
     @State private var settings = DeepAnalyzeSettings.shared
 
     var body: some View {
-        let alreadyDone = file.isFullyAnalyzed(by: settings.activeKind.rawValue)
+        let alreadyDone = file.vlmDescription != nil
+            && file.vlmModel == settings.activeKind.rawValue
         let fits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         Button {
             guard fits else { return }
-            guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
             engine.deepAnalyzeFile(fileID: file.id, modelKind: settings.activeKind.rawValue)
         } label: {
             Label(

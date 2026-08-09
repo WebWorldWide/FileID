@@ -9,8 +9,8 @@
   `ram_plus_suppress.txt` / FILEID_RAMPLUS_PRECISION_FLOOR, diffing tag_report.py.
 
 .EXAMPLE
-  .\sample_corpus.ps1 -Corpus 'F:\TrueNAS\photos' -Count 100
-  .\sample_corpus.ps1 -Corpus 'F:\TrueNAS\photos' -Count 100 -Seed 42 -Clean
+  .\sample_corpus.ps1 -Corpus 'G:\TrueNAS\photos' -Count 100
+  .\sample_corpus.ps1 -Corpus 'G:\TrueNAS\photos' -Count 100 -Seed 42 -Clean
 #>
 [CmdletBinding()]
 param(

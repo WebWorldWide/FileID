@@ -21,15 +21,11 @@ pub(crate) struct TrashLogEntry {
 pub(crate) struct TrashLogItem {
     pub(crate) file_id: i64,
     pub(crate) original_path: String,
-    /// Path the Trash backend recorded as the source. Identity-bound deletion
-    /// first claims a file under a unique sibling name; Windows restore looks
-    /// up that claimed path, then renames it back to `original_path`.
+    /// Hint set by IFileOperation if available (.GetName on the IShellItem
+    /// after delete) — the Recycle Bin renames each item to a $R*.* form.
+    /// Often empty; restore by path is the canonical fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) recycle_bin_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) recycle_physical_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) source_identity: Option<crate::platform::FileIdentity>,
 }
 
 /// The append-only log is trimmed to the last `MAX_ENTRIES` lines so it can't
@@ -37,22 +33,6 @@ pub(crate) struct TrashLogItem {
 /// cap). Trimming drops whole oldest lines verbatim — retained lines keep
 /// their HMAC, so `read_batch` still verifies them.
 const MAX_ENTRIES: usize = 1024;
-
-#[cfg(unix)]
-fn sync_parent(path: &std::path::Path) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-        if let Some(grandparent) = parent.parent() {
-            std::fs::File::open(grandparent)?.sync_all()?;
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_path: &std::path::Path) -> anyhow::Result<()> {
-    Ok(())
-}
 
 pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
     let path = paths::trash_log_path()?;
@@ -74,7 +54,6 @@ pub(crate) fn append(entry: &TrashLogEntry) -> anyhow::Result<()> {
         // the log entry (which would orphan the Recycle Bin items).
         file.sync_all()?;
     }
-    sync_parent(&path)?;
     // Enforce the documented cap. Best-effort: a trim failure must not fail the
     // delete (the entry is already durably appended above).
     trim_to_cap(&path).ok();
@@ -112,7 +91,6 @@ fn trim_to_cap(path: &std::path::Path) -> anyhow::Result<()> {
     }
     // std::fs::rename replaces atomically on Windows (MoveFileEx REPLACE).
     std::fs::rename(&tmp, path)?;
-    sync_parent(path)?;
     Ok(())
 }
 
@@ -130,7 +108,7 @@ pub(crate) fn read_batch(batch_id: &str) -> anyhow::Result<Option<TrashLogEntry>
 }
 
 fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry> {
-    for line in raw.split(|b| *b == b'\n').rev() {
+    for line in raw.split(|b| *b == b'\n') {
         let Ok(line) = std::str::from_utf8(line) else {
             tracing::warn!("trash_log line is not valid UTF-8 (torn append?) -- skipping");
             continue;
@@ -173,37 +151,19 @@ mod tests {
                 file_id: 42,
                 original_path: r"C:\Users\u\Pictures\cat.jpg".to_string(),
                 recycle_bin_id: None,
-                recycle_physical_path: None,
-                source_identity: None,
             }],
         }
     }
 
     #[test]
     fn entry_serde_round_trip() {
-        let mut entry = make_entry("batch-1");
-        entry.items[0].recycle_physical_path = Some(r"C:\$Recycle.Bin\$Rcat.jpg".into());
-        entry.items[0].source_identity = Some(crate::platform::FileIdentity {
-            volume: 7,
-            file: 42,
-        });
+        // Doesn't touch disk — just confirms the wire shape is stable.
+        let entry = make_entry("batch-1");
         let json = serde_json::to_string(&entry).unwrap();
         let decoded: TrashLogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.batch_id, "batch-1");
         assert_eq!(decoded.items.len(), 1);
         assert_eq!(decoded.items[0].file_id, 42);
-        assert_eq!(
-            decoded.items[0].recycle_physical_path,
-            entry.items[0].recycle_physical_path
-        );
-        assert_eq!(decoded.items[0].source_identity, entry.items[0].source_identity);
-
-        let legacy = json.replace(
-            ",\"source_identity\":{\"volume\":7,\"file\":42}",
-            "",
-        );
-        let decoded: TrashLogEntry = serde_json::from_str(&legacy).unwrap();
-        assert_eq!(decoded.items[0].source_identity, None);
     }
 
     #[test]
@@ -251,27 +211,6 @@ mod tests {
     // findable undo-journal entry (or the whole batch is rolled back + surfaced
     // as an error, never silently unrecoverable). Pure: signs in-memory and
     // round-trips through find_batch_in (no filesystem).
-    #[test]
-    fn latest_signed_receipt_for_batch_wins() {
-        let key = log_hmac_key().expect("hmac key");
-        let first = make_entry("undo-receipt");
-        let mut receipt = first.clone();
-        receipt.items[0].recycle_physical_path = Some(r"C:\$Recycle.Bin\$Rabc.jpg".into());
-        let signed = |entry: &TrashLogEntry| {
-            let json = serde_json::to_string(entry).unwrap();
-            let mac = hmac_sha256_hex(&key, json.as_bytes());
-            format!("{json}\t{mac}\n")
-        };
-        let raw = format!("{}{}", signed(&first), signed(&receipt));
-
-        let found = find_batch_in(raw.as_bytes(), &key, "undo-receipt").unwrap();
-
-        assert_eq!(
-            found.items[0].recycle_physical_path,
-            receipt.items[0].recycle_physical_path
-        );
-    }
-
     #[test]
     fn appended_entry_is_findable_by_batch_id() {
         let key = log_hmac_key().expect("hmac key");

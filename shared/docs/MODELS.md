@@ -1,16 +1,14 @@
 # Models — canonical registry
 
-FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. Every artifact is SHA256-pinned in `shared/models/manifest.json`; the Windows registry and macOS `ModelManifest.swift` are compiled mirrors checked by CI. Platform downloaders verify bytes before atomic promotion, and CI rejects unpinned artifacts. No telemetry on the download.
+FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. **Every artifact is SHA256-pinned in `engine/src/models/registry.rs`** — the canonical hash is the `oid sha256:` from each HuggingFace LFS pointer (or the sha256 of the GitHub/NVIDIA release asset); the engine downloader verifies the downloaded bytes against the pin before use, and a CI gate (`windows-engine.yml`) fails the build on any unpinned (`sha256: None`) entry. No telemetry on the download.
 
-This file documents the cross-platform model contract. Production installs run only through each app's verified in-app downloader; obsolete direct-download shell installers were removed so there is no unpinned alternate path.
+This file is the cross-platform source of truth for what FileID asks for and where it lives. Per-platform installers (`platforms/apple/scripts/install_clip_models.sh`, `platforms/windows/build/install-models.ps1`, future Linux equivalent) read this list.
 
 ## Licensing posture — commercial-clean (Apache-2.0 project)
 
-The core weight stack is permissively licensed (Apache-2.0 / MIT), and no non-commercial weights are allowed. The non-commercial InsightFace face stack (ArcFace + SCRFD) and research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. Gemma models remain available under Google's separate Gemma Terms, and optional NVIDIA cuDNN/CUDA runtime archives remain under NVIDIA's vendor terms. Before the first such download, FileID presents the applicable full-terms link and a default-cancel **I Accept and Download** decision; acceptance is recorded locally and versioned by the policy review date.
+As of the 2026-05 commercial-clean pass, **every weight FileID downloads by default is permissively licensed (Apache-2.0 / MIT)** — no non-commercial weights in the core feature set. This keeps the project (Apache-2.0, see root `LICENSE`) free to be open-sourced *and* commercialized later without a weight-licensing blocker. The non-commercial InsightFace face stack (ArcFace + SCRFD) and the research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. The one conditional model, Gemma-3-4B, is commercially usable under Google's Gemma Terms and stays an opt-in, user-initiated download (its terms surface in the install flow).
 
-`shared/models/manifest.json` is the machine-enforced license registry as well as the artifact registry. `licensePolicies`, `artifactLicenses`, and `vlmRepoLicenses` must cover every downloadable entry. `shared/scripts/check_model_license_policy.py` rejects missing/unknown mappings, malformed license URLs/review dates, or a restricted policy incorrectly marked as not requiring terms acceptance. Any new model or runtime requires a reviewed manifest policy before CI permits it.
-
-> **Both Windows and macOS are on the commercial-clean stack (updated 2026-07).** The macOS Swift swap (RAM++ tagger, ViT-B/32, SFace 128-d) has **landed on `main` and is wired as primary** — verified statically in `shared/docs/MACOS_AUDIT_2026-07.md`. The *(lockstep pending)* markers on macOS cells below now mean **on-hardware embedding-parity verification is pending**, NOT that the Swift swap is unapplied. Cross-platform DB round-trips (esp. 128-d face prints) work once both engines have run on real hardware with the new models; until the macOS on-hardware parity check is done, treat face DBs as platform-local as a precaution.
+> **Windows is live on the commercial-clean stack now.** The macOS app mirror (RAM++ tagger, ViT-B/32, SFace) lands in **WS-MAC** — rows below mark macOS cells *(lockstep pending)* where the Swift swap hasn't been applied yet. Cross-platform DB round-trips (esp. 128-d face prints) require both platforms on the new models; until WS-MAC ships, treat face DBs as platform-local.
 
 ## ML stack per platform
 
@@ -22,7 +20,7 @@ The core weight stack is permissively licensed (Apache-2.0 / MIT), and no non-co
 | Face detection + 5-pt landmarks | Apple Vision (`VNDetectFaceRectanglesRequest`) | **YuNet (ONNX, OpenCV Zoo)** | YuNet is MIT. Different detectors → boxes aren't byte-identical, but 5-pt landmarks feed a shared alignment template so embeddings match. |
 | Face embedding | SFace (ONNX via CoreML EP) *(lockstep pending)* | **SFace (ONNX via DirectML / CUDA / CPU EP)** | SFace (OpenCV Zoo) is Apache-2.0, **128-d** L2-normalized. Replaces 512-d ArcFace; person-clustering DBs round-trip once both platforms are on SFace. |
 | OCR | Apple Vision `VNRecognizeTextRequest` (fast tier) | Windows.Media.Ocr (built-in WinRT) default; PaddleOCR ONNX opt-in | Built-in OCR is fast + free + multilingual on both. |
-| Vision-language models (Deep Analyze) | MLX: **Qwen3-VL 8B / 4B** · Qwen 2.5-VL · Gemma 3 · Mistral-Small-3.2 | llama.cpp: Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Qwen3-VL 8B is the measured 16 GB macOS recommendation and 4B is the 8 GB recommendation; each platform uses the best-supported commercial-clean quant. |
+| Vision-language models (Deep Analyze) | MLX: Qwen 2.5-VL · Gemma 3 · PaliGemma | llama.cpp: Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Curated lineup per platform to use the best-supported quants. |
 
 ## In-scan tagger
 
@@ -103,7 +101,7 @@ The non-commercial InsightFace stack (ArcFace `w600k_r50` + SCRFD, *"non-commerc
 | Input | letterboxed to 640×640, BGR raw [0,255], NCHW |
 | Output | per-stride (8/16/32) cls/obj/bbox/kps → score = √(cls·obj), center/exp box, 5-point landmarks remapped to the FileID order |
 
-### SFace face embedding (Windows; macOS via CoreML EP — native validation complete, cross-platform byte comparison pending)
+### SFace face embedding (Windows; macOS via CoreML EP — lockstep pending)
 
 | Aspect | Value |
 |---|---|
@@ -137,17 +135,15 @@ All default/recommended VLMs are commercial-clean (Apache-2.0). Gemma-3-4B is op
 | **Gemma 3 4B (vision)** | ~3 GB | ~8 GB | Lighter / weak-box fallback | Gemma Terms (opt-in) | [google/gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it) GGUF |
 | **Mistral-Small-3.2 24B** | ~14.3 GB | ~20 GB | Max-quality captioner | Apache-2.0 | [bartowski/Mistral-Small-3.2 GGUF](https://huggingface.co/bartowski) + mmproj |
 
-(Exact artifact SHA-256s and repository revisions live in `shared/models/manifest.json`; platform conformance tests lock their runtime tables to that canonical file.)
+(Exact pinned commits + SHA256s live in the platform-specific installer scripts, so the doc isn't a SHA copy-pasta target.)
 
 ### macOS lineup (MLX)
 
 | Model | Source | Notes |
 |---|---|---|
-| **Qwen3-VL 4B (4-bit)** | [`lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit`](https://huggingface.co/lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit) | **Recommended for 8 GB Macs** (Apache-2.0); ~3.5 GB download and 4.8 GiB measured peak footprint. |
-| **Qwen3-VL 8B (4-bit)** | [`lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit`](https://huggingface.co/lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit) | **Recommended for 16 GB Macs** (Apache-2.0); exact 5,776,636,403-byte download and 7.2 GiB measured peak footprint. A six-image copied-Adlon A/B found it generally more concise and grounded than 4B. Revision `a0afc48efd9308fb14b4d58bbd49d382f7d4f845`. |
-| Qwen 2.5-VL 7B | swift-transformers HF cache | Proven alternative (Apache-2.0); ~4.3 GB download and ~7 GB RAM. |
+| Qwen 2.5-VL 7B | swift-transformers HF cache | Default recommendation (Apache-2.0) |
 | Gemma 3 4B | swift-transformers HF cache | Opt-in (Gemma Terms) |
-| Mistral-Small-3.2 | swift-transformers HF cache | Max-quality option for Macs with at least 30 GB RAM (Apache-2.0). |
+| Mistral-Small-3.2 | swift-transformers HF cache | Max quality (Apache-2.0) — lockstep pending |
 
 ## VLM storage
 
@@ -155,51 +151,13 @@ VLMs cache to:
 - macOS: `~/Documents/huggingface/models/<repo>/` (MLX / swift-transformers convention)
 - Windows: `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (FileID's own download path; outside Documents to avoid surprising users with several GB in there)
 
-## Audio + 3D understanding — Deep Analyze (license-vetted)
-
-Deep Analyze already names audio + `.obj` from EMBEDDED metadata (tags / object names) with no model.
-*True* on-device AI understanding of those types is layered on top — all commercial-clean (Apache-2.0 / MIT),
-download-from-`huggingface.co` only (or built-in OS frameworks on macOS), opt-in like the VLMs. Owner-approved
-2026-06-17 ("use other models as long as they follow the licenses"). **Status as of 2026-06-17 below.**
-
-### Whisper — speech transcription (audio) — **MIT** — ✅ SHIPPED (both platforms)
-
-| Aspect | Value |
-|---|---|
-| Use | Transcribe spoken audio (voice memos, podcasts, lectures) → a descriptive name + caption. Music keeps the metadata path (title/artist); speech gets content. The `name_from_transcript` logic (first ~8 words → name) is byte-faithful across engines. |
-| Windows | **whisper.cpp** subprocess (`WhisperRunner`, mirrors the llama.cpp VLM pattern) — the CPU pack ([`ggml-org/whisper.cpp` v1.9.0 release](https://github.com/ggml-org/whisper.cpp)) + the multilingual `ggml-base` model ([`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp), ~148 MB), both sha256-pinned in `registry.rs` as `"whisper"`. Audio → 16 kHz mono WAV via the `symphonia` we already ship (`pipeline::audio_decode`). Installed from Settings → its "Speech transcription (Whisper)" card. |
-| macOS | **Apple Speech** (`SFSpeechRecognizer`, `requiresOnDeviceRecognition`) — the built-in-framework analogue, no model download. Needs `NSSpeechRecognitionUsageDescription` (added to the app Info.plist; the engine's `Bundle.main` resolves to the enclosing app). |
-| License | **MIT** (OpenAI Whisper code + weights; whisper.cpp port also MIT). Apple Speech is OS-provided. |
-
-### Sound-event classification (non-speech audio) — macOS ✅ SHIPPED · Windows ⏳ DEFERRED
-
-| Aspect | Value |
-|---|---|
-| Use | For audio with no metadata title AND no speech (field recordings, sound effects, ambience): classify the dominant sound → a descriptive name (rain → "Rain", a dog bark → "Dog Bark"). The cascade is metadata title → speech transcript → sound event → original name. |
-| macOS | **Apple SoundAnalysis** (`SNClassifySoundRequest .version1`) — built-in classifier, no model, no microphone permission (file analysis). `nameFromSoundLabel` humanizes + drops generic labels (speech/music/noise). Shipped. |
-| Windows (YAMNet) | **Deferred, tracked.** YAMNet (TF-Hub, Apache-2.0) → ONNX would reuse the existing ONNX Runtime, BUT needs (a) a license-vetted self-hosted ONNX *and* (b) a hand-rolled log-mel (STFT) frontend — the common ONNX exports take a `(64,96,1)` log-mel patch, not a waveform, and there's no FFT crate in the locked set. That DSP **can't be verified without on-hardware labeled audio**, so it isn't shipped blind. Phase 1 Whisper already covers the speech case on Windows; this only adds the narrow non-speech tail. See NEXT.md. |
-| License | YAMNet **Apache-2.0**; Apple SoundAnalysis is OS-provided. |
-
-### 3D models (`.obj`) — render → existing VLM (NO new model) — ✅ SHIPPED (both platforms)
-
-| Aspect | Value |
-|---|---|
-| Use | Render the `.obj` to an image → feed the **already-installed Deep Analyze VLM** (Qwen2.5-VL / Gemma 3) → caption + name. The AI literally "looks at" the model. Falls back to embedded object/material names (no VLM, an unrenderable `.obj`, or a VLM failure). |
-| Windows | A **hand-rolled software rasterizer** (`pipeline::obj_render`, NO new dependency) — parses `.obj`/`.mtl`, fixed 3/4 camera, z-buffered flat-shaded triangles (per-face `.mtl` Kd + one Lambert light), 512² PNG via the `image` crate. Wired as the `"model"` arm of `rasterize_for_vlm`. |
-| macOS | The **OS QuickLook 3D generator** (`DeepAnalyze.quickLookThumbnail`, already the loader's fallback) renders the `.obj` → the MLX VLM. No new code, no new dep. |
-| License | No new weights. No new dependency on either platform. |
-
-All build-verifiable in the dev env; on-device inference (VLM/Speech/SoundAnalysis quality) is hardware-verified
-(owner's RTX 2060 / Mac), like every other model. The metadata paths stay as the no-model fallback + the
-music/named-object fast path.
-
 ## Performance Packs (Windows GPU runtimes)
 
 Optional. Settings → Performance → "Get faster on this hardware". Auto-suggested when matching hardware is detected. Same downloader pattern as model downloads.
 
 | Pack | Size | Activates EP | Hardware target |
 |---|---|---|---|
-| NVIDIA CUDA Pack | ~2.1 GB | ORT CUDA EP + full CUDA 12.9 math runtime (cudart/cublas/cuFFT/NVRTC) + cuDNN 9.8 + llama.cpp CUDA backend | NVIDIA GPUs (any RTX-class incl. Blackwell/RTX 50) |
+| NVIDIA CUDA Pack | ~600 MB | ORT CUDA EP + cuDNN runtime + llama.cpp CUDA backend | NVIDIA GPUs (any RTX-class) |
 | Intel OpenVINO Pack | ~300 MB | ORT OpenVINO EP | Intel iGPU + Arc dGPU |
 | Snapdragon NPU Pack | ~150 MB | ORT QNN EP + (when available) llama.cpp QNN backend | Snapdragon X Elite (Hexagon NPU) on WoA |
 

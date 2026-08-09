@@ -91,40 +91,38 @@ public sealed partial class BulkTagSheet : UserControl
             _replaceConfirmed = false;
         }
 
+        // Snapshot prior user tags BEFORE the replace deletes them, so the
+        // action can be journaled for undo (the engine drops every source='user'
+        // row first). Add/Remove are non-destructive, so they need no snapshot.
+        IReadOnlyDictionary<long, List<string>>? priorUserTags =
+            mode == "replace" ? await ReadUserTagsAsync(_fileIds).ConfigureAwait(true) : null;
+
+        StatusText.Text = "Applying...";
         try
         {
-            StatusText.Text = "Saving existing tags for undo...";
-            var priorUserTags = await Services.TagChangeJournal
-                .CapturePriorUserTagsAsync(_fileIds)
-                .ConfigureAwait(true);
-
-            StatusText.Text = "Applying...";
             var result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "applyTags",
                 () => EngineClient.Instance.ApplyTagsAsync(_fileIds, tags, mode),
-                Services.BulkActionTimeout.ForFileCount(_fileIds.Count));
-            var confirmedFileIds = Services.BulkActionResultTruth
-                .ConfirmedSuccessfulFileIds(result, _fileIds);
+                TimeSpan.FromSeconds(30));
 
-            if (confirmedFileIds.Count > 0)
+            if (result.Failed > 0)
             {
-                Services.TagChangeJournal.PushUndo(
-                    Services.TagChangeJournal.FormatLabel(mode, confirmedFileIds.Count),
-                    confirmedFileIds,
-                    priorUserTags);
-            }
-
-            if (!Services.BulkActionResultTruth.ConfirmsExactSuccess(result, _fileIds))
-            {
+                // Surface per-file engine failures. Keep the dialog open so the
+                // user can adjust + retry; do NOT report success.
                 var first = result.Messages.FirstOrDefault(m => !m.Ok)?.Message
-                            ?? "the engine did not confirm every requested tag update";
-                var notConfirmed = _fileIds.Distinct().Count() - confirmedFileIds.Count;
-                var body = confirmedFileIds.Count > 0
-                    ? $"Tagged {confirmedFileIds.Count}; {notConfirmed} not confirmed — {first}"
-                    : $"No tag updates were confirmed — {first}";
+                            ?? "see logs for details";
+                var body = result.Succeeded > 0
+                    ? $"Tagged {result.Succeeded}; {result.Failed} failed — {first}"
+                    : $"{result.Failed} file(s) failed to tag — {first}";
                 StatusText.Text = body;
                 await ShowAlertAsync("Tagging incomplete", body);
                 return false;
+            }
+
+            // Journal the replace so Ctrl+Z restores the wiped user tags.
+            if (mode == "replace" && result.Succeeded > 0 && priorUserTags is not null)
+            {
+                JournalReplaceUndo(_fileIds, priorUserTags);
             }
 
             StatusText.Text = $"Tagged {result.Succeeded} file(s).";
@@ -139,16 +137,103 @@ public sealed partial class BulkTagSheet : UserControl
         }
     }
 
+    // Read each file's current user tags (source='user') from the read-only DB,
+    // mirroring FilePreviewSheet's direct-connection read. Best-effort: a DB it
+    // can't open yields an empty map and the undo simply restores nothing.
+    private static async Task<IReadOnlyDictionary<long, List<string>>> ReadUserTagsAsync(
+        IReadOnlyList<long> fileIds)
+    {
+        var map = new Dictionary<long, List<string>>();
+        if (fileIds.Count == 0) return map;
+        await Task.Run(() =>
+        {
+            try
+            {
+                if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return;
+                using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                    {
+                        DataSource = Services.AppPaths.DbPath,
+                        Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                    }.ToString());
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                // file ids are int64 drawn from our own DB selection (never user
+                // text), so an inlined IN-list is injection-safe and sidesteps a
+                // variable-count parameter dance.
+                var inList = string.Join(",", fileIds);
+                cmd.CommandText =
+                    $"SELECT file_id, tag FROM tags WHERE source = 'user' AND file_id IN ({inList}) ORDER BY file_id, rowid";
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    var fid = rdr.GetInt64(0);
+                    if (!map.TryGetValue(fid, out var list))
+                    {
+                        list = new List<string>();
+                        map[fid] = list;
+                    }
+                    list.Add(rdr.GetString(1));
+                }
+            }
+            catch
+            {
+                // DB unavailable / locked — undo degrades to a no-op restore.
+            }
+        }).ConfigureAwait(false);
+        return map;
+    }
+
+    // Group the affected files by their identical prior user-tag set so the undo
+    // restores each distinct set with a single applyTags(replace) per group (the
+    // IPC command applies one tag list to many files). Pure + static so it's
+    // unit-testable without the UI runtime.
     internal static List<(List<long> Ids, List<string> Tags)> GroupByTagSet(
         IReadOnlyList<long> fileIds, IReadOnlyDictionary<long, List<string>> priorTags)
-        => Services.TagChangeJournal.GroupByTagSet(fileIds, priorTags);
+    {
+        var groups = new Dictionary<string, (List<long> Ids, List<string> Tags)>(StringComparer.Ordinal);
+        foreach (var id in fileIds)
+        {
+            var tags = priorTags.TryGetValue(id, out var t) ? t : new List<string>();
+            // Order-insensitive key so files with the same set share one batch.
+            var key = string.Join("\u0001", tags.OrderBy(x => x, StringComparer.Ordinal));
+            if (!groups.TryGetValue(key, out var g))
+            {
+                g = (new List<long>(), new List<string>(tags));
+                groups[key] = g;
+            }
+            g.Ids.Add(id);
+        }
+        return groups.Values.ToList();
+    }
 
-    internal static async Task<bool> RestoreGroupsConfirmedAsync(
-        IReadOnlyList<(List<long> Ids, List<string> Tags)> groups,
-        Func<IReadOnlyList<long>, IReadOnlyList<string>, Task<BulkActionResult>> reverse)
-        => await Services.TagChangeJournal
-            .RestoreGroupsConfirmedAsync(groups, reverse)
-            .ConfigureAwait(false);
+    private static void JournalReplaceUndo(
+        IReadOnlyList<long> fileIds, IReadOnlyDictionary<long, List<string>> priorUserTags)
+    {
+        var groups = GroupByTagSet(fileIds, priorUserTags);
+        var label = fileIds.Count == 1 ? "replace tags" : $"replace tags on {fileIds.Count} files";
+        Services.UndoStack.Instance.Push(label, async () =>
+        {
+            try
+            {
+                // Restore each file's prior user-tag set; "replace" with the
+                // captured tags resets exactly (an empty set clears them again).
+                foreach (var (ids, tags) in groups)
+                {
+                    await EngineClient.Instance.WaitForBulkActionResultAsync(
+                        "applyTags",
+                        () => EngineClient.Instance.ApplyTagsAsync(ids, tags, "replace"),
+                        TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Warn("Bulk-tag replace undo failed: " + ex.Message);
+                return false;
+            }
+        });
+    }
 
     private async Task ShowAlertAsync(string title, string body)
     {

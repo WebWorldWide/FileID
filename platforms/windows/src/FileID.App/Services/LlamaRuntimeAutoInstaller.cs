@@ -1,13 +1,22 @@
-﻿// LlamaRuntimeAutoInstaller — runtime-presence detection at engine-ready time.
-// The runtime is installed together with the VLM after an explicit Welcome or
-// Deep Analyze install action; startup never initiates a network request.
+﻿// LlamaRuntimeAutoInstaller — silent install of the Vulkan llama.cpp runtime
+// at engine-ready time so Deep Analyze "just works" the first time the user
+// opens the tab.
 //
-// PRIVACY: no telemetry and no automatic network request.
+// Previously this was an advisory banner inside Deep Analyze with an Install
+// button. Most users didn't notice it until they tried to caption an image
+// and got nothing. The CudaAutoInstaller pattern proved that silent install
+// is the better default; this is the same idea for the base Vulkan runtime
+// every Windows user needs (NVIDIA, AMD, Intel, Adreno — Vulkan covers all).
+//
+// PRIVACY: no telemetry — failure paths log locally only. The download is a
+// plain HTTPS GET against the official llama.cpp GitHub release (the same
+// source the previous manual button used). No new network surface.
 
 using System;
 using System.ComponentModel;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using FileID.ViewModels;
 
 namespace FileID.Services;
@@ -76,41 +85,39 @@ internal static class LlamaRuntimeAutoInstaller
             try
             {
                 var llamaDir = Path.Combine(AppPaths.ModelsDir, "llama.cpp");
-                // Match both sentinel forms the engine writes (flat
-                // `{id}.installed` + hashed `{id}-{hash}.installed`) — the
-                // flat-only probe never saw hashed sentinels, so this fired a
-                // slot-less prewarm on every engine Ready.
-                bool sentinelPresent = SentinelProbe.Installed(ModelKind);
+                var sentinel = Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{ModelKind}.installed");
                 // Match the engine's VlmRunner, which accepts the binary at the
                 // dir root OR a bin/ subdir — checking only the flat path would
                 // re-download every launch if a future zip nests binaries.
                 bool mtmdPresent = File.Exists(Path.Combine(llamaDir, "llama-mtmd-cli.exe"))
                                 || File.Exists(Path.Combine(llamaDir, "bin", "llama-mtmd-cli.exe"));
-                if (sentinelPresent && mtmdPresent)
+                if (File.Exists(sentinel) && mtmdPresent)
                 {
                     DebugLog.Info("[VULKAN-AUTO] llama.cpp runtime already installed (mtmd-cli present); skipping.");
                     return;
                 }
-                if (sentinelPresent)
+                if (File.Exists(sentinel))
                 {
                     DebugLog.Info("[VULKAN-AUTO] runtime present but missing llama-mtmd-cli.exe (stale pre-mtmd build) — reinstalling current runtime.");
-                    var sentinelsDir = Path.Combine(AppPaths.ModelsDir, ".sentinels");
-                    try
-                    {
-                        // `{ModelKind}*.installed` covers flat + hashed; it cannot
-                        // match llama_runtime_cuda_x64 (different prefix).
-                        foreach (var f in Directory.EnumerateFiles(sentinelsDir, $"{ModelKind}*.installed"))
-                        {
-                            try { File.Delete(f); } catch { /* best-effort */ }
-                        }
-                    }
-                    catch { /* best-effort */ }
-                    try { File.Delete(Path.Combine(llamaDir, "llama-runtime.zip")); } catch { /* best-effort */ }
+                    try { File.Delete(sentinel); } catch { /* best-effort */ }
+                    try { File.Delete(Path.Combine(AppPaths.ModelsDir, "llama.cpp", "llama-runtime.zip")); } catch { /* best-effort */ }
                 }
             }
             catch { /* if FS check fails, engine's own short-circuit will catch it */ }
 
-            DebugLog.Info("[VULKAN-AUTO] runtime missing — it will install with the user's Deep Analyze model selection.");
+            DebugLog.Info("[VULKAN-AUTO] no sentinel — silently installing Vulkan llama.cpp runtime.");
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await EngineClient.Instance.PrewarmModelAsync(ModelKind).ConfigureAwait(false);
+                    DebugLog.Info("[VULKAN-AUTO] PrewarmModel IPC dispatched.");
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("[VULKAN-AUTO] PrewarmModel failed: " + ex.Message);
+                }
+            });
         }
         catch (Exception ex)
         {

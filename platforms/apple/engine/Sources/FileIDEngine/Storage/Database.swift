@@ -465,8 +465,9 @@ public final class Database: @unchecked Sendable {
         // resolve and the anti-merge guard silently no-ops. Add (file_id, bbox) keys
         // (a face at a given file+bbox is the same face across re-scans) + backfill
         // from face_a/face_b where they still resolve. Byte-equivalent to the Windows
-        // v17_face_verification_stable_keys migration; both the macOS write path and
-        // FaceClustering resolve these anchors across face-print id churn.
+        // v17_face_verification_stable_keys migration. macOS has no verdict WRITE path
+        // (markPersonsDifferent is not_implemented here) — this is for cross-platform
+        // schema parity + so the apply side (FaceClustering) resolves churn-stably.
         m.registerMigration("v17_face_verification_stable_keys") { db in
             try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN file_a INTEGER")
             try db.execute(sql: "ALTER TABLE face_verifications ADD COLUMN bbox_a TEXT")
@@ -498,19 +499,6 @@ public final class Database: @unchecked Sendable {
                 )
                 """)
             try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token)")
-        }
-
-        // v19: records that a doc/pdf's text-extraction stage has run, so the BGE
-        // backfill carve-out stops re-walking a doc that yields no embeddable text
-        // (an image-only PDF, an iWork package, an empty file) on every rescan.
-        // Byte-faithful with the Rust v19_files_text_stage_done migration.
-        m.registerMigration("v19_files_text_stage_done") { db in
-            try db.execute(sql: "ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0")
-        }
-
-        // Full-pass completion is distinct from vlm_model's latest-run provenance.
-        m.registerMigration("v20_vlm_full_model") { db in
-            try db.execute(sql: "ALTER TABLE files ADD COLUMN vlm_full_model TEXT;")
         }
 
         return m
@@ -584,14 +572,14 @@ public final class Database: @unchecked Sendable {
         return try await pool.write { db in
             let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
             var args: [DatabaseValueConvertible] = [target]
-            args.append(contentsOf: validSources)
+            args.append(contentsOf: validSources.map { Int($0) })
             try db.execute(
                 sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
                 arguments: StatementArguments(args)
             )
             try db.execute(
                 sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                arguments: StatementArguments(validSources)
+                arguments: StatementArguments(validSources.map { Int($0) })
             )
             try db.execute(sql: """
                 UPDATE persons SET file_count = (
@@ -601,18 +589,6 @@ public final class Database: @unchecked Sendable {
                 )
                 WHERE id = ?
                 """, arguments: [target, target])
-            try db.execute(sql: """
-                UPDATE persons
-                SET representative_face_id = COALESCE(
-                    (SELECT fp.id FROM face_prints fp
-                     WHERE fp.person_id = ? AND fp.arcface_embedding IS NOT NULL
-                     ORDER BY COALESCE(fp.face_quality, 0.0) DESC LIMIT 1),
-                    (SELECT fp.id FROM face_prints fp
-                     WHERE fp.person_id = ?
-                     ORDER BY COALESCE(fp.face_quality, 0.0) DESC LIMIT 1),
-                    representative_face_id)
-                WHERE id = ?
-                """, arguments: [target, target, target])
             return try Int.fetchOne(db, sql:
                 "SELECT file_count FROM persons WHERE id = ?",
                 arguments: [target]) ?? 0

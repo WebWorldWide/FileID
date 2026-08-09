@@ -1,12 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Shared WinUI palette, surfaces, motion primitives, and reduced-motion bridge. -->
+  <!--
+    FileID.Theme — visual language as a class library.
+    Owns: Theme.xaml (brushes + tokens), GlassCard / GoldButton / BadgePill /
+    SettingToggleRow / ThemedSegmentedControl reusable components, motion
+    primitives (Shimmer, CompletionRipple, IridescentBorder, LavaLamp,
+    SpringEasing), and the ReducedMotion bridge.
+
+    Separated from FileID.App so the theme can be unit-tested + visually
+    audited in isolation (a future Theme Gallery debug app references this).
+  -->
   <PropertyGroup>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
-    <Platforms>x64;ARM64</Platforms>
-    <PlatformTarget Condition="'$(Platform)' == 'ARM64'">ARM64</PlatformTarget>
-    <PlatformTarget Condition="'$(Platform)' != 'ARM64'">x64</PlatformTarget>
-    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <RootNamespace>FileID.Theme</RootNamespace>
     <AssemblyName>FileID.Theme</AssemblyName>
     <UseWinUI>true</UseWinUI>

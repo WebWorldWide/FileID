@@ -49,23 +49,11 @@ enum Theme {
 // MARK: - GlassCard
 
 struct GlassCard<Content: View>: View {
-    let content: Content
-    let padding: CGFloat
-    let fillsWidth: Bool
-
-    init(
-        padding: CGFloat = Theme.Space.m,
-        fillsWidth: Bool = false,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.content = content()
-        self.padding = padding
-        self.fillsWidth = fillsWidth
-    }
+    @ViewBuilder var content: Content
+    var padding: CGFloat = Theme.Space.m
 
     var body: some View {
         content
-            .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.m)
@@ -111,11 +99,11 @@ struct SettingToggleRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.callout)
+                Text(title).font(.caption.bold())
                 if let subtitle {
                     Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -184,5 +172,42 @@ struct ThemedSegmentedControl: View {
                         .stroke(Color.white.opacity(0.1), lineWidth: 1)
                 )
         )
+    }
+}
+
+struct ThemedTogglePicker: View {
+    @Binding var selection: Bool
+    let falseLabel: String
+    let trueLabel:  String
+
+    var body: some View {
+        HStack(spacing: 2) {
+            pillButton(label: falseLabel, active: !selection) { selection = false }
+            pillButton(label: trueLabel,  active:  selection) { selection = true  }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color.white.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
+        )
+    }
+
+    private func pillButton(label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { action() }
+        } label: {
+            Text(label)
+                .font(.system(size: 12, weight: active ? .bold : .medium))
+                .foregroundStyle(active ? Color.black : Color.primary.opacity(0.7))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(active ? Theme.gold : Color.white.opacity(0.08)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }

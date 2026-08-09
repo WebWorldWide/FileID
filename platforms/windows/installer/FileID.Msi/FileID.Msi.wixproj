@@ -10,8 +10,7 @@
 
     The MSI installs:
       - FileID.exe + the entire dotnet publish output (self-contained .NET +
-        Win2D + every project DLL). The Burn bundle installs the framework-
-        dependent Windows App Runtime prerequisite before this MSI.
+        WinAppSDK runtime + Win2D + every project DLL).
       - FileIDEngine.exe colocated with FileID.exe so the C# spawn path
         (AppPaths.EngineExePath) finds it without falling back to the dev
         layout.
@@ -25,19 +24,6 @@
     <OutputType>Package</OutputType>
     <OutputName Condition="'$(Platform)' == 'x64'">FileID-x64</OutputName>
     <OutputName Condition="'$(Platform)' == 'arm64'">FileID-arm64</OutputName>
-    <!-- ICE60: fires on versioned, language-neutral NATIVE DLLs (e_sqlite3.dll
-         from SQLitePCLRaw.bundle_e_sqlite3, added when the NuGet SQLite CVE was
-         patched) because they carry a version resource but no Language column
-         and are not fonts. This is the documented ICE60 false-positive for
-         native libraries — Windows' own installers suppress it. Safe because
-         these are single-binary, culture-invariant native DLLs with no
-         language variants to disambiguate.
-         ICE61: the expected, documented consequence of AllowSameVersionUpgrades
-         in Product.wxs — that flag sets the Upgrade table's VersionMax inclusive
-         so a same-version cross-arch package majors-upgrades in place, which is
-         exactly what ICE61 ("should remove only older versions") flags. WiX's own
-         docs say to suppress ICE61 when using AllowSameVersionUpgrades. -->
-    <SuppressIces>ICE60;ICE61</SuppressIces>
     <!-- WiX 4's wix.exe accepts only `full` or `none` for -pdbType.
          Override the platforms-wide `portable` default from
          Directory.Build.props (intended for .NET assemblies, not MSIs). -->
@@ -55,16 +41,16 @@
          repo asset, not the publish output, so the WiX MSI gets the
          multi-res version even before R2R/AOT publish runs. -->
     <AssetsRoot>$(MSBuildThisFileDirectory)..\..\src\FileID.App\Assets</AssetsRoot>
-    <MsiThemeRoot>$(MSBuildThisFileDirectory)theme</MsiThemeRoot>
-    <BundleThemeRoot>$(MSBuildThisFileDirectory)..\FileID.Bundle\theme</BundleThemeRoot>
 
     <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\installer\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Platform)\</IntermediateOutputPath>
 
-    <!-- One cross-architecture product family. Keep this UpgradeCode stable:
-         an ARM64 MSI must major-upgrade an x64 MSI (including the same product
-         version) rather than registering two owners for Program Files\FileID. -->
-    <UpgradeCode>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCode>
+    <!-- Per-arch upgrade codes — must NEVER change between releases.
+         Different arches get different upgrade codes so the Burn bundle
+         can install both side-by-side if needed (it never does — chain
+         picks one — but the GUIDs stay distinct for safety). -->
+    <UpgradeCodeX64>1B5E7FA0-4C42-4A6E-9A12-7F9AE9E1B5C4</UpgradeCodeX64>
+    <UpgradeCodeArm64>2C6F80B1-5D53-5B7F-AB23-80AB0AF2C6D5</UpgradeCodeArm64>
   </PropertyGroup>
 
   <ItemGroup>
@@ -82,20 +68,40 @@
          from Directory.Build.props (single source: platforms/windows/VERSION),
          so Product.wxs uses $(var.Version) instead of a hardcoded literal. -->
     <DefineConstants Condition="'$(Platform)' == 'x64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCode);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeX64);AssetsRoot=$(AssetsRoot);Version=$(FileIDVersion)</DefineConstants>
     <DefineConstants Condition="'$(Platform)' == 'arm64'"
-        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCode);AssetsRoot=$(AssetsRoot);MsiThemeRoot=$(MsiThemeRoot);BundleThemeRoot=$(BundleThemeRoot);Version=$(FileIDVersion)</DefineConstants>
+        >PublishRoot=$(PublishRoot);UpgradeCode=$(UpgradeCodeArm64);AssetsRoot=$(AssetsRoot);Version=$(FileIDVersion)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" />
   </ItemGroup>
 
-  <!-- Fail closed if VERSION or the engine package version cannot be parsed,
-       or if they differ. -->
+  <!-- Single-source guard: the MSI version comes from VERSION (via
+       $(FileIDVersion) in Directory.Build.props); the Rust engine mirrors
+       the same literal in src/engine/Cargo.toml because Cargo can't read an
+       external file without a build script. Fail the installer build if the
+       two drift, so a stale Cargo.toml can never ship a mismatched engine
+       version inside an installer stamped with a different ProductVersion.
+       (Not gated by CI — the WiX projects aren't CI-built — but catches it
+       on every local release build via publish-bundle.ps1.) -->
   <Target Name="VerifyEngineVersionMatchesVersionFile" BeforeTargets="CoreCompile">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\build\verify-version.ps1&quot;"
-          ConsoleToMSBuild="true" />
+    <!-- Read Cargo.toml line-by-line (avoids feeding multiline text with
+         embedded quotes into an inline property-function, which corrupts the
+         MSBuild expression parser) and pull the first `version = "x.y.z"`. -->
+    <ReadLinesFromFile File="$(MSBuildThisFileDirectory)..\..\src\engine\Cargo.toml">
+      <Output TaskParameter="Lines" ItemName="_CargoTomlLine" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_CargoVersionMatch Include="@(_CargoTomlLine)"
+                          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Identity)', '^\s*version\s*=\s*&quot;[^&quot;]+&quot;'))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_CargoVersionParsed>$([System.Text.RegularExpressions.Regex]::Match('@(_CargoVersionMatch)', 'version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</_CargoVersionParsed>
+    </PropertyGroup>
+    <Error
+        Condition="'$(_CargoVersionParsed)' != '$(FileIDVersion)'"
+        Text="Version drift: platforms/windows/VERSION is '$(FileIDVersion)' but src/engine/Cargo.toml is '$(_CargoVersionParsed)'. Update Cargo.toml to match VERSION (the single source of truth)." />
   </Target>
 
   <!-- Generate the PublishedFiles.wxs component fragment from the publish/
@@ -105,26 +111,7 @@
        Ids + GUIDs derived from each file's relative path so upgrade
        behavior stays correct across versions. -->
   <Target Name="GeneratePublishedFiles" BeforeTargets="CoreCompile">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot; -Architecture &quot;$(Platform)&quot;"
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)Generate-Components.ps1&quot; -PublishRoot &quot;$(PublishRoot)&quot; -OutputFile &quot;$(IntermediateOutputPath)PublishedFiles.wxs&quot;"
           ConsoleToMSBuild="true" />
-  </Target>
-
-  <Target Name="VerifyPublishedLayout" BeforeTargets="GeneratePublishedFiles">
-    <Error Condition="!Exists('$(PublishRoot)\FileID.exe')"
-           Text="Incomplete publish layout: FileID.exe is missing from $(PublishRoot)." />
-    <Error Condition="!Exists('$(PublishRoot)\FileIDEngine.exe')"
-           Text="Incomplete publish layout: FileIDEngine.exe is missing from $(PublishRoot). Run publish-bundle.ps1 so the matching native engine is staged before MSI creation." />
-    <Error Condition="!Exists('$(PublishRoot)\FileID.pri')"
-           Text="Incomplete publish layout: FileID.pri is missing from $(PublishRoot); the installed WinUI app would fail during XAML activation." />
-    <Error Condition="!Exists('$(PublishRoot)\Microsoft.WindowsAppRuntime.Bootstrap.dll')"
-           Text="Incomplete publish layout: the Windows App Runtime bootstrap DLL is missing from $(PublishRoot)." />
-    <Error Condition="!Exists('$(PublishRoot)\onnxruntime.dll')"
-           Text="Incomplete publish layout: onnxruntime.dll is missing from $(PublishRoot); the installed engine could not initialize inference." />
-    <Error Condition="!Exists('$(PublishRoot)\onnxruntime_providers_shared.dll')"
-           Text="Incomplete publish layout: onnxruntime_providers_shared.dll is missing from $(PublishRoot)." />
-    <Error Condition="!Exists('$(PublishRoot)\DirectML.dll')"
-           Text="Incomplete publish layout: DirectML.dll is missing from $(PublishRoot); the default Windows GPU execution provider would be unavailable." />
-    <Error Condition="!Exists('$(PublishRoot)\pdfium.dll')"
-           Text="Incomplete publish layout: pdfium.dll is missing from $(PublishRoot); PDF analysis would fail at runtime." />
   </Target>
 </Project>

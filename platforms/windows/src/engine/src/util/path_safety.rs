@@ -92,32 +92,24 @@ pub(crate) fn canonicalize_for_containment(p: &Path) -> PathBuf {
     canonical
 }
 
-/// Stable hash for a file path, case-folded ONLY where the filesystem is
-/// case-insensitive. On NTFS / exfat / default HFS+/APFS a re-scan after a
-/// path-case change must produce the same hash — else the next ingest creates a
-/// duplicate `files` row — so we key `DefaultHasher` (SipHash) off
-/// `to_ascii_lowercase`. NTFS uses a Unicode case-folding table that's roughly
-/// equivalent for typical paths; a pathological Turkish-dotted-I name wouldn't
-/// round-trip exactly, but the collision is bounded (worst case: one duplicate
-/// row the next scan overwrites via UPSERT).
+/// Case-insensitive stable hash for a file path. NTFS is case-insensitive,
+/// so a re-scan after a path-case change must produce the same hash — else
+/// the next ingest creates a duplicate `files` row. `DefaultHasher` (SipHash)
+/// keyed off `to_ascii_lowercase` is enough: NTFS uses a Unicode case-folding
+/// table that's roughly equivalent for typical paths. A pathological
+/// filename with Turkish dotted I would not round-trip exactly, but the
+/// resulting hash collision is bounded and tolerable (worst case: one
+/// duplicate row that the next scan overwrites via UPSERT).
 ///
-/// Linux's default filesystems (ext4 / btrfs / xfs / zfs) are case-SENSITIVE,
-/// so `Foo.jpg` and `foo.jpg` are genuinely distinct files. Lowercasing there
-/// would hash them to the same `path_hash` (the dedup/lookup key), letting one
-/// shadow or overwrite the other on UPSERT — silent data loss. So on Linux we
-/// hash the path as-is. (A case-insensitive volume mounted on Linux, e.g. the
-/// exfat test drive, can't hold two case-distinct names anyway, so preserving
-/// case is harmless there.) Each platform owns its own DB, so this per-OS
-/// difference has no cross-platform implication. The wire schema stores the
-/// resulting i64 as-is.
+/// macOS volumes default to case-insensitive HFS+/APFS, so the same
+/// behavior is correct there — but each platform owns its own DB, so the
+/// cross-platform implication is moot. The wire schema stores the resulting
+/// i64 as-is.
 pub(crate) fn stable_path_hash(path: &str) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    if cfg!(target_os = "linux") {
-        path.hash(&mut h);
-    } else {
-        path.to_ascii_lowercase().hash(&mut h);
-    }
+    let normalized = path.to_ascii_lowercase();
+    normalized.hash(&mut h);
     h.finish() as i64
 }
 
@@ -197,82 +189,6 @@ pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Canonical comparison form for user folder-exclusion matching: strip any
-/// "\\?\" verbatim prefix, unify '/'→'\', trim trailing separators, and
-/// lowercase (NTFS is case-insensitive). On non-Windows only trailing '/'
-/// are trimmed — Linux filesystems are case-sensitive and '\' is a legal
-/// filename character there, so folding either would corrupt paths.
-pub(crate) fn normalize_for_exclusion(p: &Path) -> String {
-    let stripped = strip_extended_length(p);
-    let s = stripped.as_os_str().to_string_lossy();
-    if cfg!(windows) {
-        let unified: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-        unified.trim_end_matches('\\').to_lowercase()
-    } else {
-        let t = s.trim_end_matches('/');
-        if t.is_empty() { "/".to_string() } else { t.to_string() }
-    }
-}
-
-/// A user exclusion validated against a scan root. `original` keeps the
-/// caller's casing (verbatim-stripped, separators unified, trailing
-/// separators trimmed) for BINARY-collating `path_text` range scans;
-/// `normalized` is the case-folded form the walker compares against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedExclusion {
-    pub original: String,
-    pub normalized: String,
-}
-
-/// Resolve a single absolute path with no root-containment check — used by
-/// the `purgeExcluded` command, where any absolute folder is a valid purge
-/// target. Returns None for relative paths.
-pub(crate) fn resolve_exclusion_unrooted(p: &Path) -> Option<ResolvedExclusion> {
-    if !p.is_absolute() {
-        return None;
-    }
-    let normalized = normalize_for_exclusion(p);
-    let stripped = strip_extended_length(p);
-    let s = stripped.as_os_str().to_string_lossy();
-    let original = if cfg!(windows) {
-        let unified: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
-        unified.trim_end_matches('\\').to_string()
-    } else {
-        s.trim_end_matches('/').to_string()
-    };
-    Some(ResolvedExclusion { original, normalized })
-}
-
-/// Filter + normalize raw exclusion strings against a scan root: drops
-/// relative paths, paths not strictly under the root, duplicates, and the
-/// root itself (excluding the root would exclude everything — warn instead).
-pub(crate) fn resolve_exclusions(root: &Path, raw: &[String]) -> Vec<ResolvedExclusion> {
-    let norm_root = normalize_for_exclusion(root);
-    let sep = if cfg!(windows) { '\\' } else { '/' };
-    let mut child_prefix = norm_root.clone();
-    if !child_prefix.ends_with(sep) {
-        child_prefix.push(sep);
-    }
-    let mut out: Vec<ResolvedExclusion> = Vec::new();
-    let mut seen = std::collections::HashSet::with_capacity(raw.len());
-    for r in raw {
-        let Some(res) = resolve_exclusion_unrooted(Path::new(r)) else {
-            continue;
-        };
-        if res.normalized == norm_root {
-            tracing::warn!("exclusion equal to the scan root ignored");
-            continue;
-        }
-        if !res.normalized.starts_with(&child_prefix) {
-            continue;
-        }
-        if seen.insert(res.normalized.clone()) {
-            out.push(res);
-        }
-    }
-    out
-}
-
 /// Map an arbitrary string to a filename component safe on Windows NTFS, Linux,
 /// and BSD — byte-faithful with macOS `FilesystemNameSafe.componentSafe` so the
 /// restructure planner produces IDENTICAL folder names on every platform
@@ -285,8 +201,8 @@ pub fn safe_filename_component(raw: &str) -> String {
     const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
     const MAX_LEN: usize = 200;
     const RESERVED: &[&str] = &[
-        "con", "prn", "aux", "nul", "com0", "com1", "com2", "com3", "com4", "com5",
-        "com6", "com7", "com8", "com9", "lpt0", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
         "lpt6", "lpt7", "lpt8", "lpt9",
     ];
     let mut out = String::with_capacity(raw.len());
@@ -318,141 +234,9 @@ pub fn safe_filename_component(raw: &str) -> String {
     out
 }
 
-#[cfg(windows)]
-#[allow(dead_code)]
-pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVE_FILE_FLAGS};
-
-    let source = to_extended_length(source);
-    let destination = to_extended_length(destination);
-    let source_wide: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let destination_wide: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        MoveFileExW(
-            PCWSTR(source_wide.as_ptr()),
-            PCWSTR(destination_wide.as_ptr()),
-            MOVE_FILE_FLAGS(0),
-        )
-        .map_err(std::io::Error::other)
-    }
-}
-
-#[cfg(unix)]
-#[allow(dead_code)]
-fn c_path(path: &Path, label: &str) -> std::io::Result<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{label} path contains NUL"),
-        )
-    })
-}
-
-#[cfg(target_os = "linux")]
-#[allow(dead_code)]
-pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = c_path(source, "source")?;
-    let destination = c_path(destination, "destination")?;
-    let result = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = c_path(source, "source")?;
-    let destination = c_path(destination, "destination")?;
-    let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-#[allow(dead_code)]
-pub fn rename_no_replace(_source: &Path, _destination: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "atomic no-replace rename is unavailable on this platform",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    #[cfg(windows)]
-    fn normalize_for_exclusion_windows_forms() {
-        let n = |s: &str| normalize_for_exclusion(Path::new(s));
-        assert_eq!(n(r"C:\Pics\Raw"), r"c:\pics\raw");
-        assert_eq!(n(r"C:\Pics\Raw\"), r"c:\pics\raw");
-        assert_eq!(n(r"C:/Pics/Raw"), r"c:\pics\raw");
-        assert_eq!(n(r"\\?\C:\Pics\Raw"), r"c:\pics\raw");
-        assert_eq!(n(r"\\?\UNC\srv\share\Raw"), r"\\srv\share\raw");
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn normalize_for_exclusion_unix_forms() {
-        let n = |s: &str| normalize_for_exclusion(Path::new(s));
-        assert_eq!(n("/pics/Raw/"), "/pics/Raw"); // case preserved
-        assert_eq!(n("/pics/with\\backslash"), "/pics/with\\backslash");
-        assert_eq!(n("/"), "/");
-    }
-
-    #[test]
-    fn resolve_exclusions_containment() {
-        let (root, inside, inside_dup, outside) = if cfg!(windows) {
-            (r"C:\Pics", r"C:\Pics\Raw\", r"c:\pics\RAW", r"D:\Other")
-        } else {
-            ("/pics", "/pics/raw/", "/pics/RAW", "/other")
-        };
-        let raw = vec![
-            inside.to_string(),
-            inside_dup.to_string(),
-            outside.to_string(),
-            root.to_string(),        // root-equal → dropped
-            "relative/x".to_string(), // relative → dropped
-        ];
-        let resolved = resolve_exclusions(Path::new(root), &raw);
-        // On Unix the "dup" differs by case and is a genuinely distinct dir.
-        let expected = if cfg!(windows) { 1 } else { 2 };
-        assert_eq!(resolved.len(), expected);
-        assert_eq!(
-            resolved[0].original,
-            if cfg!(windows) { r"C:\Pics\Raw" } else { "/pics/raw" }
-        );
-        // Prefix-boundary: excluding \Pics must not match \PicsBackup.
-        let sibling = if cfg!(windows) { r"C:\PicsBackup" } else { "/picsBackup" };
-        assert!(resolve_exclusions(Path::new(root), &[sibling.to_string()]).is_empty());
-    }
 
     #[test]
     fn component_safe_matches_macos_rules() {
@@ -467,28 +251,6 @@ mod tests {
         // All-illegal collapses to placeholders, never empty.
         assert_eq!(safe_filename_component("///"), "___");
         assert_eq!(safe_filename_component(""), "_");
-    }
-
-    #[test]
-    fn no_replace_rename_preserves_an_occupied_destination() {
-        let root = std::env::temp_dir().join(format!(
-            "fileid-no-replace-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("source");
-        let destination = root.join("destination");
-        std::fs::write(&source, b"source").unwrap();
-        std::fs::write(&destination, b"destination").unwrap();
-        assert!(rename_no_replace(&source, &destination).is_err());
-        assert_eq!(std::fs::read(&source).unwrap(), b"source");
-        assert_eq!(std::fs::read(&destination).unwrap(), b"destination");
-        std::fs::remove_file(&destination).unwrap();
-        rename_no_replace(&source, &destination).unwrap();
-        assert!(!source.exists());
-        assert_eq!(std::fs::read(&destination).unwrap(), b"source");
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -555,26 +317,16 @@ mod tests {
             }
         }
 
-        // Case folding follows the filesystem. On case-INSENSITIVE volumes
-        // (NTFS/exfat/default APFS) C:\Users\Foo and c:\users\foo are the same
-        // file, so a re-scan after an Explorer rename mustn't create a duplicate
-        // row → equal hashes. On case-SENSITIVE Linux fs they're distinct files,
-        // so case-distinct paths must hash differently (else one shadows the
-        // other on UPSERT) while identical strings still collide.
+        // stable_path_hash must be case-insensitive: NTFS treats
+        // C:\Users\Foo and c:\users\foo as the same file. A re-scan after
+        // an Explorer rename mustn't create a duplicate row.
         #[test]
-        fn stable_path_hash_case_sensitivity(
+        fn stable_path_hash_is_case_insensitive(
             s in "[a-zA-Z0-9_./\\\\]{1,80}",
         ) {
             let lower = s.to_ascii_lowercase();
             let upper = s.to_ascii_uppercase();
-            if cfg!(target_os = "linux") {
-                proptest::prop_assert_eq!(
-                    stable_path_hash(&lower) == stable_path_hash(&upper),
-                    lower == upper
-                );
-            } else {
-                proptest::prop_assert_eq!(stable_path_hash(&lower), stable_path_hash(&upper));
-            }
+            proptest::prop_assert_eq!(stable_path_hash(&lower), stable_path_hash(&upper));
         }
 
         // stable_path_hash must be deterministic: same input twice in a
@@ -609,14 +361,7 @@ mod tests {
     /// StablePathHashTests) so `files.path_hash` is identical in both
     /// engines' DBs. If DefaultHasher's algorithm ever changes, this fails
     /// before the platforms silently drift apart.
-    ///
-    /// Linux is intentionally excluded: its case-SENSITIVE filesystems make
-    /// `stable_path_hash` preserve case (see the fn doc), so these lowercased
-    /// macOS/Windows-parity vectors don't apply there. Linux's contract is the
-    /// `stable_path_hash_case_sensitivity` property test above. (DBs are never
-    /// shared across OSes, so the divergence is invisible in practice.)
     #[test]
-    #[cfg(not(target_os = "linux"))]
     fn stable_path_hash_pinned_vectors() {
         assert_eq!(stable_path_hash(""), 3_476_900_567_878_811_119);
         assert_eq!(stable_path_hash("a"), 8_186_225_505_942_432_243);

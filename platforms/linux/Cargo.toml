@@ -6,11 +6,3 @@
 [workspace]
 resolver = "2"
 members = ["src/app"]
-
-# Profiles must live at the workspace root (a member's [profile] is ignored).
-[profile.release]
-opt-level     = 3
-lto           = "fat"
-codegen-units = 1
-strip         = "symbols"
-panic         = "abort"

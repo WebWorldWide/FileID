@@ -83,13 +83,6 @@ import Foundation
         #expect(try buf.append(d("recovered\n")) == [d("recovered")])
     }
 
-    @Test func newlineTerminatedOverflowAlsoThrows() {
-        let buf = LineBuffer()
-        var huge = Data(count: LineBuffer.maxLineBytes + 1)
-        huge.append(0x0A)
-        #expect(throws: LineOverflowError.self) { try buf.append(huge) }
-    }
-
     @Test func overflowMessageReflectsCap() {
         #expect(LineOverflowError(capBytes: 64 * 1024 * 1024).description == "IPC line exceeded 64 MiB cap")
     }

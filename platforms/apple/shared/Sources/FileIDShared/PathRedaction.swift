@@ -1,30 +1,33 @@
 import Foundation
 
-/// Redact a path for persistent logs. Keeps the last two components so
-/// failures stay debuggable without recording a username or full folder tree.
-/// FileID's own database/model paths follow the same rule: they still contain
-/// the user's home directory and can include user-selected model locations.
+/// FileID's own state tree (models, DB, logs). Resolved once; the only
+/// prefix allowed to pass through redaction verbatim.
+private let fileIDStateRoot: String = {
+    guard let base = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask).first
+    else { return "" }
+    return base.appendingPathComponent("FileID", isDirectory: true).path
+}()
+
+/// Redact a user file path for logs. Keeps the last two path
+/// components so failures stay debuggable while folder names like
+/// "Mom_Birthday_2024" don't end up in logs. Only FileID's OWN state
+/// tree passes through verbatim — the old unanchored
+/// `contains("/Library/Application Support/")` leaked any user path
+/// that merely embedded that substring, username and all (the same
+/// ENG-97/#26 class fixed in the Windows engine's redact_path_for_log).
 public func redactPathForLog(_ path: String) -> String {
-    let normalized = path.replacingOccurrences(of: "\\", with: "/")
-    let parts = normalized.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-    guard !parts.isEmpty else { return "…" }
-
-    let homeMarker: Int? = if parts.first == "Users" || parts.first == "home" {
-        0
-    } else if parts.count > 1,
-              parts[0].hasSuffix(":"),
-              parts[1].caseInsensitiveCompare("Users") == .orderedSame {
-        1
-    } else {
-        nil
+    if !fileIDStateRoot.isEmpty {
+        if path == fileIDStateRoot { return path }
+        if path.hasPrefix(fileIDStateRoot + "/") { return path }
     }
-    if let homeMarker {
-        let userIndex = homeMarker + 1
-        if parts.count == userIndex + 1 { return "…" }
-        if parts.count == userIndex + 2 { return "…/\(parts[userIndex + 1])" }
+    let parts = (path as NSString).pathComponents
+    // A file directly under a home directory (/Users/<name>/<file>)
+    // would keep the username as the parent component of the
+    // two-component tail — emit the filename alone instead.
+    if parts.count == 4, parts[0] == "/", parts[1] == "Users" {
+        return "…/\(parts[3])"
     }
-
-    if normalized.hasPrefix("//"), parts.count <= 2 { return "…" }
     let tail = parts.suffix(2).joined(separator: "/")
-    return "…/\(tail)"
+    return tail.isEmpty ? "…" : "…/\(tail)"
 }

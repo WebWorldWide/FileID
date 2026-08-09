@@ -3,8 +3,6 @@
 // per-file streaming with up to 3 concurrent fetches.
 import Foundation
 import AppKit
-import CryptoKit
-import Darwin
 import FileIDShared
 
 @MainActor
@@ -41,7 +39,6 @@ public final class CLIPModelInstaller {
     /// liveness so a stale tick can't resurrect a phantom "Downloading…"
     /// footer with a dead Cancel button. Mirrors ArcFaceModelInstaller.active.
     private var installing = false
-    private var uninstalling = false
 
     private init() {}
 
@@ -60,13 +57,6 @@ public final class CLIPModelInstaller {
     }
 
     public static var modelsRoot: URL { AppSupportPath.models }
-
-    public static let approxDownloadBytes: Int64 = {
-        let ids = Set(["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"])
-        return ModelManifest.artifacts
-            .filter { ids.contains($0.id) }
-            .reduce(0) { $0 + $1.approxBytes }
-    }()
 
     private static var fetchPlan: [(remote: URL, dest: URL, sha256: String?)] {
         let m = modelsRoot
@@ -137,11 +127,9 @@ public final class CLIPModelInstaller {
     // MARK: - Install paths
 
     public func install() {
-        guard task == nil, !uninstalling else { return }
+        guard task == nil else { return }
         task = Task { [weak self] in
-            await AppSleepActivity.run(reason: "Install CLIP models") {
-                await self?.runHubFetch()
-            }
+            await self?.runHubFetch()
             self?.task = nil
         }
     }
@@ -149,11 +137,9 @@ public final class CLIPModelInstaller {
     /// Air-gapped fallback. Expects the same layout the hub fetch
     /// produces — mobileclip_image/… and clip_text/… at the top.
     public func installFromLocalZip(_ zipURL: URL) {
-        guard task == nil, !uninstalling else { return }
+        guard task == nil else { return }
         task = Task { [weak self] in
-            await AppSleepActivity.run(reason: "Install local CLIP models") {
-                await self?.runExtract(zipAt: zipURL, deleteZipAfter: false)
-            }
+            await self?.runExtract(zipAt: zipURL, deleteZipAfter: false)
             self?.task = nil
         }
     }
@@ -162,14 +148,8 @@ public final class CLIPModelInstaller {
         task?.cancel()
     }
 
-    public func uninstall() async {
-        guard !uninstalling else { return }
-        uninstalling = true
-        defer { uninstalling = false }
-        let activeTask = task
-        activeTask?.cancel()
-        await activeTask?.value
-        task = nil
+    public func uninstall() {
+        cancel()
         let dirs = [
             Self.modelsRoot.appendingPathComponent("mobileclip_image", isDirectory: true),
             Self.modelsRoot.appendingPathComponent("clip_text", isDirectory: true),
@@ -177,11 +157,6 @@ public final class CLIPModelInstaller {
         for d in dirs {
             try? FileManager.default.removeItem(at: d)
         }
-        // The text encoder's ORT session is now backed by deleted weights.
-        // Drop the readiness flag so Library re-shows the "reinstall CLIP" hint
-        // and falls back to keyword-only search instead of a stale semantic path
-        // that would fail on the next query. (Install→Remove leaked it true.)
-        textEncoderReady = false
         refreshStatus()
     }
 
@@ -196,7 +171,7 @@ public final class CLIPModelInstaller {
         installing = true
         defer { installing = false }
         Self.sweepOrphanedStagingRoots()
-        let approxBytes = Self.approxDownloadBytes
+        let approxBytes: Int64 = 250 * 1024 * 1024
         if let free = freeDiskBytes(), free < approxBytes * 2 {
             status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
             return
@@ -243,10 +218,19 @@ public final class CLIPModelInstaller {
 
         status = .extracting
         do {
-            try promoteStaged(stagedPlan.map { (staged: $0.staged, finalDest: $0.finalDest) })
+            for item in stagedPlan {
+                try FileManager.default.createDirectory(
+                    at: item.finalDest.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                if FileManager.default.fileExists(atPath: item.finalDest.path) {
+                    _ = try FileManager.default.replaceItemAt(item.finalDest, withItemAt: item.staged)
+                } else {
+                    try FileManager.default.moveItem(at: item.staged, to: item.finalDest)
+                }
+            }
         } catch {
             status = .installFailed("Couldn't promote staged files: \(error.localizedDescription)")
-            recomputePresentFiles()
+            recomputePresentFiles()  // promote may have moved some files into the live tree
             return
         }
 
@@ -440,361 +424,72 @@ public final class CLIPModelInstaller {
             return
         }
 
+        // Zip-bomb safety margin: extract is ~250 MB, require 1 GB free.
         let minFreeBytes: Int64 = 1_073_741_824
         if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
            let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.int64Value,
            free < minFreeBytes {
-            status = .installFailed("Need at least 1 GB free to extract; only \(free / 1_048_576) MB available.")
+            let freeMB = free / 1_048_576
+            status = .installFailed("Need at least 1 GB free to extract; only \(freeMB) MB available.")
             return
         }
 
-        let stagingRoot = modelsRoot.appendingPathComponent(
-            ".clip-staging-\(UUID().uuidString)", isDirectory: true)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        proc.arguments = ["-o", "-q", zipURL.path, "-d", modelsRoot.path]
+        let stderr = Pipe()
+        proc.standardError = stderr
+        proc.standardOutput = Pipe()
+
         do {
-            try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stagingRoot.path)
+            try proc.run()
+            // 5 min watchdog — degenerate archive shouldn't hang.
+            let resumed = MutexBox(false)
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                proc.terminationHandler = { _ in
+                    if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
+                        cont.resume()
+                    }
+                }
+                Task.detached {
+                    try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+                    if proc.isRunning { proc.terminate() }
+                    if resumed.withLock({ if $0 { return false } else { $0 = true; return true } }) {
+                        cont.resume()
+                    }
+                }
+            }
         } catch {
-            status = .installFailed("Couldn't create a private extraction area: \(error.localizedDescription)")
+            status = .installFailed("Couldn't run unzip: \(error.localizedDescription)")
             return
         }
-        defer { try? FileManager.default.removeItem(at: stagingRoot) }
 
-        do {
-            try Task.checkCancellation()
-            let expandedBytes = try await preflightArchive(zipURL, workRoot: stagingRoot)
-            let requiredFree = expandedBytes * 2 + 256 * 1_024 * 1_024
-            if let fsAttrs = try? FileManager.default.attributesOfFileSystem(forPath: modelsRoot.path),
-               let free = (fsAttrs[.systemFreeSize] as? NSNumber)?.uint64Value,
-               free < requiredFree {
-                throw LocalArchiveError(
-                    "archive needs at least \(requiredFree / 1_048_576) MB free for extraction and rollback")
-            }
-            let result = try await runUnzip(
-                ["-q", zipURL.path, "-d", stagingRoot.path],
-                workRoot: stagingRoot,
-                timeoutSeconds: 300,
-                label: "extract")
-            guard result.status == 0 else {
-                throw LocalArchiveError("unzip failed (\(result.status)): \(result.error)")
-            }
-            try Task.checkCancellation()
+        guard proc.terminationStatus == 0 else {
+            let errData: Data = ((try? stderr.fileHandleForReading.readToEnd()) ?? nil) ?? Data()
+            let errStr = String(data: errData, encoding: .utf8) ?? ""
+            status = .installFailed("Extract failed (\(proc.terminationStatus)): \(errStr.trimmingCharacters(in: .whitespacesAndNewlines))")
+            recomputePresentFiles()  // unzip extracts straight into the live tree — may be partial
+            return
+        }
 
-            let plan = Self.fetchPlan.map { item -> (staged: URL, finalDest: URL, sha256: String?) in
-                let relative = item.dest.path.dropFirst(modelsRoot.path.count + 1)
-                return (
-                    stagingRoot.appendingPathComponent(String(relative)),
-                    item.dest,
-                    item.sha256
-                )
+        for f in Self.requiredFiles {
+            if !FileManager.default.fileExists(atPath: f.path) {
+                status = .installFailed("Zip didn't contain \(f.lastPathComponent).")
+                recomputePresentFiles()
+                return
             }
-            guard plan.count == Self.requiredFiles.count else {
-                throw LocalArchiveError("the canonical CLIP manifest is incomplete")
-            }
-            for item in plan {
-                try Task.checkCancellation()
-                let values = try item.staged.resourceValues(forKeys: [
-                    .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
-                ])
-                guard values.isRegularFile == true, values.isSymbolicLink != true else {
-                    throw LocalArchiveError("\(item.staged.lastPathComponent) isn't a regular file")
-                }
-                guard let expected = item.sha256 else {
-                    throw LocalArchiveError("\(item.staged.lastPathComponent) has no canonical SHA-256 pin")
-                }
-                let actual = try sha256File(item.staged)
-                guard actual == expected.lowercased() else {
-                    throw LocalArchiveError(
-                        "\(item.staged.lastPathComponent) failed integrity verification")
-                }
-            }
-            try rejectSpecialFiles(in: stagingRoot)
-            try Task.checkCancellation()
-            try promoteStaged(plan.map { (staged: $0.staged, finalDest: $0.finalDest) })
-        } catch is CancellationError {
-            status = .missing(reason: "Cancelled.")
-            recomputePresentFiles()
-            return
-        } catch {
-            status = .installFailed("Local model archive rejected: \(error.localizedDescription)")
-            recomputePresentFiles()
-            return
         }
 
         if deleteZipAfter {
             try? FileManager.default.removeItem(at: zipURL)
         }
+
         Task.detached(priority: .utility) {
             if CLIPTextEncoder.shared.load() {
                 await Self.shared.markTextEncoderReady()
             }
         }
         refreshStatus()
-    }
-
-    func preflightArchive(_ zipURL: URL, workRoot: URL) async throws -> UInt64 {
-        let namesResult = try await runUnzip(
-            ["-Z1", zipURL.path], workRoot: workRoot,
-            timeoutSeconds: 30, label: "names")
-        guard namesResult.status == 0 else {
-            throw LocalArchiveError("couldn't list archive entries: \(namesResult.error)")
-        }
-        let names = namesResult.output.split(whereSeparator: \.isNewline).map(String.init)
-        guard names.count <= 10_000 else {
-            throw LocalArchiveError("archive has more than 10,000 entries")
-        }
-        for name in names where !LocalArchiveSafety.entryNameIsSafe(name) {
-            throw LocalArchiveError("archive contains an unsafe entry name")
-        }
-
-        let verbose = try await runUnzip(
-            ["-Z", "-v", zipURL.path], workRoot: workRoot,
-            timeoutSeconds: 30, label: "metadata")
-        guard verbose.status == 0 else {
-            throw LocalArchiveError("couldn't inspect archive metadata: \(verbose.error)")
-        }
-        var total: UInt64 = 0
-        for rawLine in verbose.output.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("uncompressed size:") {
-                let fields = line.split(whereSeparator: \.isWhitespace)
-                guard fields.count >= 3, let size = UInt64(fields[2]), size <= 1_073_741_824 else {
-                    throw LocalArchiveError("archive contains an oversized entry")
-                }
-                total = total.addingReportingOverflow(size).overflow ? UInt64.max : total + size
-                if total > 2_147_483_648 {
-                    throw LocalArchiveError("archive expands past the 2 GB safety cap")
-                }
-            }
-            if line.hasPrefix("file security status:"),
-               let value = line.split(separator: ":", maxSplits: 1).last,
-               !LocalArchiveSafety.fileSecurityStatusIsUnencrypted(String(value)) {
-                throw LocalArchiveError("encrypted archives aren't supported")
-            }
-            if line.hasPrefix("Unix file attributes"),
-               let permissions = line.split(separator: ":", maxSplits: 1).last?
-                    .trimmingCharacters(in: .whitespaces),
-               !LocalArchiveSafety.unixEntryTypeIsSafe(permissions) {
-                throw LocalArchiveError("archive contains a symlink or special entry")
-            }
-        }
-        return total
-    }
-
-    private func runUnzip(
-        _ arguments: [String],
-        workRoot: URL,
-        timeoutSeconds: UInt64,
-        label: String
-    ) async throws -> (status: Int32, output: String, error: String) {
-        let outputURL = workRoot.appendingPathComponent(".\(label)-stdout")
-        let errorURL = workRoot.appendingPathComponent(".\(label)-stderr")
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-        FileManager.default.createFile(atPath: errorURL.path, contents: nil)
-        let outputHandle = try FileHandle(forWritingTo: outputURL)
-        let errorHandle = try FileHandle(forWritingTo: errorURL)
-        defer {
-            try? outputHandle.close()
-            try? errorHandle.close()
-            try? FileManager.default.removeItem(at: outputURL)
-            try? FileManager.default.removeItem(at: errorURL)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = arguments
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = outputHandle
-        process.standardError = errorHandle
-        let timedOut = MutexBox(false)
-        let cancelled = MutexBox(false)
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                process.terminationHandler = { _ in continuation.resume() }
-                do {
-                    try process.run()
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                if Task.isCancelled || cancelled.withLock({ $0 }) {
-                    cancelled.withLock { $0 = true }
-                    process.terminate()
-                }
-                Task.detached {
-                    try? await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000)
-                    if process.isRunning {
-                        timedOut.withLock { $0 = true }
-                        process.terminate()
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        if process.isRunning {
-                            Darwin.kill(process.processIdentifier, SIGKILL)
-                        }
-                    }
-                }
-            }
-        } onCancel: {
-            cancelled.withLock { $0 = true }
-            if process.isRunning {
-                process.terminate()
-                Task.detached {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    if process.isRunning {
-                        Darwin.kill(process.processIdentifier, SIGKILL)
-                    }
-                }
-            }
-        }
-        try outputHandle.synchronize()
-        try errorHandle.synchronize()
-        if cancelled.withLock({ $0 }) { throw CancellationError() }
-        if timedOut.withLock({ $0 }) {
-            throw LocalArchiveError("unzip \(label) timed out")
-        }
-        let output = try readSmallText(outputURL, cap: 4 * 1_024 * 1_024)
-        let error = try readSmallText(errorURL, cap: 256 * 1_024)
-        return (process.terminationStatus, output, error)
-    }
-
-    private func readSmallText(_ url: URL, cap: Int) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let data = try handle.read(upToCount: cap + 1) ?? Data()
-        guard data.count <= cap else { throw LocalArchiveError("archive listing was too large") }
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw LocalArchiveError("archive listing wasn't UTF-8")
-        }
-        return text
-    }
-
-    private func sha256File(_ url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while let data = try handle.read(upToCount: 1_024 * 1_024), !data.isEmpty {
-            hasher.update(data: data)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func rejectSpecialFiles(in root: URL) throws {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey],
-            options: []) else {
-            throw LocalArchiveError("couldn't inspect extracted files")
-        }
-        var count = 0
-        for case let url as URL in enumerator {
-            count += 1
-            guard count <= 10_000 else { throw LocalArchiveError("too many extracted entries") }
-            let values = try url.resourceValues(forKeys: [
-                .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey,
-            ])
-            guard values.isSymbolicLink != true,
-                  values.isDirectory == true || values.isRegularFile == true else {
-                throw LocalArchiveError("archive extracted a special filesystem object")
-            }
-        }
-    }
-
-    private func promoteStaged(_ plan: [(staged: URL, finalDest: URL)]) throws {
-        try Self.promoteStaged(plan, modelsRoot: Self.modelsRoot)
-    }
-
-    static func promoteStaged(
-        _ plan: [(staged: URL, finalDest: URL)],
-        modelsRoot: URL,
-        moveItem: (URL, URL) throws -> Void = { source, destination in
-            try FileManager.default.moveItem(at: source, to: destination)
-        },
-        removeItem: (URL) throws -> Void = { url in
-            try FileManager.default.removeItem(at: url)
-        }
-    ) throws {
-        let backupRoot = modelsRoot.appendingPathComponent(
-            ".clip-backup-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: backupRoot, withIntermediateDirectories: false)
-        var backedUp: [(backup: URL, finalDest: URL)] = []
-        var promoted: [(staged: URL, finalDest: URL)] = []
-        do {
-            for item in plan {
-                try prepareSafeDestination(item.finalDest, modelsRoot: modelsRoot)
-                if FileManager.default.fileExists(atPath: item.finalDest.path) {
-                    let relative = item.finalDest.path.dropFirst(modelsRoot.path.count + 1)
-                    let backup = backupRoot.appendingPathComponent(String(relative))
-                    try FileManager.default.createDirectory(
-                        at: backup.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try moveItem(item.finalDest, backup)
-                    backedUp.append((backup, item.finalDest))
-                }
-            }
-            for item in plan {
-                try prepareSafeDestination(item.finalDest, modelsRoot: modelsRoot)
-                try moveItem(item.staged, item.finalDest)
-                promoted.append(item)
-            }
-            try removeItem(backupRoot)
-        } catch {
-            var rollbackErrors: [String] = []
-            for item in promoted.reversed() {
-                do { try moveItem(item.finalDest, item.staged) }
-                catch { rollbackErrors.append(error.localizedDescription) }
-            }
-            for item in backedUp.reversed() {
-                do { try moveItem(item.backup, item.finalDest) }
-                catch { rollbackErrors.append(error.localizedDescription) }
-            }
-            if rollbackErrors.isEmpty {
-                try? FileManager.default.removeItem(at: backupRoot)
-                throw error
-            }
-            throw LocalArchiveError(
-                "promotion failed and rollback was incomplete; originals remain at \(backupRoot.path): \(rollbackErrors.joined(separator: "; "))")
-        }
-    }
-
-    private static func prepareSafeDestination(_ destination: URL, modelsRoot: URL) throws {
-        let fileManager = FileManager.default
-        let root = modelsRoot.standardizedFileURL
-        let destination = destination.standardizedFileURL
-        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        guard destination.path.hasPrefix(prefix) else {
-            throw LocalArchiveError("model destination escaped the models directory")
-        }
-        let rootAttributes = try fileManager.attributesOfItem(atPath: root.path)
-        guard rootAttributes[.type] as? FileAttributeType == .typeDirectory else {
-            throw LocalArchiveError("models directory is a symlink or special object")
-        }
-
-        let relative = destination.path.dropFirst(prefix.count)
-        let components = relative.split(separator: "/").map(String.init)
-        var current = root
-        for component in components.dropLast() {
-            guard component != "." && component != ".." else {
-                throw LocalArchiveError("invalid model destination component")
-            }
-            current.appendPathComponent(component, isDirectory: true)
-            if fileManager.fileExists(atPath: current.path) {
-                let attributes = try fileManager.attributesOfItem(atPath: current.path)
-                guard attributes[.type] as? FileAttributeType == .typeDirectory else {
-                    throw LocalArchiveError("model destination parent is a symlink or special object")
-                }
-            } else {
-                try fileManager.createDirectory(at: current, withIntermediateDirectories: false)
-            }
-        }
-        if fileManager.fileExists(atPath: destination.path) {
-            let attributes = try fileManager.attributesOfItem(atPath: destination.path)
-            guard attributes[.type] as? FileAttributeType == .typeRegular else {
-                throw LocalArchiveError("model destination is a symlink or special object")
-            }
-        }
-    }
-
-    private struct LocalArchiveError: LocalizedError {
-        let message: String
-        init(_ message: String) { self.message = message }
-        var errorDescription: String? { message }
     }
 
     // MARK: - Utilities

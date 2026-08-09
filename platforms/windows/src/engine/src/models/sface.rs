@@ -17,7 +17,8 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::runtime::{
-    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+    classify_inference_error, configure_session_builder, execution_providers_for_chain,
+    priority_chain, RuntimeProbe,
 };
 
 pub struct SFace {
@@ -33,7 +34,28 @@ impl SFace {
         if !path.exists() {
             anyhow::bail!("SFace weights missing at {}", path.display());
         }
-        let (session, input_name) = commit_chain_session("SFace", path)?;
+        let probe = RuntimeProbe::shared();
+        let chain = priority_chain(probe.vendor);
+        let builder = Session::builder().context("ORT session builder")?;
+        let mut builder =
+            configure_session_builder(builder).context("configure session (SFace)")?;
+        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
+        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .context("register execution providers (SFace)")?;
+        }
+        tracing::info!(model = "SFace", chain = ?chain_labels, "EP priority chain registered");
+        let session = builder
+            .commit_from_file(path)
+            .context("ORT session commit (SFace)")?;
+        let input_name = session
+            .inputs
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("SFace ONNX has no inputs"))?
+            .name
+            .clone();
 
         let mut model = Self { session, input_name };
         let warmup_started = std::time::Instant::now();
@@ -65,7 +87,6 @@ impl SFace {
 
         let input = Tensor::from_array(chw).context("SFace input tensor")?;
         let input_name = self.input_name.clone();
-        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

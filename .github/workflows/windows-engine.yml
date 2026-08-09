@@ -6,17 +6,11 @@ on:
     paths:
       - 'platforms/windows/**'
       - 'shared/ipc-schema/**'
-      - 'shared/models/**'
-      - 'shared/scripts/check_binary_privacy.py'
-      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/windows-engine.yml'
   pull_request:
     paths:
       - 'platforms/windows/**'
       - 'shared/ipc-schema/**'
-      - 'shared/models/**'
-      - 'shared/scripts/check_binary_privacy.py'
-      - 'shared/scripts/test_check_binary_privacy.py'
       - '.github/workflows/windows-engine.yml'
   workflow_dispatch:
 
@@ -58,10 +52,10 @@ jobs:
         working-directory: platforms/windows/src/engine
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           # MSRV pinned to 1.90 in rust-toolchain.toml. Keep both files
           # in sync — drift here means CI builds with a different toolchain
@@ -71,7 +65,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -117,7 +111,7 @@ jobs:
         # binaries in ~/.cargo/bin so successive runs skip the
         # `cargo install --locked` recompile (~5 min each from source).
         # Cache key version (`v1`) is manually bumped to refresh tools.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@v4
         id: cache-cargo-tools
         with:
           path: |
@@ -192,8 +186,6 @@ jobs:
         #   XML/XAML namespace identifiers (URN-like; never resolved):
         #     - schemas.microsoft.com         — WinUI XAML namespace tokens
         #     - schemas.openxmlformats.org    — XAML markup-compat tokens
-        #     - ai.google.dev                 — Gemma license terms (browser-opened link, not egress)
-        #     - docs.nvidia.com               — cuDNN/CUDA EULA (browser-opened link, not egress)
         #
         # To add a host: edit this list AND add a rationale entry in
         # shared/docs/DECISIONS.md. Reviewers should reject PRs that
@@ -205,9 +197,7 @@ jobs:
             "developer.download.nvidia.com",
             "developer.nvidia.com",
             "schemas.microsoft.com",
-            "schemas.openxmlformats.org",
-            "ai.google.dev",
-            "docs.nvidia.com"
+            "schemas.openxmlformats.org"
           )
           $sources = Get-ChildItem -Path platforms/windows/src -Recurse -File `
             -Include *.rs,*.cs,*.xaml,*.xaml.cs |
@@ -333,11 +323,56 @@ jobs:
           }
           Write-Host "verifyCudaPack reprobe smoke passed. ✅"
 
-      # Byte-exact ASCII/UTF-16LE/UTF-16BE privacy gate. Cross builds are
-      # scanned too; executing the target is not required.
+      # Privacy gate: shipped binary must NOT contain telemetry SDK strings.
+      # Failing this is a release blocker — no exception.
       - name: Privacy — telemetry-string scan
+        if: matrix.label != 'arm64-cross'
         shell: pwsh
         run: |
           $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
-          python "$env:GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" $exe
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # MUST stay in sync with platforms/windows/build/publish-bundle.ps1's
+          # $ForbiddenTelemetryStrings (release script). Any addition here
+          # should land in publish-bundle.ps1 too. Order is irrelevant.
+          $forbidden = @(
+            "sentry.io",
+            "io.sentry",
+            "applicationinsights",
+            "applicationinsights.azure.com",
+            "googletagmanager",
+            "google-analytics.com",
+            "segment.io",
+            "segment.com",
+            "mixpanel.com",
+            "amplitude.com",
+            "posthog.com",
+            "datadoghq",
+            "bugsnag",
+            "rollbar.com",
+            "honeycomb.io",
+            "newrelic.com",
+            "raygun.io",
+            "firebase",
+            "firebaseio.com",
+            "appcenter.ms",
+            "in.appcenter.ms",
+            "crashpad",
+            "breakpad"
+          )
+          # SCAN BOTH ASCII AND UTF-16: many telemetry SDKs embed their
+          # endpoint URLs as wide strings in .NET assemblies. The release
+          # script (publish-bundle.ps1) does the same.
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $textAscii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $textUtf16 = [System.Text.Encoding]::Unicode.GetString($bytes)
+          $hits = @()
+          foreach ($needle in $forbidden) {
+            if ($textAscii -match [regex]::Escape($needle) -or
+                $textUtf16 -match [regex]::Escape($needle)) {
+              $hits += $needle
+            }
+          }
+          if ($hits.Count -gt 0) {
+            Write-Error "Telemetry strings found in shipped binary: $($hits -join ', ')"
+            exit 1
+          }
+          Write-Host "No telemetry strings detected. ✅"

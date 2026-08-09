@@ -1,4 +1,4 @@
-# FileID Windows - dev build (x64 host, x64 target).
+# FileID Windows — dev build (x64 host, x64 target).
 #
 # Builds:
 #   - FileIDEngine.exe (Rust release with LTO; x64)
@@ -33,12 +33,12 @@ Write-Host "FileID Windows build (x64)" -ForegroundColor Cyan
 Write-Host "  engine: $EngineDir"
 Write-Host "  dist:   $StagingDir"
 
-# --- 1. Toolchain probes -----------------------------------------------------
+# ─── 1. Toolchain probes ─────────────────────────────────────────────────────
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Error "cargo not found. Install Rust via https://rustup.rs and re-run."
 }
 
-# --- 2. Clean ---------------------------------------------------------------
+# ─── 2. Clean ───────────────────────────────────────────────────────────────
 if ($Clean) {
     Write-Host "Cleaning previous build artifacts..." -ForegroundColor Yellow
     Push-Location $EngineDir
@@ -47,12 +47,12 @@ if ($Clean) {
     if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 }
 
-# --- 2b. Wipe library database (keep downloaded models) ---------------------
+# ─── 2b. Wipe library database (keep downloaded models) ──────────────────────
 # Deletes %LOCALAPPDATA%\FileID\fileid.sqlite{,-wal,-shm} so the next launch
 # does a full re-scan + re-tag from scratch. Leaves Models\ (CLIP / ArcFace /
-# VLM - hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
+# VLM — hundreds of MB) and thumbs.cache\ untouched, so nothing re-downloads
 # and thumbnails stay warm. Use after a tagging change when an incremental
-# rescan would skip files already in the DB. Close the app first - a running
+# rescan would skip files already in the DB. Close the app first — a running
 # engine holds the SQLite file open.
 if ($WipeDb) {
     $FileIdData = Join-Path $env:LOCALAPPDATA "FileID"
@@ -67,14 +67,14 @@ if ($WipeDb) {
                 Write-Host "WipeDb: removed $($f.Name)" -ForegroundColor Yellow
             }
             catch {
-                Write-Warning "WipeDb: could not delete $($f.Name) - is FileID still running? Close it and re-run. ($($_.Exception.Message))"
+                Write-Warning "WipeDb: could not delete $($f.Name) — is FileID still running? Close it and re-run. ($($_.Exception.Message))"
             }
         }
         Write-Host "WipeDb: database cleared; Models\ and thumbs.cache\ preserved." -ForegroundColor Green
     }
 }
 
-# --- 3. Build engine --------------------------------------------------------
+# ─── 3. Build engine ────────────────────────────────────────────────────────
 Push-Location $EngineDir
 try {
     $profileFlag = if ($Release) { "--release" } else { "" }
@@ -90,7 +90,7 @@ finally {
     Pop-Location
 }
 
-# --- 4. Stage ---------------------------------------------------------------
+# ─── 4. Stage ───────────────────────────────────────────────────────────────
 $BuildDir = if ($Release) {
     Join-Path $EngineDir "target/x86_64-pc-windows-msvc/release"
 } else {

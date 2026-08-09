@@ -27,6 +27,7 @@ pub mod ram_plus;
 pub mod ram_plus_batch;
 pub mod registry;
 pub mod runtime;
+pub mod florence2;
 pub mod scene_vocab;
 pub mod face_align;
 pub mod scrfd;
@@ -35,7 +36,6 @@ pub mod variants;
 pub mod yunet;
 pub mod vlm;
 pub mod vlm_server;
-pub mod whisper;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;

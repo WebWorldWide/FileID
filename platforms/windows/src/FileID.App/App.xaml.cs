@@ -1,4 +1,4 @@
-﻿// Application root — owns the single MainWindow and the lifetime of every
+// Application root — owns the single MainWindow and the lifetime of every
 // app-level service (EngineClient, model installers, settings store).
 //
 // On macOS this is FileIDApp.swift + AppDelegate. On Windows the WinUI
@@ -59,7 +59,7 @@ public partial class App : Application
         {
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
-            Trace($"State dir = {PathRedactor.Redact(AppPaths.Root)}");
+            Trace($"State dir = {AppPaths.Root}");
             // Prime the disk thumbnail cache size counter so Settings →
             // Diagnostics shows a real number without waiting for the
             // first sweep. Off the UI thread: a warm cache is a recursive
@@ -68,9 +68,7 @@ public partial class App : Application
             // ConcurrentDictionary and _cachedBytes uses Interlocked, so a write
             // landing before Prime finishes is race-safe (worst case a transient
             // diagnostics blip, not an eviction-correctness bug).
-            _ = Task.Run(() => DebugLog.SafeRun(
-                "ThumbnailDiskCache.Prime",
-                ThumbnailDiskCache.Prime));
+            _ = Task.Run(ThumbnailDiskCache.Prime);
             // last-session breadcrumb. Detects whether the
             // previous session died via a native fast-fail (which
             // bypasses every managed crash sink) and writes a
@@ -80,7 +78,7 @@ public partial class App : Application
             // session can be correlated to a specific build + engine binary.
             var asmVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
             var enginePath = AppPaths.EngineExePath;
-            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={PathRedactor.Redact(AppPaths.Root)}, engine={PathRedactor.Redact(enginePath)}");
+            DebugLog.Info($"[STARTUP] FileID app launched. version={asmVersion}, pid={Environment.ProcessId}, stateDir={AppPaths.Root}, engine={enginePath}");
 
             Trace("EngineClient.StartAsync");
             // Captured on EngineStartedTask so the install flow can poll
@@ -100,7 +98,7 @@ public partial class App : Application
                 // hard to miss. Covers three classes:
                 //   1. Binary not found (path resolution failed)
                 //   2. Signature verdict was Untrusted (tamper / bad cert chain)
-                //   3. Signed-release policy refused an unsigned/wrong-publisher binary
+                //   3. Release build refused an Unsigned binary (FILEID_EV_THUMBPRINT set)
                 // Recoverable crashes (pure spawn failures, runtime panics
                 // that respawn) keep using the pill alone.
                 try
@@ -136,7 +134,7 @@ public partial class App : Application
                             body = "FileID's engine binary is unsigned, but this release was built " +
                                    "to require a valid signature.\n\n" +
                                    "Reinstall FileID from a trusted source. If you built from source, " +
-                                   "unset FILEID_SIGN_THUMBPRINT / FILEID_EV_THUMBPRINT for dev builds.\n\n" +
+                                   "unset the FILEID_EV_THUMBPRINT environment variable for dev builds.\n\n" +
                                    "See %LOCALAPPDATA%\\FileID\\logs\\app.log for details.";
                         }
                         if (title is not null && body is not null)
@@ -186,18 +184,15 @@ public partial class App : Application
             HostWindow = window;
             Trace("window.Activate()");
             window.Activate();
-
-            // Heal a stale LastFolderPath: if the saved library folder was
-            // deleted but the engine DB still holds a scan of another root
-            // that exists on disk, fall back to that root instead of booting
-            // into a contradictory sidebar/library state. Skipped under the
-            // auto-scan harness, which sets FolderPath itself.
-            if (string.IsNullOrEmpty(Program.AutoScanFolder))
+            try
             {
-                Trace("LibraryRootRecovery.RunAsync");
-                try { _ = LibraryRootRecovery.RunAsync(window.DispatcherQueue); }
-                catch (System.Exception ex) { Trace($"LibraryRootRecovery failed (non-fatal): {ex.Message}"); }
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                _ = ShowWindow(hwnd, 9 /* SW_RESTORE */);
+                _ = ShowWindow(hwnd, 5 /* SW_SHOW */);
+                _ = SetForegroundWindow(hwnd);
+                window.AppWindow.Show(true);
             }
+            catch (System.Exception ex) { Trace($"Window show failed: {ex.Message}"); }
             Trace("OnLaunched complete");
 
             // harness auto-scan. When Program.AutoScanFolder is set
@@ -232,11 +227,17 @@ public partial class App : Application
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int NativeMessageBox(System.IntPtr hWnd, string text, string caption, uint type);
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(System.IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+
     /// <summary>harness entry point. Awaits engine readiness, sets
     /// the folder on AppViewModel (so the UI reflects it), kicks off
     /// StartScanAsync, and — if --auto-exit-after-scan was passed — closes
-    /// the window once scan and face clustering both finish so MarkCleanExit
-    /// runs and the harness can assert the complete native pipeline.</summary>
+    /// the window once ScanCompleteEvent fires so MarkCleanExit runs and
+    /// the harness can assert clean_exit=true.</summary>
     private static async Task AutoScanAsync(string folderPath, bool exitAfterScan, Window window)
     {
         try
@@ -249,123 +250,33 @@ public partial class App : Application
                 if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => window.Close()); }
                 return;
             }
-            window.DispatcherQueue.TryEnqueue(() => AppViewModel.Instance.FolderPath = folderPath);
-            DebugLog.Info($"[AUTO-SCAN] starting scan; path={PathRedactor.Redact(folderPath)}");
+            AppViewModel.Instance.FolderPath = folderPath;
+            DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
+            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
+            if (!exitAfterScan) return;
 
-            var scanGeneration = EngineClient.Instance.SpawnGeneration;
-            var faceResultAtStart = EngineClient.Instance.LastFaceClustering;
-            TaskCompletionSource<bool>? terminal = null;
-            TaskCompletionSource<bool>? faceTerminal = null;
-            System.ComponentModel.PropertyChangedEventHandler? phaseHandler = null;
-            if (exitAfterScan)
+            // Wait for ScanComplete by watching Phase transition to Completed
+            // (or Failed). PropertyChanged fires on whatever thread the
+            // engine event arrived on — don't touch XAML in the handler.
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
             {
-                terminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                faceTerminal = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                var scanCompleted = false;
-                var clusteringStarted = false;
-                void ObserveTerminalPhase()
+                if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
+                var phase = EngineClient.Instance.Phase;
+                if (phase == FileID.IpcSchema.ScanPhase.Completed || phase == FileID.IpcSchema.ScanPhase.Failed)
                 {
-                    if (EngineClient.Instance.SpawnGeneration != scanGeneration
-                        || EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed)
-                    {
-                        terminal!.TrySetResult(false);
-                        faceTerminal!.TrySetResult(false);
-                        return;
-                    }
-                    var phase = EngineClient.Instance.Phase;
-                    if (phase is FileID.IpcSchema.ScanPhase.Completed
-                        or FileID.IpcSchema.ScanPhase.Failed
-                        or FileID.IpcSchema.ScanPhase.Cancelled)
-                    {
-                        scanCompleted = phase == FileID.IpcSchema.ScanPhase.Completed;
-                        terminal!.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
-                    }
+                    tcs.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
                 }
-                void ObserveFaceTerminal(string? propertyName)
-                {
-                    if (!scanCompleted)
-                    {
-                        return;
-                    }
-                    if (propertyName == nameof(ViewModels.EngineClient.FaceClusteringInFlight))
-                    {
-                        if (EngineClient.Instance.FaceClusteringInFlight)
-                        {
-                            clusteringStarted = true;
-                        }
-                        else if (clusteringStarted
-                            && Equals(EngineClient.Instance.LastFaceClustering, faceResultAtStart))
-                        {
-                            faceTerminal!.TrySetResult(false);
-                        }
-                    }
-                    if (propertyName == nameof(ViewModels.EngineClient.LastFaceClustering)
-                        && !Equals(EngineClient.Instance.LastFaceClustering, faceResultAtStart))
-                    {
-                        faceTerminal!.TrySetResult(true);
-                    }
-                    else if (propertyName == nameof(ViewModels.EngineClient.LastError)
-                        && EngineClient.Instance.LastError?.Kind == "face_clustering_failed")
-                    {
-                        faceTerminal!.TrySetResult(false);
-                    }
-                }
-                phaseHandler = (_, e) => DebugLog.SafeRun("App.AutoScan.TerminalChanged", () =>
-                {
-                    if (e.PropertyName is not nameof(ViewModels.EngineClient.Phase)
-                        and not nameof(ViewModels.EngineClient.State)
-                        and not nameof(ViewModels.EngineClient.SpawnGeneration)
-                        and not nameof(ViewModels.EngineClient.FaceClusteringInFlight)
-                        and not nameof(ViewModels.EngineClient.LastFaceClustering)
-                        and not nameof(ViewModels.EngineClient.LastError))
-                    {
-                        return;
-                    }
-
-                    DebugLog.Debug($"[ENGINE-SUB:App.AutoScan] {e.PropertyName}");
-                    ObserveTerminalPhase();
-                    ObserveFaceTerminal(e.PropertyName);
-                });
-                EngineClient.Instance.PropertyChanged += phaseHandler;
             }
-
+            EngineClient.Instance.PropertyChanged += OnEngineChanged;
             try
             {
-                await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay,
-                    excludedPaths: AppViewModel.Instance.Settings.ExcludedFolders);
-                if (!exitAfterScan) return;
-
-                var phase = EngineClient.Instance.Phase;
-                if (EngineClient.Instance.SpawnGeneration != scanGeneration
-                    || EngineClient.Instance.State == ViewModels.EngineClient.LifecycleState.Crashed
-                    || phase is FileID.IpcSchema.ScanPhase.Failed or FileID.IpcSchema.ScanPhase.Cancelled)
-                {
-                    terminal!.TrySetResult(false);
-                }
-                else if (phase == FileID.IpcSchema.ScanPhase.Completed)
-                {
-                    terminal!.TrySetResult(true);
-                }
-                var ok = await terminal!.Task.WaitAsync(TimeSpan.FromHours(12));
-                var applyDrained = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                if (!window.DispatcherQueue.TryEnqueue(() => applyDrained.TrySetResult(true)))
-                {
-                    throw new InvalidOperationException("Could not verify the final scan event on the UI thread.");
-                }
-                await applyDrained.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                if (ok)
-                {
-                    ok = await faceTerminal!.Task.WaitAsync(TimeSpan.FromHours(12));
-                }
-                var faceResult = EngineClient.Instance.LastFaceClustering;
-                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok} processed={EngineClient.Instance.LastScanProcessedFiles} persons={faceResult?.PersonCount ?? 0} faces={faceResult?.FaceCount ?? 0}; closing window.");
+                var ok = await tcs.Task;
+                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok}; closing window.");
             }
             finally
             {
-                if (phaseHandler is not null)
-                {
-                    EngineClient.Instance.PropertyChanged -= phaseHandler;
-                }
+                EngineClient.Instance.PropertyChanged -= OnEngineChanged;
             }
             window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } });
         }

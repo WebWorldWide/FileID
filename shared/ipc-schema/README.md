@@ -25,13 +25,13 @@ The `generators/` subdirectory will hold scripted codegen once the schema settle
 1. Update `ipc.schema.json` first.
 2. Update the per-platform DTO files to match.
 3. Add a round-trip test on each platform that exercises the new variant.
-4. Run all platforms' tests; all must decode to the same schema-valid logical message. JSON key order is not part of the contract.
+4. Run all platforms' tests; all must encode the same byte string for the same logical message.
 
 ## Versioning
 
 The schema is versioned in its top-level `version` field. **Backward-incompatible changes** (renamed/removed variants, renamed fields, type narrowing) require a major version bump and coordinated commits across every platform. **Backward-compatible additions** (new variant, optional field) bump the minor version.
 
-The current major version is `1.x`. Engines reject malformed frames and unrecognized command variants with `IPCEvent.error(EngineError(kind: "command_decode_failed", ...))`; callers must not infer whether a rejected frame was syntactically malformed or merely unknown.
+The current major version is `1.x`. Engines reject command frames with an unrecognized variant name with `IPCEvent.error(EngineError(kind: "ipc_unknown_command", ...))`.
 
 ## Privacy clause
 

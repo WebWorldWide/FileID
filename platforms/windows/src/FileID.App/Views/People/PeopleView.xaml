@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!--
     PeopleView — face cluster cards in a wrap layout. Cards show the
     cluster's anchor face crop + a caption. Drag-merge + person-detail
@@ -29,7 +29,7 @@
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}"
                            AutomationProperties.HeadingLevel="Level1"/>
-                <TextBlock Text="Faces grouped into person cards. Name or merge them as you review."
+                <TextBlock Text="Faces clustered into named cards. Drag to merge."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
@@ -151,18 +151,16 @@
                               BorderThickness="1"
                               Padding="12"
                               Tag="{x:Bind ClusterId}"
-                              IsTabStop="True"
                               AutomationProperties.Name="{x:Bind Caption}"
-                              AutomationProperties.HelpText="Click, or press Enter, to see every face in this group and edit its name. Drag onto another group to merge."
+                              AutomationProperties.HelpText="Double-tap to edit name and faces; drag onto another person to merge."
                               CanDrag="True"
                               AllowDrop="True"
                               DragStarting="OnClusterDragStarting"
                               DragOver="OnClusterDragOver"
                               DragLeave="OnClusterDragLeave"
                               Drop="OnClusterDrop"
-                              KeyDown="OnClusterKeyDown"
-                              DoubleTapped="OnClusterDoubleTapped"
-                              Tapped="OnClusterTapped">
+                              Tapped="OnClusterTapped"
+                              DoubleTapped="OnClusterDoubleTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
                                     <MenuFlyoutItem Text="Edit name + faces"
@@ -194,20 +192,12 @@
                                        Stretch="UniformToFill"
                                        Width="120" Height="120" />
                             </Border>
-                            <StackPanel Grid.Row="1" Spacing="6">
-                                <TextBlock Text="{x:Bind Caption, Mode=OneWay}"
-                                           Margin="0,8,0,0"
-                                           Style="{StaticResource BodyTextBlockStyle}"
-                                           TextAlignment="Center"
-                                           TextTrimming="CharacterEllipsis"/>
-                                <Button Content="Edit name"
-                                        Click="OnClusterEditNameClicked"
-                                        Tag="{x:Bind ClusterId}"
-                                        HorizontalAlignment="Stretch"
-                                        Padding="8,4"
-                                        AutomationProperties.Name="Edit person name"
-                                        AutomationProperties.HelpText="Open the person details editor to name this group." />
-                            </StackPanel>
+                            <TextBlock Grid.Row="1"
+                                       Text="{x:Bind Caption}"
+                                       Margin="0,8,0,0"
+                                       Style="{StaticResource BodyTextBlockStyle}"
+                                       TextAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
                             <!-- FEAT-CRIT-1: per-card selection checkbox.
                                  Visibility driven from PeopleView code-behind
                                  (UpdateSelectionVisibility on each Loaded). -->

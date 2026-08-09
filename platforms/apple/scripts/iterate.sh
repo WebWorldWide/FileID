@@ -123,10 +123,10 @@ if ! wait_for_event "ready" 15; then
 fi
 ok "engine ready"
 
-# IPCCommand.startScan(rootPath: String, rootDisplay: String?, rescan: Bool, excludedPaths: [String]?)
+# IPCCommand.startScan(rootPath: String, rootDisplay: String?, rescan: Bool)
 # The app resolves the security-scoped bookmark to a path app-side; the engine
 # now takes the resolved rootPath directly.
-ipc_send "{\"startScan\":{\"rootPath\":\"$CORPUS\",\"rootDisplay\":\"$CORPUS\",\"rescan\":false,\"excludedPaths\":null}}"
+ipc_send "{\"startScan\":{\"rootPath\":\"$CORPUS\",\"rootDisplay\":\"$CORPUS\",\"rescan\":false}}"
 ok "startScan sent"
 
 if ! wait_for_event "scanComplete" 240; then
@@ -147,7 +147,7 @@ fi
 ok "faceClusteringComplete (auto-triggered)"
 
 # Clean shutdown
-ipc_send '{"shutdown":{}}'
+ipc_send "\"shutdown\""
 sleep 2
 
 # U4: the IPC wire must carry ONLY JSON event lines — any library

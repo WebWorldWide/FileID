@@ -8,16 +8,14 @@
 ## What FileID is
 
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename
-tens of thousands of files locally. The primary v1.0 targets are:
+tens of thousands of files locally. Two platforms ship at v1.0:
 
 - **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 8 C# app.
 - **macOS** — Swift / SwiftUI app + engine, MLX inference. The visual + UX reference.
-- **Linux** — shared Rust engine + native GTK4/libadwaita app, with packaging and behavioral UAT still hardware-gated.
 
-Linux ships all six tabs over the shared engine. The two binaries on each desktop
-platform talk newline-delimited JSON over stdio; the engine owns a SQLite WAL DB
-(migrations v1–v20, byte-faithful across the macOS GRDB and Windows/Linux
-rusqlite stores).
+Linux is deferred. The two binaries on each platform talk newline-delimited JSON
+over stdio; the engine owns a SQLite WAL DB (migrations v1–v12, byte-faithful
+across the macOS GRDB and Windows rusqlite stores).
 
 ## Non-negotiables
 
@@ -27,10 +25,10 @@ These hold for every shipped feature, on every platform.
   download instrumentation. The only network egress is user-initiated model
   downloads from `huggingface.co`. CI scans the shipped binaries for telemetry
   strings as a release blocker. See [`PRIVACY.md`](PRIVACY.md).
-- **Apache-2.0 project, commercial-clean models.** Root `LICENSE`. Core weights
-  are Apache-2.0/MIT and no non-commercial-only model may ship. Optional
-  restricted models such as Gemma are commercially usable under separately
-  accepted upstream terms (see [`MODELS.md`](MODELS.md)).
+- **Apache-2.0.** Root `LICENSE`. Every weight FileID downloads by default is
+  Apache-2.0 or MIT — no non-commercial or research-only models in the core
+  feature set (see [`MODELS.md`](MODELS.md)). The project is free to be
+  open-sourced *and* commercialized without a licensing blocker.
 - **Performance is a feature.** Match or beat the macOS pipeline on comparable
   hardware; use the GPU/NPU when present.
 - **The macOS app is the visual reference.** Windows is a 1:1 port — same palette
@@ -59,49 +57,10 @@ For the overall product:
 - Signed, packaged, downloadable from a public GitHub release.
 - README + LICENSE + CONTRIBUTING + PRIVACY + screenshots in the repo.
 
-## Current audit status (2026-08-03)
-
-Native Apple-Silicon gates are now locally covered. Strict Swift 6 concurrency
-with warnings as errors passes 381 tests in 73 suites, including document/PDF/
-presentation extraction, all-file Deep Analyze routing, OBJ containment, audio
-and Quick Look deadlines, face clustering, restructure apply/undo, terminal IPC,
-and UI data/geometry contracts. The release app and engine build, binary privacy
-scan, ad-hoc signing dry run, DMG checksum, mounted-app signature, and mounted-app
-launch all pass. The mounted app spawns its separately signed engine and includes
-one verified `mlx.metallib`.
-
-The current Rust 1.90 tree passes format and strict Clippy for the shared engine,
-CLI, and TUI. Normal tests pass 684 engine library tests plus two manifest tests,
-65 CLI unit + 14 smoke tests, and 111 TUI tests; the CLI's two explicit scale
-suites and TUI's million-row suite also pass. All four shipped lockfiles resolve
-`event-listener` 5.4.2, clearing `RUSTSEC-2026-0221`. Shared model-license,
-bootstrap supply-chain, workflow pin/permission, current-document, packaging,
-and binary-privacy gates pass. The .NET SDK and native GTK development libraries
-are unavailable on this Mac, so WinUI and GTK builds remain hosted/native-platform
-gates rather than inferred successes.
-
-The final versioned DMG also passes a read-only mounted-artifact launch: both the
-UI and its bundled engine start directly from the image. A 25-file read-only
-Adlon acceptance set scanned all 16 supported Office documents and completed
-packaged Qwen3-VL 8B analysis for representative DOCX and PPTX inputs without
-changing the source fingerprint. The separate security review was skipped at
-the owner's direction and is not claimed by this audit.
-
-This evidence supports refreshing the clearly labeled **unsigned v0.1.4
-prerelease**, not production-trust publication. No Developer ID Application
-identity, notarization profile, or Windows protected signing provider is
-configured. The strict no-flag runtime-egress gate also continues to reject the
-ten reviewed GitHub/NVIDIA development runtime archives and widened downloader
-host set described in `PRIVACY.md`; those artifacts must be removed or mirrored
-byte-identically to license-vetted Hugging Face locations before a signed release.
-AMD/Intel/QNN, Windows ARM64, native distro/Flatpak lifecycle, clean-machine
-install/upgrade/uninstall, and full accessibility matrices remain external gates.
-
 ## Model stack (commercial-clean)
 
-Core weights are Apache-2.0/MIT. Optional restricted weights such as Gemma use
-separately accepted commercially usable upstream terms. Downloads are user-triggered
-and SHA/revision-pinned; the full registry and acceptance policies live in
+Every default weight is Apache-2.0 / MIT and downloaded at runtime from upstream,
+SHA-pinned, after the user explicitly triggers it. Full registry in
 [`MODELS.md`](MODELS.md).
 
 | Capability | Model | License |
@@ -109,20 +68,17 @@ and SHA/revision-pinned; the full registry and acceptance policies live in
 | In-scan image tagging (primary) | RAM++ Swin-L @384 — 4585-tag ONNX, per-class thresholds + generic-tag suppress-list | Apache-2.0 |
 | Image tagging (fallback) | CLIP zero-shot scene tags (when RAM++ isn't installed) | MIT |
 | Image + text semantic search | CLIP ViT-B/32 — 512-d embeddings | MIT |
-| Face detection + 5-pt landmarks | YuNet (Rust engine) · Apple Vision (macOS) | MIT / OS-provided |
+| Face detection + 5-pt landmarks | YuNet | MIT |
 | Face embedding | SFace — 128-d, 5-point aligned | Apache-2.0 |
-| Deep Analyze (VLM, opt-in) | macOS: Qwen3-VL 8B/4B · Qwen2.5-VL · Gemma 3 · Mistral-Small-3.2; Rust: Qwen2.5-VL · Gemma 3 · Mistral-Small-3.2 | Apache-2.0 (Gemma: Gemma Terms) |
+| Deep Analyze (VLM, opt-in) | Qwen2.5-VL 7B (default) · Gemma 3 4B · Mistral-Small-3.2 24B, via llama.cpp | Apache-2.0 (Gemma: Gemma Terms) |
 
 Removed in the commercial-clean pass: the non-commercial Qwen2.5-VL-3B,
 InsightFace ArcFace/SCRFD, and research-only MobileCLIP-S2.
 
-On Windows, ONNX Runtime selects among execution providers actually present on
-the machine. The release-approved universal GPU path is DirectML, with CPU as the
-floor; owner-supplied CUDA/OpenVINO/QNN runtimes are development/BYO paths, not
-approved product Performance Packs. The current development registry still
-contains legacy GitHub/NVIDIA runtime downloads, so strict runtime-egress policy
-blocks release staging until those entries are removed or mirrored to Hugging Face.
-macOS uses MLX + CoreML + the Neural Engine.
+On Windows, ONNX Runtime auto-selects the execution provider
+(CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU). NVIDIA cards without the CUDA
+pack installed run on DirectML — fully functional, ~80–90% of native CUDA
+throughput for ML inference. macOS uses MLX + CoreML + the Neural Engine.
 
 ## Restructure — butler-grade overhaul
 
@@ -157,21 +113,12 @@ source-URL scans are hard release blockers — no exceptions.
   vulnerable-package scan, telemetry-string scan, app startup smoke.
 - **`macos.yml`**: `swift build` (app + engine), `swift test`, source-URL
   allowlist, telemetry-string scan, engine startup smoke.
-- **`linux.yml`**: native engine/CLI/TUI/GTK format, clippy, tests, builds,
-  schema checks, and binary privacy scanning.
-- **`packaging.yml`**: required GNOME 49 Flatpak build from generated pinned
-  Cargo sources plus SHA-pinned ONNX Runtime, with Cargo forced offline.
-- **`tools.yml` / `release.yml`**: staged native-tool privacy, exact archive
-  membership/checksums, and release validation. Publication remains separately
-  gated on signing credentials and job-scoped write permission.
-- **`policy.yml`**: rejects mutable external GitHub Action references.
-- **`pages.yml`**: builds and deploys the static website when Pages is enabled.
 
 Dev verifies headlessly in the agent environment (`cargo clippy`/`test`,
-`dotnet build`/`test`/`format`); Windows on-hardware verification uses
-`platforms/windows/build/iterate.ps1` + `build/scan_assertions.py` against the
-configured real corpus (asserting count, failure rate, RAM++/CLIP tags,
-128-d/512-byte SFace prints, and person clusters).
+`dotnet build`/`test`/`format`); on-hardware verification runs on an RTX 2060
+against the `G:\TrueNAS` corpus via `platforms/windows/build/iterate.ps1` +
+`build/scan_assertions.py` (asserts file count, low failure rate, RAM++/CLIP tags
+present, 128-d/512-byte SFace prints, person clusters formed).
 
 ## Remaining to v1.0
 
@@ -183,38 +130,29 @@ sign/notarize/DMG pipeline** (`platforms/apple/scripts/release.sh`; real signing
 on the Developer ID cert). The major open items:
 
 - **Restructure P2–P4** — VLM naming, confidence tiers + journal, Win2D Sankey.
-- **macOS lockstep (WS-MAC) — swap LANDED (2026-07), on-hardware parity verify remains.**
-  The commercial-clean stack (RAM++ tagger, ViT-B/32, SFace 128-d with Apple Vision
-  detection, VLM ladder) is wired as primary on `main` (verified statically —
-  `shared/docs/MACOS_AUDIT_2026-07.md`). Remaining: confirm on a Mac that a face DB
-  written on one platform round-trips on the other; treat face DBs as platform-local
-  until that check passes. Also open on Mac: F1 (non-image Exact-dedup content_hash)
-  from the audit.
-- **Throughput re-baseline — DONE 2026-07 on RTX 5080.** Measured ~40 f/s full corpus
-  on DirectML (~5× the 2060); the GPU is dispatch-bound (idle p50=19%). Owner-local
-  CUDA EP provisioning remains a development performance experiment, but no CUDA
-  Performance Pack is approved for product distribution. See STATE.md.
-- **Face clustering** — DONE on the Rust engine (Windows/Linux/CLI/TUI): mutual-kNN
-  default-on + a pre-clustering quality gate + label-calibrated thresholds
-  (pass1 0.50) took the owner's labelled People-tab precision/recall to 1.0
-  (STATE 2026-07-05). REMAINING: macOS Swift carries the mechanisms (default-off)
-  but needs its own on-Mac label-calibration pass (Apple Vision quality scale +
-  FaceAlign) before adopting the values.
+- **macOS lockstep (WS-MAC)** — mirror the commercial-clean swap into the Swift
+  app: RAM++ tagger, ViT-B/32, SFace (128-d) with Apple Vision detection, VLM
+  ladder. Goal: a face DB written on one platform round-trips on the other. Until
+  then, treat face DBs as platform-local.
+- **Throughput re-baseline** — DirectML on the RTX 2060 measures ~6–7 files/s
+  (RAM++ Swin-L-bound); host the ORT CUDA EP DLLs for the NVIDIA 3–5× path.
+- **Face clustering** — Pass-1 single-linkage chains distinct people through
+  bridge faces on very large libraries; structural fix (mutual-kNN / density-gated
+  edges) + calibration against labeled faces.
 - **Rename-heal exact-duplicate fix** — coexisting byte-identical files currently
   collapse to one row; fix so N pairs yield 2N rows and Cleanup surfaces the group.
-- **Packaging + signing (Windows)** — branded WiX MSI/Burn builds are verified; select and authenticate a public-trust provider using `WINDOWS_SIGNING.md`.
+- **Packaging + signing (Windows)** — WiX MSI + Authenticode EV cert.
 - **Per-vendor on-hardware verification** — see the matrix below.
 
 ## Appendix — Windows per-vendor verification matrix
 
 The engine's ORT execution-provider picker auto-detects the best accelerator on
-each vendor's silicon. **GPU Performance Packs are not approved for release** (no
-shippable, license-compliant per-vendor URLs) — DirectML is the universal GPU path
-for every D3D12-capable vendor and CPU is the floor. Legacy pack definitions remain
-in the development registry and are a deliberate strict-egress release blocker,
-not a shippable product path. Rationale in `DECISIONS.md`. Power users who install
-a vendor SDK locally can use the engine's auto-pick (CUDA / OpenVINO / QNN), but
-the default ship target is DirectML or CPU.
+each vendor's silicon. **GPU Performance Packs were removed** (no shippable,
+license-compliant per-vendor URLs) — DirectML is the universal GPU path for every
+D3D12-capable vendor, CPU is the floor. Rationale in `DECISIONS.md`. The
+Intel OpenVINO and Snapdragon QNN packs remain unhosted; power users who install a
+vendor SDK locally get the engine's auto-pick (OpenVINO / QNN), but the default
+ship target is DirectML or CPU.
 
 Run a 1,000-file scan on representative hardware per row and confirm the engine log
 + throughput.
@@ -245,8 +183,9 @@ on real silicon — is the missing layer the six checks above provide.
 
 ### Build pre-reqs for the verification pass
 
-- Public-trust Authenticode provider configured through `WINDOWS_SIGNING.md`; verify signatures on a clean Windows VM. Signing improves reputation but cannot guarantee first-run SmartScreen suppression.
-- Mirror `llama_runtime_x64` and the remaining reviewed GitHub/NVIDIA runtime archives to Hugging Face, or remove those download paths; the strict egress gate must pass before staging.
+- Authenticode EV cert installed + `FILEID_EV_THUMBPRINT` set, so signed binaries
+  aren't SmartScreen-blocked on first run.
+- `llama_runtime_x64` (Vulkan llama.cpp) downloadable from GitHub.
 
 ### Lane gate
 

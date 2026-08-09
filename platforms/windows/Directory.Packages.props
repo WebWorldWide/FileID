@@ -37,8 +37,7 @@
     <!-- Read-only SQLite access from the app side. The engine owns the writer
          connection (rusqlite). Microsoft.Data.Sqlite ships native SQLite +
          FTS5 bundled, matching the engine's bundled libsqlite3 byte-for-byte. -->
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.17" />
-    <PackageVersion Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.0" />
 
     <!-- IObservable bridge for INotifyPropertyChanged + simple LRU cache. -->
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="9.0.0" />

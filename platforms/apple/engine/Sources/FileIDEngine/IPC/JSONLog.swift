@@ -46,7 +46,7 @@ public final class JSONLog: @unchecked Sendable {
             FileManager.default.createFile(atPath: url.path, contents: nil)
         }
         self.handle = try? FileHandle(forWritingTo: url)
-        _ = try? self.handle?.seekToEnd()
+        try? self.handle?.seekToEnd()
     }
 
     public struct Entry: Encodable {

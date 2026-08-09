@@ -7,7 +7,6 @@
 //! reads use ephemeral read-only connections opened on demand.
 
 pub mod migrations;
-pub mod zero_byte;
 
 use std::path::Path;
 
@@ -31,7 +30,7 @@ pub const SETUP_PRAGMAS: &[&str] = &[
 ];
 
 /// Open the engine's writer connection. Creates the file + schema if absent.
-/// Applies every migration up to v20 in registered order.
+/// Applies every migration up to v7 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -54,36 +53,14 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     // exits abnormally the row stays stale forever, polluting Settings →
     // Recent scans. Mark them all as 'failed' on startup; new scans
     // overwrite this when they finish cleanly.
-    match conn.execute(
+    let _ = conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
         [],
-    ) {
-        // A swept 'running' row means the previous engine died mid-scan, so
-        // the last committed batch may have durable face_prints rows whose
-        // crop JPEGs (written post-commit, outside the tx) never landed. Flag
-        // it so the next incremental scan reconciles missing crops instead of
-        // skipping those now-unchanged files forever. Clean shutdowns sweep 0
-        // rows and pay nothing.
-        Ok(swept) if swept > 0 => {
-            UNCLEAN_PRIOR_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(swept, "open_writer: swept orphaned 'running' scan_sessions (unclean prior shutdown)");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "open_writer: sweeping orphaned 'running' scan_sessions failed");
-        }
-    }
+    );
 
     Ok(conn)
 }
-
-/// Set true when `open_writer` sweeps a stale `running` scan_sessions row —
-/// i.e. the previous engine process died mid-scan. Read once by the next
-/// incremental scan to decide whether to reconcile face crops that a
-/// post-commit write may have missed (see scan_session skip-set preload).
-pub static UNCLEAN_PRIOR_SHUTDOWN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Open an ephemeral READ-ONLY connection. Query handlers use these so they
 /// never contend on the single writer mutex — WAL lets readers run concurrent
@@ -137,13 +114,8 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     const RETRY_DELAY_MS: u64 = 50;
     for attempt in 1..=MAX_ATTEMPTS {
-        // wal_checkpoint(TRUNCATE) returns a row `(busy, log, checkpointed)`. A
-        // blocked truncate surfaces as `busy != 0` in that row, NOT as a
-        // SQLITE_BUSY error — `execute_batch` discards the row, so it would
-        // report Ok() even when nothing was truncated (and the SQLITE_BUSY retry
-        // arm was dead). Read the busy flag and retry on it.
-        let busy = match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)) {
-            Ok(busy) => busy,
+        match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
+            Ok(()) => return Ok(()),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::DatabaseBusy
                     && attempt < MAX_ATTEMPTS =>
@@ -152,14 +124,7 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
                 continue;
             }
             Err(e) => return Err(e).context("WAL checkpoint(TRUNCATE) failed"),
-        };
-        if busy == 0 {
-            return Ok(());
         }
-        if attempt >= MAX_ATTEMPTS {
-            anyhow::bail!("WAL checkpoint(TRUNCATE) still busy after {MAX_ATTEMPTS} attempts");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
     }
     Ok(())
 }
@@ -222,23 +187,7 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         tx.commit().context("committing wipe")?;
         Ok(())
     })();
-    let restore_foreign_keys = (|| -> Result<()> {
-        conn.execute_batch("PRAGMA foreign_keys = ON")
-            .context("re-enabling foreign_keys after wipe")?;
-        let enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
-        if enabled != 1 {
-            anyhow::bail!("foreign_keys remained disabled after wipe");
-        }
-        Ok(())
-    })();
-    if let Err(restore_error) = restore_foreign_keys {
-        return match wipe {
-            Ok(()) => Err(restore_error),
-            Err(wipe_error) => Err(anyhow::anyhow!(
-                "wipe failed: {wipe_error:#}; foreign-key recovery also failed: {restore_error:#}"
-            )),
-        };
-    }
+    let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
     wipe?;
 
     // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.

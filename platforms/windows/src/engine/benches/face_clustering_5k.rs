@@ -47,8 +47,7 @@ fn synthetic_faces(n: usize, cluster_size: usize) -> Vec<FaceRow> {
             normalize(&mut e);
             FaceRow {
                 face_id: i as i64 + 1,
-                file_id: i as i64 + 1,
-                content_hash: Some((i as u64).to_le_bytes().to_vec()),
+                file_id: (i as i64 / 5) + 1, // ~5 faces per file
                 embedding: e,
                 quality: 0.9,
             }

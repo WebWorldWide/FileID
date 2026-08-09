@@ -26,7 +26,7 @@ public sealed partial class DetailHostView : UserControl
     public DetailHostView()
     {
         InitializeComponent();
-        Loaded += (_, _) => DebugLog.SafeRun(nameof(DetailHostView) + ".Loaded", () => Sync(animate: false));
+        Loaded += (_, _) => Sync(animate: false);
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
         Unloaded += OnUnloaded;
     }
@@ -42,7 +42,7 @@ public sealed partial class DetailHostView : UserControl
     {
         if (e.PropertyName is nameof(AppViewModel.ActiveTab) or nameof(AppViewModel.HasFolder))
         {
-            DispatcherQueue.TryEnqueue(() => DebugLog.SafeRun(nameof(OnAppChanged) + ".Enqueue", () => Sync(animate: true)));
+            DispatcherQueue.TryEnqueue(() => Sync(animate: true));
         }
     }
 
@@ -52,11 +52,8 @@ public sealed partial class DetailHostView : UserControl
         {
             try { _activeStoryboard?.Stop(); } catch { /* best-effort */ }
             _activeStoryboard = null;
-            DebugLog.SafeRun(nameof(Sync) + ".Reduced", () =>
-            {
-                CommitChild(BuildChild());
-                Host.Opacity = 1.0;
-            });
+            CommitChild(BuildChild());
+            Host.Opacity = 1.0;
             return;
         }
 
@@ -84,7 +81,7 @@ public sealed partial class DetailHostView : UserControl
         // racing storyboards on the same target leak references.
         try { _activeStoryboard?.Stop(); } catch { }
         _activeStoryboard = sbOut;
-        sbOut.Completed += (_, _) => DebugLog.SafeRun(nameof(Sync) + ".FadeOutCompleted", () =>
+        sbOut.Completed += (_, _) =>
         {
             // Superseded by a newer swap (defensive — Stop() shouldn't raise
             // Completed, but never build/dispose for a stale storyboard).
@@ -103,13 +100,13 @@ public sealed partial class DetailHostView : UserControl
             Storyboard.SetTargetProperty(fadeIn, "Opacity");
             var sbIn = new Storyboard();
             sbIn.Children.Add(fadeIn);
-            sbIn.Completed += (_, _) => DebugLog.SafeRun(nameof(Sync) + ".FadeInCompleted", () =>
+            sbIn.Completed += (_, _) =>
             {
                 if (ReferenceEquals(_activeStoryboard, sbIn)) _activeStoryboard = null;
-            });
+            };
             _activeStoryboard = sbIn;
             sbIn.Begin();
-        });
+        };
         sbOut.Begin();
     }
 

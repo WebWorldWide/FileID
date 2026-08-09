@@ -26,6 +26,7 @@ public sealed class TreeDiffControl : Control
     public sealed class DiffNode
     {
         public required string Name { get; init; }
+        public required string Path { get; init; }
         /// <summary>"unchanged", "added", "removed", "moved-source", "moved-dest".</summary>
         public required string Status { get; init; }
         public int FileCount { get; set; }
@@ -33,6 +34,7 @@ public sealed class TreeDiffControl : Control
         public string DisplayName => FileCount > 0
             ? $"{Name}  ({FileCount})"
             : Name;
+        public bool IsHighlighted => Status != "unchanged";
         public Brush HighlightBrush => Status switch
         {
             "added" or "moved-dest" => FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush"),
@@ -79,8 +81,8 @@ public sealed class TreeDiffControl : Control
     private static (DiffNode current, DiffNode proposed) BuildTrees(RestructurePlan plan)
     {
         var libraryRoot = plan.LibraryRoot ?? "";
-        var current = new DiffNode { Name = LeafName(libraryRoot, "Library"), Status = "unchanged" };
-        var proposed = new DiffNode { Name = LeafName(libraryRoot, "Library"), Status = "unchanged" };
+        var current = new DiffNode { Name = LeafName(libraryRoot, "Library"), Path = libraryRoot, Status = "unchanged" };
+        var proposed = new DiffNode { Name = LeafName(libraryRoot, "Library"), Path = libraryRoot, Status = "unchanged" };
 
         var currentBuckets = new Dictionary<string, DiffNode>(StringComparer.OrdinalIgnoreCase) { [""] = current };
         var proposedBuckets = new Dictionary<string, DiffNode>(StringComparer.OrdinalIgnoreCase) { [""] = proposed };
@@ -109,6 +111,7 @@ public sealed class TreeDiffControl : Control
         var node = new DiffNode
         {
             Name = LeafName(relDir, "?"),
+            Path = relDir,
             Status = statusForNew,
         };
         parent.Children.Add(node);

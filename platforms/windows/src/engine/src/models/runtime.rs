@@ -13,7 +13,7 @@
 // is consumed by `emit_ready` (advertised back to the app) and by
 // the EP-priority builder when an ORT session is created.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -75,14 +75,8 @@ impl RuntimeProbe {
         // A pack EP that crashed during bind on the prior run is treated as
         // absent until the user re-enables it (ep_guard), so we transparently
         // fall through to DirectML instead of crash-looping.
-        // Order matters: the stack preload only runs when the provider DLL is
-        // on disk and not crash-disabled, and its verdict is part of "present"
-        // — a pack whose native closure can't load must NOT advertise CUDA
-        // (the chain would silently land on CPU; see cuda_stack_ready).
-        let cuda_pack_present = cuda_provider_present()
-            && !crate::models::ep_guard::is_disabled("cuda")
-            && cuda_stack_ready();
-        let openvino_pack_present = openvino_provider_present() && !crate::models::ep_guard::is_disabled("openvino");
+        let cuda_pack_present = cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda");
+        let openvino_pack_present = pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino");
         let qnn_pack_present = pack_present("qnn");
         let provider = pick_provider(
             vendor,
@@ -99,12 +93,11 @@ impl RuntimeProbe {
             static EMITTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             EMITTED.get_or_init(|| {
                 tracing::info!(
-                    "perf: NVIDIA GPU detected but the CUDA Performance Pack is \
-                     not installed (or its runtime DLLs failed to load — see any \
-                     [EP] CUDA stack lines above) — ML inference is on DirectML \
-                     (~3-5x slower). Install/reinstall the CUDA pack via Settings \
-                     → Models → GPU acceleration; the pack supplies the full CUDA \
-                     runtime (cudart/cublas/cuFFT) and cuDNN auto-installs."
+                    "perf: NVIDIA GPU detected but the CUDA Performance Pack \
+                     (onnxruntime_providers_cuda.dll) isn't installed — ML inference \
+                     is on DirectML (~3-5x slower). Install the CUDA pack via \
+                     Settings → Models → GPU acceleration to enable the ONNX Runtime \
+                     CUDA EP. cuDNN auto-installs; the CUDA toolkit supplies cudart/cublas."
                 );
             });
         }
@@ -183,31 +176,6 @@ pub fn priority_chain(vendor: GpuVendor) -> Vec<ExecutionProvider> {
     chain
 }
 
-fn bind_chain(probe: &RuntimeProbe) -> Vec<ExecutionProvider> {
-    bind_chain_with_availability(probe, tensorrt_provider_present())
-}
-
-fn bind_chain_with_availability(
-    probe: &RuntimeProbe,
-    tensorrt_provider_present: bool,
-) -> Vec<ExecutionProvider> {
-    let directml_override = matches!(read_user_ep_override(), Some(ExecutionProvider::DirectMl));
-    priority_chain(probe.vendor)
-        .into_iter()
-        .filter(|ep| match ep {
-            ExecutionProvider::Cuda => probe.cuda_pack_present,
-            ExecutionProvider::TensorRt => tensorrt_provider_present,
-            ExecutionProvider::OpenVino => probe.openvino_pack_present,
-            ExecutionProvider::Qnn => probe.qnn_pack_present,
-            // The matched CUDA ORT runtime does not export DirectML. Keep the
-            // fallback only on the base runtime, or when the user explicitly
-            // selected DirectML (which also suppresses the CUDA runtime pin).
-            ExecutionProvider::DirectMl => !probe.cuda_pack_present || directml_override,
-            ExecutionProvider::Cpu => true,
-        })
-        .collect()
-}
-
 fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
     if !chain.contains(&ep) {
         chain.push(ep);
@@ -236,13 +204,6 @@ fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
 /// error chain to know it should cancel the scan rather than skip the file.
 pub const GPU_DEVICE_REMOVED_MARKER: &str = "[FILEID_GPU_DEVICE_REMOVED]";
 
-pub fn ensure_gpu_inference_alive() -> anyhow::Result<()> {
-    if crate::coordinator::process_gpu_device_removed() {
-        anyhow::bail!(GPU_DEVICE_REMOVED_MARKER);
-    }
-    Ok(())
-}
-
 /// Detects whether an error carries the marker added by the model
 /// wrappers when they classify a session.run failure as device-removed.
 /// Cheap substring check on the formatted error chain.
@@ -257,7 +218,6 @@ pub fn error_has_device_removed_marker(err: &anyhow::Error) -> bool {
 /// non-fatal failures the pipeline can skip).
 pub fn classify_inference_error(err: anyhow::Error) -> anyhow::Error {
     if is_device_removed_error(&err) {
-        crate::coordinator::latch_process_gpu_device_removed();
         err.context(GPU_DEVICE_REMOVED_MARKER)
     } else {
         err
@@ -382,7 +342,7 @@ pub fn armed_provider() -> ExecutionProvider {
     // Only reads the Copy `vendor` field; the loop re-queries pack/disable state
     // live, so the memoized probe is byte-identical and skips a DXGI re-walk.
     let probe = RuntimeProbe::shared();
-    for ep in bind_chain(probe) {
+    for ep in priority_chain(probe.vendor) {
         match ep {
             ExecutionProvider::Cuda
                 if cuda_provider_present() && !crate::models::ep_guard::is_disabled("cuda") =>
@@ -390,7 +350,7 @@ pub fn armed_provider() -> ExecutionProvider {
                 return ExecutionProvider::Cuda;
             }
             ExecutionProvider::OpenVino
-                if openvino_provider_present() && !crate::models::ep_guard::is_disabled("openvino") =>
+                if pack_present("openvino") && !crate::models::ep_guard::is_disabled("openvino") =>
             {
                 return ExecutionProvider::OpenVino;
             }
@@ -425,7 +385,6 @@ pub fn armed_provider() -> ExecutionProvider {
 pub fn configure_session_builder(
     builder: ort::session::builder::SessionBuilder,
 ) -> ort::Result<ort::session::builder::SessionBuilder> {
-    use ort::logging::LogLevel;
     use ort::session::builder::GraphOptimizationLevel;
     // Use the EP that will ACTUALLY bind — the first in the override-aware
     // priority chain — not active_provider() (which is derived from pick_provider
@@ -434,7 +393,7 @@ pub fn configure_session_builder(
     // would be tuned with the GPU default of 1 intra-op thread → single-threaded
     // CPU inference on a multi-core box. priority_chain always ends with Cpu, so
     // next() is always Some.
-    let ep = bind_chain(RuntimeProbe::shared())
+    let ep = priority_chain(RuntimeProbe::shared().vendor)
         .into_iter()
         .next()
         .unwrap_or(ExecutionProvider::Cpu);
@@ -448,49 +407,7 @@ pub fn configure_session_builder(
     } else {
         1
     };
-    builder
-        .with_log_level(LogLevel::Error)?
-        .with_optimization_level(opt)?
-        .with_intra_threads(intra)
-}
-
-/// Build -> configure -> register-EPs -> commit an ORT session from `onnx_path`
-/// over this process's EP priority chain, returning the session and its first
-/// input tensor name. Folds the identical per-wrapper session-bind boilerplate
-/// (RAM++, SFace, MobileCLIP, CLIP-text, YuNet, SCRFD) into one place; `label`
-/// flows into the `.context()` chain and the EP-chain log line. BGE binds the
-/// CPU EP with a thread override + multi-input binding, so it keeps its own path.
-pub fn commit_chain_session(
-    label: &str,
-    onnx_path: &Path,
-) -> anyhow::Result<(ort::session::Session, String)> {
-    use anyhow::Context;
-    ensure_gpu_inference_alive()?;
-    let probe = RuntimeProbe::shared();
-    let chain = bind_chain(probe);
-    let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-    let builder = ort::session::Session::builder().context("ORT session builder")?;
-    let mut builder =
-        configure_session_builder(builder).with_context(|| format!("configure session ({label})"))?;
-    let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-    if !providers.is_empty() {
-        builder = builder
-            .with_execution_providers(providers)
-            .with_context(|| format!("register execution providers ({label})"))
-            .map_err(classify_inference_error)?;
-    }
-    tracing::info!(model = label, chain = ?chain_labels, "EP priority chain registered");
-    let session = builder
-        .commit_from_file(onnx_path)
-        .with_context(|| format!("ORT session commit ({label})"))
-        .map_err(classify_inference_error)?;
-    let input_name = session
-        .inputs
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("{label} ONNX has no inputs"))?
-        .name
-        .clone();
-    Ok((session, input_name))
+    builder.with_optimization_level(opt)?.with_intra_threads(intra)
 }
 
 /// User-supplied EP override stored in the C# app's `app-settings.json`
@@ -585,234 +502,6 @@ fn cuda_provider_present() -> bool {
     .is_some()
 }
 
-fn tensorrt_provider_present() -> bool {
-    let Ok(root) = crate::paths::models_dir() else {
-        return false;
-    };
-    let provider = crate::platform::find_file_under(
-        &root.join("packs").join("cuda"),
-        "onnxruntime_providers_tensorrt.dll",
-        4,
-    );
-    // The ORT TensorRT provider is only loadable when NVIDIA's TensorRT
-    // runtime is installed as well. The CUDA performance pack intentionally
-    // does not ship that separately licensed dependency.
-    provider.is_some()
-        && crate::platform::find_file_under(
-            &root.join("packs").join("cuda"),
-            "nvinfer_10.dll",
-            4,
-        )
-        .is_some()
-}
-
-/// The CUDA EP's native dependency closure. `onnxruntime_providers_cuda.dll`
-/// (ORT 1.22 win-x64-gpu) hard-imports every one of these — a single missing
-/// name makes its LoadLibrary fail with ERROR_MOD_NOT_FOUND at session build,
-/// ORT falls through the chain, and (because the pinned gpu runtime carries no
-/// DirectML EP) the session lands on CPU with zero Rust-visible error. That
-/// exact shape burned a full overnight scan on 2026-07-20: pack "present",
-/// ep="cuda" everywhere, cufft64_11.dll absent, Swin-L on one CPU thread.
-#[cfg(windows)]
-const CUDA_STACK_REQUIRED: &[&str] = &[
-    "cudart64_12.dll",
-    "cublasLt64_12.dll",
-    "cublas64_12.dll",
-    "cufft64_11.dll",
-    "cudnn64_9.dll",
-];
-
-/// Loaded when present; their absence degrades specific paths (cuDNN
-/// runtime-compiled engines) rather than blocking the EP outright.
-#[cfg(windows)]
-const CUDA_STACK_OPTIONAL: &[&str] = &["nvrtc64_120_0.dll"];
-
-#[cfg(windows)]
-static CUDA_STACK_STATE: parking_lot::Mutex<Option<bool>> = parking_lot::Mutex::new(None);
-
-/// True once the CUDA math stack has been deterministically pre-loaded.
-/// Memoized (module identity can't change after first resolution) but
-/// invalidatable — a mid-session pack install must be able to flip
-/// absent → ready for the Settings "Verify install" flow without an engine
-/// restart. This is the loadability half of "is CUDA actually usable";
-/// `cuda_provider_present` is only the on-disk half.
-#[cfg(windows)]
-pub fn cuda_stack_ready() -> bool {
-    let mut state = CUDA_STACK_STATE.lock();
-    if let Some(ready) = *state {
-        return ready;
-    }
-    let ready = preload_cuda_math_stack();
-    *state = Some(ready);
-    ready
-}
-
-#[cfg(not(windows))]
-pub fn cuda_stack_ready() -> bool {
-    // Non-Windows builds never pin the CUDA gpu runtime; presence checks
-    // alone keep their existing meaning.
-    true
-}
-
-/// Re-run the stack preload on the next `cuda_stack_ready` query — called
-/// after a CUDA-related pack (re)install or EP re-enable. DLLs already loaded
-/// stay loaded for the process lifetime, so a re-run can only flip a previous
-/// "missing" verdict to ready, never unload a live stack.
-#[cfg(windows)]
-pub fn invalidate_cuda_stack_probe() {
-    *CUDA_STACK_STATE.lock() = None;
-}
-
-#[cfg(not(windows))]
-pub fn invalidate_cuda_stack_probe() {}
-
-/// Pre-load the CUDA EP's math DLLs by full path, in dependency order, from a
-/// deterministic per-DLL location preference: the CUDA Performance Pack →
-/// a system CUDA toolkit (`CUDA_PATH`/default install) → the llama.cpp CUDA
-/// runtime → the newest installed cuDNN drop. Two birds: (a) a broken/partial
-/// pack is detected here, BEFORE we advertise ep="cuda" or pin ORT_DYLIB_PATH
-/// to the DirectML-less gpu runtime; (b) when the same DLL name exists in
-/// several registered directories (llama.cpp-cuda ships its own cudart/cublas
-/// line), the copy the CUDA EP binds is the one chosen here — AddDllDirectory
-/// search order is explicitly unspecified.
-#[cfg(windows)]
-fn preload_cuda_math_stack() -> bool {
-    let mut ok = true;
-    for name in CUDA_STACK_REQUIRED {
-        match locate_stack_dll(name) {
-            Some(path) => match crate::platform::preload_dll(&path) {
-                Ok(()) => {
-                    tracing::info!(
-                        dll = name,
-                        path = %crate::platform::redact_path_for_log(&path),
-                        "[EP] CUDA stack preloaded"
-                    );
-                }
-                Err(code) => {
-                    tracing::error!(
-                        dll = name,
-                        path = %crate::platform::redact_path_for_log(&path),
-                        win32 = code,
-                        "[EP] CUDA stack DLL failed to load — CUDA EP unusable, falling back to DirectML"
-                    );
-                    ok = false;
-                }
-            },
-            None => {
-                tracing::error!(
-                    dll = name,
-                    "[EP] CUDA stack DLL missing from every known location — CUDA EP unusable, falling back to DirectML. Reinstall the CUDA Performance Pack (Settings → Models → GPU acceleration)."
-                );
-                ok = false;
-            }
-        }
-    }
-    for name in CUDA_STACK_OPTIONAL {
-        match locate_stack_dll(name) {
-            Some(path) => {
-                let _ = crate::platform::preload_dll(&path);
-            }
-            None => {
-                tracing::info!(dll = name, "[EP] optional CUDA stack DLL not present");
-            }
-        }
-    }
-    // Pin the cuDNN sub-library identities to the same drop as the dispatch
-    // shim we just loaded — the shim LoadLibrary's them lazily by bare name,
-    // which would otherwise re-enter the unordered search set and could mix
-    // cuDNN versions across directories.
-    if ok {
-        if let Some(shim) = locate_stack_dll("cudnn64_9.dll") {
-            if let Some(dir) = shim.parent() {
-                if let Ok(rd) = std::fs::read_dir(dir) {
-                    for entry in rd.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if name.starts_with("cudnn_") && name.ends_with("64_9.dll") {
-                            let _ = crate::platform::preload_dll(&entry.path());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    ok
-}
-
-/// Deterministic per-DLL location preference for the CUDA math stack.
-#[cfg(windows)]
-fn locate_stack_dll(name: &str) -> Option<PathBuf> {
-    let root = crate::paths::models_dir().ok();
-    if let Some(root) = &root {
-        if let Some(p) =
-            crate::platform::find_file_under(&root.join("packs").join("cuda"), name, 4)
-        {
-            return Some(p);
-        }
-    }
-    if let Some(bin) = system_cuda_toolkit_dir() {
-        let p = bin.join(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    if let Some(root) = &root {
-        let llama = root.join("llama.cpp-cuda").join(name);
-        if llama.is_file() {
-            return Some(llama);
-        }
-        if let Some(p) = newest_cudnn_dll(root, name) {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Find `name` under the NEWEST versioned cuDNN drop in `Models/cudnn/`.
-/// A pin bump extracts a second `cudnn-windows-x86_64-<ver>_cudaN-archive`
-/// sibling next to the old one; a plain directory walk finds whichever
-/// `read_dir` yields first (lexicographic on NTFS — "9.5.1" sorts before
-/// "9.8.0", and would sort AFTER "9.10.0"). Parse the version numerically.
-#[cfg(windows)]
-fn newest_cudnn_dll(models_root: &std::path::Path, name: &str) -> Option<PathBuf> {
-    let cudnn_root = models_root.join("cudnn");
-    let mut best: Option<(Vec<u32>, PathBuf)> = None;
-    for entry in std::fs::read_dir(&cudnn_root).ok()?.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-        let dir_name = entry.file_name();
-        let dir_name = dir_name.to_string_lossy().to_string();
-        let version: Vec<u32> = dir_name
-            .strip_prefix("cudnn-windows-x86_64-")
-            .and_then(|rest| rest.split('_').next())
-            .map(|v| v.split('.').filter_map(|c| c.parse().ok()).collect())
-            .unwrap_or_default();
-        let candidate = entry.path().join("bin").join(name);
-        if candidate.is_file() && best.as_ref().is_none_or(|(v, _)| version > *v) {
-            best = Some((version, candidate));
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-/// OpenVINO mirrors the CUDA gate: usable only when the pack's own provider
-/// DLL is on disk. The shallow `pack_present` (any top-level DLL) both
-/// under-reported a pack whose zip carries a top-level directory and
-/// over-reported on a stray unrelated DLL — the same two failure modes the
-/// CUDA gate was hardened against.
-fn openvino_provider_present() -> bool {
-    let Ok(root) = crate::paths::models_dir() else {
-        return false;
-    };
-    crate::platform::find_file_under(
-        &root.join("packs").join("openvino"),
-        "onnxruntime_providers_openvino.dll",
-        4,
-    )
-    .is_some()
-}
-
 /// The accelerator pack directory for the detected GPU vendor, if that vendor
 /// uses a pack-backed ORT execution provider: NVIDIA → `packs/cuda`,
 /// Intel → `packs/openvino`. Returned as `(ep_name, dir)` where `ep_name` is
@@ -821,12 +510,6 @@ fn openvino_provider_present() -> bool {
 /// build pyke's base lacks. AMD/Qualcomm/None use DirectML/CPU — no pinned
 /// runtime, so this returns None.
 pub fn active_pack_dir() -> Option<(&'static str, PathBuf)> {
-    if matches!(
-        read_user_ep_override(),
-        Some(ExecutionProvider::DirectMl | ExecutionProvider::Cpu)
-    ) {
-        return None;
-    }
     let root = crate::paths::models_dir().ok()?;
     let (vendor, _, _) = probe_gpu_vendor();
     let ep = match vendor {
@@ -1036,9 +719,13 @@ pub fn probe_cuda_pack() -> CudaPackProbe {
 mod tests {
     use super::*;
 
-    /// Regression guard: every vendor's requested EP chain must end at CPU
-    /// (the always-present floor). Availability filtering below removes
-    /// providers whose matched native runtime cannot load them.
+    /// Regression guard: every vendor's EP chain must end at CPU (the
+    /// always-present floor) and must include DirectML (the always-tried
+    /// fallback on Windows). The vendor-specific accelerated EPs come
+    /// first; ORT registers them in order and silently falls through
+    /// when an EP's DLLs aren't present at runtime — so unconditional
+    /// chain entry is correct here, the dynamic gating happens at
+    /// load time, not chain-build time.
     fn assert_chain_terminates_at_cpu_with_directml(vendor: GpuVendor, chain: &[ExecutionProvider]) {
         assert_eq!(
             chain.last(),
@@ -1067,42 +754,6 @@ mod tests {
                 ExecutionProvider::DirectMl,
                 ExecutionProvider::Cpu,
             ]
-        );
-    }
-
-    #[test]
-    fn nvidia_bind_chain_skips_uninstalled_pack_providers() {
-        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
-        let probe = RuntimeProbe {
-            vendor: GpuVendor::Nvidia,
-            adapter_name: None,
-            adapter_index: Some(0),
-            provider: ExecutionProvider::DirectMl,
-            cuda_pack_present: false,
-            openvino_pack_present: false,
-            qnn_pack_present: false,
-        };
-        assert_eq!(
-            bind_chain_with_availability(&probe, false),
-            vec![ExecutionProvider::DirectMl, ExecutionProvider::Cpu]
-        );
-    }
-
-    #[test]
-    fn nvidia_bind_chain_omits_directml_from_cuda_runtime() {
-        unsafe { std::env::remove_var("FILEID_GPU_EP_OVERRIDE"); }
-        let probe = RuntimeProbe {
-            vendor: GpuVendor::Nvidia,
-            adapter_name: None,
-            adapter_index: Some(0),
-            provider: ExecutionProvider::Cuda,
-            cuda_pack_present: true,
-            openvino_pack_present: false,
-            qnn_pack_present: false,
-        };
-        assert_eq!(
-            bind_chain_with_availability(&probe, false),
-            vec![ExecutionProvider::Cuda, ExecutionProvider::Cpu]
         );
     }
 
@@ -1169,35 +820,5 @@ mod tests {
             let chain = priority_chain(vendor);
             assert_chain_terminates_at_cpu_with_directml(vendor, &chain);
         }
-    }
-
-    #[test]
-    fn device_removed_classification_latches_only_in_an_isolated_process() {
-        const CHILD: &str = "FILEID_GPU_LATCH_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            assert!(!crate::coordinator::process_gpu_device_removed());
-            let ordinary = classify_inference_error(anyhow::anyhow!("ordinary model error"));
-            assert!(!error_has_device_removed_marker(&ordinary));
-            assert!(!crate::coordinator::process_gpu_device_removed());
-
-            let removed = classify_inference_error(
-                anyhow::anyhow!("DXGI_ERROR_DEVICE_REMOVED 0x887A0005")
-                    .context("ORT session commit (test model)"),
-            );
-            assert!(error_has_device_removed_marker(&removed));
-            assert!(crate::coordinator::process_gpu_device_removed());
-            let blocked = ensure_gpu_inference_alive().expect_err("GPU work must stay blocked");
-            assert!(error_has_device_removed_marker(&blocked));
-            return;
-        }
-
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("models::runtime::tests::device_removed_classification_latches_only_in_an_isolated_process")
-            .arg("--exact")
-            .arg("--nocapture")
-            .env(CHILD, "1")
-            .status()
-            .expect("launch isolated GPU-latch test");
-        assert!(status.success());
     }
 }
