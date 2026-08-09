@@ -288,7 +288,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
 
     def test_reviewed_shell_script_inventory_is_exact(self) -> None:
         self.assertEqual(REVIEWED_SHELL_SCRIPT_SHA256, {
-            "build.sh": "9e18d3ed14e88eab1cbb642ff5e3fff47d5ffd988bdf668002621c583f67caf5",
+            "build.sh": "07f636a7a6a10a3d39ee636d4dc63dce1af9aa7c101221987b9e88539deaa68c",
             "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
             "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
             "platforms/apple/run.sh": "7e5479a450f25744457915ce8824b86b0f29a4d9518939beca6815949396a660",

@@ -98,12 +98,39 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
+      - name: Enforce reviewed runtime egress before publication
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers
+
+      - name: Download signed/non-Windows CLI/TUI bundles
+        if: steps.mode.outputs.publish == 'true'
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          pattern: '*tools-*'
+          merge-multiple: true
+          path: release-tools
+
+      - name: Stage release-ready assets
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        run: |
+          $stage = "dist/release-ready"
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item $stage -ItemType Directory -Force | Out-Null
+          $assets = @(
+            "dist/installer/FileIDSetup.exe",
+            "dist/installer/FileID-x64.msi",
+            "dist/installer/FileID-arm64.msi"
+          )
+          foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
+
       - name: Upload release-ready assets
         if: steps.mode.outputs.publish == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: FileID-release-ready-${{ github.run_id }}
-          path: platforms/windows/dist/installer/*
+          path: platforms/windows/dist/release-ready/*
           if-no-files-found: error
           retention-days: 1
 
