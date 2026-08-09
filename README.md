@@ -38,7 +38,7 @@
 Point FileID at a folder. It indexes images, video keyframes, audio and speech, PDFs, Office documents, presentations, and plain text into one searchable library that understands what is *in* them. Faces cluster into named cards. Duplicates group by content and perceptual similarity. Local models add tags, captions, and proposed filenames. Folder reorganization previews before anything moves on disk.
 
 > **No cloud. No telemetry. Ever.**
-> No analytics SDKs, no crash reporters, no update pings. The only network egress is a model download you explicitly ask for. CI scans every shipped binary against a 23-string deny-list as a release blocker.
+> No analytics SDKs, no crash reporters, no update pings. Network egress is limited to user-requested model and optional hardware-runtime downloads from the reviewed upstream host baseline. CI scans every shipped binary against a 23-string deny-list as a release blocker.
 
 <table>
 <tr><td width="50%" valign="top">
@@ -126,7 +126,7 @@ macOS is the canonical visual + behavioral reference; the Windows and Linux apps
 
 `fileid` and `fileid-tui` share the Rust engine crate and the **same library format** as the desktop apps. Read/query and model-free paths run in-process; full-ML scans spawn `FileIDEngine` over the canonical IPC.
 
-Download the matching `FileID-tools-0.1.0-*` archive from the [v0.1.0 prerelease](https://github.com/WebWorldWide/FileID/releases/tag/v0.1.0), or build from source. This command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin`:
+Download the matching `FileID-tools-0.1.0-*` archive from the [v0.1.0 release](https://github.com/WebWorldWide/FileID/releases/tag/v0.1.0), or build from source. This command builds the engine, CLI, and TUI in release and installs `fileid`, `fileid-tui`, and the engine binary to `~/.cargo/bin`:
 
 ```bash
 bash scripts/build-tools.sh
@@ -170,7 +170,7 @@ Deeper reference: [`platforms/cli/README.md`](platforms/cli/README.md) · [`plat
 ## Install
 
 > [!NOTE]
-> Clearly labeled **unsigned** prerelease artifacts are published on [GitHub Releases](https://github.com/WebWorldWide/FileID/releases). They are not public-trust signed. Building from source (see [Quickstart](#quickstart)) remains the recommended path, or use the recipes in [`packaging/`](packaging/).
+> `v0.1.0` artifacts are clearly labeled **unsigned** and published on [GitHub Releases](https://github.com/WebWorldWide/FileID/releases). They are not public-trust signed. Building from source (see [Quickstart](#quickstart)) remains the recommended path, or use the recipes in [`packaging/`](packaging/).
 
 | Platform | Format | Notes |
 | :-- | :-- | :-- |
@@ -247,5 +247,9 @@ Per-front-end conventions: [Windows](platforms/windows/CLAUDE.md) · [macOS](pla
 **Apache-2.0** — see [`LICENSE`](LICENSE).
 
 Default model weights are commercially usable and contain no non-commercial-only set; most are Apache-2.0/MIT, while Gemma is governed by separately accepted Gemma Terms. FileID downloads weights at runtime and **never redistributes them**; every weight remains governed by its upstream license or terms. See [`shared/docs/MODELS.md`](shared/docs/MODELS.md) for the canonical registry.
+
+## Credits
+
+FileID is shaped and implemented with **Claude** and **Codex**, alongside the project’s human maintainers and contributors.
 
 ---
