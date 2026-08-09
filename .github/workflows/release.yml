@@ -345,6 +345,6 @@ jobs:
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -ge 1
           gh release create "${{ github.ref_name }}" \
             --title "FileID ${{ github.ref_name }}" \
-            --generate-notes \
+            --notes "Unsigned FileID v0.1.0 release. See README and CHANGELOG.md for platform details." \
             release-assets/*
 
