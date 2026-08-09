@@ -943,6 +943,7 @@ img { display: block; max-width: 100%; }
   grid-template-columns: 1.2fr 1fr 1fr;
   gap: 18px;
   margin-bottom: 56px;
+  align-items: start;
 }
 .dl-card {
   position: relative;
@@ -954,6 +955,7 @@ img { display: block; max-width: 100%; }
   backdrop-filter: blur(20px);
   display: flex;
   flex-direction: column;
+  min-height: 330px;
 }
 .dl-card-primary {
   background:
@@ -987,10 +989,11 @@ img { display: block; max-width: 100%; }
   color: var(--fg-soft);
   line-height: 1.55;
   margin-bottom: 24px;
-  flex: 1;
+  flex: 0 0 auto;
+  min-height: 108px;
   text-wrap: pretty;
 }
-.dl-actions { display: flex; flex-direction: column; gap: 10px; }
+.dl-actions { display: flex; flex-direction: column; gap: 10px; margin-top: auto; }
 .dl-sub {
   display: flex; gap: 18px;
   font-family: var(--font-mono);
