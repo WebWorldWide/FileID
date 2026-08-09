@@ -612,8 +612,8 @@ class RuntimeEgressTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[2]
         original = (repository / ".github/workflows/release.yml").read_text(encoding="utf-8")
         mutated = original.replace(
-            "        run: python ../../shared/scripts/check_runtime_egress.py\n",
-            "        run: python ../../shared/scripts/check_runtime_egress.py\n        continue-on-error: true\n",
+            "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n",
+            "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n        continue-on-error: true\n",
             1,
         )
         with tempfile.TemporaryDirectory() as directory:
