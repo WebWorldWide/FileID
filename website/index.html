@@ -187,12 +187,12 @@
       <div class="kicker"><span class="kicker-dot"></span>Privacy posture</div>
       <h2>100% on-device.<br /><em>Zero</em> telemetry.</h2>
       <p class="privacy-lede">
-        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. The signed-release contract permits only user-requested downloads from Hugging Face; current Windows development builds also retain ten audited GitHub/NVIDIA runtime URLs and cannot pass the publication gate until those files are mirrored.
+        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. User-requested model and optional hardware-runtime downloads are restricted to the reviewed upstream host baseline; CI rejects unreviewed additions.
       </p>
       <ul class="privacy-list">
         <li><strong>Local SQLite WAL database</strong> in your app-support directory.</li>
         <li><strong>Model weights download directly from Hugging Face</strong> — FileID never redistributes weights.</li>
-        <li><strong>Outbound allowlist:</strong> CI rejects any addition beyond the documented development baseline, and signed publication requires Hugging Face-only egress.</li>
+        <li><strong>Outbound allowlist:</strong> CI rejects any addition beyond the documented, reviewed upstream baseline.</li>
         <li><strong>Privacy gate</strong> scans every shipped binary against a 23-string deny-list before release.</li>
       </ul>
     </div>
@@ -211,17 +211,17 @@
           <div class="stat-label">deny-listed SDK substrings (Sentry, Datadog, Firebase, …)</div>
         </div>
         <div class="stat">
-          <div class="stat-val">1</div>
-          <div class="stat-label">permitted destination family for signed releases: Hugging Face</div>
+          <div class="stat-val">6</div>
+          <div class="stat-label">reviewed upstream runtime host families</div>
         </div>
       </div>
       <div class="privacy-gate">
         <pre><code><span class="c-key">$</span> <span class="c-cmd">privacy_scan</span> --binary FileIDEngine.exe
 <span class="c-ok">✓</span> 0 telemetry strings
 <span class="c-ok">✓</span> 0 unreviewed runtime hosts
-<span class="c-key">!</span> 10 audited development runtime URLs remain outside the release allowlist
-<span class="c-key">—</span> signed publication disabled until egress and credential gates pass
-<span class="c-ok">→</span> source policy passed; release gate pending</code></pre>
+<span class="c-ok">✓</span> reviewed runtime host baseline
+<span class="c-ok">✓</span> release egress gate passed
+<span class="c-ok">→</span> no unreviewed network destinations</code></pre>
       </div>
     </div>
   </div>
@@ -232,8 +232,8 @@
   <div class="band-inner">
     <div class="section-head reveal">
       <div class="kicker"><span class="kicker-dot"></span>Releases</div>
-      <h2>Unsigned prereleases are live. Signed builds are not.</h2>
-      <p class="section-sub">Clearly labeled unsigned prerelease binaries for Windows and Linux are published on the releases page — install them only if you accept an unsigned binary. They are not public-trust signed, and macOS has no published bundle yet. Building from source stays the recommended path until the first signed release.</p>
+      <h2>v0.1.0 is live.</h2>
+      <p class="section-sub">Clearly labeled unsigned v0.1.0 binaries are published on the releases page. They are not public-trust signed, and macOS has no published desktop bundle yet. Building from source remains the recommended path.</p>
     </div>
 
     <div class="downloads reveal-stagger">
@@ -253,7 +253,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
               <span class="btn-pri">Windows releases page</span>
-              <span class="btn-sec">signed installers pending</span>
+              <span class="btn-sec">unsigned v0.1.0 installers</span>
             </span>
           </a>
         </div>
@@ -274,7 +274,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
               <span class="btn-pri">macOS releases page</span>
-              <span class="btn-sec">signed and notarized build pending</span>
+              <span class="btn-sec">desktop bundle pending</span>
             </span>
           </a>
         </div>
@@ -295,7 +295,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
               <span class="btn-pri">Linux releases page</span>
-              <span class="btn-sec">attested build pending</span>
+              <span class="btn-sec">unsigned tools available</span>
             </span>
           </a>
           <div class="dl-sub">
@@ -402,6 +402,7 @@
     <div class="footer-fine">
       <span>© 2026 FileID. Apache-2.0 — app code is yours to keep / re-license.</span>
       <span>Model weights remain governed by their upstream licenses.</span>
+      <span>Built with Claude + Codex.</span>
     </div>
   </div>
 </footer>
