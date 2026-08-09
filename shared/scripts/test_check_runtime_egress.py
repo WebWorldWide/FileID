@@ -212,6 +212,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/app/Sources/FileID/EngineClient.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
+            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
             "platforms/cli/src/runtime.rs",
             "platforms/cli/src/scan_models.rs",
             "platforms/linux/src/app/src/engine_client.rs",
@@ -243,6 +244,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
             "platforms/windows/src/engine/src/pipeline/doc_extract.rs",
             "platforms/windows/src/engine/src/pipeline/restructure_apply.rs",
+            "platforms/windows/src/engine/src/pipeline/usn.rs",
             "platforms/windows/src/engine/src/shell/heic.rs",
             "platforms/windows/src/engine/src/shell/ocr.rs",
             "platforms/windows/src/engine/src/shell/reveal.rs",
@@ -251,6 +253,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/shell/trash.rs",
             "platforms/windows/src/engine/src/shell/video.rs",
             "platforms/windows/src/engine/src/util/content_hash.rs",
+            "platforms/windows/src/engine/src/util/elevation.rs",
             "platforms/windows/src/engine/src/util/path_safety.rs",
         })
         self.assertEqual(set(REVIEWED_NETWORK_SOURCE_SHA256), RAW_NETWORK_FILES)
@@ -512,7 +515,7 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_reviewed_local_loader_content_is_digest_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = self.source_tree(directory)
-            relative = "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift"
+            relative = "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
             path = root / relative
             source = path.read_text(encoding="utf-8").replace(
                 "Data(contentsOf: url)",
