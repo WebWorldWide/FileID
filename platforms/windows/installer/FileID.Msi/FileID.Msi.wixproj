@@ -86,18 +86,9 @@
        (Not gated by CI — the WiX projects aren't CI-built — but catches it
        on every local release build via publish-bundle.ps1.) -->
   <Target Name="VerifyEngineVersionMatchesVersionFile" BeforeTargets="CoreCompile">
-    <!-- Read Cargo.toml line-by-line (avoids feeding multiline text with
-         embedded quotes into an inline property-function, which corrupts the
-         MSBuild expression parser) and pull the first `version = "x.y.z"`. -->
-    <ReadLinesFromFile File="$(MSBuildThisFileDirectory)..\..\src\engine\Cargo.toml">
-      <Output TaskParameter="Lines" ItemName="_CargoTomlLine" />
-    </ReadLinesFromFile>
-    <ItemGroup>
-      <_CargoVersionMatch Include="@(_CargoTomlLine)"
-                          Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Identity)', '^\s*version\s*=\s*&quot;[^&quot;]+&quot;'))" />
-    </ItemGroup>
     <PropertyGroup>
-      <_CargoVersionParsed>$([System.Text.RegularExpressions.Regex]::Match('@(_CargoVersionMatch)', 'version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</_CargoVersionParsed>
+      <_CargoTomlText>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)..\..\src\engine\Cargo.toml'))</_CargoTomlText>
+      <_CargoVersionParsed>$([System.Text.RegularExpressions.Regex]::Match('$(_CargoTomlText)', 'version\s*=\s*&quot;([^&quot;]+)&quot;').Groups[1].Value)</_CargoVersionParsed>
     </PropertyGroup>
     <Error
         Condition="'$(_CargoVersionParsed)' != '$(FileIDVersion)'"
