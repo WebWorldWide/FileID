@@ -19,6 +19,7 @@ pwsh build/build.ps1 -RunTests  # + cargo test
 
 Prereqs:
 - Visual Studio 2022 (or Build Tools) with the **.NET desktop development** workload plus the **Windows App SDK / WinUI** MSBuild tooling. WinUI 3's PriGen/MRT targets need VS's `AppxPackage` tasks; the standalone .NET SDK alone won't build the app.
+- **Linux**: Rust 1.85+, GTK4 4.12+, libadwaita 1.4+, Flatpak builder with GNOME 49 runtime.
 - Rust 1.90 (`rustup install 1.90 && rustup default 1.90`). MSRV is pinned in `rust-toolchain.toml`.
 - PowerShell 7+ (`pwsh`).
 
