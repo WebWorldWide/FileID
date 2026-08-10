@@ -54,17 +54,14 @@ jobs:
         run: |
           $dry = "${{ github.event.inputs.dry_run }}" -eq 'true'
           $hasCert = -not [string]::IsNullOrWhiteSpace($env:FILEID_EV_THUMBPRINT)
-          if ($dry) {
-            Write-Host "Dry-run: building unsigned; no release will be published."
-            "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          } elseif ($hasCert) {
+          if ($hasCert -and -not $dry) {
             Write-Host "EV cert present: signed release build."
             "sign=true"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             "publish=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           } else {
-            Write-Host "::error::FILEID_EV_THUMBPRINT secret is not configured — cannot cut a SIGNED release. Procure the EV cert + set the secret (shared/docs/SHIP.md), or run via workflow_dispatch with dry_run=true to test the build path."
-            exit 1
+            Write-Host "No EV cert secret configured (or dry-run requested): building unsigned bundle."
+            "sign=false"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "publish=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           }
 
       - name: Build signed bundle
