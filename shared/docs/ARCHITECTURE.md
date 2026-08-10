@@ -27,7 +27,7 @@ When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned at v7 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v18 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`
