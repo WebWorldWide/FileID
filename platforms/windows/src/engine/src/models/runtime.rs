@@ -204,6 +204,14 @@ fn push_unique(chain: &mut Vec<ExecutionProvider>, ep: ExecutionProvider) {
 /// error chain to know it should cancel the scan rather than skip the file.
 pub const GPU_DEVICE_REMOVED_MARKER: &str = "[FILEID_GPU_DEVICE_REMOVED]";
 
+/// Check if GPU device was marked dead/removed; returns Err if inference is blocked.
+pub fn ensure_gpu_inference_alive() -> anyhow::Result<()> {
+    if crate::coordinator::process_gpu_device_removed() {
+        anyhow::bail!("GPU device removed — inference disabled for process");
+    }
+    Ok(())
+}
+
 /// Detects whether an error carries the marker added by the model
 /// wrappers when they classify a session.run failure as device-removed.
 /// Cheap substring check on the formatted error chain.

@@ -1280,6 +1280,37 @@ pub fn set_worker_background_priority() {
 #[cfg(not(windows))]
 pub fn set_worker_background_priority() {}
 
+/// Query available disk free space in bytes at `path`.
+#[cfg(windows)]
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free_bytes_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+    let res = unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free_bytes_available),
+            Some(&mut total_bytes),
+            Some(&mut total_free_bytes),
+        )
+    };
+    if res.is_ok() {
+        Some(free_bytes_available)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(windows))]
+pub fn available_disk_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;

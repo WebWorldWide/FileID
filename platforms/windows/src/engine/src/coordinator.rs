@@ -12,6 +12,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+static GLOBAL_GPU_DEAD: AtomicBool = AtomicBool::new(false);
+
+/// Check if GPU device was removed in this process.
+pub fn process_gpu_device_removed() -> bool {
+    GLOBAL_GPU_DEAD.load(Ordering::Relaxed)
+}
+
+/// Mark global GPU dead flag.
+pub fn mark_global_gpu_dead() -> bool {
+    let was = GLOBAL_GPU_DEAD.swap(true, Ordering::AcqRel);
+    !was
+}
+
 #[derive(Clone)]
 pub struct ScanCoordinator {
     inner: Arc<Inner>,
