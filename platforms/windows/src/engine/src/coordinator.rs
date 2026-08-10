@@ -20,6 +20,7 @@ pub fn process_gpu_device_removed() -> bool {
 }
 
 /// Mark global GPU dead flag.
+#[allow(dead_code)]
 pub fn mark_global_gpu_dead() -> bool {
     let was = GLOBAL_GPU_DEAD.swap(true, Ordering::AcqRel);
     !was

@@ -136,6 +136,7 @@ const PINNED_ROOT_CERTS: [(&str, &[u8]); 11] = [
 /// reverts to the OS root store — validation only ever changes, never the
 /// egress surface — and is logged loudly as a diagnostic escape hatch for
 /// networks that intercept HTTPS.
+#[allow(dead_code)]
 pub fn fail_closed_client() -> Arc<reqwest::Client> {
     Arc::new(
         reqwest::Client::builder()
