@@ -438,7 +438,7 @@ async fn run_deep_analyze_batch(
     // including the cancel-early path below.
     let server = match weights {
         Some((gguf, mmproj)) => {
-            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj).await {
+            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj, &cancel).await {
                 Ok(s) => {
                     // A2: verify the server accepts our multimodal payload shape
                     // BEFORE committing the whole batch to it. If it rejects the
