@@ -75,6 +75,20 @@ pub fn search_locations() -> Vec<PathBuf> {
     out
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn search_locations() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join(DYLIB_FILE_NAME));
+        }
+    }
+    if let Ok(rt) = crate::paths::runtime_dir() {
+        out.push(rt.join(DYLIB_FILE_NAME));
+    }
+    out
+}
+
 /// Resolve an installed ONNX Runtime dylib, honoring an explicit, non-empty
 /// `ORT_DYLIB_PATH` first, then [`search_locations`]. Returns the first path
 /// that is an existing file.
