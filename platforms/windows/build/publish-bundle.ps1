@@ -150,10 +150,31 @@ if (-not $SkipArm64) {
 }
 
 # ─── 3. Publish app for each arch ──────────────────────────────────────────
+function Get-MSBuildPath {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $found = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+        if ($found -and (Test-Path $found)) {
+            return $found
+        }
+    }
+    $candidates = @(
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe"
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return $c }
+    }
+    return $null
+}
+
 function Publish-App($rid, $platform) {
     Write-Host "Publishing FileID.App ($rid)..." -ForegroundColor Cyan
-    $msBuild = "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe"
-    if (Test-Path $msBuild) {
+    $msBuild = Get-MSBuildPath
+    if ($msBuild) {
+        Write-Host "Using MSBuild at: $msBuild" -ForegroundColor Gray
         & $msBuild $AppCsproj /t:Publish /p:Configuration=Release /p:Platform=$platform /p:RuntimeIdentifier=$rid /p:SelfContained=true /p:PublishReadyToRun=true /nologo /restore
     } else {
         & dotnet publish $AppCsproj -c Release -r $rid --self-contained true /p:PublishReadyToRun=true -p:Platform=$platform --nologo
