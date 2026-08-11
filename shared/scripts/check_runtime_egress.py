@@ -174,7 +174,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/vlm_server.rs": "c47e1be5f0b777727dc122b0c13f425cd04106bc3edc8aa1e6009ef67ed733ff",
   "platforms/windows/src/engine/src/models/whisper.rs": "22bc6786f637487f82483732e16e43af38d54b590699d4bcd71640460f791bde",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "1c94b657dbb21aa6f25d55736b4dbf75031c0e6a83d4fb4162db3c83668d8a76",
-  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "9663f761f3a66a00d0b951d69e01d50e55990c8fb8e9a5e1b2713c9b1fa04efb",
+  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "e6ec521ac65aaab03c5918d6bc3b04854b2c6a878eed6b8fad82cf0aa50f1267",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "fa73f561f980193a4b2c14ab38464d82123a3d20d8592eb8ea0199a888273424",
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
   "platforms/windows/src/engine/src/platform.rs": "4336961b56e1d0ce3ba111cb667bb90340813e04a6a0f9bf605a2ee9509d56b9",

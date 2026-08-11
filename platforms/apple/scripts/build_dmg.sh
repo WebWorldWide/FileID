@@ -127,6 +127,9 @@ fi
 
 # Stage: app + Applications symlink. Plain — no background image, no
 # .DS_Store, no styled window. Finder picks defaults; reliable.
+echo "🛡️ Privacy gate: scanning shipped binaries..."
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "$APP"
+
 mkdir -p "$DIST_DIR"
 # Wipe any stale numbered duplicates Finder leaves behind (FileID 2.dmg,
 # FileID 3.dmg, etc.) plus the working files for this run.

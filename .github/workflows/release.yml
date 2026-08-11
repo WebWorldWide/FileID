@@ -95,6 +95,11 @@ jobs:
           }
           Write-Host "All release artifacts signed + Valid."
 
+      - name: Enforce binary privacy gate before publication
+        if: steps.mode.outputs.publish == 'true'
+        shell: pwsh
+        run: python ../../shared/scripts/check_binary_privacy.py dist/installer
+
       - name: Enforce reviewed runtime egress before publication
         if: steps.mode.outputs.publish == 'true'
         shell: pwsh
