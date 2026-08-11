@@ -334,4 +334,4 @@ jobs:
         shell: pwsh
         run: |
           $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
-          python ../../../shared/scripts/check_binary_privacy.py $exe
+          python "${{ github.workspace }}/shared/scripts/check_binary_privacy.py" $exe
