@@ -276,7 +276,7 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 }
             }
             Ok(Event::Text(t)) if depth > 0 => {
-                if let Ok(s) = t.unescape() {
+                if let Ok(s) = reader.decoder().decode(&t) {
                     out.push_str(&s);
                 }
             }
