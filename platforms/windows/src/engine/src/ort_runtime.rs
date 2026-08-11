@@ -50,6 +50,10 @@ pub const INSTALL_COMMAND: &str = "fileid runtime install";
 pub fn install_path() -> anyhow::Result<PathBuf> {
     Ok(crate::paths::runtime_dir()?.join(DYLIB_FILE_NAME))
 }
+#[cfg(not(target_os = "macos"))]
+pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::paths::runtime_dir()?.join(DYLIB_FILE_NAME))
+}
 
 /// Ordered macOS search locations for an installed ONNX Runtime dylib (highest
 /// priority first), NOT counting an explicit `ORT_DYLIB_PATH` (resolved before
@@ -101,6 +105,18 @@ pub fn resolve_dylib() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") {
         if !p.is_empty() {
             let p = PathBuf::from(p);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    search_locations().into_iter().find(|p| p.is_file())
+}
+#[cfg(not(target_os = "macos"))]
+pub fn resolve_dylib() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") {
+        if !p.is_empty() {
+            let p = std::path::PathBuf::from(p);
             if p.is_file() {
                 return Some(p);
             }

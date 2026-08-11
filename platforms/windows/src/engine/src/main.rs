@@ -19,6 +19,7 @@ mod ipc;
 mod job_queue;
 mod logging;
 mod models;
+mod ort_runtime;
 mod paths;
 mod pipeline;
 mod platform;
