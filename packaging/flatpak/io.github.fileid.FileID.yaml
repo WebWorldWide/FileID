@@ -40,6 +40,7 @@ modules:
   - name: fileid
     buildsystem: simple
     build-options:
+      no-debuginfo: true
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/fileid/cargo
