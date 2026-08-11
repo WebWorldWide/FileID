@@ -2228,6 +2228,7 @@ pub fn compute_dhash(rgb: &[u8], width: usize, height: usize) -> i64 {
 }
 
 /// Compute dHash perceptual fingerprint directly from an image file at `path`.
+#[allow(dead_code)]
 pub fn compute_dhash_for_path(path: &std::path::Path) -> std::io::Result<i64> {
     let img = image::open(path).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let rgb = img.to_rgb8();

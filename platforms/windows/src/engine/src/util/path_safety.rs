@@ -2,6 +2,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
+#[allow(dead_code)]
 pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     if to.exists() {
         return Err(std::io::Error::new(

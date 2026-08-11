@@ -88,6 +88,7 @@ impl RestructureApply {
         self.apply_with(moves, true)
     }
 
+    #[allow(dead_code)]
     pub fn apply_iter<I>(&self, moves: I, _total: Option<usize>) -> Result<RestructureApplyResult>
     where
         I: IntoIterator<Item = Result<RestructureMove>>,
