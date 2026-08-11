@@ -22,6 +22,7 @@ const CANONICAL_KINDS: &[&str] = &[
     "llama_runtime_cuda_x64",
     "bge_text",
     "florence2_base",
+    "whisper",
 ];
 
 fn manifest() -> serde_json::Value {
@@ -89,7 +90,7 @@ fn registry_matches_manifest_exactly() {
         "manifest lists windows artifacts the registry doesn't serve: {:?}",
         manifest_entries.keys().collect::<Vec<_>>()
     );
-    assert_eq!(registry_urls.len(), 29, "expected 29 pinned artifacts");
+    assert_eq!(registry_urls.len(), 31, "expected 31 pinned artifacts");
 }
 
 #[test]
