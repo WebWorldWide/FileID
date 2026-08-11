@@ -672,14 +672,7 @@ mod tests {
         i64,
         i64,
     );
-    type ZeroDormantState = (
-        i64,
-        i64,
-        i64,
-        Option<i64>,
-        Option<Vec<u8>>,
-        Option<String>,
-    );
+    type ZeroDormantState = (i64, i64, i64, Option<i64>, Option<Vec<u8>>, Option<String>);
 
     fn test_layout(name: &str) -> (PathBuf, PathBuf, Ctx) {
         let temp = std::env::temp_dir().join(format!(
@@ -904,7 +897,16 @@ mod tests {
                     "SELECT id, size_bytes, failed, phash, content_hash, vlm_description \
                      FROM files WHERE path_text = ?1",
                     params![canonical_path_text(&path)],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
                 )
                 .unwrap();
             assert_eq!(state, (original_id, 0, 1, None, None, None));
