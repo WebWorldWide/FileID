@@ -60,6 +60,7 @@ pub fn engine_models_dir() -> Result<PathBuf> { models_dir() }
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
+pub fn runtime_dir()  -> Result<PathBuf> { Ok(root()?.join("runtime")) }
 #[allow(dead_code)]
 pub fn settings_path() -> Result<PathBuf> { Ok(root()?.join("settings.json")) }
 /// The C# app's settings file (separate from the engine's probe-cache
