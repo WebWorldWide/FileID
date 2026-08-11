@@ -201,6 +201,8 @@ pub struct StartScanPayload {
     /// rescan (skip already-current files).
     #[serde(default)]
     pub rescan: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1035,6 +1037,7 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
+                excluded_paths: None,
             }),
         };
         let j = serde_json::to_string(&cmd).unwrap();
@@ -1133,6 +1136,7 @@ mod tests {
                 root_path: r"C:\Users\adam\Pictures".into(),
                 root_display: Some("Pictures".into()),
                 rescan: false,
+                excluded_paths: None,
             }),
             CommandPayload::PauseScan(Empty {}),
             CommandPayload::ResumeScan(Empty {}),
@@ -1304,6 +1308,7 @@ mod tests {
                     root_path: path.clone(),
                     root_display: None,
                     rescan: false,
+                    excluded_paths: None,
                 }),
             };
             let json = serde_json::to_string(&cmd).expect("encode");

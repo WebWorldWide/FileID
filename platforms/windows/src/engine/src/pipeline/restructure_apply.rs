@@ -88,6 +88,14 @@ impl RestructureApply {
         self.apply_with(moves, true)
     }
 
+    pub fn apply_iter<I>(&self, moves: I, _total: Option<usize>) -> Result<RestructureApplyResult>
+    where
+        I: IntoIterator<Item = Result<RestructureMove>>,
+    {
+        let vec: Vec<RestructureMove> = moves.into_iter().collect::<Result<_>>()?;
+        self.apply(&vec)
+    }
+
     fn apply_with(
         &self,
         moves: &[RestructureMove],

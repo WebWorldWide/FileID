@@ -22,8 +22,99 @@ const CHUNK: usize = 1024 * 1024;
 /// 32-byte BLAKE3 content identity for `path` (whose length is `size`). Same
 /// bytes -> same hash, so a moved/renamed file re-binds to its existing
 /// catalog row instead of being recomputed. Opens long paths safely.
-pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
+pub fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
     hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, true)
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactDuplicateCandidate {
+    pub id: i64,
+    pub path: std::path::PathBuf,
+    pub indexed_size: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExactDuplicateGroup {
+    pub hash: [u8; 32],
+    pub size: u64,
+    pub files: Vec<ExactDuplicateCandidate>,
+}
+
+#[derive(Debug)]
+pub struct ExactDuplicateGrouping {
+    pub groups: Vec<ExactDuplicateGroup>,
+    pub skipped: usize,
+}
+
+pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
+    use sha2::Digest;
+    let mut file = std::fs::File::open(super::path_safety::to_extended_length(path))?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() != expected_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file type or size changed before exact hashing",
+        ));
+    }
+    let mut sha = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        sha.update(&buffer[..read]);
+    }
+    let after = file.metadata()?;
+    if !after.is_file() || after.len() != expected_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file type or size changed during exact hashing",
+        ));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&sha.finalize());
+    Ok(hash)
+}
+
+pub fn group_exact_duplicates(
+    candidates: Vec<ExactDuplicateCandidate>,
+) -> ExactDuplicateGrouping {
+    group_exact_duplicates_until(candidates, || false)
+}
+
+pub fn group_exact_duplicates_until(
+    candidates: Vec<ExactDuplicateCandidate>,
+    should_cancel: impl Fn() -> bool,
+) -> ExactDuplicateGrouping {
+    use std::collections::BTreeMap;
+    let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
+        BTreeMap::new();
+    let mut skipped = 0;
+    for candidate in candidates {
+        if should_cancel() {
+            break;
+        }
+        let Ok(size) = u64::try_from(candidate.indexed_size) else {
+            skipped += 1;
+            continue;
+        };
+        match exact_file_sha256(&candidate.path, size) {
+            Ok(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
+            Err(_) => skipped += 1,
+        }
+    }
+    let groups = by_digest
+        .into_iter()
+        .filter_map(|((size, hash), mut files)| {
+            if files.len() < 2 {
+                return None;
+            }
+            files.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.id.cmp(&b.id)));
+            Some(ExactDuplicateGroup { hash, size, files })
+        })
+        .collect();
+    ExactDuplicateGrouping { groups, skipped }
 }
 
 /// Recipe-v1 composite: blake3(head ‖ tail ‖ size_le), NO interior samples.

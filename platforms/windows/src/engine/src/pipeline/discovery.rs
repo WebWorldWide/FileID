@@ -55,6 +55,7 @@ pub enum FileKind {
     Pdf,
     Doc,
     Audio,
+    Model,
     Other,
 }
 
@@ -66,6 +67,7 @@ impl FileKind {
             FileKind::Pdf => "pdf",
             FileKind::Doc => "doc",
             FileKind::Audio => "audio",
+            FileKind::Model => "model",
             FileKind::Other => "other",
         }
     }
