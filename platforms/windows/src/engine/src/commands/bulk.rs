@@ -215,10 +215,31 @@ pub(crate) async fn handle_apply_tags(
         // writes so a large bulk-tag can't wedge the engine's only writer (and
         // any concurrent scan flush) for the whole operation. (audit P0)
         drop(conn);
+        let mut iprops_count = 0u32;
+        let mut sidecar_only_count = 0u32;
         for (path, tags) in &sidecar_writes {
-            if let Err(err) = crate::shell::tags::write_tags(std::path::Path::new(path), tags) {
-                tracing::warn!(?err, path = %crate::platform::redact_path_for_log(path), "sidecar tag write failed");
+            match crate::shell::tags::write_tags_full(std::path::Path::new(path), tags) {
+                Ok(true) => iprops_count += 1,
+                Ok(false) => sidecar_only_count += 1,
+                Err(err) => {
+                    tracing::warn!(?err, path = %crate::platform::redact_path_for_log(path), "sidecar tag write failed");
+                }
             }
+        }
+        // Surface a human-readable summary of where the tags landed so the UI
+        // can tell the user why Explorer's Details column is blank for some files
+        // (those use sidecar-only because their extension has no property handler).
+        if iprops_count > 0 || sidecar_only_count > 0 {
+            let summary = match (iprops_count, sidecar_only_count) {
+                (f, 0) => format!("{f} file(s) tagged in Explorer Keywords + sidecar"),
+                (0, s) => format!("{s} file(s) tagged in sidecar only (Explorer Keywords not supported for these file types)"),
+                (f, s) => format!("{f} file(s) tagged in Explorer Keywords + sidecar; {s} file(s) sidecar only (no property handler for those extensions)"),
+            };
+            messages.push(BulkActionItem {
+                file_id: None,
+                ok: true,
+                message: Some(summary),
+            });
         }
         Ok(BulkActionResult {
             action: "applyTags".into(),

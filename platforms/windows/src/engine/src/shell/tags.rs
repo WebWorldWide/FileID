@@ -49,6 +49,7 @@ fn sidecar_path(file: &Path) -> PathBuf {
 /// and IPropertyStore PKEY_Keywords (best-effort — silently skipped if
 /// the file type has no registered property handler). Empty `tags`
 /// clears both: VT_EMPTY into PKEY_Keywords + sidecar removal.
+#[allow(dead_code)]
 pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
     write_sidecar(path, tags)?;
     // IPropertyStore write is best-effort. Many extensions (.swift,
@@ -61,6 +62,22 @@ pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
         let _ = windows_ipropertystore::write_keywords(path, tags);
     }
     Ok(())
+}
+
+/// Like `write_tags` but also reports whether the IPropertyStore tier landed.
+/// The sidecar write is still mandatory (returns Err on failure). The bool
+/// indicates `true` when PKEY_Keywords was written to Explorer's property
+/// store (i.e. the file type has a registered handler), `false` when it
+/// silently fell back to sidecar-only.
+pub fn write_tags_full(path: &Path, tags: &[String]) -> Result<bool> {
+    write_sidecar(path, tags)?;
+    #[cfg(target_os = "windows")]
+    {
+        let iprops_ok = windows_ipropertystore::write_keywords(path, tags).is_ok();
+        return Ok(iprops_ok);
+    }
+    #[cfg(not(target_os = "windows"))]
+    Ok(false)
 }
 
 fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {

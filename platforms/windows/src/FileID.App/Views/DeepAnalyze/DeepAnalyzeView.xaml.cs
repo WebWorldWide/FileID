@@ -1,4 +1,4 @@
-﻿// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
+// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
 // + ModelInstallerService for the per-model install state. Drives the
 // llama.cpp runtime install, model install, full-library/per-file
 // analyze, cancel, and renders the live caption stream as tokens
@@ -114,6 +114,35 @@ public sealed partial class DeepAnalyzeView : UserControl
         // clustering finishes.
         _ = RefreshNamePeopleGateAsync();
         SyncExplainerBanner();
+        // Restore the pending-rename pill from the DB on every load so navigating
+        // away and back doesn't wipe the count. _proposedNameCount is incremented
+        // per-FileDone during a run; this seeds it from the authoritative DB count
+        // so the pill is correct even after a tab switch between runs.
+        _ = RestorePendingNamesCountAsync();
+    }
+
+    private async System.Threading.Tasks.Task RestorePendingNamesCountAsync()
+    {
+        try
+        {
+            using var store = new Services.ReadStore(Services.AppPaths.DbPath);
+            await store.OpenAsync().ConfigureAwait(false);
+            var ct = System.Threading.CancellationToken.None;
+            var count = await store.PendingProposedRenameCountAsync(ct).ConfigureAwait(false);
+            if (_unloaded) return;
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_unloaded) return;
+                // Only override the in-memory counter when a run is NOT in
+                // progress (Starting/Progress latched) — a live run's counter is
+                // correct; the DB version may lag by one file.
+                var ec = EngineClient.Instance;
+                if (ec.DeepAnalyzeStarting is not null || ec.DeepAnalyzeProgress is not null) return;
+                _proposedNameCount = count;
+                SyncProposedNamesPill();
+            });
+        }
+        catch (Exception ex) { DebugLog.Warn("RestorePendingNamesCountAsync failed: " + ex.Message); }
     }
 
     // Item 4: show the Tagging-vs-Deep-Analyze explainer unless the user has
@@ -869,9 +898,16 @@ public sealed partial class DeepAnalyzeView : UserControl
         var parts = new System.Collections.Generic.List<string>();
         if (keywords) parts.Add($"{tagged} tagged");
         if (people) parts.Add($"{peopled} people-tagged");
+        // Tags are written to both a sidecar JSON file and (for JPEG/PNG/MP4 etc.)
+        // Explorer's Keywords property. Non-media extensions get sidecar-only —
+        // Explorer's Details > Tags column stays blank for those, which is expected.
+        string statusNote = (tagged > 0 || peopled > 0)
+            ? " Tags appear in Explorer for supported media files (JPEG, PNG, MP4…); other types use a sidecar file."
+            : string.Empty;
         SetApplyBusy(false, parts.Count == 0
             ? "Nothing to apply yet."
-            : "Applied — " + string.Join(", ", parts) + ".");
+            : "Applied — " + string.Join(", ", parts) + "." + statusNote);
+
 
         // Smart names go through the review sheet (correct extension + uniqueness
         // handling) rather than a blind bulk rename — safer for a destructive op,
