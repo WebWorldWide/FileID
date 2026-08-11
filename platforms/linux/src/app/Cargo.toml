@@ -16,7 +16,7 @@ path = "src/main.rs"
 # libadwaita 1.5+, which ship on Ubuntu 24.04, Fedora 40, and Arch
 # rolling. Older distros use the Flatpak.
 gtk = { package = "gtk4", version = "0.7", features = ["v4_14"] }
-adw = { package = "libadwaita", version = "0.6", features = ["v1_5"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 glib = "0.18"
 gio  = "0.18"
 
