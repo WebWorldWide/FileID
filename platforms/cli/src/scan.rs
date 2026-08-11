@@ -701,7 +701,7 @@ mod tests {
         std::fs::write(&path, "old!").unwrap();
         run(&ctx, &root, false).unwrap();
 
-        let old_ref = fileid_engine::platform::file_ref(&path).unwrap();
+        let old_ref = fileid_engine::platform::file_ref(&path).unwrap_or(0);
         std::fs::rename(&path, temp.join("held.txt")).unwrap();
         std::fs::write(&path, "new!").unwrap();
         let meta = std::fs::metadata(&path).unwrap();

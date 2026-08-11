@@ -723,9 +723,9 @@ pub fn file_ref(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-pub fn file_ref(_path: &Path) -> Option<u64> {
-    // Linux/macOS would use libc::stat::st_ino; deferred until the Linux port.
-    None
+pub fn file_ref(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.ino())
 }
 
 // ─── Battery / AC power detection ───────────────────────────────────────────
