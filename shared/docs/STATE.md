@@ -8,6 +8,26 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-11 — Windows bug fixes: smart-name pill, tag visibility, Restructure error surfacing + apply timeout
+
+Three user-reported bugs diagnosed and fixed across the Windows C# app and Rust engine:
+
+**1. Smart-name pill disappears after tab navigation (`DeepAnalyzeView.xaml.cs`)**
+- Root cause: `_proposedNameCount` was reset to `0` at every `DeepAnalyzeStarting` event; navigating away and back wiped the in-memory counter, hiding all pending renames.
+- Fix: added `RestorePendingNamesCountAsync()` called from `OnLoadedHandler`. It reads `PendingProposedRenameCountAsync` from the DB on every tab load and restores `_proposedNameCount`, guarded so it doesn't override an actively-running run's live counter.
+
+**2. Tags not visibly applied to files (`bulk.rs` + `shell/tags.rs` + `DeepAnalyzeView.xaml.cs`)**
+- Root cause: tags ARE being written correctly, but only to the `.filename.fileid-tags.json` sidecar for file types without a Windows property handler. Explorer's Details > Tags column stays blank for those (JPEG/PNG/MP4 get IPropertyStore; everything else is sidecar-only). No error, just silent sidecar writes with no UI explanation.
+- Fix: added `write_tags_full(path, tags) -> Result<bool>` in `shell/tags.rs` returning whether IPropertyStore succeeded. `handle_apply_tags` in `bulk.rs` now uses it to count `iprops_count` vs `sidecar_only_count`, appending a summary `BulkActionItem` message. `DeepAnalyzeView.RunApplyAsync` status text now explains that Explorer Keywords only works for supported media file types.
+
+**3. Restructure: error kinds silently dropped + no apply timeout (`RestructureView.xaml.cs`)**
+- Bug A: `SyncEngineError` only filtered on `"plan_restructure_failed"` and `"apply_restructure"`. Engine errors `"plan_restructure_db"` (DB query failure during planning) and `"undo_restructure"` were silently dropped, leaving the tab frozen on "Computing plan..." with no feedback.
+  - Fix: widened the filter to all four restructure error kinds; added a dedicated undo-error branch with a specific error dialog.
+- Bug B: if the engine crashed or the pipe died mid-apply, `SyncApplyResult` never fired, leaving `_applying = true` forever and the Apply buttons permanently disabled with "Moving N files..." frozen.
+  - Fix: added a `DispatcherQueueTimer _applyTimeoutTimer` (90 s). `ArmApplyTimer()` called after `ApplyRestructureAsync` is dispatched; `SyncApplyResult` stops it on arrival. `OnApplyTimerTick` releases `_applying`, resets status text, and shows an error dialog. Timer cancelled in `OnUnloaded`.
+
+**cargo clippy `-D warnings`**: clean. **dotnet format CHARSET**: pre-existing (unrelated to these changes).
+
 ## 2026-06-16 (latest) — Learn-from-corrections: instance-based folder memory (both engines, lockstep)
 
 The consuming logic for the v18 `restructure_feedback` table landed, completing the SOTA instance-based

@@ -180,6 +180,8 @@ jobs:
             "github.com",
             "developer.download.nvidia.com",
             "developer.nvidia.com",
+            "docs.nvidia.com",
+            "ai.google.dev",
             "schemas.microsoft.com",
             "schemas.openxmlformats.org"
           )

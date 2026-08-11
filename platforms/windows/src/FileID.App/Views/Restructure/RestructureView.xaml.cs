@@ -1,4 +1,4 @@
-﻿// RestructureView code-behind — recommendation-first + file-first reorg UI
+// RestructureView code-behind — recommendation-first + file-first reorg UI
 // (port of macOS RestructureView.swift). Reads EngineClient.LastRestructurePlan,
 // groups the moves by Tier into Keep / Tidy / Reorganize recommendation cards,
 // and drives a per-file + per-group selection model whose count is, by
@@ -55,6 +55,12 @@ public sealed partial class RestructureView : UserControl
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private EngineError? _lastHandledError;
+    // Apply timeout: if the engine doesn't reply with a RestructureApplyResult
+    // within this window (crash / pipe death mid-apply), fire on the UI thread,
+    // release _applying, and surface an error. Instance timer so it's cancelled
+    // when the view unloads (no ghost firings on a re-hosted instance).
+    private static readonly TimeSpan ApplyTimeout = TimeSpan.FromSeconds(90);
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _applyTimeoutTimer;
 
     // UI-thread brushes cached at ctor time (CLAUDE.md: never build brushes per
     // event). Tile tints match RestructureRecommendationVm's outcome colors.
@@ -80,6 +86,7 @@ public sealed partial class RestructureView : UserControl
             _unloaded = true;
             EngineClient.Instance.PropertyChanged -= OnEngineChanged;
             Sankey.RibbonInvoked -= OnSankeyRibbonInvoked;
+            _applyTimeoutTimer?.Stop();
         };
     }
 
@@ -644,9 +651,6 @@ public sealed partial class RestructureView : UserControl
 
     private async Task ApplyAsync(bool useSymlinks)
     {
-        // Single-flight: re-clicking after an apply re-runs against a now-stale
-        // plan (B4 reports every file failed -> a false "some changes couldn't be
-        // applied" alarm). Guard + disable until the result (and re-plan) land.
         if (_applying) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || plan.Moves.Count == 0) return;
@@ -663,6 +667,11 @@ public sealed partial class RestructureView : UserControl
         ApplyStatusText.Text = useSymlinks
             ? $"Creating {sel.Count:N0} symlinks..."
             : $"Moving {sel.Count:N0} files...";
+        // Arm the apply watchdog. The engine replies with RestructureApplyResult
+        // which SyncApplyResult cancels; if nothing arrives within ApplyTimeout
+        // (engine crash / pipe death) the timer fires, releases _applying, and
+        // shows an error so the UI doesn't freeze forever.
+        ArmApplyTimer();
         try
         {
             await EngineClient.Instance.ApplyRestructureAsync(plan.LibraryRoot, sel, useSymlinks);
@@ -672,6 +681,7 @@ public sealed partial class RestructureView : UserControl
             // SendCommandAsync can throw if the engine pipe is dead. Without this
             // the status freezes on "Moving N files..." (the apply-result event
             // never arrives). Surface it instead of a silent hang.
+            _applyTimeoutTimer?.Stop();
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
             _applying = false;
             RecomputeSelection();
@@ -681,6 +691,39 @@ public sealed partial class RestructureView : UserControl
                 "Your files were not touched. Try restarting the app, then apply again.");
         }
     }
+
+    private void ArmApplyTimer()
+    {
+        if (_unloaded) return;
+        var dq = DispatcherQueue;
+        if (dq is null) return;
+        if (_applyTimeoutTimer is null)
+        {
+            _applyTimeoutTimer = dq.CreateTimer();
+            _applyTimeoutTimer.IsRepeating = false;
+            _applyTimeoutTimer.Tick += OnApplyTimerTick;
+        }
+        _applyTimeoutTimer.Stop();
+        _applyTimeoutTimer.Interval = ApplyTimeout;
+        _applyTimeoutTimer.Start();
+    }
+
+    private void OnApplyTimerTick(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args)
+        => DebugLog.SafeRun("RestructureView.OnApplyTimerTick", () =>
+        {
+            sender.Stop();
+            if (_unloaded || !_applying) return;
+            DebugLog.Warn("[RESTRUCTURE] apply timed out — engine didn't reply within 90 s");
+            _applying = false;
+            _applyingPlan = null;
+            RecomputeSelection();
+            ApplyStatusText.Text = "Apply timed out — the engine stopped responding. Your files are unchanged.";
+            _ = ShowAlertAsync("Apply timed out",
+                "The engine didn't confirm the reorganization within 90 seconds. " +
+                "Your files are most likely unchanged, but check the engine log at " +
+                "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl to be sure.\n\n" +
+                "Try restarting the app and applying again.");
+        });
 
     // R2 reversibility: show/hide the "Undo last run" button from the engine's
     // CanUndoRestructure flag (set after an apply that moved files, cleared once
@@ -718,6 +761,8 @@ public sealed partial class RestructureView : UserControl
     {
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (r is null) return;
+        // The result arrived — disarm the watchdog timer before touching any state.
+        _applyTimeoutTimer?.Stop();
 
         // Anything actually moved -> the current plan is stale (real moves
         // updated the DB; applied rows must leave the view). Re-plan, exactly as
@@ -785,28 +830,44 @@ public sealed partial class RestructureView : UserControl
 
     // A plan/apply that dies engine-side surfaces as EngineClient.LastError with
     // a restructure kind (restructure.rs: "plan_restructure_failed" /
-    // "apply_restructure") - never as a Plan/ApplyResult event. Without handling
-    // it the tab freezes on "Computing plan..." / "Moving N files..." forever.
+    // "apply_restructure" / "plan_restructure_db" / "undo_restructure") - never as
+    // a Plan/ApplyResult event. Without handling it the tab freezes on "Computing
+    // plan..." / "Moving N files..." forever.
     // Only react to restructure kinds (LastError is a shared slot) and de-dupe.
     private void SyncEngineError()
     {
         var err = EngineClient.Instance.LastError;
         if (err is null || ReferenceEquals(err, _lastHandledError)) return;
-        if (err.Kind != "plan_restructure_failed" && err.Kind != "apply_restructure") return;
+        if (err.Kind != "plan_restructure_failed"
+            && err.Kind != "plan_restructure_db"
+            && err.Kind != "apply_restructure"
+            && err.Kind != "undo_restructure")
+        {
+            return;
+        }
+
         _lastHandledError = err;
 
         // The apply itself, or the post-apply re-plan, failed - release the
         // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
         _applying = false;
         RecomputeSelection();
-
-        if (err.Kind == "plan_restructure_failed")
+        if (err.Kind == "plan_restructure_failed" || err.Kind == "plan_restructure_db")
         {
             PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
             _ = ShowAlertAsync("Couldn't plan the reorganization",
                 string.IsNullOrWhiteSpace(err.Message)
                     ? "FileID couldn't compute a reorganization plan. Try again, or run a fresh scan first."
                     : err.Message);
+        }
+        else if (err.Kind == "undo_restructure")
+        {
+            ApplyStatusText.Text = "Undo didn't complete - your files are unchanged. Try again.";
+            _ = ShowAlertAsync("Couldn't undo",
+                (string.IsNullOrWhiteSpace(err.Message)
+                    ? "FileID couldn't finish undoing your reorganization."
+                    : err.Message) +
+                "\n\nYour files are unchanged. Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl if this keeps happening.");
         }
         else
         {
@@ -818,6 +879,7 @@ public sealed partial class RestructureView : UserControl
                 "\n\nYour originals are unchanged. Try again; if it keeps failing, check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
         }
     }
+
 
     // ---- Helpers --------------------------------------------------------
 
