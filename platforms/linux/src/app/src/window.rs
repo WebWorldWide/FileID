@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 // Main window — minimal scaffold. Mirror of macOS ContentView /
 // Windows MainWindow. Phase 1 lands the 6 tabs (Library, People,
 // Cleanup, Deep Analyze, Restructure, Settings) as adw::NavigationPage

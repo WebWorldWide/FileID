@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 // FileID Linux — gtk4 + libadwaita entrypoint.
 //
 // Mirror of macOS FileIDApp.swift / Windows App.xaml.cs. Boots an
@@ -65,7 +67,7 @@ fn load_brand_css() {
         }
     "#;
     let provider = gtk::CssProvider::new();
-    provider.load_from_data(css);
+    provider.load_from_string(css);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
