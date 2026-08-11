@@ -292,27 +292,17 @@ if (-not $SkipSign) {
 if (-not $SkipPrivacyGate) {
     Write-Host ""
     Write-Host "Privacy gate: scanning shipped binaries..." -ForegroundColor Cyan
-    $hits = @()
+    $privacyPy = Join-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) "shared\scripts\check_binary_privacy.py"
     $publishDirs = @((Resolve-PublishDir "win-x64" "x64"))
     if (-not $SkipArm64) {
         $publishDirs += (Resolve-PublishDir "win-arm64" "arm64")
     }
     foreach ($d in $publishDirs) {
-        $files = Get-ChildItem -Path $d -Recurse -Include *.exe, *.dll
-        foreach ($f in $files) {
-            foreach ($needle in $ForbiddenTelemetryStrings) {
-                $found = Select-String -Path $f.FullName -Pattern $needle -SimpleMatch -List -ErrorAction SilentlyContinue
-                if ($found) {
-                    $hits += [pscustomobject]@{ File = $f.FullName; Pattern = $needle }
-                }
-            }
+        & python $privacyPy $d
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: Privacy gate failed for $d" -ForegroundColor Red
+            exit 1
         }
-    }
-    if ($hits.Count -gt 0) {
-        Write-Host "ERROR: Privacy gate found $($hits.Count) telemetry-pattern hit(s):" -ForegroundColor Red
-        $hits | Format-Table -AutoSize
-        Write-Host "       Refusing to ship. Investigate or pass -SkipPrivacyGate to bypass (NOT for releases)." -ForegroundColor Yellow
-        exit 1
     }
     Write-Host "  Privacy gate          OK (zero telemetry strings)" -ForegroundColor Green
 }

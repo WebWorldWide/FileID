@@ -217,6 +217,9 @@ fi
 # ── Final gate ───────────────────────────────────────────────────────────────
 echo
 echo "── Release summary ─────────────────────────────────────────────"
+echo "🛡️ Privacy gate: scanning shipped binaries..."
+python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" "$APP"
+
 shasum -a 256 "$DMG_OUT"
 if [ "$SKIP_NOTARIZE" = "0" ]; then
     echo "🔍 Gatekeeper assessment:"

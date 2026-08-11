@@ -110,7 +110,7 @@ class BinaryPrivacyTests(unittest.TestCase):
         )
         for relative in workflows:
             with self.subTest(workflow=relative):
-                text = (root / relative).read_text(encoding="utf-8")
+                text = (root / relative).read_text(encoding="utf-8").replace("\r\n", "\n")
                 self.assertIn("check_binary_privacy.py", text)
                 self.assertEqual(text.count("      - 'shared/scripts/check_binary_privacy.py'\n"), 2)
                 self.assertEqual(text.count("      - 'shared/scripts/test_check_binary_privacy.py'\n"), 2)
@@ -131,7 +131,7 @@ class BinaryPrivacyTests(unittest.TestCase):
             with self.subTest(consumer=relative):
                 self.assertIn(
                     "check_binary_privacy.py",
-                    (root / relative).read_text(encoding="utf-8"),
+                    (root / relative).read_text(encoding="utf-8").replace("\r\n", "\n"),
                 )
 
 
