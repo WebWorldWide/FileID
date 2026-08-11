@@ -293,9 +293,10 @@ fn restructure_move() -> RestructureMove {
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
         CommandPayload::StartScan(StartScanPayload {
-            root_path: r"C:\Users\adam\Pictures".into(),
-            root_display: Some("Pictures".into()),
-            rescan: true,
+            root_path: r"C:\Photos".to_string(),
+            root_display: None,
+            rescan: false,
+            excluded_paths: None,
         }),
         CommandPayload::PauseScan(Empty {}),
         CommandPayload::ResumeScan(Empty {}),

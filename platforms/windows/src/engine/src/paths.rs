@@ -48,6 +48,7 @@ pub fn root() -> Result<PathBuf> {
 pub fn db_path()      -> Result<PathBuf> { Ok(root()?.join("fileid.sqlite")) }
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
 pub fn models_dir()   -> Result<PathBuf> { Ok(root()?.join("Models")) }
+pub fn engine_models_dir() -> Result<PathBuf> { models_dir() }
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }

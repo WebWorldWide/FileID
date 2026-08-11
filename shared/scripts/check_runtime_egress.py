@@ -169,13 +169,13 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/trash.rs": "8d414920e54782ed1d14d52cc729a2b46a2b7ee6840f9f8a5fc163e4ee92d742",
   "platforms/windows/src/engine/src/downloader.rs": "292535105b30db2d62b5545313ba08890c42d5c8a5f9c1210f88c9f3d9c9ab3a",
   "platforms/windows/src/engine/src/main.rs": "c8b03bbaca4c13b27b17c572c60917db1dfbb739950c9927e6ff8c425d2e3464",
-  "platforms/windows/src/engine/src/models/runtime.rs": "a49ac0c6855e06ffd3a9f344f3965aedd602af1102ee9a4ccca9c7c0474a9959",
+  "platforms/windows/src/engine/src/models/runtime.rs": "6c6df04c3556d6d5aead5e6fbcd380fcefca6eb2ecb668fa884675ef0f7fc8f0",
   "platforms/windows/src/engine/src/models/vlm.rs": "edd456bec7887453ce65cb8344c51fe451d1f645255a31cb1fce9c2f5abc7f7e",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "c47e1be5f0b777727dc122b0c13f425cd04106bc3edc8aa1e6009ef67ed733ff",
   "platforms/windows/src/engine/src/models/whisper.rs": "22bc6786f637487f82483732e16e43af38d54b590699d4bcd71640460f791bde",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "1c94b657dbb21aa6f25d55736b4dbf75031c0e6a83d4fb4162db3c83668d8a76",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "9663f761f3a66a00d0b951d69e01d50e55990c8fb8e9a5e1b2713c9b1fa04efb",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "9635bb075697682f962b06426e5cdfeb9671f0f4c25974d21b3ae1cbfb622445",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "fcb78062bdfc72cdc1c5573a9a8278dfe79baf26d5024627ba377e7c36b6b50a",
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
   "platforms/windows/src/engine/src/platform.rs": "4336961b56e1d0ce3ba111cb667bb90340813e04a6a0f9bf605a2ee9509d56b9",
   "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
@@ -186,9 +186,9 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/thumbnail.rs": "8fa7977553d16e5cbc09ea4ae0dd1ad8867232d4f361d9425fa884cdd4674dac",
   "platforms/windows/src/engine/src/shell/trash.rs": "410acc2e5de370a052710c493e9d0be7028f3f4fa29e002b4ddd55d62a1df9b8",
   "platforms/windows/src/engine/src/shell/video.rs": "76dc9fb3820f464a9390f3cb11142bfd3b401fcff6d5d90fb9edaace9a3500bf",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "0ab49ddd7063bcd5b29b3738d86a8103fad8694ab640e52ec51210cc920b35df",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "bd242f7d035d086a034362de51df8c9598ce5028f99f84dbfec214ce5ee0c406",
   "platforms/windows/src/engine/src/util/elevation.rs": "3da9fe31efafaa0b276693e208f3b2b97312e2801a86cdee42b56781847cc0ff",
-  "platforms/windows/src/engine/src/util/path_safety.rs": "aa55c59edaed1634ea20e6260fde3f787c6617e171bc0698d2c1ff6305089e66"
+  "platforms/windows/src/engine/src/util/path_safety.rs": "d697ea922aa81c434f4ff0413e97d31f42687c7b3b0e3b4d98ad5328a55967a5"
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",

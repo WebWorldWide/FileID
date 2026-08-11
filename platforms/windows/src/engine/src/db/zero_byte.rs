@@ -90,8 +90,7 @@ pub fn apply_validated_zero_byte_files(
              scanned_at = ?4, file_ref = ?5, failed = 1, error_message = ?6, \
              phash = NULL, aesthetic = NULL, has_faces = 0, has_text = 0, \
              camera_model = NULL, location_lat = NULL, location_lon = NULL, \
-             content_hash = NULL, vlm_description = NULL, vlm_proposed_name = NULL, \
-             vlm_model = NULL, vlm_full_model = NULL, vlm_analyzed_at = NULL, text_stage_done = 0 \
+             content_hash = NULL \
              WHERE id = ?1",
         )
         .context("preparing zero-byte row update")?;
@@ -248,9 +247,8 @@ mod tests {
         conn.execute(
             "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, \
              phash, aesthetic, has_faces, has_text, camera_model, location_lat, location_lon, failed, \
-             content_hash, file_ref, vlm_description, vlm_proposed_name, vlm_model, vlm_full_model, vlm_analyzed_at, text_stage_done) \
-             VALUES (7, ?1, 1, 99, 1, 'doc', 'txt', 2, 3, 1, 1, 'camera', 4, 5, 0, x'01', 9, \
-             'caption', 'name', 'model', 'model', 6, 1)",
+             content_hash, file_ref) \
+             VALUES (7, ?1, 1, 99, 1, 'doc', 'txt', 2, 3, 1, 1, 'camera', 4, 5, 0, x'01', 9)",
             params![path_text],
         )
         .unwrap();
@@ -296,23 +294,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.applied, 1);
-        let state: (i64, i64, i64, Option<i64>, Option<Vec<u8>>, Option<String>, i64) = conn
+        let state: (i64, i64, i64, Option<i64>, Option<Vec<u8>>) = conn
             .query_row(
-                "SELECT id, size_bytes, failed, phash, content_hash, vlm_description, text_stage_done \
+                "SELECT id, size_bytes, failed, phash, content_hash \
                  FROM files WHERE path_text = ?1",
                 params![path_text],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .unwrap();
-        assert_eq!(state, (7, 0, 1, None, None, None, 0));
-        let completion: (Option<String>, Option<String>, Option<f64>) = conn
+        assert_eq!(state, (7, 0, 1, None, None));
+        let completion: (Option<String>, Option<f64>) = conn
             .query_row(
-                "SELECT vlm_model, vlm_full_model, vlm_analyzed_at FROM files WHERE id=7",
+                "SELECT vlm_model, vlm_analyzed_at FROM files WHERE id=7",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(completion, (None, None, None));
+        assert_eq!(completion, (None, None));
         let surviving_tags: Vec<(String, String)> = conn
             .prepare("SELECT tag, source FROM tags WHERE file_id = 7 ORDER BY tag")
             .unwrap()

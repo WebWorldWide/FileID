@@ -2,6 +2,16 @@
 
 use std::path::{Component, Path, PathBuf};
 
+pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination file already exists",
+        ));
+    }
+    std::fs::rename(to_extended_length(from), to_extended_length(to))
+}
+
 /// Returns true iff `name` is exactly one Normal path component:
 /// no slashes, no "..", no ".", no drive letter, no UNC, no leading/trailing
 /// whitespace that the OS would silently strip. Used as the path-traversal

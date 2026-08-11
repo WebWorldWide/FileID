@@ -15,6 +15,8 @@
 
 use std::path::PathBuf;
 
+pub const INSTALL_COMMAND: &str = "fileid scan-models download";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub enum GpuVendor {
