@@ -92,7 +92,8 @@ pub fn apply_validated_zero_byte_files(
              scanned_at = ?4, file_ref = ?5, failed = 1, error_message = ?6, \
              phash = NULL, aesthetic = NULL, has_faces = 0, has_text = 0, \
              camera_model = NULL, location_lat = NULL, location_lon = NULL, \
-             content_hash = NULL \
+             content_hash = NULL, vlm_description = NULL, vlm_proposed_name = NULL, \
+             vlm_model = NULL, vlm_analyzed_at = NULL \
              WHERE id = ?1",
         )
         .context("preparing zero-byte row update")?;

@@ -168,7 +168,7 @@ fn commit_batch(
                 "UPDATE files SET phash = NULL, aesthetic = NULL, has_faces = 0, \
                  has_text = ?2, camera_model = NULL, location_lat = NULL, location_lon = NULL, \
                  content_hash = NULL, vlm_description = NULL, vlm_proposed_name = NULL, \
-                 vlm_model = NULL, vlm_analyzed_at = NULL, text_stage_done = 0 WHERE id = ?1",
+                 vlm_model = NULL, vlm_analyzed_at = NULL WHERE id = ?1",
             )
             .context("prepare derived-metadata invalidation")?;
         let mut delete_auto_tags = tx
@@ -679,7 +679,6 @@ mod tests {
         Option<i64>,
         Option<Vec<u8>>,
         Option<String>,
-        i64,
     );
 
     fn test_layout(name: &str) -> (PathBuf, PathBuf, Ctx) {
@@ -853,7 +852,7 @@ mod tests {
                 "UPDATE files SET phash = 9, aesthetic = 0.5, has_faces = 1, has_text = 1, \
                  camera_model = 'camera', location_lat = 1, location_lon = 2, content_hash = x'01', \
                  vlm_description = 'stale caption', vlm_proposed_name = 'stale name', \
-                 vlm_model = 'stale model', vlm_analyzed_at = 4, text_stage_done = 1 WHERE id = ?1",
+                 vlm_model = 'stale model', vlm_analyzed_at = 4 WHERE id = ?1",
                 params![original_id],
             )
             .unwrap();
@@ -902,13 +901,13 @@ mod tests {
             let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
             let state: ZeroDormantState = conn
                 .query_row(
-                    "SELECT id, size_bytes, failed, phash, content_hash, vlm_description, text_stage_done \
+                    "SELECT id, size_bytes, failed, phash, content_hash, vlm_description \
                      FROM files WHERE path_text = ?1",
                     params![canonical_path_text(&path)],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
                 )
                 .unwrap();
-            assert_eq!(state, (original_id, 0, 1, None, None, None, 0));
+            assert_eq!(state, (original_id, 0, 1, None, None, None));
             let tags: Vec<(String, String)> = conn
                 .prepare("SELECT tag, source FROM tags WHERE file_id = ?1 ORDER BY tag")
                 .unwrap()
