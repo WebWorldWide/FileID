@@ -546,13 +546,23 @@ fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 }
 
 #[cfg(not(windows))]
-fn move_file(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> {
-    Err(ApplyError::Other(anyhow::anyhow!("move_file requires Windows")))
+fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    match std::fs::copy(src, dst) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(src);
+            Ok(())
+        }
+        Err(e) => Err(ApplyError::Other(anyhow::Error::from(e))),
+    }
 }
 
 #[cfg(not(windows))]
-fn make_symlink(_src: &str, _dst: &Path) -> std::result::Result<(), ApplyError> {
-    Err(ApplyError::Other(anyhow::anyhow!("symlink requires Windows")))
+fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
+    std::os::unix::fs::symlink(src, dst)
+        .map_err(|e| ApplyError::Other(anyhow::Error::from(e)))
 }
 
 fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Path) -> Result<()> {
