@@ -1,4 +1,4 @@
-// BulkRenameSheet code-behind. Uses a virtualized XAML ItemTemplate for rows.
+﻿// BulkRenameSheet code-behind. Uses a virtualized XAML ItemTemplate for rows.
 // Apply emits engine `renameFiles` IPC with the entries for which the
 // "include" checkbox is on.
 
