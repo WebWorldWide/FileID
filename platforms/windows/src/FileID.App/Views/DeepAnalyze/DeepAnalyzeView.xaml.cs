@@ -1,4 +1,4 @@
-﻿// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
+// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
 // + ModelInstallerService for the per-model install state. Drives the
 // llama.cpp runtime install, model install, full-library/per-file
 // analyze, cancel, and renders the live caption stream as tokens
@@ -596,17 +596,17 @@ public sealed partial class DeepAnalyzeView : UserControl
             // below both used to leak the store.
             using var store = new Services.ReadStore(Services.AppPaths.DbPath);
             await store.OpenAsync();
-            var pending = await store.PendingProposedRenamesAsync(500, System.Threading.CancellationToken.None);
+            var pending = await store.PendingProposedRenamesAsync(200000, System.Threading.CancellationToken.None);
             if (pending.Count == 0)
             {
                 _proposedNameCount = 0;
                 SyncProposedNamesPill();
                 return;
             }
-            var plan = new System.Collections.Generic.List<Views.Library.BulkRenameSheet.RenamePlan>(pending.Count);
+            var plan = new System.Collections.Generic.List<Views.Library.RenamePlan>(pending.Count);
             foreach (var p in pending)
             {
-                plan.Add(new Views.Library.BulkRenameSheet.RenamePlan
+                plan.Add(new Views.Library.RenamePlan
                 {
                     FileId = p.Id,
                     CurrentPath = p.Path,
@@ -886,7 +886,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             }
             if (names)
             {
-                var pending = await store.PendingProposedRenamesAsync(5000, ct);
+                var pending = await store.PendingProposedRenamesAsync(200000, ct);
                 openRenameSheet = pending.Count > 0;
             }
         }

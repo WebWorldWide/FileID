@@ -1,4 +1,4 @@
-﻿// LibraryView code-behind. Routes search-box + kind-filter input into the
+// LibraryView code-behind. Routes search-box + kind-filter input into the
 // LibraryViewModel + drives the footer's loading/empty/error states.
 
 using System;
@@ -1043,7 +1043,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var selected = ViewModel.SelectedItems.ToArray();
         if (selected.Length == 0) return;
 
-        var plan = selected.Select(t => new BulkRenameSheet.RenamePlan
+        var plan = selected.Select(t => new RenamePlan
         {
             FileId = t.Id,
             CurrentPath = t.Path,
