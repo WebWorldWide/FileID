@@ -179,7 +179,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
   "platforms/windows/src/engine/src/platform.rs": "4dac3644093f2125abb378b38ba803419a2c7bfd5b6441d39d881bd710032b3b",
   "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
-  "platforms/windows/src/engine/src/shell/mod.rs": "e6ee7d09b7db378fe00cef72fe5fd69f896ea32121df5d05dc1e3e46b75d00e3",
+  "platforms/windows/src/engine/src/shell/mod.rs": "0854e842975747c4d45293e13ba0db642d30236072bebf8d58a3c70b39ceb004",
   "platforms/windows/src/engine/src/shell/ocr.rs": "7942ee66691670d93fc5725697a817c634c10d32acafb06df9a76a5ed97995a0",
   "platforms/windows/src/engine/src/shell/reveal.rs": "99fffa994961644a9695812f9388599f233742ff85105c107e6a76dafa30591b",
   "platforms/windows/src/engine/src/shell/tags.rs": "4d1f28412f69580b5de344372fd984621d35942af10ffd682ba61dacf578b2dd",
