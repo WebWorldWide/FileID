@@ -42,6 +42,9 @@ pub mod tags {
     pub fn write_tags(_path: &Path, _tags: &[String]) -> Result<()> {
         anyhow::bail!("shell::tags::write_tags not implemented on this platform")
     }
+    pub fn write_tags_full(_path: &Path, _tags: &[String]) -> Result<bool> {
+        anyhow::bail!("shell::tags::write_tags_full not implemented on this platform")
+    }
     #[allow(dead_code)]
     pub fn read_tags(_path: &Path) -> Result<Vec<String>> {
         Ok(Vec::new())

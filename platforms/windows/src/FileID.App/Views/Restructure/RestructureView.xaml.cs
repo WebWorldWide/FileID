@@ -1,4 +1,4 @@
-// RestructureView code-behind — recommendation-first + file-first reorg UI
+﻿// RestructureView code-behind — recommendation-first + file-first reorg UI
 // (port of macOS RestructureView.swift). Reads EngineClient.LastRestructurePlan,
 // groups the moves by Tier into Keep / Tidy / Reorganize recommendation cards,
 // and drives a per-file + per-group selection model whose count is, by

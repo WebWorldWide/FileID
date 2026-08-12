@@ -1,4 +1,4 @@
-// EngineClient — owns the FileIDEngine.exe child process lifecycle.
+﻿// EngineClient — owns the FileIDEngine.exe child process lifecycle.
 //
 // Responsibilities:
 //   1. Spawn FileIDEngine.exe with stdin/stdout/stderr redirected.
