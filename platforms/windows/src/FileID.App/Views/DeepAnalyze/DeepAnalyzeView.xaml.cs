@@ -1,4 +1,4 @@
-// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
+﻿// DeepAnalyzeView code-behind. Subscribes to EngineClient observables
 // + ModelInstallerService for the per-model install state. Drives the
 // llama.cpp runtime install, model install, full-library/per-file
 // analyze, cancel, and renders the live caption stream as tokens

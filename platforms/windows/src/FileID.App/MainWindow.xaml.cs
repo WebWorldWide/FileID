@@ -1,4 +1,4 @@
-// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, custom title
+﻿// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, custom title
 // bar, min size), sidebar visibility binding, drag-drop folder, and the
 // app-level keyboard accelerators (Alt+1..6, Ctrl+O, Ctrl+R, Ctrl+F,
 // Ctrl+Shift+S).

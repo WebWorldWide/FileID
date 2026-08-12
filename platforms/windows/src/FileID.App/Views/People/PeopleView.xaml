@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     PeopleView — face cluster cards in a wrap layout. Cards show the
     cluster's anchor face crop + a caption. Drag-merge + person-detail

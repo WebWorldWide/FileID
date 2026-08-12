@@ -1,4 +1,4 @@
-// PeopleViewModel — backs the People tab cluster grid.
+﻿// PeopleViewModel — backs the People tab cluster grid.
 //
 // Each cluster has a representative face image, a member count, an
 // optional person name (set by the user), and a list of file IDs that

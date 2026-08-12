@@ -313,7 +313,7 @@ if (-not $SkipSign) {
 if (-not $SkipPrivacyGate) {
     Write-Host ""
     Write-Host "Privacy gate: scanning shipped binaries..." -ForegroundColor Cyan
-    $privacyPy = Join-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) "shared\scripts\check_binary_privacy.py"
+    $privacyPy = Join-Path (Split-Path (Split-Path (Split-Path $ScriptDir -Parent) -Parent) -Parent) "shared\scripts\check_binary_privacy.py"
     $publishDirs = @((Resolve-PublishDir "win-x64" "x64"))
     if (-not $SkipArm64) {
         $publishDirs += (Resolve-PublishDir "win-arm64" "arm64")

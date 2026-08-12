@@ -1,4 +1,4 @@
-// Application root — owns the single MainWindow and the lifetime of every
+﻿// Application root — owns the single MainWindow and the lifetime of every
 // app-level service (EngineClient, model installers, settings store).
 //
 // On macOS this is FileIDApp.swift + AppDelegate. On Windows the WinUI

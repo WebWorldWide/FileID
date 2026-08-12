@@ -1,4 +1,4 @@
-// Custom entry point for the WinUI 3 unpackaged desktop app.
+﻿// Custom entry point for the WinUI 3 unpackaged desktop app.
 //
 // Why we replace the XAML-generated Main:
 //   1. Run the WinAppSDK bootstrapper before XAML touches anything. Unpackaged

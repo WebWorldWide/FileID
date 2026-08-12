@@ -1,4 +1,4 @@
-// Plain DTO records used inside command + event payloads. 1:1 mirror of the
+﻿// Plain DTO records used inside command + event payloads. 1:1 mirror of the
 // schema's `$defs` section. Records (immutable, init-only, value-equality)
 // match Swift's struct semantics and Rust's #[derive(Debug, Clone)] structs.
 //
