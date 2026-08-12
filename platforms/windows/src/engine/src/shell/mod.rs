@@ -39,6 +39,7 @@ pub mod reveal {
 pub mod tags {
     use anyhow::Result;
     use std::path::Path;
+    #[allow(dead_code)]
     pub fn write_tags(_path: &Path, _tags: &[String]) -> Result<()> {
         anyhow::bail!("shell::tags::write_tags not implemented on this platform")
     }
