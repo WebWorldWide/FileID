@@ -69,7 +69,7 @@ struct TreeDiffView: View {
             ))
         }
         return rows
-            .filter(filterMatches)
+            .filter { filterMatches($0) }
             .sorted { (a, b) in
                 let order: [SourceKind: Int] = [.anchor: 0, .mixed: 1, .junk: 2]
                 if order[a.kind, default: 0] != order[b.kind, default: 0] {
@@ -89,7 +89,7 @@ struct TreeDiffView: View {
             DestRow(bucket: $0.folder, count: $0.count, isExisting: true)
         })
         return rows
-            .filter(destFilterMatches)
+            .filter { destFilterMatches($0) }
             .sorted { (a, b) in
                 if a.isExisting != b.isExisting { return a.isExisting }
                 return a.bucket.localizedCaseInsensitiveCompare(b.bucket) == .orderedAscending
