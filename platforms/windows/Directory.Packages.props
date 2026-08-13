@@ -38,6 +38,10 @@
          connection (rusqlite). Microsoft.Data.Sqlite ships native SQLite +
          FTS5 bundled, matching the engine's bundled libsqlite3 byte-for-byte. -->
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <!-- Transitive pin: SQLitePCLRaw.lib.e_sqlite3 2.1.10 bundles SQLite < 3.50.2
+         (GHSA-2m69-gcr7-jv3q, High). 3.53.3 ships SQLite 3.53.x which is safe.
+         CentralPackageTransitivePinningEnabled=true enforces this floor. -->
+    <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.53.3" />
 
     <!-- IObservable bridge for INotifyPropertyChanged + simple LRU cache. -->
     <PackageVersion Include="Microsoft.Extensions.Caching.Memory" Version="9.0.0" />
