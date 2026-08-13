@@ -163,7 +163,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "35ef9a30935f57d0e45c11bb54684b55a92b9767f2169cbf474ceb5ff1e87d15",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "34af21dc08d3043ac2853b0153003cdf737abe7997f8fb7f53b71648fed7f1ce",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "e6028cf4955464a0ec5bd9bbad5e6a63ecd83996e79d9dd9bc769c733b6758b6",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "bec8b9945b65438d884f54ea92026c8bbc68982437e4dfd2368eb6643564f34e",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "5f1e233f2a5ea391c1b056d8da355d970f95047cb8ff78298299cdb48080830e",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "a15689ae7d0bbca0be12f47799eb31376208f11f31d7eb5a5eda556ef646076c",
   "platforms/windows/src/engine/src/commands/restructure.rs": "7d70a187574625ca1387ed2ea2159ea09037c11526132094def84740222fc515",
   "platforms/windows/src/engine/src/commands/trash.rs": "8d414920e54782ed1d14d52cc729a2b46a2b7ee6840f9f8a5fc163e4ee92d742",
@@ -188,7 +188,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "76dc9fb3820f464a9390f3cb11142bfd3b401fcff6d5d90fb9edaace9a3500bf",
   "platforms/windows/src/engine/src/util/content_hash.rs": "bd242f7d035d086a034362de51df8c9598ce5028f99f84dbfec214ce5ee0c406",
   "platforms/windows/src/engine/src/util/elevation.rs": "3da9fe31efafaa0b276693e208f3b2b97312e2801a86cdee42b56781847cc0ff",
-  "platforms/windows/src/engine/src/util/path_safety.rs": "f5a3165d32df2df20a505875c131739bfcc9e685c9b62a504cd00a02f0a444d7"
+  "platforms/windows/src/engine/src/util/path_safety.rs": "dfcb6489754fe2fa3c8b4e4a88ebfb6754e5008ecf1efbab816dc0478627efd6"
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
