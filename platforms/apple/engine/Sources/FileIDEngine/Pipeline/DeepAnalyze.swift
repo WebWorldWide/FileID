@@ -674,7 +674,7 @@ public actor DeepAnalyze {
     /// whitespace becomes `-`, runs of `-` collapse, and an empty/over-trimmed
     /// result falls back to the literal "untitled" (never nil) so the column
     /// round-trips identically across platforms.
-    private static func sanitize(filename raw: String) -> String? {
+    static func sanitize(filename raw: String) -> String? {
         // 1. Trim, then strip surrounding quotes, then trim again — mirrors
         //    raw.trim().trim_matches('"').trim_matches('\'').trim().
         let trimmed = raw
