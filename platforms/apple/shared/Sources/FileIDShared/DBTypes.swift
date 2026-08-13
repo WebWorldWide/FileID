@@ -70,16 +70,36 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public var isVideo: Bool { kind == "video" }
 }
 
-/// Duplicate group — files sharing the same byte-exact content_hash (item 1).
+/// Duplicate group — files verified by a live full-file digest, or a
+/// perceptual near-duplicate cluster when `isSimilar` is true (Cleanup's
+/// "Similar" mode: dHash Hamming grouping — NOT byte-identical).
 public struct DuplicateGroup: Sendable, Identifiable, Hashable {
-    public let id: Int64           // first 8 bytes of the group's content_hash
+    public let id: Int64           // exact: first 8 bytes of full digest; similar: min member file id
     public let files: [FileRow]    // sorted by keeperRank descending (best first)
-    public init(id: Int64, files: [FileRow]) {
+    /// Exact cardinality/bytes for the whole group. `files` is a bounded
+    /// interactive preview when a pathological group contains thousands of
+    /// copies, so the preview and total counts may differ.
+    public let totalFileCount: Int
+    private let storedTotalBytes: Int64?
+    /// True for perceptual near-duplicate groups. The Cleanup "Similar" view
+    /// surfaces these with a "review before deleting — not identical" disclaimer
+    /// and never pre-selects copies for deletion.
+    public let isSimilar: Bool
+    public init(
+        id: Int64, files: [FileRow], isSimilar: Bool = false,
+        totalFileCount: Int? = nil, totalBytes: Int64? = nil
+    ) {
         self.id = id
         self.files = files
+        self.isSimilar = isSimilar
+        self.totalFileCount = totalFileCount ?? files.count
+        self.storedTotalBytes = totalBytes
     }
 
-    public var totalBytes: Int64 { files.reduce(0) { $0 + $1.sizeBytes } }
+    public var isTruncated: Bool { totalFileCount > files.count }
+    public var totalBytes: Int64 {
+        storedTotalBytes ?? files.reduce(0) { $0 + $1.sizeBytes }
+    }
     public var reclaimableBytes: Int64 { totalBytes - (files.first?.sizeBytes ?? 0) }
     public var keeper: FileRow? { files.first }
     public var trashable: ArraySlice<FileRow> { files.dropFirst() }
