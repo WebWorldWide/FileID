@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>On-device AI file organization. macOS today, Windows next, Linux soon.</strong><br>
+  <strong>On-device AI file organization. macOS and Windows live, Linux soon.</strong><br>
   <em>Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own.</em>
 </p>
 
@@ -123,7 +123,7 @@ End users (no source needed):
 | **Windows 10 22H2+ / 11** (x64 + ARM64) | `FileIDSetup.exe` (single download, auto-picks architecture) | Standard MSI install under `C:\Program Files\FileID\`. Start menu shortcut. Uninstall via Settings → Apps. |
 | **macOS 15+** (Apple Silicon) | `FileID.dmg` | Drag to Applications. |
 
-Release builds aren't yet shipping — see [Build from source](#build-from-source) below to compile your own.
+Unsigned/self-signed v0.1.0 release builds are available on the [releases page](https://github.com/WebWorldWide/FileID/releases/latest) — or compile your own via [Build from source](#build-from-source) below.
 
 ---
 

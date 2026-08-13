@@ -940,10 +940,9 @@ img { display: block; max-width: 100%; }
 /* ───── DOWNLOAD ───── */
 .downloads {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 18px;
   margin-bottom: 56px;
-  align-items: start;
 }
 .dl-card {
   position: relative;
