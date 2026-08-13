@@ -865,7 +865,7 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
 /// `pub(crate)` so the other path-mutating writers (restructure-apply, bulk
 /// rename, trash-restore) can reuse this single canonical normalizer instead
 /// of re-stamping `path_search = path_text` verbatim.
-pub(crate) fn nfc_path_search(path: &str) -> String {
+pub fn nfc_path_search(path: &str) -> String {
     // Fast path: a pure-ASCII path is already NFC (NFC is the identity on
     // ASCII), so skip the scan + allocation entirely.
     if path.is_ascii() {

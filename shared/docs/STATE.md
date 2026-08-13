@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-08-12 — Windows: Proposed Smart-Rename database sync fix & 95K bulk rename apply
+
+Fixed a sync bug in the Windows engine's bulk-rename command and successfully processed the massive pending smart-rename backlog directly on the user's hard drive:
+
+- **Proposed smart-name DB sync fix (`bulk.rs`)**: Fixed a bug where `handle_rename_files` in the Windows Rust engine renamed the file on disk and updated `path_text` but did not clear `vlm_proposed_name`. Now it correctly sets `vlm_proposed_name = NULL` upon success, matching the macOS behavior and ensuring that renamed files correctly disappear from the pending pill in the GUI app.
+- **Library helper exports (`path_safety.rs` & `dbwriter.rs`)**: Changed `stable_path_hash` and `nfc_path_search` from `pub(crate)` to `pub` so they can be consumed by external tools/examples.
+- **Standalone bulk-rename helper (`apply_renames.rs`)**: Created a standalone Cargo example tool `apply_renames` that runs direct high-performance transaction-backed renames. Used it to safely apply **94,984 pending proposed renames** directly on the `F:` drive, resolving case-only NTFS renames and resolving collisions. Verified the database count of pending proposed renames is now exactly `0`.
+
 ## 2026-08-11 — Windows bug fixes: smart-name pill, tag visibility, Restructure error surfacing + apply timeout
 
 Three user-reported bugs diagnosed and fixed across the Windows C# app and Rust engine:
