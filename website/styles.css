@@ -478,12 +478,12 @@ img { display: block; max-width: 100%; }
 }
 .btn-block {
   width: 100%;
-  justify-content: space-between;
-  padding: 14px 18px;
+  justify-content: center;
+  padding: 14px 22px;
 }
 .btn-pri { display: block; font-size: 15px; font-weight: 700; }
 .btn-sec { display: block; font-size: 11.5px; font-weight: 500; opacity: 0.7; margin-top: 1px; }
-.btn-block span { text-align: left; }
+.btn-block span { text-align: center; }
 .btn-gold .btn-sec { opacity: 0.65; }
 
 /* ───── Scroll reveal ───── */
@@ -983,6 +983,21 @@ img { display: block; max-width: 100%; }
   border-radius: 999px;
 }
 .dl-badge-soon { color: var(--fg-faint); }
+.dl-badge-windows {
+  color: #62b5e5;
+  background: rgba(98, 181, 229, 0.08);
+  border-color: rgba(98, 181, 229, 0.25);
+}
+.dl-badge-apple {
+  color: #d8c8f2;
+  background: rgba(216, 200, 242, 0.08);
+  border-color: rgba(216, 200, 242, 0.25);
+}
+.dl-badge-linux {
+  color: #f0c85a;
+  background: rgba(240, 200, 90, 0.08);
+  border-color: rgba(240, 200, 90, 0.25);
+}
 .dl-blurb {
   font-size: 13.5px;
   color: var(--fg-soft);
