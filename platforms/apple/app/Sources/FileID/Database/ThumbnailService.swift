@@ -33,31 +33,37 @@ public final class ThumbnailService {
         return c
     }()
 
-    private var inflight: [String: Task<NSImage?, Never>] = [:]
+    private var inflight: [String: Task<Data?, Never>] = [:]
 
     private init() {}
 
     public func thumbnail(for url: URL, size: CGFloat = 192) async -> NSImage? {
         let key = "\(url.path)|\(Int(size))" as NSString
         if let hit = cache.object(forKey: key) { return hit }
-        if let task = inflight[key as String] { return await task.value }
+        if let task = inflight[key as String] {
+            if let data = await task.value {
+                return NSImage(data: data)
+            }
+            return nil
+        }
 
         // Capture the screen scale on MainActor BEFORE entering the detached
         // task; NSScreen.main also requires MainActor isolation.
         let scale = NSScreen.main?.backingScaleFactor ?? 2
-        let task = Task<NSImage?, Never> {
+        let task = Task<Data?, Never> {
             await ThumbnailService.generate(url: url, size: size, scale: scale)
         }
         inflight[key as String] = task
-        let image = await task.value
+        let data = await task.value
         inflight.removeValue(forKey: key as String)
-        if let image {
+        if let data, let image = NSImage(data: data) {
             // Cost in PIXELS, not points — a Retina request yields a
             // scale× representation, and point-based costs undercount
             // 4× so the totalCostLimit never engages.
             cache.setObject(image, forKey: key, cost: Int(size * scale * size * scale * 4))
+            return image
         }
-        return image
+        return nil
     }
 
     /// Off-main thumbnail production: on-disk cache first (fast, local),
@@ -65,7 +71,7 @@ public final class ThumbnailService {
     /// written back to disk. `generateBestRepresentation` (single-callback)
     /// — the plural `generateRepresentations(for:)` calls back per
     /// representation type and double-resumes the continuation.
-    nonisolated private static func generate(url: URL, size: CGFloat, scale: CGFloat) async -> NSImage? {
+    nonisolated private static func generate(url: URL, size: CGFloat, scale: CGFloat) async -> Data? {
         // File identity for invalidation — a stat is cheap next to a remote
         // decode, and lets an edited / replaced file miss its stale thumb.
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
@@ -73,10 +79,10 @@ public final class ThumbnailService {
         let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
         let diskURL = ThumbnailDiskCache.url(path: url.path, mtime: mtime,
                                              bytes: bytes, size: size, scale: scale)
-        if let cached = ThumbnailDiskCache.load(diskURL) { return cached }
+        if let cachedData = ThumbnailDiskCache.load(diskURL) { return cachedData }
 
         await thumbDecodeGate.acquire()
-        let image: NSImage? = await withCheckedContinuation { (cont: CheckedContinuation<NSImage?, Never>) in
+        let jpegData: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             let req = QLThumbnailGenerator.Request(
                 fileAt: url,
                 size: CGSize(width: size, height: size),
@@ -87,12 +93,20 @@ public final class ThumbnailService {
                 guard let rep, error == nil else {
                     cont.resume(returning: nil); return
                 }
-                cont.resume(returning: rep.nsImage)
+                let image = rep.nsImage
+                guard let tiff = image.tiffRepresentation,
+                      let bitmapRep = NSBitmapImageRep(data: tiff),
+                      let jpeg = bitmapRep.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
+                    cont.resume(returning: nil); return
+                }
+                cont.resume(returning: jpeg)
             }
         }
         await thumbDecodeGate.release()
-        if let image { ThumbnailDiskCache.store(image, to: diskURL) }
-        return image
+        if let jpegData {
+            try? jpegData.write(to: diskURL, options: .atomic)
+        }
+        return jpegData
     }
 }
 
@@ -145,16 +159,7 @@ private enum ThumbnailDiskCache {
         return dir.appendingPathComponent("\(hex).jpg")
     }
 
-    static func load(_ url: URL) -> NSImage? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return NSImage(data: data)
-    }
-
-    static func store(_ image: NSImage, to url: URL) {
-        guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let jpeg = rep.representation(using: .jpeg,
-                                            properties: [.compressionFactor: 0.8]) else { return }
-        try? jpeg.write(to: url, options: .atomic)
+    static func load(_ url: URL) -> Data? {
+        return try? Data(contentsOf: url)
     }
 }
