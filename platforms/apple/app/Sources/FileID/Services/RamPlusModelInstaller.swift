@@ -68,7 +68,9 @@ public final class RamPlusModelInstaller {
     public func install() {
         guard task == nil else { return }
         task = Task { [weak self] in
-            await self?.runInstall()
+            await AppSleepActivity.run(reason: "Install RAM++ model") {
+                await self?.runInstall()
+            }
             self?.task = nil
         }
     }

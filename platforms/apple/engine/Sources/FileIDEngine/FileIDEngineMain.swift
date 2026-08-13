@@ -16,6 +16,8 @@ import GRDB
 
 @main
 struct FileIDEngineMain {
+    static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
+
     static func main() async {
         // U4: must run before ANY library can write to fd 2 (and before
         // the IPCSink singleton captures its wire handle).
@@ -51,9 +53,11 @@ struct FileIDEngineMain {
         // pool per scan triggers SQLITE_BUSY when a prior pool is still alive
         // (which was the "database is locked" symptom from spam-clicking
         // Start). We open here, hand the same Database to every runScan.
+        let databaseURL = ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"]
+            .map { URL(fileURLWithPath: $0) } ?? Database.defaultURL
         let database: Database?
         do {
-            database = try Database(at: Database.defaultURL)
+            database = try Database(at: databaseURL)
         } catch let error as DatabaseOpenError {
             // Migration identifiers, not user paths — safe to log raw.
             await sink.emit(.error(EngineError(
@@ -65,9 +69,14 @@ struct FileIDEngineMain {
         } catch {
             await sink.emit(.error(EngineError(
                 kind: "db_open_failed",
-                message: "Could not open database at \(Database.defaultURL.path): \(error)"
+                message: databaseOpenFailureMessage
             )))
-            JSONLog.shared.error(ev: "db_open_failed", error: "\(error)")
+            let nsError = error as NSError
+            JSONLog.shared.error(
+                ev: "db_open_failed",
+                path: redactPathForLog(databaseURL.path),
+                error: "\(nsError.domain) \(nsError.code)"
+            )
             database = nil
         }
 
@@ -83,7 +92,7 @@ struct FileIDEngineMain {
         // Engine ready handshake. App waits for this before sending the first
         // command, so it knows the pipe is live and the engine started clean.
         await sink.emit(.ready(EngineInfo(
-            version: "0.1.0-m1",
+            version: "0.1.3",
             pid: ProcessInfo.processInfo.processIdentifier,
             workerCap: Hardware.workerCap,
             physicalMemoryGB: Hardware.physicalMemoryGB
@@ -111,7 +120,7 @@ struct FileIDEngineMain {
         let progressTicker = Task.detached(priority: .background) {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                if let snap = await coordinator.snapshot() {
+                if let snap = await coordinator.periodicSnapshot() {
                     await sink.emit(.progress(snap))
                 }
             }
@@ -168,12 +177,34 @@ struct FileIDEngineMain {
         Darwin._exit(0)
     }
 
+    private static func requireLicenseAcceptance(
+        for kind: AIModelKind,
+        sink: IPCSink,
+        emitDeepAnalyzeTerminal: Bool = false
+    ) async -> Bool {
+        guard ModelLicenseAcceptance.isAccepted(for: kind) else {
+            await sink.emit(.error(EngineError(
+                kind: "model_license_not_accepted",
+                message: "Open FileID and accept the \(kind.licenseName) before downloading or using \(kind.displayName).",
+                modelKind: kind.rawValue
+            )))
+            if emitDeepAnalyzeTerminal {
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: kind.rawValue, cancelled: false
+                )))
+            }
+            return false
+        }
+        return true
+    }
+
     /// Per-command dispatcher. `startScan` runs the scan in a detached task so
     /// the command loop stays responsive to subsequent pause/cancel commands.
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
                           sink: IPCSink, database: Database?) async {
         switch cmd.payload {
-        case .startScan(let rootPath, let rootDisplay, let rescan):
+        case .startScan(let rootPath, let rootDisplay, let rescan, let excludedPaths):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -186,6 +217,16 @@ struct FileIDEngineMain {
                 await sink.emit(.scanComplete(ScanComplete(
                     sessionID: "", totalFiles: 0, processedFiles: 0,
                     failedFiles: 0, totalSeconds: 0
+                )))
+                return
+            }
+            // Reject a start-scan while one is already queued or running. Mirrors
+            // the Windows engine's scan_session.rs guard. Prevents unbounded job
+            // queue growth from a misbehaving or rapidly-clicking app client.
+            if await JobQueue.shared.hasActive(category: .scan) {
+                await sink.emit(.error(EngineError(
+                    kind: "scan_already_queued",
+                    message: "A scan is already running or queued — cancel it first."
                 )))
                 return
             }
@@ -207,7 +248,8 @@ struct FileIDEngineMain {
             ) {
                 let task = Task.detached(priority: .userInitiated) {
                     await runScan(rootPath: rootPath, displayPath: displayPath,
-                                  rescan: rescan, epoch: epoch,
+                                  rescan: rescan ?? false, epoch: epoch,
+                                  excludedPaths: excludedPaths,
                                   coordinator: coordinator, sink: sink,
                                   database: database)
                 }
@@ -223,6 +265,14 @@ struct FileIDEngineMain {
         case .cancelScan:
             await coordinator.requestCancel()
             JSONLog.shared.info(ev: "cancel_requested")
+        case .cancelRestructure:
+            await coordinator.requestRestructureCancel()
+            JSONLog.shared.info(ev: "restructure_cancel_requested")
+        case .healthCheck(let requestID):
+            await sink.emit(.healthCheckResult(HealthCheckResult(
+                requestID: requestID,
+                pid: ProcessInfo.processInfo.processIdentifier
+            )))
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))
@@ -267,13 +317,31 @@ struct FileIDEngineMain {
                 await sink.emit(.faceClusteringComplete(summary))
             })
         case .deepAnalyzeFile(let fileID, let modelKind):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
             // Duplicate-command parity with the Windows engine: a second
             // deep-analyze while one is queued/running is rejected, not
             // silently queued (the app disables its buttons in-flight, so
@@ -302,13 +370,31 @@ struct FileIDEngineMain {
                                              modelKind: kind)
             })
         case .deepAnalyzeFolder(let prefix, let modelKind):
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
             if await JobQueue.shared.hasActive(category: .deepAnalyze) {
                 await sink.emit(.error(EngineError(
                     kind: "deep_analyze_already_running",
@@ -328,16 +414,41 @@ struct FileIDEngineMain {
                                              scope: .folder(prefix: prefix),
                                              modelKind: kind)
             })
-        case .deepAnalyzeAll(let modelKind, let skipExisting, _, _):
-            // `tagsOnly` (fast one-VLM-call/file pass) and `proposeRenames`
-            // (full pass minus the smart-rename VLM call) are accepted for wire
-            // parity; the macOS DeepAnalyzeRunner's wholeLibrary scope doesn't
-            // branch on either yet (tracked in NEXT.md) — full caption + tags +
-            // rename runs regardless. (audit F-C2-001)
-            guard let database, let kind = AIModelKind(rawValue: modelKind) else {
+        case .deepAnalyzeAll(let modelKind, let skipExisting, let tagsOnly, let proposeRenames, let fileIDs, let excludedFolders):
+            guard let database else {
                 await sink.emit(.error(EngineError(
-                    kind: "deep_invalid",
-                    message: "Database unavailable or unknown model kind \(modelKind)."
+                    kind: "db_failed", message: "Database unavailable for Deep Analyze.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.error(EngineError(
+                    kind: "unknown_model", message: "Unknown Deep Analyze model: \(modelKind).",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
+                )))
+                return
+            }
+            guard await requireLicenseAcceptance(
+                for: kind, sink: sink, emitDeepAnalyzeTerminal: true
+            ) else { return }
+            if let fileIDs, fileIDs.count > 10_000 {
+                await sink.emit(.error(EngineError(
+                    kind: "deep_analyze_selection_too_large",
+                    message: "Analyze Selected accepts at most 10,000 files per run. Reduce the selection and try again.",
+                    modelKind: modelKind
+                )))
+                await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
+                    processed: 0, failed: 1, totalSeconds: 0,
+                    modelKind: modelKind, cancelled: false
                 )))
                 return
             }
@@ -356,13 +467,29 @@ struct FileIDEngineMain {
                 title: "Deep Analyze entire library (\(kind.displayName))",
                 etaSeconds: nil
             ) {
+                // excludedFolders applies ONLY to the whole-library path — an
+                // explicit fileIDs selection is a deliberate per-file action
+                // and is never silently filtered (schema; mirrors the Rust +
+                // C# engines).
+                let scope: DeepAnalyzeScope = if let fileIDs {
+                    .selected(fileIDs: fileIDs, skipExisting: skipExisting)
+                } else {
+                    .wholeLibrary(skipExisting: skipExisting, excludedFolders: excludedFolders ?? [])
+                }
                 await DeepAnalyzeRunner.run(database: database, sink: sink,
-                                             scope: .wholeLibrary(skipExisting: skipExisting),
-                                             modelKind: kind)
+                                             scope: scope,
+                                             modelKind: kind,
+                                             tagsOnly: tagsOnly ?? false,
+                                             proposeRenames: proposeRenames ?? true)
             })
         case .deepAnalyzeCancel:
-            await DeepAnalyze.shared.requestCancel()
-            JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
+            if await JobQueue.shared.hasActive(category: .deepAnalyze) {
+                await DeepAnalyze.shared.requestCancel()
+                JSONLog.shared.info(ev: "deep_analyze_cancel_requested")
+            } else {
+                await DeepAnalyze.shared.clearCancel()
+                JSONLog.shared.info(ev: "deep_analyze_cancel_ignored_idle")
+            }
         case .prewarmModel(let modelKey):
             guard let kind = AIModelKind(rawValue: modelKey) else {
                 // Canonical cross-platform kind for "engine doesn't recognize
@@ -376,6 +503,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard await requireLicenseAcceptance(for: kind, sink: sink) else { return }
             // Prewarm runs OUTSIDE JobQueue. JobQueue serializes
             // user-facing pipeline jobs (scan, cluster, analyze) that
             // touch the database; a multi-GB model download has no
@@ -384,6 +512,8 @@ struct FileIDEngineMain {
             JSONLog.shared.info(ev: "prewarm_model_started",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             let work = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Model prewarm")
+                defer { SleepGuard.shared.end() }
                 do {
                     try await DeepAnalyze.shared.ensureLoaded(kind: kind) { frac, msg, done, total in
                         Task {
@@ -433,7 +563,7 @@ struct FileIDEngineMain {
         // moves through the engine's Restructure butler and emit the
         // corresponding reply event. Run detached so the command loop stays
         // responsive to pause/cancel/shutdown during a long plan computation.
-        case .planRestructure(let libraryRoot):
+        case .planRestructure(let libraryRoot, let supportsPagedPlans):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -441,17 +571,49 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure operation is already running.")))
+                return
+            }
             let planRoot = URL(fileURLWithPath: libraryRoot)
-            Task.detached(priority: .userInitiated) {
+            let planTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure planning")
+                defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "plan_restructure_requested",
                                     path: redactPathForLog(libraryRoot))
                 do {
-                    let planResult = try await Restructure.proposeAll(
-                        database: database, libraryRoot: planRoot)
-                    let plan = Self.restructurePlan(from: planResult, libraryRoot: libraryRoot)
+                    let plan: RestructurePlan
+                    if supportsPagedPlans == true,
+                       let largePlan = try await Restructure.proposeLargeStoredIfNeeded(
+                           database: database, libraryRoot: planRoot) {
+                        plan = largePlan
+                    } else {
+                        let planResult = try await Restructure.proposeAll(
+                            database: database, libraryRoot: planRoot)
+                        var legacyPlan = Self.restructurePlan(
+                            from: planResult, libraryRoot: libraryRoot)
+                        if supportsPagedPlans == true,
+                           legacyPlan.moves.count > Restructure.storedPlanPreviewCap {
+                            let stored = try Restructure.storePlan(
+                                libraryRoot: libraryRoot, moves: legacyPlan.moves)
+                            legacyPlan = RestructurePlan(
+                                libraryRoot: legacyPlan.libraryRoot,
+                                moves: stored.preview,
+                                categoryCounts: legacyPlan.categoryCounts,
+                                folderClassifications: legacyPlan.folderClassifications,
+                                planID: stored.planID,
+                                totalMoves: legacyPlan.moves.count,
+                                truncated: true,
+                                confidenceCounts: legacyPlan.confidenceCounts)
+                        }
+                        plan = legacyPlan
+                    }
                     await sink.emit(.restructurePlan(plan))
                     JSONLog.shared.info(ev: "plan_restructure_done",
-                                        extra: ["moves": AnyCodable(plan.moves.count)])
+                                        extra: ["moves": AnyCodable(
+                                            plan.totalMoves ?? plan.moves.count)])
                 } catch {
                     // Terminal error so the Restructure tab's "Computing plan…"
                     // status recovers instead of awaiting forever (mirrors
@@ -462,15 +624,29 @@ struct FileIDEngineMain {
                         message: "Restructure planning did not complete: \(error)"
                     )))
                 }
+                await coordinator.finishRestructure(token: restructureToken)
             }
-        case .applyRestructure(let libraryRoot, let moves, _):
-            // macOS performs real filesystem moves; the Windows engine's
-            // symlink-preview mode has no macOS equivalent, so `useSymlinks`
-            // is accepted for wire parity and ignored.
+            await coordinator.attachRestructure(planTask, token: restructureToken)
+        case .applyRestructure(let libraryRoot, let moves, let useSymlinks, let planID):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
                     message: "Database failed to open at engine startup; cannot apply a restructure."
+                )))
+                return
+            }
+            // Fail closed instead of silently converting a symlink-preview
+            // request into permanent real moves: macOS has no symlink-apply
+            // engine path (no shortcut-mode journal to undo it with), so the
+            // prior "accepted for wire parity and ignored" behavior meant a
+            // caller asking for a reversible preview got irreversible moves
+            // with no warning. Checked BEFORE reserveRestructure() so a
+            // rejected request never wedges later applies/undos on
+            // restructure_busy. (audit R3 — see DECISIONS.md)
+            guard !useSymlinks else {
+                await sink.emit(.error(EngineError(
+                    kind: "apply_restructure",
+                    message: "Symlink-preview mode is not supported by the macOS engine; it only performs real on-disk moves. Send useSymlinks: false."
                 )))
                 return
             }
@@ -480,25 +656,82 @@ struct FileIDEngineMain {
                     fileID: m.fileID, oldPath: m.source, newPath: m.destination,
                     bucket: m.category, confidence: m.confidence, reason: m.reason)
             }
-            let applyTask = Task.detached(priority: .userInitiated) {
-                JSONLog.shared.info(ev: "apply_restructure_requested",
-                                    extra: ["moves": AnyCodable(proposals.count)])
-                let result = await Restructure.apply(
-                    proposals: proposals, database: database, libraryRoot: applyRoot)
-                await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                    applied: result.moved, failed: result.failed, privilegeError: nil)))
-                // Clear the handle so a later cancelScan can't cancel a finished
-                // apply, and awaitActiveRestructure() returns promptly.
-                await coordinator.setActiveRestructure(nil)
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure apply or undo is already running.")))
+                return
             }
-            // Register so cancelScan can stop a long apply (F-C6-013 wiring) and
-            // shutdown awaits the terminal result instead of _exit-ing over it.
-            await coordinator.setActiveRestructure(applyTask)
+            let applyTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure apply")
+                defer { SleepGuard.shared.end() }
+                JSONLog.shared.info(ev: "apply_restructure_requested",
+                                    extra: ["moves": AnyCodable(proposals.count),
+                                            "storedPlan": AnyCodable(planID != nil)])
+                do {
+                    let result: Restructure.ApplyResult
+                    if let planID {
+                        guard moves.isEmpty else {
+                            throw CocoaError(.fileReadCorruptFile)
+                        }
+                        result = try await Restructure.applyStoredPlan(
+                            planID: planID, expectedRoot: libraryRoot,
+                            database: database, libraryRoot: applyRoot)
+                    } else {
+                        result = try await Restructure.apply(
+                            proposals: proposals, database: database, libraryRoot: applyRoot)
+                    }
+                    await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                        applied: result.moved, failed: result.failed, privilegeError: nil,
+                        cancelled: result.cancelled)))
+                } catch {
+                    if let journalError = error as? Restructure.UndoJournalError {
+                        let result = journalError.result
+                        await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                            applied: result.moved, failed: result.failed, privilegeError: nil,
+                            cancelled: result.cancelled)))
+                        await sink.emit(.error(EngineError(
+                            kind: "restructure_undo_journal",
+                            message: journalError.localizedDescription)))
+                    } else {
+                        await sink.emit(.error(EngineError(
+                            kind: "apply_restructure",
+                            message: "Apply failed: \(error.localizedDescription)")))
+                    }
+                }
+                await coordinator.finishRestructure(token: restructureToken)
+            }
+            await coordinator.attachRestructure(applyTask, token: restructureToken)
 
-        case .undoRestructure(let libraryRoot):
+        case .undoRestructure(let libraryRoot, let shortcutUndoToken):
             // Reverse the last apply by replaying the engine's on-disk undo
             // journal. Same machinery as apply (real moves, cancellable, terminal
             // restructureApplyResult), so register it the same way. (R2)
+            //
+            // A non-nil shortcutUndoToken asks to undo only ONE shortcut-mode
+            // (symlink) apply run, never the real-move journal (schema:
+            // shortcutUndoToken). macOS has no symlink-apply mode at all (see the
+            // useSymlinks rejection above), so there is no shortcut journal to
+            // replay — fail closed rather than silently falling through to
+            // undoLast() and replaying the real-move journal instead, which
+            // would violate that contract. Checked BEFORE reserveRestructure()
+            // so a rejected request can't wedge restructure_busy for every
+            // later apply/undo (ScanCoordinator's reservation has no timeout).
+            // (audit R3 — see DECISIONS.md)
+            guard shortcutUndoToken == nil else {
+                // EngineClient's undoRestructureInFlight flag is cleared ONLY by
+                // a terminal restructureApplyResult (audit R2-app) — an .error
+                // alone would leave it latched and mis-attribute the NEXT apply's
+                // result to this rejected undo. Emit both, mirroring the
+                // UndoJournalError catch arm above.
+                await sink.emit(.restructureApplyResult(RestructureApplyResult(
+                    applied: 0, failed: 0, privilegeError: nil, cancelled: false)))
+                await sink.emit(.error(EngineError(
+                    kind: "undo_restructure",
+                    message: "Shortcut-mode restructure is not supported by the macOS engine; there is no shortcut undo journal to replay."
+                )))
+                return
+            }
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -506,44 +739,420 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            guard let restructureToken = await coordinator.reserveRestructure() else {
+                await sink.emit(.error(EngineError(
+                    kind: "restructure_busy",
+                    message: "Another restructure apply or undo is already running.")))
+                return
+            }
             let undoRoot = URL(fileURLWithPath: libraryRoot)
             let undoTask = Task.detached(priority: .userInitiated) {
+                SleepGuard.shared.begin(reason: "Restructure undo")
+                defer { SleepGuard.shared.end() }
                 JSONLog.shared.info(ev: "undo_restructure_requested")
                 let result = await Restructure.undoLast(database: database, libraryRoot: undoRoot)
                 await sink.emit(.restructureApplyResult(RestructureApplyResult(
-                    applied: result.moved, failed: result.failed, privilegeError: nil)))
-                await coordinator.setActiveRestructure(nil)
+                    applied: result.moved, failed: result.failed, privilegeError: nil,
+                    cancelled: result.cancelled)))
+                await coordinator.finishRestructure(token: restructureToken)
             }
-            await coordinator.setActiveRestructure(undoTask)
+            await coordinator.attachRestructure(undoTask, token: restructureToken)
 
-        // ── Windows-originated commands ──────────────────────────
-        // The schema keeps these symmetric across platforms. Mac
-        // exposes equivalent flows through per-tab UI actions, not
-        // the IPC, so the engine returns a structured pointer rather
-        // than silently dropping.
-        case .applyTags,
-             .renameFiles,
-             .trashFiles,
-             .mergeClusters,
+        case .purgeExcluded(let excludedPaths):
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot purge excluded folders."
+                )))
+                return
+            }
+            let normalized = normalizeExcludedPaths(excludedPaths)
+            let deleted = await purgeExcludedRows(database: database, excludedPaths: normalized,
+                                                 sink: sink, sessionID: nil)
+            if deleted >= 0 {
+                await sink.emit(.bulkActionResult(BulkActionResult(
+                    action: "purgeExcluded",
+                    succeeded: deleted,
+                    failed: 0,
+                    messages: []
+                )))
+            }
+
+        // ── Cross-platform bulk actions ──────────────────────────
+        case .applyTags(let fileIDs, let tags, let mode):
+            guard let database else { await emitDbUnavailable(sink, action: "applyTags"); return }
+            await sink.emit(.bulkActionResult(await applyTags(database: database, fileIDs: fileIDs, tags: tags, mode: mode)))
+        case .renameFiles(let renames):
+            guard let database else { await emitDbUnavailable(sink, action: "renameFiles"); return }
+            await sink.emit(.bulkActionResult(await renameFiles(database: database, renames: renames)))
+        case .trashFiles(let fileIDs, let exactIdentities):
+            guard exactIdentities == nil else {
+                await sink.emit(.bulkActionResult(BulkActionResult(
+                    action: "trashFiles", succeeded: 0, failed: fileIDs.count,
+                    messages: fileIDs.map {
+                        item($0, ok: false, "Exact Trash evidence is not accepted by the macOS engine; use the native Cleanup flow.")
+                    })))
+                return
+            }
+            guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
+            await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
+        case .mergeClusters(let sourcePersonID, let destinationPersonID):
+            guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
+            await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
+        case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
+            guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
+            await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+        case .markPersonsAsUnknown(let personIDs):
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
+            await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
+        case .markPersonsDifferent(let sourcePersonID, let destinationPersonID,
+                                   let sourceAnchorFaceID, let destinationAnchorFaceID):
+            guard let database else { await emitDbUnavailable(sink, action: "markPersonsDifferent"); return }
+            await sink.emit(.bulkActionResult(await markPersonsDifferent(
+                database: database,
+                sourcePersonID: sourcePersonID,
+                destinationPersonID: destinationPersonID,
+                sourceAnchorFaceID: sourceAnchorFaceID,
+                destinationAnchorFaceID: destinationAnchorFaceID
+            )))
+        case .wipeLibrary:
+            guard let database else { await sink.emit(.libraryWiped(LibraryWiped(ok: false, message: "Database unavailable."))); return }
+            await sink.emit(.libraryWiped(await wipeLibrary(database: database)))
+        case .findMergeSuggestions,
              .embedTextQuery,
-             .renamePerson,
-             .markPersonsAsUnknown,
-             .findMergeSuggestions,
-             .markPersonsDifferent,
              .embedImageQuery,
              .restoreFromTrash,
              .revertMerge,
-             .wipeLibrary,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
-                message: "Bulk tag/rename operations are handled by the FileID app on macOS."
+                message: "This IPC command is not implemented by the macOS engine yet."
             )))
         case .verifyCudaPack:
             await sink.emit(.error(EngineError(
                 kind: "not_applicable_on_platform",
                 message: "CUDA isn't available on Apple Silicon — the AppleProvider EP selects ANE/Metal automatically."
             )))
+        }
+    }
+
+    static func emitDbUnavailable(_ sink: IPCSink, action: String) async {
+        await sink.emit(.bulkActionResult(BulkActionResult(
+            action: action,
+            succeeded: 0,
+            failed: 0,
+            messages: [BulkActionItem(ok: false, message: "Database unavailable.")]
+        )))
+    }
+
+    static func item(_ id: Int64? = nil, ok: Bool, _ message: String? = nil) -> BulkActionItem {
+        BulkActionItem(fileID: id, ok: ok, message: message)
+    }
+
+    static func applyTags(database: Database, fileIDs: [Int64], tags: [String], mode: String) async -> BulkActionResult {
+        let clean = Array(Set(tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted()
+        guard !fileIDs.isEmpty, !clean.isEmpty else {
+            return BulkActionResult(action: "applyTags", succeeded: 0, failed: fileIDs.count, messages: [item(nil, ok: false, "No files or tags supplied.")])
+        }
+        do {
+            let lower = mode.lowercased()
+            let messages = try await database.pool.write { db -> [BulkActionItem] in
+                var messages: [BulkActionItem] = []
+                for id in fileIDs {
+                    do {
+                        if lower == "replace" {
+                            try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'user'", arguments: [id])
+                        }
+                        for tag in clean {
+                            if lower == "remove" {
+                                try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND tag = ? AND source = 'user'", arguments: [id, tag])
+                            } else {
+                                try db.execute(sql: "INSERT OR IGNORE INTO tags(file_id, tag, source, score) VALUES (?, ?, 'user', NULL)", arguments: [id, tag])
+                            }
+                        }
+                        messages.append(item(id, ok: true))
+                    } catch {
+                        messages.append(item(id, ok: false, error.localizedDescription))
+                    }
+                }
+                return messages
+            }
+            return BulkActionResult(action: "applyTags", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        } catch {
+            return BulkActionResult(action: "applyTags", succeeded: 0, failed: fileIDs.count, messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static let bulkMutationChunkSize = 500
+
+    struct BulkFileState: Sendable {
+        let path: String
+        let fileRef: Int64?
+    }
+
+    static func fetchBulkStates(
+        database: Database, fileIDs: [Int64]
+    ) async throws -> [Int64: BulkFileState] {
+        let ids = Array(Set(fileIDs))
+        guard !ids.isEmpty else { return [:] }
+        return try await database.pool.read { db in
+            var result: [Int64: BulkFileState] = [:]
+            for start in stride(from: 0, to: ids.count, by: bulkMutationChunkSize) {
+                let chunk = ids[start..<min(start + bulkMutationChunkSize, ids.count)]
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                let rows = try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, path_text, file_ref FROM files WHERE id IN (\(placeholders))",
+                    arguments: StatementArguments(chunk))
+                for row in rows {
+                    let id: Int64 = row["id"]
+                    result[id] = BulkFileState(path: row["path_text"], fileRef: row["file_ref"])
+                }
+            }
+            return result
+        }
+    }
+
+    static func renameFiles(database: Database, renames: [RenameEntry]) async -> BulkActionResult {
+        SleepGuard.shared.begin(reason: "Bulk rename")
+        defer { SleepGuard.shared.end() }
+        var messages: [BulkActionItem] = []
+        var states: [Int64: BulkFileState]
+        do {
+            states = try await fetchBulkStates(database: database,
+                                               fileIDs: renames.map(\.fileID))
+        } catch {
+            return BulkActionResult(
+                action: "renameFiles", succeeded: 0, failed: renames.count,
+                messages: renames.map { item($0.fileID, ok: false, error.localizedDescription) })
+        }
+        for rename in renames {
+            let trimmed = rename.newName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, !trimmed.contains("/"), !trimmed.contains("\0") else {
+                messages.append(item(rename.fileID, ok: false, "Invalid filename."))
+                continue
+            }
+            guard let state = states[rename.fileID] else {
+                messages.append(item(rename.fileID, ok: false, "File row not found."))
+                continue
+            }
+            let oldURL = URL(fileURLWithPath: state.path)
+            guard !Restructure.fileRefSwapped(
+                dbRef: state.fileRef, currentRef: Discovery.inode(of: oldURL)) else {
+                messages.append(item(rename.fileID, ok: false, "File changed since it was indexed."))
+                continue
+            }
+            let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
+            guard !FileManager.default.fileExists(atPath: newURL.path) else {
+                messages.append(item(rename.fileID, ok: false, "Destination already exists."))
+                continue
+            }
+            do {
+                try FileManager.default.moveItem(at: oldURL, to: newURL)
+                let ext = newURL.pathExtension.lowercased()
+                try await database.pool.write { db in
+                    try db.execute(
+                        sql: "UPDATE OR ABORT files SET path_text = ?, path_hash = ?, path_search = ?, extension = ? WHERE id = ? AND path_text = ?",
+                        arguments: [newURL.path, StablePathHash.hash(newURL.path),
+                                    newURL.path.precomposedStringWithCanonicalMapping,
+                                    ext.isEmpty ? nil : ext, rename.fileID, state.path])
+                    guard db.changesCount == 1 else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                }
+                states[rename.fileID] = BulkFileState(
+                    path: newURL.path, fileRef: state.fileRef)
+                messages.append(item(rename.fileID, ok: true))
+            } catch {
+                messages.append(item(rename.fileID, ok: false, error.localizedDescription))
+            }
+        }
+        return BulkActionResult(action: "renameFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    static func orderedUniqueFileIDs(_ fileIDs: [Int64]) -> [Int64] {
+        var seen = Set<Int64>()
+        return fileIDs.filter { seen.insert($0).inserted }
+    }
+
+    static func trashFiles(database: Database, fileIDs: [Int64]) async -> BulkActionResult {
+        SleepGuard.shared.begin(reason: "Bulk trash")
+        defer { SleepGuard.shared.end() }
+        let uniqueIDs = orderedUniqueFileIDs(fileIDs)
+        var messages: [BulkActionItem] = []
+        let states: [Int64: BulkFileState]
+        do {
+            states = try await fetchBulkStates(database: database, fileIDs: uniqueIDs)
+        } catch {
+            return BulkActionResult(
+                action: "trashFiles", succeeded: 0, failed: uniqueIDs.count,
+                messages: uniqueIDs.map { item($0, ok: false, error.localizedDescription) })
+        }
+        for id in uniqueIDs {
+            guard let state = states[id] else {
+                messages.append(item(id, ok: false, "File row not found."))
+                continue
+            }
+            let url = URL(fileURLWithPath: state.path)
+            guard !Restructure.fileRefSwapped(
+                dbRef: state.fileRef, currentRef: Discovery.inode(of: url)) else {
+                messages.append(item(id, ok: false, "File changed since it was indexed."))
+                continue
+            }
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                try await database.pool.write { db in
+                    try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
+                    guard db.changesCount == 1 else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                }
+                messages.append(item(id, ok: true))
+            } catch {
+                messages.append(item(id, ok: false, error.localizedDescription))
+            }
+        }
+        return BulkActionResult(action: "trashFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    static func mergeClusters(database: Database, source: Int64, destination: Int64) async -> BulkActionResult {
+        if source == destination {
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true, "No-op self merge.")])
+        }
+        do {
+            _ = try await database.mergePersons(target: destination, sources: [source])
+            return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
+        } catch {
+            return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func renamePerson(database: Database, personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?) async -> BulkActionResult {
+        let clean: @Sendable (String?) -> String? = { value in
+            let t = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return t.isEmpty ? nil : t
+        }
+        let parts = [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix)].compactMap { $0 }
+        let display = parts.joined(separator: " ")
+        do {
+            try await database.pool.write { db in
+                try db.execute(sql: """
+                    UPDATE persons
+                    SET title = ?, first_name = ?, middle_name = ?, last_name = ?, suffix = ?, name = ?, is_unknown = 0
+                    WHERE id = ?
+                    """, arguments: [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix), display.isEmpty ? nil : display, personID])
+            }
+            return BulkActionResult(action: "renamePerson", succeeded: 1, failed: 0, messages: [item(personID, ok: true)])
+        } catch {
+            return BulkActionResult(action: "renamePerson", succeeded: 0, failed: 1, messages: [item(personID, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func markPersonsAsUnknown(database: Database, personIDs: [Int64]) async -> BulkActionResult {
+        do {
+            let messages = try await database.pool.write { db -> [BulkActionItem] in
+                var messages: [BulkActionItem] = []
+                for id in personIDs {
+                    do {
+                        try db.execute(sql: """
+                            UPDATE persons
+                            SET name = NULL, title = NULL, first_name = NULL, middle_name = NULL,
+                                last_name = NULL, suffix = NULL, is_unknown = 1
+                            WHERE id = ?
+                            """, arguments: [id])
+                        messages.append(item(id, ok: true))
+                    } catch {
+                        messages.append(item(id, ok: false, error.localizedDescription))
+                    }
+                }
+                return messages
+            }
+            return BulkActionResult(action: "markPersonsAsUnknown", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        } catch {
+            return BulkActionResult(action: "markPersonsAsUnknown", succeeded: 0, failed: personIDs.count, messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func markPersonsDifferent(
+        database: Database,
+        sourcePersonID: Int64,
+        destinationPersonID: Int64,
+        sourceAnchorFaceID: Int64,
+        destinationAnchorFaceID: Int64
+    ) async -> BulkActionResult {
+        do {
+            try await database.pool.write { db in
+                let requested = [
+                    (personID: sourcePersonID, faceID: sourceAnchorFaceID),
+                    (personID: destinationPersonID, faceID: destinationAnchorFaceID)
+                ]
+                var anchors: [(faceID: Int64, fileID: Int64, bbox: String)] = []
+                for entry in requested {
+                    guard let row = try Row.fetchOne(db, sql: """
+                        SELECT person_id, file_id, bbox FROM face_prints WHERE id = ?
+                        """, arguments: [entry.faceID]),
+                          (row["person_id"] as Int64?) == entry.personID,
+                          let fileID: Int64 = row["file_id"],
+                          let bbox: String = row["bbox"] else {
+                        throw NSError(
+                            domain: "FileID.MarkPersonsDifferent",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey:
+                                "The suggested face pair is stale; refresh People and try again."]
+                        )
+                    }
+                    anchors.append((entry.faceID, fileID, bbox))
+                }
+                anchors.sort { $0.faceID < $1.faceID }
+                let personA = min(sourcePersonID, destinationPersonID)
+                let personB = max(sourcePersonID, destinationPersonID)
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO face_verifications
+                        (person_a, person_b, same_person, confidence, vlm_model, verified_at,
+                         face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+                    VALUES (?, ?, 0, 1.0, 'user-verified', ?, ?, ?, ?, ?, ?, ?)
+                    """, arguments: [
+                        personA, personB, Date().timeIntervalSince1970,
+                        anchors[0].faceID, anchors[1].faceID,
+                        anchors[0].fileID, anchors[0].bbox,
+                        anchors[1].fileID, anchors[1].bbox
+                    ])
+            }
+            return BulkActionResult(
+                action: "markPersonsDifferent", succeeded: 1, failed: 0,
+                messages: [item(nil, ok: true)])
+        } catch {
+            return BulkActionResult(
+                action: "markPersonsDifferent", succeeded: 0, failed: 1,
+                messages: [item(nil, ok: false, error.localizedDescription)])
+        }
+    }
+
+    static func wipeLibrary(database: Database) async -> LibraryWiped {
+        do {
+            try await database.pool.write { db in
+                let virtuals = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'")
+                let tables = try String.fetchAll(db, sql: """
+                    SELECT name FROM sqlite_master
+                    WHERE type='table' AND sql LIKE 'CREATE TABLE%'
+                      AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'
+                    """).filter { table in
+                        !virtuals.contains { v in table.hasPrefix(v + "_") }
+                    }
+                try db.execute(sql: "PRAGMA foreign_keys = OFF")
+                for table in tables {
+                    try db.execute(sql: "DELETE FROM \"\(table.replacingOccurrences(of: "\"", with: "\"\""))\"")
+                }
+                for table in virtuals {
+                    let q = table.replacingOccurrences(of: "\"", with: "\"\"")
+                    try db.execute(sql: "INSERT INTO \"\(q)\"(\"\(q)\") VALUES('delete-all')")
+                }
+                try? db.execute(sql: "DELETE FROM sqlite_sequence")
+                try db.execute(sql: "PRAGMA foreign_keys = ON")
+            }
+            return LibraryWiped(ok: true)
+        } catch {
+            return LibraryWiped(ok: false, message: error.localizedDescription)
         }
     }
 
@@ -555,7 +1164,7 @@ struct FileIDEngineMain {
     /// per engine process — opening more would trigger SQLITE_BUSY).
     static func runScan(
         rootPath: String, displayPath: String, rescan: Bool, epoch: Int,
-        coordinator: ScanCoordinator, sink: IPCSink,
+        excludedPaths: [String]?, coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
         let url = URL(fileURLWithPath: rootPath)
@@ -573,6 +1182,16 @@ struct FileIDEngineMain {
         // system doesn't suspend mid-tag overnight. Released in defer.
         SleepGuard.shared.begin(reason: "Scanning \(url.lastPathComponent)")
         defer { SleepGuard.shared.end() }
+
+        let effectiveExcludedPaths = Discovery.resolvedExclusionPaths(
+            root: url, rawPaths: excludedPaths)
+        if let excludedPaths, !excludedPaths.isEmpty {
+            JSONLog.shared.info(
+                ev: "start_scan_exclusions",
+                path: redactPathForLog(url.path),
+                extra: ["requested": AnyCodable(excludedPaths.count),
+                        "effective": AnyCodable(effectiveExcludedPaths.count)])
+        }
 
         let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent, epoch: epoch)
         await sink.emit(.phaseChanged(.discovering))
@@ -604,48 +1223,19 @@ struct FileIDEngineMain {
             return
         }
 
-        // Stage A — Discovery. Walk the tree, sort by path for I/O locality.
-        // cancelCheck reads the cancel mirror (sync, no actor hop) so the
-        // enumerator loop bails out immediately on Cancel — the v1-deferred
-        // "cancel during discovery" gap is now closed.
+        if !effectiveExcludedPaths.isEmpty {
+            await purgeExcludedRows(database: database, excludedPaths: effectiveExcludedPaths,
+                                    sink: sink, sessionID: session.id)
+        }
+
+        // Stage A — Discovery. Files are streamed directly into the tagging
+        // workers below. The old `walk` path retained and sorted every
+        // DiscoveredFile first, which duplicated all paths and metadata and
+        // exhausted memory on million-file libraries. Directory enumeration is
+        // already depth-first, preserving the useful same-folder I/O locality
+        // without the global O(N) sort.
         let discovery = Discovery()
         let scanStart = Date()
-        // F-C6-001: pass the DB + rescan flag so discovery drops files the DB
-        // already holds unchanged BEFORE the ANE/Vision/CLIP/OCR pass (a non-
-        // forced rescan no longer re-runs ML on every unchanged file). On
-        // `rescan` the skip set is empty (full reprocess), mirroring Windows.
-        let files = await discovery.walk(
-            root: url,
-            database: database,
-            forceReprocess: rescan,
-            cancelCheck: { ScanCoordinator.isCancelledSync() },
-            progress: { count in
-                Task { await coordinator.bumpDiscovered(to: count) }
-            }
-        )
-        let discoveryDur = Date().timeIntervalSince(scanStart)
-        await coordinator.bumpDiscovered(to: files.count)
-        await coordinator.setTotal(files.count)
-        JSONLog.shared.info(ev: "discovery_complete", sess: session.id,
-                            extra: ["files": AnyCodable(files.count),
-                                    "seconds": AnyCodable(discoveryDur),
-                                    "ratePerSec": AnyCodable(discoveryDur > 0 ? Double(files.count) / discoveryDur : 0)])
-        await sink.emit(.discoveryComplete(totalFiles: files.count))
-        // If the user cancelled during discovery, don't proceed to tagging.
-        if await coordinator.isCancelled {
-            JSONLog.shared.info(ev: "scan_cancelled_during_discovery", sess: session.id)
-            await markSessionFinal(database: database, session: session,
-                                    coordinator: coordinator, sink: sink,
-                                    totalSeconds: discoveryDur)
-            return
-        }
-        if files.isEmpty {
-            await markSessionFinal(database: database, session: session,
-                                    coordinator: coordinator, sink: sink,
-                                    totalSeconds: discoveryDur)
-            return
-        }
-        await sink.emit(.phaseChanged(.tagging))
 
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
@@ -685,16 +1275,45 @@ struct FileIDEngineMain {
         // Producer + N workers in one TaskGroup so we know when all workers
         // finish (and can then close taggedChan to signal EOF to writer).
         await withTaskGroup(of: Void.self) { group in
-            // Producer: feed all discovered files into the channel. The cancel
-            // check lets the common case (cancel observed before the producer
-            // next suspends) finish promptly; task cancellation (above) handles
-            // the case where the producer is already suspended in `send`.
+            // Producer: enumerate and feed each file immediately. AsyncChannel
+            // is a rendezvous channel, so the producer cannot outrun the worker
+            // pool and resident discovery state stays O(worker count). The
+            // active scan task is cancelled by requestCancel(), which also
+            // unblocks a producer suspended in send.
             group.addTask {
-                for file in files {
-                    if ScanCoordinator.isCancelledSync() { break }
-                    await discoveryChan.send(file)
+                defer { discoveryChan.finish() }
+                var taggingStarted = false
+                let discovered = await discovery.walkStreaming(
+                    root: url,
+                    database: database,
+                    forceReprocess: rescan,
+                    excludedPaths: effectiveExcludedPaths,
+                    cancelCheck: { ScanCoordinator.isCancelledSync() },
+                    progress: { count in
+                        Task { await coordinator.bumpDiscovered(to: count) }
+                    }
+                ) { file in
+                    if !Task.isCancelled && !ScanCoordinator.isCancelledSync() {
+                        if !taggingStarted {
+                            taggingStarted = true
+                            await coordinator.beginTagging()
+                            await sink.emit(.phaseChanged(.tagging))
+                        }
+                        await discoveryChan.send(file)
+                    }
                 }
-                discoveryChan.finish()
+                let discoveryDur = Date().timeIntervalSince(scanStart)
+                await coordinator.bumpDiscovered(to: discovered)
+                await coordinator.setTotal(discovered)
+                JSONLog.shared.info(
+                    ev: "discovery_complete", sess: session.id,
+                    extra: [
+                        "files": AnyCodable(discovered),
+                        "seconds": AnyCodable(discoveryDur),
+                        "ratePerSec": AnyCodable(
+                            discoveryDur > 0 ? Double(discovered) / discoveryDur : 0)
+                    ])
+                await sink.emit(.discoveryComplete(totalFiles: discovered))
             }
             // Workers — N concurrent. Each pulls files until the channel
             // closes, processes via the Vision pool, pushes to tagged.
@@ -862,6 +1481,146 @@ struct FileIDEngineMain {
         }
     }
 
+    /// Delete already-cataloged rows under user-excluded folders before a scan
+    /// starts. Files on disk are untouched; DB ON DELETE CASCADE removes tags,
+    /// OCR/captions, embeddings, and face rows. Mirrors the Windows exclusion
+    /// semantics and keeps Library from showing newly-excluded files.
+    @discardableResult
+    private static func purgeExcludedRows(
+        database: Database,
+        excludedPaths: [String],
+        sink: IPCSink,
+        sessionID: String?
+    ) async -> Int {
+        guard !excludedPaths.isEmpty else { return 0 }
+        do {
+            let deleted = try await database.pool.write { db -> Int in
+                var ids = Set<Int64>()
+                // Needles SQLite cannot match on its own — see the fallback below.
+                var unicodeNeedles: [(exact: String, prefix: String)] = []
+                for excluded in excludedPaths {
+                    let prefix = excluded.hasSuffix("/") ? excluded : excluded + "/"
+                    let upper = prefixUpperBound(prefix)
+                    if excluded.contains(where: { !$0.isASCII }) {
+                        unicodeNeedles.append((exact: excluded, prefix: prefix))
+                    }
+                    // Match against path_search (the NFC form of path_text), not
+                    // path_text itself. The excluded-path needle is NFC-normalized
+                    // (normalizeExcludedPaths / Discovery.normalizedExclusionPath both
+                    // apply precomposedStringWithCanonicalMapping), but macOS
+                    // GUI-created accented folder names are commonly NFD on disk, so
+                    // lower(path_text) would byte-mismatch the NFC needle and purge
+                    // zero rows for any excluded folder with non-ASCII characters.
+                    // path_search is the NFC column every writer maintains for exactly
+                    // this normalization-insensitive matching (Database.swift v16).
+                    let rows = try Int64.fetchAll(db, sql: """
+                        SELECT id FROM files
+                        WHERE lower(path_search) = ?
+                           OR (lower(path_search) >= ? AND lower(path_search) < ?)
+                        """, arguments: [excluded, prefix, upper])
+                    ids.formUnion(rows)
+                }
+
+                // The query above delegates case folding to SQLite's built-in
+                // lower(), which folds ASCII A-Z only — no ICU extension is
+                // loaded (Database.swift). The needle, by contrast, was folded by
+                // Swift over the full Unicode range (normalizeExcludedPaths /
+                // Discovery.normalizedExclusionPath). For a path holding a
+                // non-ASCII uppercase letter — "Fotos/Ärchiv", "Документы" — the
+                // needle reads "ärchiv" while lower(path_search) still reads
+                // "Ärchiv", so the equality misses AND the BINARY range bound
+                // misses at the first differing byte. The purge then deleted
+                // nothing and reported success, leaving every already-indexed
+                // file under an excluded folder — with its tags, faces and OCR —
+                // visible in the library forever.
+                //
+                // Only such needles pay for this pass, so ASCII libraries keep
+                // the indexed query and scan nothing extra.
+                if !unicodeNeedles.isEmpty {
+                    let rows = try Row.fetchAll(
+                        db, sql: "SELECT id, path_search FROM files WHERE path_search IS NOT NULL")
+                    for row in rows {
+                        guard let stored: String = row["path_search"],
+                            let id: Int64 = row["id"]
+                        else { continue }
+                        let folded = stored.precomposedStringWithCanonicalMapping.lowercased()
+                        if unicodeNeedles.contains(where: {
+                            folded == $0.exact || folded.hasPrefix($0.prefix)
+                        }) {
+                            ids.insert(id)
+                        }
+                    }
+                }
+                guard !ids.isEmpty else { return 0 }
+
+                let sortedIDs = ids.sorted()
+                let chunks = stride(from: 0, to: sortedIDs.count, by: 200).map {
+                    Array(sortedIDs[$0..<min($0 + 200, sortedIDs.count)])
+                }
+                var affectedPersons = Set<Int64>()
+                for chunk in chunks {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    let pids = try Int64.fetchAll(db, sql: """
+                        SELECT DISTINCT person_id FROM face_prints
+                        WHERE person_id IS NOT NULL AND file_id IN (\(placeholders))
+                        """, arguments: StatementArguments(chunk.map { Int($0) }))
+                    affectedPersons.formUnion(pids)
+                }
+                for chunk in chunks {
+                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                    try db.execute(
+                        sql: "DELETE FROM files WHERE id IN (\(placeholders))",
+                        arguments: StatementArguments(chunk.map { Int($0) }))
+                }
+                try Self.reconcilePersons(affectedPersons, db: db)
+                return sortedIDs.count
+            }
+            JSONLog.shared.info(ev: "purge_excluded_rows", sess: sessionID,
+                                extra: ["deleted": AnyCodable(deleted),
+                                        "excludedPaths": AnyCodable(excludedPaths.count)])
+            return deleted
+        } catch {
+            JSONLog.shared.warn(ev: "purge_excluded_rows_failed", sess: sessionID,
+                                error: "\(error)")
+            await sink.emit(.error(EngineError(
+                kind: "purge_excluded_failed",
+                message: "Could not remove excluded folders from the library: \(error)"
+            )))
+            return -1
+        }
+    }
+
+    private static func normalizeExcludedPaths(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for path in paths {
+            let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            var normalized = URL(fileURLWithPath: trimmed)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+                .path
+                .precomposedStringWithCanonicalMapping
+                .lowercased()
+            while normalized.count > 1, normalized.hasSuffix("/") {
+                normalized.removeLast()
+            }
+            guard !seen.contains(normalized) else { continue }
+            seen.insert(normalized)
+            result.append(normalized)
+        }
+        return result
+    }
+
+    private static func prefixUpperBound(_ prefix: String) -> String {
+        var s = prefix
+        guard let last = s.popLast(),
+              let next = UnicodeScalar(last.unicodeScalars.first!.value + 1) else {
+            return prefix
+        }
+        return s + String(next)
+    }
+
     /// Recompute persons.file_count and repair a dangling
     /// representative_face_id for the given persons, after their faces may
     /// have been removed (cascade delete). Must run inside the caller's write
@@ -962,7 +1721,8 @@ struct FileIDEngineMain {
 
     /// Build the IPC `RestructurePlan` DTO from engine proposals: map each
     /// proposal to a `RestructureMove` and roll up per-bucket category counts
-    /// (descending by count, then category for a stable order). Per-move `tier`
+    /// plus full-plan confidence totals. Categories sort by descending count,
+    /// then category for a stable order. Per-move `tier`
     /// (Anchor/Mixed/Junk) and the rolled-up `folderClassifications` are derived
     /// from `Restructure.classifyFolders` so the app renders the
     /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
@@ -988,12 +1748,15 @@ struct FileIDEngineMain {
         let categoryCounts = counts
             .map { RestructureCategoryCount(category: $0.key, count: $0.value) }
             .sorted { $0.count != $1.count ? $0.count > $1.count : $0.category < $1.category }
+        let confidenceCounts = Restructure.confidenceCounts(
+            plan.proposals.lazy.map(\.confidence))
         return RestructurePlan(
             libraryRoot: libraryRoot, moves: moves,
             categoryCounts: categoryCounts,
             folderClassifications: FolderClassificationCounts(
                 anchorFolders: plan.anchorFolders, mixedFolders: plan.mixedFolders,
-                junkFolders: plan.junkFolders))
+                junkFolders: plan.junkFolders),
+            confidenceCounts: confidenceCounts)
     }
 
     /// Mark the session completed/cancelled in the DB + emit terminal events.

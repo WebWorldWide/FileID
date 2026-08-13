@@ -14,10 +14,17 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BUNDLE="${1:?usage: assemble_app.sh <bundle-path> [version] [build]}"
-VERSION="${2:-1.0}"
+VERSION_FILE="$PROJECT_DIR/../windows/VERSION"
+[ -f "$VERSION_FILE" ] || { echo "❌ canonical version file missing: $VERSION_FILE"; exit 1; }
+VERSION="${2:-$(tr -d '[:space:]' < "$VERSION_FILE")}"
 BUILD_NUM="${3:-1}"
 
-BUILD_DIR="$PROJECT_DIR/.build/release"
+BUILD_CONFIGURATION="${FILEID_BUILD_CONFIGURATION:-release}"
+case "$BUILD_CONFIGURATION" in
+    release|debug) ;;
+    *) echo "❌ unsupported FILEID_BUILD_CONFIGURATION: $BUILD_CONFIGURATION"; exit 1 ;;
+esac
+BUILD_DIR="$PROJECT_DIR/.build/$BUILD_CONFIGURATION"
 CONTENTS="$APP_BUNDLE/Contents"
 METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 
@@ -31,11 +38,9 @@ cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
 cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
 chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
 
-# MLX loads its GPU kernels from a metallib colocated with the engine
-# binary; both names because MLX tries default.metallib then mlx.metallib.
+# MLX first loads a colocated mlx.metallib beside the engine binary.
 if [ -f "$METALLIB_CACHE" ]; then
     cp "$METALLIB_CACHE" "$CONTENTS/MacOS/mlx.metallib"
-    cp "$METALLIB_CACHE" "$CONTENTS/MacOS/default.metallib"
 else
     echo "⚠️  $METALLIB_CACHE missing — Deep Analyze will fail at runtime."
     echo "   Run bash run.sh once on a Mac with Xcode + Metal Toolchain to build it."
@@ -60,6 +65,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>NSDesktopFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
     <key>NSDocumentsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
     <key>NSDownloadsFolderUsageDescription</key><string>FileID needs to read your folders to tag, dedupe, and reorganize files.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>FileID transcribes audio on-device to give voice memos and recordings descriptive names. Nothing leaves your Mac.</string>
 </dict>
 </plist>
 PLIST

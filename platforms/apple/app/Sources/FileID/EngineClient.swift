@@ -2,6 +2,7 @@
 // backoff. State and events are observable on MainActor.
 import Foundation
 import Security
+import AppKit
 import FileIDShared
 
 @MainActor
@@ -92,6 +93,8 @@ public final class EngineClient {
     public private(set) var restructureApplyResult: RestructureApplyResult?
     public private(set) var restructurePlanSignal: Int = 0
     public private(set) var restructureApplyResultSignal: Int = 0
+    public private(set) var bulkActionResult: BulkActionResult?
+    public private(set) var bulkActionResultSignal: Int = 0
     /// True once an applyRestructure has moved files and they haven't been undone
     /// yet — drives the "Undo last run" affordance. (R2)
     public private(set) var canUndoRestructure = false
@@ -103,6 +106,21 @@ public final class EngineClient {
     /// to let two rapid send() calls write to the engine's stdin fd at once,
     /// which could reorder commands or interleave their bytes mid-line.
     private let stdinWriteQueue = DispatchQueue(label: "com.fileid.engine.stdin")
+
+    // MARK: - App Nap protection
+    //
+    // The old app-lifetime beginActivity token (removed in AppDelegate) kept
+    // the UI process from being App-Napped — throttled timers / coalesced
+    // updates — during a long scan or Deep Analyze run. Replaced with
+    // operation-scoped tokens so the app isn't held un-nappable while idle.
+    // (System idle-sleep during scans is handled separately by the engine's
+    // SleepGuard; this is purely App Nap for the UI process.) Each token is
+    // begun when its operation starts and ended on EVERY terminal path —
+    // completion, cancel, failure, and engine crash/exit — through the guarded
+    // helpers below (begin no-ops if already held, end no-ops if already
+    // cleared), so the pair can never leak or double-release.
+    private var scanActivityToken: NSObjectProtocol?
+    private var deepAnalyzeActivityToken: NSObjectProtocol?
 
     // Up to 3 respawns within respawnWindow; cleared on .ready.
     private static let respawnDelays: [UInt64] = [1, 4, 16]
@@ -209,6 +227,20 @@ public final class EngineClient {
         }
         process = nil
         stdinPipe = nil
+
+        // `handleEngineExit(for:)` deliberately rejects this process the moment
+        // it stops being `self.process`, so a restart NEVER reaches the reset
+        // there — `start()` reassigns `self.process` in `spawn()` before the old
+        // pipe's EOF lands. Without this call, Settings ▸ Restart Engine during a
+        // job left `deepAnalyzeInFlight` (and the undo/queue/App-Nap state)
+        // latched against a jobless engine, disabling Analyze until relaunch.
+        resetStateOnlyADeadEngineCouldClear()
+        // A restart is an explicit "start over", so drop the frozen scan
+        // progress too: `SidebarProcessingControl` keys off a non-idle phase and
+        // would otherwise keep rendering a dead Pause/Cancel pair with no
+        // reachable Start. The crash leg deliberately keeps its last progress as
+        // forensic context — only this explicit path clears it.
+        lastProgress = nil
     }
 
     /// Bounded wait for a child to exit; true if it exited within `timeout`.
@@ -299,6 +331,15 @@ public final class EngineClient {
         // "Install all" clicks. Its escape hatch (HubApi.swift:822).
         var env = ProcessInfo.processInfo.environment
         env["CI_DISABLE_NETWORK_MONITOR"] = "1"
+        // Restructure folder-granularity (Settings ▸ Restructure). The engine reads
+        // FILEID_RESTRUCTURE_GRANULARITY at plan time; pass the user's saved choice
+        // through at spawn so it applies on the next engine start. "normal"/unset is the
+        // calibrated default, so only a validated non-default value is forwarded.
+        if let g = UserDefaults.standard.string(forKey: AppSettings.restructureGranularityKey),
+           g != AppSettings.restructureGranularityDefault,
+           AppSettings.restructureGranularityValues.contains(g) {
+            env["FILEID_RESTRUCTURE_GRANULARITY"] = g
+        }
         proc.environment = env
         let inPipe = Pipe()
         let outPipe = Pipe()
@@ -357,6 +398,13 @@ public final class EngineClient {
                         state.scanned = state.data.count
                         break
                     }
+                    let lineBytes = state.data.distance(from: state.data.startIndex, to: nl)
+                    if lineBytes > maxFrameBytes {
+                        oversizeBytes = max(oversizeBytes ?? 0, lineBytes)
+                        state.data.removeSubrange(state.data.startIndex...nl)
+                        state.scanned = 0
+                        continue
+                    }
                     let line = state.data.subdata(in: state.data.startIndex..<nl)
                     state.data.removeSubrange(state.data.startIndex...nl)
                     state.scanned = 0
@@ -374,7 +422,7 @@ public final class EngineClient {
                 return out
             }
             if let dropped = oversizeBytes {
-                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes, no newline) — discarding")
+                Self.debug("ENGINE: oversize IPC frame (\(dropped) bytes) — discarding")
                 Task { @MainActor in
                     self?.lastError = EngineError(
                         kind: "ipc_frame_too_large",
@@ -477,6 +525,13 @@ public final class EngineClient {
             // counter (or the phase) backwards within the same session.
             guard p.supersedes(lastProgress) else { break }
             lastProgress = p
+            // Release the App-Nap token on any terminal scan phase. Cancel /
+            // fail arrive here as a phase change (not as .scanComplete), so
+            // this is the only place those two paths surface.
+            switch p.phase {
+            case .completed, .cancelled, .failed: endScanActivity()
+            case .idle, .discovering, .tagging, .postScan: break
+            }
             // Auto-pilot: cancel + failed phases must release the
             // assistant view, otherwise the user is stuck looking at
             // "Finding people…" or similar with no way forward. The
@@ -497,6 +552,7 @@ public final class EngineClient {
             lastBatch = b
         case .scanComplete:
             lastTerminalEventAt = Date()
+            endScanActivity()
             // Auto-pilot: scan ➜ face clustering already auto-fires from
             // the engine itself, so just update the visible stage.
             // BUT: if there are no faces in the scanned library, the
@@ -555,9 +611,11 @@ public final class EngineClient {
             if e.kind.hasPrefix("deep") {
                 // A deep-analyze error (e.g. unknown model kind → "deep_invalid")
                 // means we'll never get .deepAnalyzeComplete, which is the only
-                // place that clears this flag — so clear it here or the UI stays
-                // stuck "analyzing…" forever.
+                // place that clears these flags — so clear them here or the UI
+                // stays stuck "analyzing…" forever.
                 deepAnalyzeInFlight = false
+                deepAnalyzeProgress = nil
+                endDeepAnalyzeActivity()
                 if autoPilotActive {
                     // Deep Analyze failure during auto-pilot — same idea.
                     autoPilotStage = .ready
@@ -579,9 +637,11 @@ public final class EngineClient {
         case .deepAnalyzeStarting(let s):
             deepAnalyzeStarting = s
             deepAnalyzeInFlight = true
+            beginDeepAnalyzeActivity()
         case .deepAnalyzeProgress(let p):
             deepAnalyzeProgress = p
             deepAnalyzeInFlight = true
+            beginDeepAnalyzeActivity()
             // First per-file progress arrived — clear the "Starting…"
             // card so the progress card can take over without overlap.
             deepAnalyzeStarting = nil
@@ -596,6 +656,7 @@ public final class EngineClient {
         case .deepAnalyzeComplete(let c):
             deepAnalyzeComplete = c
             deepAnalyzeInFlight = false
+            endDeepAnalyzeActivity()
             lastTerminalEventAt = Date()
             deepAnalyzeProgress = nil
             deepAnalyzeStarting = nil
@@ -634,15 +695,28 @@ public final class EngineClient {
             // makes the run undoable; the undo's own reply clears it. (R2)
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
-                canUndoRestructure = false
+                // A cancelled or partially-failed undo must KEEP the
+                // affordance: Restructure.undoLast only clears the on-disk
+                // journal when the undo both completed and had zero failures
+                // (Pipeline/Restructure.swift), so the remaining files are
+                // still relocated and still reversible. Clearing this
+                // unconditionally stranded a half-reverted library with no UI
+                // path back — permanently, since this flag is only ever set
+                // true by a forward apply and is never re-seeded from disk.
+                // Mirrors Windows NextCanUndoRestructure and Linux
+                // undo_fully_completed.
+                canUndoRestructure = result.cancelled || result.failed > 0
             } else {
                 canUndoRestructure = result.applied > 0
             }
+        case .bulkActionResult(let result):
+            bulkActionResult = result
+            bulkActionResultSignal &+= 1
         // ── Remaining Windows-originated reply events. The mac app's
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
-        case .bulkActionResult,
+        case .healthCheckResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -652,28 +726,22 @@ public final class EngineClient {
         }
     }
 
-    @MainActor
-    private func handleEngineExit(for proc: Process?) {
-        // Identity guard (mirrors the Windows sender != _process check):
-        // a late EOF from a process we already terminated/replaced — a
-        // Restart, or a respawn that raced — must NOT tear down the
-        // engine that's live now, or reset its in-flight UI.
-        guard let proc, proc === self.process else { return }
-
-        // Nil pipe handlers so any in-flight GCD callback short-circuits.
-        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        process = nil
-        stdinPipe = nil
-
-        // A dead engine can never emit the terminal events that clear
-        // these — without the reset, one mid-job crash wedges Deep
-        // Analyze / People across the respawn (the respawned engine
-        // starts jobless, so nothing else un-sticks them).
+    /// Clear the UI state whose only other clearer is an engine terminal event.
+    ///
+    /// A dead engine can never emit those events, so one mid-job crash would
+    /// wedge Deep Analyze / People across the respawn (the respawned engine
+    /// starts jobless, so nothing else un-sticks them). Both the crash leg and
+    /// a deliberate restart run this — see the call in `terminateRunningEngine`.
+    private func resetStateOnlyADeadEngineCouldClear() {
         deepAnalyzeInFlight = false
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
         faceClusteringInFlight = false
+        // A dead engine emits no terminal event, so release both App-Nap
+        // tokens here — this is the crash/exit leg that keeps the begin/end
+        // pairs balanced. Both helpers no-op when their token isn't held.
+        endScanActivity()
+        endDeepAnalyzeActivity()
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so without the reset the NEXT
         // apply's result is mis-attributed as the (dead) undo's. (audit R2-app)
@@ -691,6 +759,23 @@ public final class EngineClient {
         // StreamCard + inert Cancel) to reset — the engine can no longer
         // emit the terminal event that would clear them.
         engineResetSignal &+= 1
+    }
+
+    @MainActor
+    private func handleEngineExit(for proc: Process?) {
+        // Identity guard (mirrors the Windows sender != _process check):
+        // a late EOF from a process we already terminated/replaced — a
+        // Restart, or a respawn that raced — must NOT tear down the
+        // engine that's live now, or reset its in-flight UI.
+        guard let proc, proc === self.process else { return }
+
+        // Nil pipe handlers so any in-flight GCD callback short-circuits.
+        (proc.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        process = nil
+        stdinPipe = nil
+
+        resetStateOnlyADeadEngineCouldClear()
 
         // Expected exit (shutdown called or work just completed): silent
         // re-spawn, no error pill, no respawn budget burned. Covers
@@ -752,11 +837,35 @@ public final class EngineClient {
         }
     }
 
+    // MARK: - App Nap activity (begin/end must stay balanced)
+
+    private func beginScanActivity() {
+        guard scanActivityToken == nil else { return }
+        scanActivityToken = AppSleepActivity.begin(reason: "FileID is scanning files")
+    }
+
+    private func endScanActivity() {
+        guard let token = scanActivityToken else { return }
+        AppSleepActivity.end(token)
+        scanActivityToken = nil
+    }
+
+    private func beginDeepAnalyzeActivity() {
+        guard deepAnalyzeActivityToken == nil else { return }
+        deepAnalyzeActivityToken = AppSleepActivity.begin(reason: "FileID is running Deep Analyze")
+    }
+
+    private func endDeepAnalyzeActivity() {
+        guard let token = deepAnalyzeActivityToken else { return }
+        AppSleepActivity.end(token)
+        deepAnalyzeActivityToken = nil
+    }
+
     // MARK: - Commands
 
-    /// Returns false when the command never left the app (engine down
-    /// during the respawn window, or encode failure) so callers can
-    /// avoid arming state that only an engine event would clear.
+    /// Returns false when the command could not be queued (engine down or
+    /// encode failure). A later pipe-write failure terminates the captured
+    /// engine generation so its normal exit path clears caller state.
     @discardableResult
     public func send(_ payload: IPCCommand.Payload) -> Bool {
         guard let pipe = stdinPipe else { return false }
@@ -789,6 +898,7 @@ public final class EngineClient {
                 try writeHandle.write(contentsOf: data)
             } catch {
                 FileHandle.standardError.write(Data("EngineClient send failed: \(error)\n".utf8))
+                procBox.withLock { $0?.terminate() }
             }
             done.withLock { $0 = true }
         }
@@ -818,7 +928,8 @@ public final class EngineClient {
         // not a bookmark). Round-tripping through bookmarkData →
         // resolvingBookmarkData yields the canonical scoped path the sandbox
         // actually grants; outside a sandbox it's just rootURL.path.
-        Task.detached(priority: .userInitiated) { [weak self] in
+        let client = self
+        Task.detached(priority: .userInitiated) {
             let resolvedPath: String
             do {
                 let bookmark = try rootURL.bookmarkData(
@@ -840,7 +951,13 @@ public final class EngineClient {
                 resolvedPath = displayPath
             }
             await MainActor.run {
-                self?.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath, rescan: false))
+                // Begin the App-Nap token only if the command actually left the
+                // app; a dropped send (engine down) would otherwise leave the
+                // token held with no scan and no terminal event to release it.
+                if client.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
+                                          rescan: false, excludedPaths: nil)) {
+                    client.beginScanActivity()
+                }
             }
         }
     }
@@ -856,7 +973,13 @@ public final class EngineClient {
 
     public func pause()    { isPaused = true;  send(.pauseScan)  }
     public func resume()   { isPaused = false; send(.resumeScan) }
-    public func cancel()   { isPaused = false; send(.cancelScan) }
+    public func cancel() {
+        isPaused = false
+        send(.cancelScan)
+        send(.cancelRestructure)
+        send(.deepAnalyzeCancel)
+        cancelAutoPilot()
+    }
     public func shutdown() {
         // Only latch the expected-exit suppression when the shutdown
         // command actually left the app — otherwise a genuine crash that
@@ -865,6 +988,21 @@ public final class EngineClient {
         if send(.shutdown) {
             expectedExit = true
         }
+    }
+
+    /// Factory Reset: terminate the engine, wipe the Application Support folder,
+    /// purge all UserDefaults, and exit the macOS app immediately.
+    public func factoryResetAndQuit() {
+        terminateRunningEngine()
+        let fm = FileManager.default
+        try? fm.removeItem(at: AppSupportPath.fileID)
+        if let bundleID = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleID)
+            UserDefaults.standard.synchronize()
+        }
+        #if os(macOS)
+        NSApplication.shared.terminate(nil)
+        #endif
     }
 
     /// Wipes the SQLite library + scan logs and triggers a fresh
@@ -886,6 +1024,7 @@ public final class EngineClient {
         // Engine already down (respawn backoff or exhausted budget):
         // the shutdown would be silently dropped and no exit would
         // ever run the wipe — but no WAL lock is held either, so wipe
+
         // directly and respawn.
         guard stdinPipe != nil else {
             Self.deleteLibraryFiles()
@@ -934,28 +1073,55 @@ public final class EngineClient {
         faceClusteringInFlight = true
     }
 
+    @discardableResult
+    public func markPersonsDifferent(
+        sourcePersonID: Int64,
+        destinationPersonID: Int64,
+        sourceAnchorFaceID: Int64,
+        destinationAnchorFaceID: Int64
+    ) -> Bool {
+        send(.markPersonsDifferent(
+            sourcePersonID: sourcePersonID,
+            destinationPersonID: destinationPersonID,
+            sourceAnchorFaceID: sourceAnchorFaceID,
+            destinationAnchorFaceID: destinationAnchorFaceID
+        ))
+    }
+
     public func deepAnalyzeFile(fileID: Int64, modelKind: String) {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
         guard send(.deepAnalyzeFile(fileID: fileID, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeFolder(prefix: String, modelKind: String) {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
         guard send(.deepAnalyzeFolder(pathPrefix: prefix, modelKind: modelKind)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeAll(modelKind: String, skipExisting: Bool) {
-        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true)) else { return }
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return }
+        // Every current call site is a whole-library run (no fileIDs), so the
+        // persisted Deep Analyze exclusion list is threaded through here —
+        // the one choke point every deepAnalyzeAll send passes through —
+        // rather than at each call site. Sent as nil (omitted on the wire)
+        // when empty; ignored engine-side whenever fileIDs is present.
+        let excluded = DeepAnalyzeSettings.shared.excludedFolders
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: skipExisting, tagsOnly: false, proposeRenames: true, fileIDs: nil, excludedFolders: excluded.isEmpty ? nil : excluded)) else { return }
         deepAnalyzeInFlight = true
         deepAnalyzeProgress = nil
         deepAnalyzeComplete = nil
         deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
     }
 
     public func deepAnalyzeCancel() {
@@ -970,17 +1136,23 @@ public final class EngineClient {
     /// down) so the caller can stop its "computing…" spinner.
     @discardableResult
     public func planRestructure(libraryRoot: String) -> Bool {
-        send(.planRestructure(libraryRoot: libraryRoot))
+        send(.planRestructure(libraryRoot: libraryRoot, supportsPagedPlans: true))
     }
 
     /// Apply the selected `moves` through the engine butler. macOS performs
-    /// real on-disk moves; `useSymlinks` is sent for wire parity and ignored
-    /// engine-side. The reply lands on `restructureApplyResult` and bumps
+    /// real on-disk moves only — there is no symlink-preview apply mode, so
+    /// the engine now rejects `useSymlinks: true` with an error instead of
+    /// silently performing a real move (audit R3; see DECISIONS.md). Callers
+    /// should not pass `true`; the parameter exists for wire parity with the
+    /// Windows engine. The reply lands on `restructureApplyResult` and bumps
     /// `restructureApplyResultSignal`.
     @discardableResult
     public func applyRestructure(libraryRoot: String, moves: [RestructureMove],
-                                 useSymlinks: Bool = false) -> Bool {
-        send(.applyRestructure(libraryRoot: libraryRoot, moves: moves, useSymlinks: useSymlinks))
+                                 useSymlinks: Bool = false,
+                                 planID: String? = nil) -> Bool {
+        send(.applyRestructure(
+            libraryRoot: libraryRoot, moves: moves,
+            useSymlinks: useSymlinks, planID: planID))
     }
 
     /// Reverse the most recent applyRestructure — the engine replays its on-disk
@@ -998,14 +1170,26 @@ public final class EngineClient {
         return sent
     }
 
+    /// Cooperatively cancel the active restructure plan/apply/undo — never a
+    /// library scan (that's `cancel()` → `.cancelScan`; the schema requires
+    /// `.cancelRestructure` stay isolated from it). The engine finishes the
+    /// move currently in flight (each is already durable before the next
+    /// cancel-poll) and replies with a terminal `restructureApplyResult`
+    /// whose `cancelled` is true.
+    public func cancelRestructure() {
+        send(.cancelRestructure)
+    }
+
     /// Pre-fetch a VLM's weights without running inference. Used by the
     /// welcome-sheet onboarding flow so first-launch downloads happen
     /// up front instead of stalling the first Deep Analyze run. The
     /// engine emits `modelDownloadProgress` events identical to the
     /// in-Deep-Analyze flow; bind to `engine.modelDownloadProgress`
     /// for live progress.
-    public func prewarmModel(_ modelKind: String) {
-        send(.prewarmModel(modelKind: modelKind))
+    @discardableResult
+    public func prewarmModel(_ modelKind: String) -> Bool {
+        guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return false }
+        return send(.prewarmModel(modelKind: modelKind))
     }
 
     /// Cancel a running prewarm. Lands at the next Task.checkCancellation
@@ -1013,6 +1197,18 @@ public final class EngineClient {
     /// every in-flight prewarm (the only mode the welcome sheet uses today).
     public func cancelPrewarm() {
         send(.cancelPrewarm(modelKind: nil))
+    }
+
+    /// Drop a stale `modelDownloadProgress` left behind by a cancelled prewarm.
+    /// The engine only auto-clears the bar at fraction 1.0 (or on exit); a user
+    /// Cancel stops mid-download, so the last fraction lingers with the same
+    /// modelKind and would fool WelcomeSheet's retry watchdogs into believing a
+    /// fresh download is already progressing — arming neither the "no response"
+    /// nor the "stalled" timer. Pass a modelKind to clear only that model's
+    /// residue; nil clears whatever is showing.
+    public func clearModelDownloadProgress(forModelKind modelKind: String? = nil) {
+        if let modelKind, modelDownloadProgress?.modelKind != modelKind { return }
+        modelDownloadProgress = nil
     }
 }
 

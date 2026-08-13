@@ -212,7 +212,6 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/app/Sources/FileID/EngineClient.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
-            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
             "platforms/cli/src/runtime.rs",
             "platforms/cli/src/scan_models.rs",
             "platforms/linux/src/app/src/engine_client.rs",
@@ -515,10 +514,10 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_reviewed_local_loader_content_is_digest_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = self.source_tree(directory)
-            relative = "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift"
+            relative = "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift"
             path = root / relative
             source = path.read_text(encoding="utf-8").replace(
-                "Data(contentsOf: url)",
+                "Data(contentsOf: configurationURL)",
                 'Data(contentsOf: URL(string: "https://evil.invalid/pixel")!)',
                 1,
             )

@@ -12,16 +12,18 @@ import FileIDShared
 public enum DeepAnalyzeScope: Sendable {
     case singleFile(Int64)
     case folder(prefix: String)
-    case wholeLibrary(skipExisting: Bool)
+    /// `excludedFolders` — absolute folder paths to skip (path-segment-boundary
+    /// matching via `DeepAnalyzeRunner.exclusionWhereClause`; empty means none).
+    /// Never applied to `.selected` — an explicit selection is deliberate and
+    /// is never silently filtered (schema `deepAnalyzeAll.excludedFolders`).
+    case wholeLibrary(skipExisting: Bool, excludedFolders: [String])
+    case selected(fileIDs: [Int64], skipExisting: Bool)
 }
 
 public enum DeepAnalyzeRunner {
 
-    /// Resolve scope → ordered list of (id, path) pairs. Targets images,
-    /// videos, and PDFs — for videos we extract a keyframe; for PDFs we
-    /// render the first page; for images we feed the file directly. The
-    /// VLM captions all three. WholeLibrary skips files already
-    /// described by the requested model when `skipExisting=true`.
+    /// Resolve the requested scope to supported, non-failed files in scan order.
+    /// `skipExisting` keys off a completed full pass by the requested model.
     public static func resolveTargets(
         database: Database,
         scope: DeepAnalyzeScope,
@@ -33,9 +35,13 @@ public enum DeepAnalyzeRunner {
             case .singleFile(let id):
                 let r = try GRDB.Row.fetchOne(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                    WHERE id = ? AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                     """, arguments: [id])
-                if let r { return [Target(id: r["id"] ?? 0, path: r["path_text"] ?? "")] }
+                if let r,
+                   let rowID: Int64 = r["id"], rowID > 0,
+                   let path: String = r["path_text"], !path.isEmpty {
+                    return [Target(id: rowID, path: path)]
+                }
                 return []
             case .folder(let prefix):
                 let p = prefix.hasSuffix("/") ? prefix : prefix + "/"
@@ -45,32 +51,61 @@ public enum DeepAnalyzeRunner {
                 // VLM pass. ESCAPE '\' pairs with escapeLike's backslashing.
                 let r = try GRDB.Row.fetchAll(db, sql: """
                     SELECT id, path_text FROM files
-                    WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                    WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
                       AND (path_text = ? OR path_text LIKE ? ESCAPE '\\')
                     ORDER BY scanned_at ASC
                     """, arguments: [prefix, Self.escapeLike(p) + "%"])
-                return r.map { Target(id: $0["id"] ?? 0, path: $0["path_text"] ?? "") }
-            case .wholeLibrary(let skipExisting):
+                return r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    return Target(id: rowID, path: path)
+                }
+            case .selected(let fileIDs, let skipExisting):
+                var seen = Set<Int64>()
+                let ids = fileIDs.filter { $0 > 0 && seen.insert($0).inserted }
+                guard !ids.isEmpty else { return [] }
+                let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+                let r = try GRDB.Row.fetchAll(db, sql: """
+                    SELECT id, path_text, vlm_full_model FROM files
+                    WHERE id IN (\(placeholders))
+                      AND kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model')
+                      AND failed = 0
+                    """, arguments: StatementArguments(ids))
+                let targets = r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    let fullModel: String? = row["vlm_full_model"]
+                    if skipExisting && fullModel == modelKey { return nil }
+                    return Target(id: rowID, path: path)
+                }
+                let byID = Dictionary(uniqueKeysWithValues: targets.map { ($0.id, $0) })
+                return ids.compactMap { byID[$0] }
+            case .wholeLibrary(let skipExisting, let excludedFolders):
+                let (exclusionSQL, exclusionParams) = Self.exclusionWhereClause(excludedFolders)
                 let sql: String
                 let args: StatementArguments
                 if skipExisting {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
-                          AND (vlm_model IS NULL OR vlm_model != ?)
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0
+                          AND (vlm_full_model IS NULL OR vlm_full_model != ?)\(exclusionSQL)
                         ORDER BY scanned_at ASC
                         """
-                    args = [modelKey]
+                    args = StatementArguments([modelKey] + exclusionParams)
                 } else {
                     sql = """
                         SELECT id, path_text FROM files
-                        WHERE kind IN ('image', 'pdf', 'video', 'doc') AND failed = 0
+                        WHERE kind IN ('image', 'pdf', 'video', 'doc', 'audio', 'model') AND failed = 0\(exclusionSQL)
                         ORDER BY scanned_at ASC
                         """
-                    args = []
+                    args = StatementArguments(exclusionParams)
                 }
                 let r = try GRDB.Row.fetchAll(db, sql: sql, arguments: args)
-                return r.map { Target(id: $0["id"] ?? 0, path: $0["path_text"] ?? "") }
+                return r.compactMap { row -> Target? in
+                    guard let rowID: Int64 = row["id"], rowID > 0,
+                          let path: String = row["path_text"], !path.isEmpty else { return nil }
+                    return Target(id: rowID, path: path)
+                }
             }
         }
         return rows.map { ($0.id, $0.path) }
@@ -85,16 +120,48 @@ public enum DeepAnalyzeRunner {
         return out
     }
 
+    /// Build a `" AND NOT (path_text LIKE ? ESCAPE '\')"` SQL fragment (empty
+    /// string when `excludedFolders` is empty) plus its bound params, for
+    /// `deepAnalyzeAll`'s whole-library scope. Reuses the same escaped-LIKE-
+    /// prefix technique as the `.folder(prefix:)` scope above (`escapeLike` +
+    /// a trailing `/` before the wildcard) so excluding "/Users/x/Photos"
+    /// does NOT also exclude "/Users/x/PhotosBackup" — a bare `LIKE prefix%`
+    /// would get that wrong. Mirrors the Rust engine's `exclusion_where_clause`
+    /// range-scan (same boundary guarantee, GRDB-idiomatic technique). No
+    /// scan-root containment check: unlike a scan exclusion, a Deep Analyze
+    /// exclusion applies library-wide (any absolute folder is a valid
+    /// target). Relative paths are silently ignored — the schema requires
+    /// absolute folder paths.
+    static func exclusionWhereClause(_ excludedFolders: [String]) -> (sql: String, params: [String]) {
+        var sql = ""
+        var params: [String] = []
+        for raw in excludedFolders {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("/") else { continue }
+            var folder = trimmed
+            while folder.count > 1, folder.hasSuffix("/") {
+                folder.removeLast()
+            }
+            guard !folder.isEmpty else { continue }
+            sql += " AND NOT (path_text LIKE ? ESCAPE '\\')"
+            params.append(Self.escapeLike(folder + "/") + "%")
+        }
+        return (sql, params)
+    }
+
     /// Run the batch. Streams progress via `sink`. Holds a SleepGuard
     /// for the duration so the system stays awake (lid-closed friendly).
     public static func run(
         database: Database,
         sink: IPCSink,
         scope: DeepAnalyzeScope,
-        modelKind: AIModelKind
+        modelKind: AIModelKind,
+        tagsOnly: Bool = false,
+        proposeRenames: Bool = true
     ) async {
         let started = Date()
         let modelKey = modelKind.rawValue
+        let completesFullPass = !tagsOnly && proposeRenames
 
         // No inline face clustering — it's a separate job. When
         // clusters are present captions use real names; otherwise
@@ -129,6 +196,29 @@ public enum DeepAnalyzeRunner {
             return
         }
 
+        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
+            modelKind: modelKey,
+            phase: .resolvingTargets,
+            message: "Finding files to analyze…"
+        )))
+        let targets: [(id: Int64, path: String)]
+        do {
+            targets = try await resolveTargets(database: database,
+                                                scope: scope, modelKey: modelKey)
+        } catch {
+            await sink.emit(.error(EngineError(
+                kind: "deep_targets_failed",
+                message: "Could not resolve targets: \(error.localizedDescription)"
+            )))
+            await finish(processed: 0, failed: 0, cancelled: false)
+            return
+        }
+        let total = targets.count
+        guard total > 0 else {
+            await finish(processed: 0, failed: 0, cancelled: false)
+            return
+        }
+
         // Defensive RAM check — the UI hides too-big models, but a stale
         // IPC command (e.g. user picked a big model on a different Mac
         // and it persisted in UserDefaults) could still arrive. Loading
@@ -146,7 +236,7 @@ public enum DeepAnalyzeRunner {
             return
         }
 
-        // 1. Load the model (download if needed, with progress events).
+        // 2. Load the model (download if needed, with progress events).
         // Tell the UI we're entering the multi-second cold-load window
         // so the startingCard can update its label from "Queued" to
         // "Loading <model>…". Without this the user stares at the same
@@ -193,32 +283,6 @@ public enum DeepAnalyzeRunner {
             return
         }
 
-        // 2. Resolve targets.
-        await sink.emit(.deepAnalyzeStarting(DeepAnalyzeStarting(
-            modelKind: modelKey,
-            phase: .resolvingTargets,
-            message: "Finding files to analyze…"
-        )))
-        let targets: [(id: Int64, path: String)]
-        do {
-            targets = try await resolveTargets(database: database,
-                                                scope: scope, modelKey: modelKey)
-        } catch {
-            await sink.emit(.error(EngineError(
-                kind: "deep_targets_failed",
-                message: "Could not resolve targets: \(error.localizedDescription)"
-            )))
-            // F-C3-028: this exit previously returned with no terminal event,
-            // stranding the UI. Emit the terminal complete like every other exit.
-            await finish(processed: 0, failed: 0, cancelled: false)
-            return
-        }
-        let total = targets.count
-        guard total > 0 else {
-            await finish(processed: 0, failed: 0, cancelled: false)
-            return
-        }
-
         JSONLog.shared.info(ev: "deep_analyze_start",
                             extra: ["model": AnyCodable(modelKey),
                                     "total": AnyCodable(total)])
@@ -228,6 +292,7 @@ public enum DeepAnalyzeRunner {
         var failed    = 0
         var cancelled = false
         let batchStart = Date()
+        var reservedProposedNames = Set<String>()
 
         for (i, target) in targets.enumerated() {
             if await DeepAnalyze.shared.isCancelled() {
@@ -262,16 +327,80 @@ public enum DeepAnalyzeRunner {
                 )))
             }
 
-            // Pull face cluster names (if any) to inject into the prompt.
-            let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
             let url = URL(fileURLWithPath: target.path)
-            let result = await DeepAnalyze.shared.analyze(imageURL: url, faceNames: faceNames, onToken: onToken)
-            let isFailure = result.description.hasPrefix("Inference failed")
-                || result.description.hasPrefix("Could not decode")
-                || result.description == "Model not loaded."
+            // Audio uses on-device metadata/speech/sound analysis. Other supported files
+            // use a bounded raster and, for documents, bounded extracted text.
+            let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
+            var result: DeepAnalyze.AnalysisResult
+            var requiresGeneratedFilenameMinimum = false
+            if kind == .audio {
+                result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                }
+            } else {
+                requiresGeneratedFilenameMinimum = true
+                let documentText: String?
+                if kind == .doc || kind == .pdf {
+                    let persistedText = try? await fetchDocumentText(
+                        database: database,
+                        fileID: target.id
+                    )
+                    if let persistedText {
+                        documentText = persistedText
+                    } else {
+                        documentText = await DocText.extractForDeepAnalyze(path: target.path)
+                    }
+                } else {
+                    documentText = nil
+                }
+                // Pull face cluster names (if any) to inject into the prompt.
+                let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
+                result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyze.shared.analyze(
+                        imageURL: url,
+                        mediaKind: kind,
+                        documentText: documentText,
+                        faceNames: faceNames,
+                        onToken: onToken
+                    )
+                }
+                // A 3D model the OS couldn't render (no QuickLook generator) or the VLM
+                // couldn't caption → its embedded-name metadata, so it still gets a name.
+                if kind == .model, Self.isAnalysisFailure(result.description) {
+                    requiresGeneratedFilenameMinimum = false
+                    result = await DeepAnalyze.shared.runCancellableAnalysis {
+                        await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
+                    }
+                }
+            }
+            if await DeepAnalyze.shared.isCancelled() {
+                cancelled = true
+                break
+            }
+            let isFailure = Self.isAnalysisFailure(result)
             if isFailure {
                 failed += 1
             } else {
+                let proposedName: String?
+                if proposeRenames && !tagsOnly {
+                    let trustedYears = (try? await Self.trustedYears(
+                        database: database, fileID: target.id
+                    )) ?? []
+                    let groundedName = Self.removingUntrustedYearTokens(
+                        from: result.proposedName,
+                        trustedYears: trustedYears
+                    )
+                    let meetsMinimum = !requiresGeneratedFilenameMinimum
+                        || DeepAnalyze.hasMinimumGeneratedFilenameWords(groundedName)
+                    let acceptedName = meetsMinimum ? groundedName : nil
+                    proposedName = Self.reserveProposedName(
+                        acceptedName,
+                        sourcePath: target.path,
+                        reserved: &reservedProposedNames
+                    )
+                } else {
+                    proposedName = nil
+                }
                 // Success is contingent on the result actually persisting. A
                 // swallowed write used to report the file as done while the
                 // caption/name never reached the DB (the UI then shows nothing
@@ -279,15 +408,18 @@ public enum DeepAnalyzeRunner {
                 do {
                     try await persist(database: database,
                                       fileID: target.id,
-                                      description: result.description,
-                                      proposedName: result.proposedName,
+                                      description: tagsOnly ? nil : result.description,
+                                      proposedName: proposedName,
                                       tags: result.tags,
-                                      modelKey: modelKey)
+                                      modelKey: modelKey,
+                                      updatesDescription: !tagsOnly,
+                                      updatesProposedName: proposeRenames && !tagsOnly,
+                                      completesFullPass: completesFullPass)
                     processed += 1
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
                         description: result.description,
-                        proposedName: result.proposedName,
+                        proposedName: proposedName,
                         modelKind: modelKey
                     )))
                 } catch {
@@ -307,56 +439,186 @@ public enum DeepAnalyzeRunner {
         await finish(processed: processed, failed: failed, cancelled: cancelled)
     }
 
+    /// A `DeepAnalyze.analyze` description that signals the file wasn't usefully analyzed
+    /// (no decodable raster, no loaded model, or an inference error) — not a real caption.
+    static func isAnalysisFailure(_ description: String) -> Bool {
+        description.hasPrefix("Inference failed")
+            || description.hasPrefix("Could not decode")
+            || description == "Model not loaded."
+    }
+
+    static func isAnalysisFailure(_ result: DeepAnalyze.AnalysisResult) -> Bool {
+        if isAnalysisFailure(result.description) { return true }
+        let hasDescription = !result.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasName = !(result.proposedName ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let hasTag = result.tags.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return !hasDescription && !hasName && !hasTag
+    }
+
+    static func reserveProposedName(
+        _ proposedName: String?,
+        sourcePath: String,
+        reserved: inout Set<String>
+    ) -> String? {
+        guard let base = proposedName, !base.isEmpty else { return nil }
+        if reserved.insert(base.lowercased()).inserted { return base }
+        let stem = ((sourcePath as NSString).lastPathComponent as NSString)
+            .deletingPathExtension
+        let sourceStem = DeepAnalyze.sanitize(filename: stem) ?? "source"
+        var ordinal = 1
+        while true {
+            let suffix = ordinal == 1 ? sourceStem : "\(sourceStem)-\(ordinal)"
+            let suffixCount = suffix.utf8.count
+            let budget = max(0, 80 - suffixCount - 1)
+            var prefix = String(base.prefix(budget))
+            while prefix.last == "-" || prefix.last == "_" { prefix.removeLast() }
+            let candidate = prefix.isEmpty ? suffix : "\(prefix)-\(suffix)"
+            if reserved.insert(candidate.lowercased()).inserted { return candidate }
+            ordinal += 1
+        }
+    }
+
+    static func removingUntrustedYearTokens(
+        from proposedName: String?,
+        trustedYears: Set<Int>
+    ) -> String? {
+        guard let proposedName, !proposedName.isEmpty else { return proposedName }
+        var pieces: [(separator: Character?, token: String)] = []
+        var token = ""
+        var separator: Character?
+        for character in proposedName {
+            if character == "-" || character == "_" {
+                if !token.isEmpty {
+                    pieces.append((separator, token))
+                    token = ""
+                }
+                separator = character
+            } else {
+                token.append(character)
+            }
+        }
+        if !token.isEmpty { pieces.append((separator, token)) }
+
+        var result = ""
+        for piece in pieces {
+            let year = plausibleYear(piece.token)
+            guard year == nil || trustedYears.contains(year!) else { continue }
+            if !result.isEmpty { result.append(piece.separator ?? "-") }
+            result.append(piece.token)
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    static func trustedYears(in text: String) -> Set<Int> {
+        Set(text.components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .compactMap(plausibleYear))
+    }
+
+    static func trustedYears(database: Database, fileID: Int64) async throws -> Set<Int> {
+        try await database.pool.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT created_at, ocr_text FROM files WHERE id = ?
+                """, arguments: [fileID]) else { return [] }
+
+            var years = Self.trustedYears(in: (row["ocr_text"] as String?) ?? "")
+            if let createdAt: Double = row["created_at"], createdAt.isFinite {
+                let year = Calendar(identifier: .gregorian)
+                    .component(.year, from: Date(timeIntervalSince1970: createdAt))
+                if (1900..<2100).contains(year) { years.insert(year) }
+            }
+            let tags = try String.fetchAll(db, sql: """
+                SELECT tag FROM tags
+                WHERE file_id = ? AND source IN ('auto', 'user') AND tag LIKE 'Year\\_%' ESCAPE '\\'
+                """, arguments: [fileID])
+            for tag in tags {
+                if let year = Int(tag.dropFirst(5)), (1900..<2100).contains(year) {
+                    years.insert(year)
+                }
+            }
+            return years
+        }
+    }
+
+    private static func plausibleYear(_ token: String) -> Int? {
+        guard token.utf8.count == 4,
+              token.allSatisfy({ $0.isASCII && $0.isNumber }),
+              let year = Int(token),
+              (1900..<2100).contains(year) else { return nil }
+        return year
+    }
+
     static func persist(
         database: Database,
         fileID: Int64,
         description: String?,
         proposedName: String?,
         tags: [String] = [],
-        modelKey: String
+        modelKey: String,
+        updatesDescription: Bool = true,
+        updatesProposedName: Bool = true,
+        completesFullPass: Bool = true
     ) async throws {
-        // R3-01 defense-in-depth: COALESCE only guards NULL, so an empty-but-
-        // present "" would overwrite a prior good value. Map an empty string to
-        // nil here too, so even a direct persist("") preserves the prior
-        // caption/name. (analyze() already classifies empty output as a failure
-        // upstream; this closes the persist layer regardless of caller.)
         let safeDesc = (description?.isEmpty == true) ? nil : description
         let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
-        // Clean tags once outside the txn (cheap, keeps the write tight).
         let cleanTags = tags
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         try await database.pool.write { db in
-            // F-C3-044: COALESCE so a NULL result (model returned no caption or
-            // no proposed name on this pass) preserves a prior good value rather
-            // than clobbering it with NULL (Windows parity, deep_analyze.rs).
-            try db.execute(sql: """
-                UPDATE files
-                SET vlm_description = COALESCE(?, vlm_description),
-                    vlm_proposed_name = COALESCE(?, vlm_proposed_name),
-                    vlm_model = ?,
-                    vlm_analyzed_at = ?
-                WHERE id = ?
-                """, arguments: [
-                    safeDesc,
-                    safeName,
-                    modelKey,
-                    Date().timeIntervalSince1970,
-                    fileID
-                ])
-            // VLM searchable tags (source='vlm'). Replace this file's prior vlm
-            // tags only when the pass produced some — an empty result leaves prior
-            // tags intact (mirrors the Windows DELETE+INSERT, deep_analyze.rs; the
-            // DELETE there runs in the same "Both"-mode path that produced tags).
-            // user/auto tags (other sources) are untouched.
-            if !cleanTags.isEmpty {
-                try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vlm'",
-                               arguments: [fileID])
-                for tag in cleanTags {
-                    try db.execute(sql: """
-                        INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?, ?, 'vlm', NULL)
-                        """, arguments: [fileID, tag])
-                }
+            if completesFullPass {
+                try db.execute(sql: """
+                    UPDATE files
+                    SET vlm_description = CASE
+                            WHEN ? THEN ? ELSE vlm_description END,
+                        vlm_proposed_name = CASE
+                            WHEN ? THEN ? ELSE vlm_proposed_name END,
+                        vlm_model = ?,
+                        vlm_full_model = ?,
+                        vlm_analyzed_at = ?
+                    WHERE id = ?
+                    """, arguments: [
+                        updatesDescription,
+                        safeDesc,
+                        updatesProposedName,
+                        safeName,
+                        modelKey,
+                        modelKey,
+                        Date().timeIntervalSince1970,
+                        fileID
+                    ])
+            } else {
+                try db.execute(sql: """
+                    UPDATE files
+                    SET vlm_description = CASE
+                            WHEN ? THEN ? ELSE vlm_description END,
+                        vlm_proposed_name = CASE
+                            WHEN ? THEN ? ELSE vlm_proposed_name END,
+                        vlm_model = CASE
+                            WHEN vlm_full_model = ? THEN vlm_model ELSE NULL END,
+                        vlm_full_model = CASE
+                            WHEN vlm_full_model = ? THEN vlm_full_model ELSE NULL END,
+                        vlm_analyzed_at = CASE
+                            WHEN vlm_full_model = ? THEN vlm_analyzed_at ELSE NULL END
+                    WHERE id = ?
+                    """, arguments: [
+                        updatesDescription,
+                        safeDesc,
+                        updatesProposedName,
+                        safeName,
+                        modelKey,
+                        modelKey,
+                        modelKey,
+                        fileID
+                    ])
+            }
+            try db.execute(sql: "DELETE FROM tags WHERE file_id = ? AND source = 'vlm'",
+                           arguments: [fileID])
+            for tag in cleanTags {
+                try db.execute(sql: """
+                    INSERT OR IGNORE INTO tags (file_id, tag, source, score) VALUES (?, ?, 'vlm', NULL)
+                    """, arguments: [fileID, tag])
             }
         }
     }
@@ -386,6 +648,16 @@ public enum DeepAnalyzeRunner {
                 if !formatted.isEmpty { names.append(formatted) }
             }
             return names
+        }
+    }
+
+    private static func fetchDocumentText(database: Database, fileID: Int64) async throws -> String? {
+        try await database.pool.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT text FROM doc_text WHERE file_id = ?",
+                arguments: [fileID]
+            )
         }
     }
 

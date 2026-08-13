@@ -117,10 +117,11 @@ struct RestructureSemanticTests {
 
     @Test("Filename agreement upgrades a thin content match to Auto")
     func nameAgreementUpgradesToAuto() {
-        // Content only weakly matches (~0.6 cosine, below the 0.72 auto bar) but the
-        // filenames clearly belong in the folder → auto-file on the name evidence.
+        // Content only weakly matches (~0.82 cosine, between the calibrated 0.80 match bar
+        // and the 0.86 content-auto bar) but the filenames clearly belong in the folder →
+        // auto-file on the name evidence.
         let files = (0..<3).map {
-            file(Int64($0), "inbox/acme_invoice_part\($0).pdf", [0.6, 0.8, 0], [])
+            file(Int64($0), "inbox/acme_invoice_part\($0).pdf", [0.82, 0.5724, 0], [])
         }
         let protos = [RestructureSemantic.FolderPrototype(
             path: "/lib/Acme Invoices", centroid: unit([1, 0, 0]),

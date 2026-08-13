@@ -1,13 +1,9 @@
 import Foundation
 import CryptoKit
 
-/// Byte-exact content identity for duplicate detection. Mirrors the Windows
-/// engine's `util::content_hash` STRUCTURE — full hash for files ≤ 16 MB; a
-/// head + interior-samples + tail + size composite above — but substitutes
-/// SHA-256 (CryptoKit, no new dependency) for BLAKE3. The hash *values* differ
-/// from the Windows engine; the dedup *behavior* is identical: byte-for-byte
-/// identical files share a hash, so Cleanup treats only literally-identical
-/// photos as duplicates. (item 1)
+/// Fast persisted content identity for rename healing and duplicate candidate
+/// hints. Files above 16 MB use samples and therefore require a separate live
+/// full-file digest before byte-exact display or destructive action.
 enum ContentHash {
     /// Files at or below this size are hashed in full; larger files use the
     /// head+interior+tail+size composite. Matches Windows `FULL_HASH_MAX_BYTES`.
@@ -16,8 +12,8 @@ enum ContentHash {
     private static let interiorSamples: UInt64 = 4   // Windows INTERIOR_SAMPLES
     private static let interiorChunk = 64 * 1024     // 64 KB (Windows INTERIOR_CHUNK)
 
-    /// 32-byte SHA-256 content identity for `url` (whose length is `size`),
-    /// or nil on I/O error. Same bytes → same hash regardless of path.
+    /// 32-byte SHA-256 full or sampled identity for `url`, or nil on I/O error.
+    /// Same bytes always match; sampled matches are not proof of byte equality.
     static func compute(url: URL, size: UInt64) -> Data? {
         compute(url: url, size: size, fullMax: fullHashMaxBytes)
     }

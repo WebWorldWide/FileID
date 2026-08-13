@@ -94,7 +94,6 @@ RAW_NETWORK_FILES = {
     "platforms/apple/app/Sources/FileID/EngineClient.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
-    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift",
     "platforms/cli/src/runtime.rs",
     "platforms/cli/src/scan_models.rs",
     "platforms/linux/src/app/src/engine_client.rs",
@@ -134,16 +133,15 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
-  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "42e0c8177d306c4927e3a42c0dda4f90b538d8338ef576e44bb29691c45aa27d",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "620d1f5bb52496f97f9174560fadb29424946b08659388e1ce51a86eb76109f5",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "ab8a0240f51c2479d59697ec078ce0116357057bca26e8a80cedbe0c189c0653",
-  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "bb05b72c3654d7c47eae1c570c7bb76d955cd95519c2904c45dd4762584e0736",
+  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "42e7b56992f5beef2516e006aec47b2469e327d40f2b4cc37829f253e1237f10",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "aa215c9376a8d38248465a1f8289d841b02092f107fb6851336f518c11e24033",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f68d473a8a29a33b11d9f37120482f70ade3b2ba427c6a39a5b39e5f37c1c231",
+  "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "746e7840f44519a0d43047f1ab31c337ccf764c4269a028cb3185ae11e8bf008",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "024125c3251cba8f8e2661056b9aaab088d5516578fffdbbd5f9eca534591b11",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "8b5c2307fa95fbe149da38a14a48d01cb1d52299d46b23b8cd31fae4c1747f94",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift": "d0bea6c59f3b4ab131cce67efaf6c89bc7cd299974db5dcd9daa6326f13050fb",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "649ae891f303751261aef7834a4a5353b0c96810018470580f6681cefef26822",
-  "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "a6823a6ff734dd65bb697da64f06df8f1489ffe64596ffc8f65b7c634d2ebf52",
+  "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": "bc9643b70b9bb104e13a04f0c9584c4675fef75e521abb7bd79915c0b45badc8",
   "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "29cc2a712ec257b3f488f039a2afb3f6128a0a6acd03e9fc859b83d84a72ab8a",
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
@@ -601,13 +599,12 @@ def source_boundary_violations(root: Path) -> list[str]:
         if sink_pattern.search(code) and relative not in SAFE_NETWORK_CALLER_FILES:
             failures.append(f"{relative}: network download sink is outside the reviewed caller inventory")
     local_data_inventory = {
-        "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": 0,
+        "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": 1,
         "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
         "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": 2,
-        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 1,
+        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 2,
         "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
         "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
-        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift": 1,
     }
     for relative, expected_count in local_data_inventory.items():
         path = root / relative
