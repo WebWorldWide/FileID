@@ -139,7 +139,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "ab8a0240f51c2479d59697ec078ce0116357057bca26e8a80cedbe0c189c0653",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "bb05b72c3654d7c47eae1c570c7bb76d955cd95519c2904c45dd4762584e0736",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "9d1a44e31f5d98606484c2ff2d01e0812119cc565624959e650220036fef6ef0",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "746e7840f44519a0d43047f1ab31c337ccf764c4269a028cb3185ae11e8bf008",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "8b5c2307fa95fbe149da38a14a48d01cb1d52299d46b23b8cd31fae4c1747f94",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/Restructure.swift": "d0bea6c59f3b4ab131cce67efaf6c89bc7cd299974db5dcd9daa6326f13050fb",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "649ae891f303751261aef7834a4a5353b0c96810018470580f6681cefef26822",
