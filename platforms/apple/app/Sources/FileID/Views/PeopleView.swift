@@ -663,7 +663,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     let personID: Int64
     let personName: String
     let store: ReadStore
-    let onMerged: @escaping @Sendable @MainActor (Int) -> Void
+    let onMerged: @Sendable @MainActor (Int) -> Void
 
     func body(content: Content) -> some View {
         if enabled {
@@ -1235,7 +1235,7 @@ private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
     let store: ReadStore
     let fileIDs: [Int64]
-    let onMoved: @escaping @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
+    let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var candidates: [ReadStore.PersonRow] = []
 
