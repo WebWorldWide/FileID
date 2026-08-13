@@ -10,6 +10,8 @@ public enum Hardware {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
     }()
 
+    public static let defaultInferenceConcurrency: Int = 4
+
     public static let coreCount: Int = ProcessInfo.processInfo.processorCount
 
     /// Logical thread count (Intel Hyper-Threading siblings included). On
