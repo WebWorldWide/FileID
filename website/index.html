@@ -233,11 +233,10 @@
     <div class="section-head reveal">
       <div class="kicker"><span class="kicker-dot"></span>Releases</div>
       <h2>v0.1.0 is live.</h2>
-      <p class="section-sub">Clearly labeled unsigned v0.1.0 binaries are published on the releases page. They are not public-trust signed, and macOS has no published desktop bundle yet. Building from source remains the recommended path.</p>
+      <p class="section-sub">Clearly labeled unsigned v0.1.0 binaries and installers are published on the releases page. They are not public-trust signed. Building from source is also supported.</p>
     </div>
 
     <div class="downloads reveal-stagger">
-
       <!-- Windows -->
       <article class="dl-card dl-card-primary">
         <div class="dl-head">
@@ -245,7 +244,7 @@
             <svg class="platform-icon platform-icon-windows" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3v-6zM11.5 4.4 21 3v8.5H11.5V4.4zM3 12.5h7.5v7L3 18.5v-6zM11.5 12.5H21V21l-9.5-1.4v-7.1z"/></svg>
             <h3>Windows</h3>
           </div>
-          <span class="dl-badge">10 22H2+ · 11</span>
+          <span class="dl-badge dl-badge-windows">10 22H2+ · 11</span>
         </div>
         <p class="dl-blurb">Standard MSI install under <code>Program Files\FileID\</code>. Start menu shortcut. WinUI 3 app + Rust engine. Auto-detects x64 vs ARM64 (Snapdragon X Elite).</p>
         <div class="dl-actions">
@@ -266,15 +265,15 @@
             <svg class="platform-icon platform-icon-apple" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.4 12.2c0-2.6 2.1-3.9 2.2-3.9-1.2-1.7-3-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2.1-.9-3.4-.9-1.8.1-3.4 1-4.3 2.6-1.8 3.2-.5 7.9 1.3 10.5.9 1.3 2 2.7 3.4 2.6 1.4-.1 1.9-.9 3.5-.9 1.6 0 2.1.9 3.5.8 1.4-.1 2.3-1.3 3.2-2.6 1-1.5 1.4-2.9 1.5-3 0 0-2.8-1.1-2.8-4.2zM13.8 4.3c.7-.9 1.2-2.1 1.1-3.3-1.1.1-2.4.7-3.1 1.6-.7.8-1.3 2-1.1 3.2 1.2.1 2.4-.6 3.1-1.5z"/></svg>
             <h3>macOS</h3>
           </div>
-          <span class="dl-badge">15+ · Apple Silicon</span>
+          <span class="dl-badge dl-badge-apple">15+ · Apple Silicon</span>
         </div>
         <p class="dl-blurb">Drag to Applications. SwiftUI app + Swift engine on MLX / CoreML / Neural Engine. The canonical reference port — every tab ships end-to-end.</p>
         <div class="dl-actions">
-          <a class="btn btn-ghost btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
+          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
             <span>
               <span class="btn-pri">macOS releases page</span>
-              <span class="btn-sec">desktop bundle pending</span>
+              <span class="btn-sec">unsigned v0.1.0 dmg</span>
             </span>
           </a>
         </div>
@@ -284,10 +283,10 @@
       <article class="dl-card">
         <div class="dl-head">
           <div class="dl-platform">
-            <svg class="platform-icon platform-icon-linux" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.529 3.405h.013c.213 0 .396.062.584.198.19.135.33.332.438.533.105.259.158.459.166.724 0-.02.006-.04.006-.06v.105a.086.086 0 01-.004-.021l-.004-.024a1.807 1.807 0 01-.15.706.953.953 0 01-.213.335.71.71 0 00-.088-.042c-.104-.045-.198-.064-.284-.133a1.312 1.312 0 00-.22-.066c.05-.06.146-.133.183-.198.053-.128.082-.264.088-.402v-.02a1.21 1.21 0 00-.061-.4c-.045-.134-.101-.2-.183-.333-.084-.066-.167-.132-.267-.132h-.016c-.093 0-.176.03-.262.132a.8.8 0 00-.205.334 1.18 1.08 0 00-.09.4v.019c.002.089.008.179.02.267-.193-.067-.438-.135-.607-.202a1.635 1.635 0 01-.018-.2v-.02a1.772 1.772 0 01.15-.768c.082-.22.232-.406.43-.533a.985 0 01.594-.2zm-2.962.059h.036c.142 0 .27.048.399.135.146.129.264.288.344.465.09.199.14.4.153.667v.004c.007.134.006.2-.002.266v.08c-.03.007-.056.018-.083.024-.152.055-.274.135-.393.2.012-.09.013-.18.003-.267v-.015c-.012-.133-.04-.2-.082-.333a.613 0 00-.166-.267.248 0 00-.183-.064h-.021c-.071.006-.13.04-.186.132a.552 0 00-.12.27.944 0 00-.023.33v.015c.012.135.037.2.08.334.046.134.098.2.166.268.01.009.02.018.034.024-.07.057-.117.07-.176.136a.304 0 01-.131.068 2.62 2.62 0 01-.275-.402 1.772 1.772 0 01-.155-.667 1.759 1.759 0 01.08-.668 1.43 0 01.283-.535c.128-.133.26-.2.418-.2zm1.37 1.706c.332 0 .733.065 1.216.399.293.2.523.269 1.052.468h.003c.255.136.405.266.478.399v-.131a.571 0 01.016.47c-.123.31-.516.643-1.063.842v.002c-.268.135-.501.333-.775.465-.276.135-.588.292-1.012.267a1.139 0 01-.448-.067 3.566 3.566 0 01-.322"/></svg>
+            <svg class="platform-icon platform-icon-linux" width="22" height="22" viewBox="0 0 448 512" aria-hidden="true"><path d="M220.8 123.3c1 .5 1.8 1.7 3 1.7 1.1 0 2.8-.4 2.9-1.5 .2-1.4-1.9-2.3-3.2-2.9-1.7-.7-3.9-1-5.5-.1-.4 .2-.8 .7-.6 1.1 .3 1.3 2.3 1.1 3.4 1.7zm-21.9 1.7c1.2 0 2-1.2 3-1.7 1.1-.6 3.1-.4 3.5-1.6 .2-.4-.2-.9-.6-1.1-1.6-.9-3.8-.6-5.5 .1-1.3 .6-3.4 1.5-3.2 2.9 .1 1 1.8 1.5 2.8 1.4zM420 403.8c-3.6-4-5.3-11.6-7.2-19.7-1.8-8.1-3.9-16.8-10.5-22.4-1.3-1.1-2.6-2.1-4-2.9-1.3-.8-2.7-1.5-4.1-2 9.2-27.3 5.6-54.5-3.7-79.1-11.4-30.1-31.3-56.4-46.5-74.4-17.1-21.5-33.7-41.9-33.4-72C311.1 85.4 315.7 .1 234.8 0 132.4-.2 158 103.4 156.9 135.2c-1.7 23.4-6.4 41.8-22.5 64.7-18.9 22.5-45.5 58.8-58.1 96.7-6 17.9-8.8 36.1-6.2 53.3-6.5 5.8-11.4 14.7-16.6 20.2-4.2 4.3-10.3 5.9-17 8.3s-14 6-18.5 14.5c-2.1 3.9-2.8 8.1-2.8 12.4 0 3.9 .6 7.9 1.2 11.8 1.2 8.1 2.5 15.7 .8 20.8-5.2 14.4-5.9 24.4-2.2 31.7 3.8 7.3 11.4 10.5 20.1 12.3 17.3 3.6 40.8 2.7 59.3 12.5 19.8 10.4 39.9 14.1 55.9 10.4 11.6-2.6 21.1-9.6 25.9-20.2 12.5-.1 26.3-5.4 48.3-6.6 14.9-1.2 33.6 5.3 55.1 4.1 .6 2.3 1.4 4.6 2.5 6.7v.1c8.3 16.7 23.8 24.3 40.3 23 16.6-1.3 34.1-11 48.3-27.9 13.6-16.4 36-23.2 50.9-32.2 7.4-4.5 13.4-10.1 13.9-18.3 .4-8.2-4.4-17.3-15.5-29.7zM223.7 87.3c9.8-22.2 34.2-21.8 44-.4 6.5 14.2 3.6 30.9-4.3 40.4-1.6-.8-5.9-2.6-12.6-4.9 1.1-1.2 3.1-2.7 3.9-4.6 4.8-11.8-.2-27-9.1-27.3-7.3-.5-13.9 10.8-11.8 23-4.1-2-9.4-3.5-13-4.4-1-6.9-.3-14.6 2.9-21.8zM183 75.8c10.1 0 20.8 14.2 19.1 33.5-3.5 1-7.1 2.5-10.2 4.6 1.2-8.9-3.3-20.1-9.6-19.6-8.4 .7-9.8 21.2-1.8 28.1 1 .8 1.9-.2-5.9 5.5-15.6-14.6-10.5-52.1 8.4-52.1zm-13.6 60.7c6.2-4.6 13.6-10 14.1-10.5 4.7-4.4 13.5-14.2 27.9-14.2 7.1 0 15.6 2.3 25.9 8.9 6.3 4.1 11.3 4.4 22.6 9.3 8.4 3.5 13.7 9.7 10.5 18.2-2.6 7.1-11 14.4-22.7 18.1-11.1 3.6-19.8 16-38.2 14.9-3.9-.2-7-1-9.6-2.1-8-3.5-12.2-10.4-20-15-8.6-4.8-13.2-10.4-14.7"/></svg>
             <h3>Linux</h3>
           </div>
-          <span class="dl-badge">GTK4 · x86_64</span>
+          <span class="dl-badge dl-badge-linux">GTK4 · x86_64</span>
         </div>
         <p class="dl-blurb">GTK4 + libadwaita app over the shared Rust engine — all six tabs, plus the headless <code>fileid</code> CLI and <code>fileid-tui</code>. Grab the AppImage or build from source.</p>
         <div class="dl-actions">

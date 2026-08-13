@@ -136,9 +136,46 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  macos-release:
+    name: Build macOS DMG release
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: platforms/apple
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Swift toolchain info
+        run: swift --version
+
+      - name: Resolve packages
+        run: swift package resolve
+
+      - name: Create Desktop folder (safeguard)
+        run: mkdir -p ~/Desktop
+
+      - name: Build DMG
+        run: bash scripts/build_dmg.sh --rebuild
+
+      - name: Stage release-ready assets
+        run: |
+          mkdir -p dist/release-ready
+          cp dist/FileID.dmg dist/release-ready/
+
+      - name: Upload release-ready assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-macos-release-ready-${{ github.run_id }}
+          path: platforms/apple/dist/release-ready/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish-release:
     name: Publish release
-    needs: windows-release
+    needs: [windows-release, macos-release]
     if: needs.windows-release.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -147,10 +184,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download release-ready assets
+      - name: Download Windows release assets
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
           name: FileID-release-ready-${{ github.run_id }}
+          path: release-assets
+
+      - name: Download macOS release assets
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: FileID-macos-release-ready-${{ github.run_id }}
           path: release-assets
 
       - name: Create or update GitHub release
@@ -162,3 +205,4 @@ jobs:
             --title "FileID ${{ github.ref_name }}" \
             --notes "Unsigned FileID v0.1.0 release. See README and CHANGELOG.md for platform details." \
             release-assets/*
+
