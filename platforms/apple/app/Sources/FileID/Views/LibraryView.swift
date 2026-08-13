@@ -1668,17 +1668,20 @@ private struct PDFPreview: View {
         .task(id: url) {
             // Off the main thread — PDFDocument open + page render can
             // cost real time on a big PDF.
-            pageImage = await Task.detached(priority: .userInitiated) {
+            if let data = await Task.detached(priority: .userInitiated) { () -> Data? in
                 guard let doc = PDFDocument(url: url),
-                      let page = doc.page(at: 0) else { return nil as NSImage? }
+                      let page = doc.page(at: 0) else { return nil }
                 let bounds = page.bounds(for: .mediaBox)
                 // Cap rendered size at 1600 px so giant scans don't OOM.
                 let scale = min(1600 / max(bounds.width, bounds.height), 2.0)
-                return page.thumbnail(of: CGSize(
+                let img = page.thumbnail(of: CGSize(
                     width: bounds.width * scale,
                     height: bounds.height * scale
                 ), for: .mediaBox)
-            }.value
+                return img.tiffRepresentation
+            }.value {
+                pageImage = NSImage(data: data)
+            }
         }
     }
 }
