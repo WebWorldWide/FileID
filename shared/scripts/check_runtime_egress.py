@@ -133,7 +133,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
-  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "42e7b56992f5beef2516e006aec47b2469e327d40f2b4cc37829f253e1237f10",
+  "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "32cfa39ff68b71b6b7c8922c9d2d9f9925d844142cbb06ebea47de29be022e47",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "aa215c9376a8d38248465a1f8289d841b02092f107fb6851336f518c11e24033",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f68d473a8a29a33b11d9f37120482f70ade3b2ba427c6a39a5b39e5f37c1c231",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
