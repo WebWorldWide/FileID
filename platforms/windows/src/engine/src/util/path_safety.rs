@@ -116,7 +116,7 @@ pub(crate) fn canonicalize_for_containment(p: &Path) -> PathBuf {
 /// behavior is correct there — but each platform owns its own DB, so the
 /// cross-platform implication is moot. The wire schema stores the resulting
 /// i64 as-is.
-pub(crate) fn stable_path_hash(path: &str) -> i64 {
+pub fn stable_path_hash(path: &str) -> i64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let normalized = path.to_ascii_lowercase();
