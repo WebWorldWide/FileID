@@ -52,7 +52,7 @@ struct ScanCancellationTests {
     // rides to the job's 12-min SIGALRM and even an out-of-band GCD watchdog +
     // stdout drain couldn't make it deterministic (the failure mode does not
     // reproduce on a developer Mac, where it passes in <2 s). The cancellation
-    // WIRING is covered deterministically by `requestCancelCancelsRestructureTask`
+    // WIRING is covered deterministically by `operationSpecificCancellation`
     // and the engine's C1 cancel-deadlock fix is exercised here on every local
     // `swift test`. Re-enable once it can run reliably on a CI-class runner (or
     // after a rewrite that drives the pipeline in-process rather than via Process).
@@ -80,6 +80,9 @@ struct ScanCancellationTests {
 
         let proc = Process()
         proc.executableURL = binary
+        proc.environment = ProcessInfo.processInfo.environment.merging([
+            "FILEID_DATABASE_PATH": root.appendingPathComponent("fileid.sqlite").path
+        ]) { _, isolated in isolated }
         let stdin = Pipe(), wire = Pipe(), stdout = Pipe()
         proc.standardInput = stdin
         proc.standardError = wire
@@ -176,24 +179,61 @@ struct ScanCancellationTests {
         }
     }
 
-    // F-C6-013 wiring: cancelScan → coordinator.requestCancel() must cancel a
-    // registered restructure-apply task (Restructure.apply polls Task.isCancelled
-    // per move). Before the wiring the apply ran in a discarded detached task no
-    // signal could reach, so a long apply was unstoppable.
-    @Test("requestCancel cancels a registered restructure-apply task")
-    func requestCancelCancelsRestructureTask() async {
+    @Test("scan and restructure cancellation stay isolated across later jobs")
+    func operationSpecificCancellation() async {
         let coord = ScanCoordinator()
+        await coord.requestRestructureCancel()
         let task = Task.detached {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000)
             }
         }
-        await coord.setActiveRestructure(task)
+        let token = await coord.reserveRestructure()
+        #expect(token != nil)
+        if let token { await coord.attachRestructure(task, token: token) }
         await coord.requestCancel()
-        // `await task.value` returns ONLY after the loop observed cancellation
-        // and exited — proving requestCancel propagated to the registered task.
+        #expect(!task.isCancelled, "idle or scan cancellation must not poison restructure")
+
+        await coord.requestRestructureCancel()
         await task.value
-        #expect(task.isCancelled, "requestCancel must cancel the registered apply task")
+        #expect(task.isCancelled, "cancelRestructure must cancel the registered apply task")
+        if let token { await coord.finishRestructure(token: token) }
+
+        let laterTask = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        let laterToken = await coord.reserveRestructure()
+        #expect(laterToken != nil)
+        if let laterToken {
+            await coord.attachRestructure(laterTask, token: laterToken)
+        }
+        #expect(!laterTask.isCancelled, "a later restructure must not inherit stale cancellation")
+        await coord.requestRestructureCancel()
+        await laterTask.value
+        if let laterToken { await coord.finishRestructure(token: laterToken) }
+    }
+
+    @Test("Only one restructure operation can be reserved")
+    func restructureReservationIsExclusive() async {
+        let coord = ScanCoordinator()
+        let first = await coord.reserveRestructure()
+        #expect(first != nil)
+        #expect(await coord.reserveRestructure() == nil)
+        if let first { await coord.finishRestructure(token: first) }
+        #expect(await coord.reserveRestructure() != nil)
+    }
+
+    @Test("periodic progress stops after a terminal scan phase")
+    func periodicProgressStopsAtTerminalPhase() async {
+        let coord = ScanCoordinator()
+        _ = await coord.startSession(rootDisplayPath: "/tmp/library", epoch: 0)
+        #expect(await coord.periodicSnapshot() != nil)
+
+        await coord.setPhase(.completed)
+        #expect(await coord.periodicSnapshot() == nil)
+        #expect(await coord.snapshot()?.phase == .completed)
     }
 
 }

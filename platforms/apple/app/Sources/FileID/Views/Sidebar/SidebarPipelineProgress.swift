@@ -1,6 +1,26 @@
 import SwiftUI
 import FileIDShared
 
+struct PipelineTrackGeometry {
+    let width: CGFloat
+    let stageCount: Int
+
+    var columnWidth: CGFloat {
+        guard stageCount > 0 else { return 0 }
+        return width / CGFloat(stageCount)
+    }
+
+    func center(for index: Int) -> CGFloat {
+        guard stageCount > 0 else { return 0 }
+        let bounded = min(max(index, 0), stageCount - 1)
+        return columnWidth * (CGFloat(bounded) + 0.5)
+    }
+
+    func filledWidth(through index: Int) -> CGFloat {
+        max(0, center(for: index) - center(for: 0))
+    }
+}
+
 /// Whole-workflow indicator: Scan → Tag → People → Captions → Done.
 /// Reads engine signals plus cheap DB counters so it stays accurate
 /// across launches when `engine.lastProgress` is nil but the DB
@@ -30,12 +50,20 @@ struct PipelineProgress: View {
             switch p.phase {
             case .discovering: return .scan
             case .tagging:     return .tag
-            case .postScan:    return .people
+            // postScan is the SCAN finalizing (orphan sweep / stats), not People
+            // clustering — keep the indicator in the scan region so the fill doesn't
+            // jump to the People dot (the halfway mark) before clustering begins.
+            // It advances to People below once face clustering is actually in flight.
+            case .postScan:    return .tag
             case .completed, .cancelled, .failed, .idle: break
             }
         }
         if engine.faceClusteringInFlight { return .people }
         if engine.deepAnalyzeInFlight    { return .captions }
+        // A paused scan is mid-flight, not done — never let the DB-derived branch below
+        // advance to People/Captions (which would push the fill to/past the halfway dot)
+        // just because the partial scan already wrote some rows.
+        if engine.isPaused { return .tag }
 
         // Nothing in flight — derive from the DB state.
         let scanned   = store.totalFiles > 0
@@ -59,50 +87,46 @@ struct PipelineProgress: View {
     }
 
     var body: some View {
-        // 5 equal columns; each column has its dot centered above its
-        // label so they always align vertically. Connector segments live
-        // in the same column as the dot — left half + right half — so
-        // they meet between adjacent dots without offsetting them.
         let stages = Stage.allCases
-        // Compute `current` once per render — it can run synchronous COUNT(*)
-        // queries (at-rest DB branch), so the 9 per-stage state() calls below
-        // must not each recompute it.
         let cur = current
-        HStack(spacing: 0) {
-            ForEach(Array(stages.enumerated()), id: \.element.id) { idx, s in
-                let st = state(for: s, cur)
-                let prevFilled = idx > 0 ? state(for: stages[idx - 1], cur).filled : false
-                VStack(spacing: 4) {
-                    ZStack {
-                        // Left connector — only when not the first dot.
-                        // Filled when the PREVIOUS stage is filled (the
-                        // segment "leads into" this dot from the left).
-                        if idx > 0 {
-                            HStack(spacing: 0) {
-                                Rectangle()
-                                    .fill(prevFilled ? Theme.gold : Color.white.opacity(0.10))
-                                    .frame(height: 1)
-                                Spacer(minLength: 0)
-                            }
+        VStack(spacing: 4) {
+            GeometryReader { proxy in
+                let geometry = PipelineTrackGeometry(
+                    width: proxy.size.width,
+                    stageCount: stages.count
+                )
+                let start = geometry.center(for: 0)
+                let trackWidth = geometry.filledWidth(through: stages.count - 1)
+                let fillWidth = geometry.filledWidth(through: cur.rawValue)
+
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.10))
+                        .frame(width: trackWidth, height: 1)
+                        .offset(x: start)
+                    Rectangle()
+                        .fill(Theme.gold)
+                        .frame(width: fillWidth, height: 1)
+                        .offset(x: start)
+                        .animation(.easeOut(duration: 0.22), value: fillWidth)
+                    HStack(spacing: 0) {
+                        ForEach(stages) { stage in
+                            dotCell(state: state(for: stage, cur))
+                                .frame(maxWidth: .infinity)
                         }
-                        // Right connector — only when not the last dot.
-                        if idx < stages.count - 1 {
-                            HStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                Rectangle()
-                                    .fill(st.filled ? Theme.gold : Color.white.opacity(0.10))
-                                    .frame(height: 1)
-                            }
-                        }
-                        dotCell(state: st)
                     }
-                    .frame(height: 14)
-                    Text(s.label)
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(st.active ? Theme.gold
-                                          : (st.filled ? Color.primary : Color.secondary))
                 }
-                .frame(maxWidth: .infinity)
+            }
+            .frame(height: 14)
+            HStack(spacing: 0) {
+                ForEach(stages) { stage in
+                    let stageState = state(for: stage, cur)
+                    Text(stage.label)
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(stageState.active ? Theme.gold
+                                          : (stageState.filled ? Color.primary : Color.secondary))
+                        .frame(maxWidth: .infinity)
+                }
             }
         }
         .padding(.horizontal, 4)

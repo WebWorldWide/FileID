@@ -27,6 +27,19 @@ struct SankeyFlowView: View {
     private static let otherSourceID = "src:__other__"
     private static let otherDestID = "dst:__other__"
 
+    /// Okabe-Ito CVD-safe palette — 7 distinguishable hues that work for all
+    /// common forms of color-vision deficiency. Applied to destination nodes so
+    /// ribbons answer "what category does this end up in?" (RESTRUCTURE.md §7)
+    private static let okabeIto: [Color] = [
+        Color(red: 0.000, green: 0.447, blue: 0.698),   // blue      #0072B2
+        Color(red: 0.835, green: 0.369, blue: 0.000),   // vermilion #D55E00
+        Color(red: 0.000, green: 0.620, blue: 0.451),   // green     #009E73
+        Color(red: 0.337, green: 0.706, blue: 0.914),   // sky blue  #56B4E9
+        Color(red: 0.902, green: 0.624, blue: 0.000),   // orange    #E69F00
+        Color(red: 0.800, green: 0.475, blue: 0.655),   // purple    #CC79A7
+        Color(red: 0.941, green: 0.894, blue: 0.259),   // yellow    #F0E442
+    ]
+
     var body: some View {
         if proposals.isEmpty {
             EmptyView()
@@ -606,15 +619,18 @@ struct SankeyFlowView: View {
         // 2. Pick top-N visible nodes per column. Long tail rolls up
         // into a single "Other" placeholder.
         let allSrcs = srcAccum.values
-            .sorted { $0.count > $1.count }
+            .sorted { a, b in a.count != b.count ? a.count > b.count : a.folder < b.folder }
         let visibleSrcs = Array(allSrcs.prefix(topN))
         let tailSrcs = Array(allSrcs.dropFirst(topN))
         let allDsts = dstCount
             .map { (bucket: $0.key, count: $0.value) }
-            .sorted { $0.count > $1.count }
+            .sorted { a, b in a.count != b.count ? a.count > b.count : a.bucket < b.bucket }
         let visibleDsts = Array(allDsts.prefix(topN))
         let tailDsts = Array(allDsts.dropFirst(topN))
 
+        // Source nodes: neutral secondary tint — they recede visually so the
+        // destination colors (which answer "what does this become?") dominate.
+        // The junk icon (tray.2) still distinguishes junk-folder sources.
         var sources: [Node] = visibleSrcs.map { entry in
             let display = (entry.folder as NSString).lastPathComponent
             return Node(
@@ -623,7 +639,7 @@ struct SankeyFlowView: View {
                 identityKey: entry.folder,
                 count: entry.count,
                 icon: entry.isJunk ? "tray.2" : "tray.and.arrow.up",
-                tint: entry.isJunk ? Theme.gold : .orange,
+                tint: .secondary,
                 isSource: true
             )
         }
@@ -639,14 +655,17 @@ struct SankeyFlowView: View {
                 isSource: true
             ))
         }
-        var destinations: [Node] = visibleDsts.map { entry in
+        // Destination nodes: Okabe-Ito CVD-safe palette so each category gets a
+        // distinct, accessible color. Ribbons carry this color so the user can
+        // instantly see "what does each ribbon become?" (RESTRUCTURE.md §7)
+        var destinations: [Node] = visibleDsts.enumerated().map { (idx, entry) in
             Node(
                 id: "dst:\(entry.bucket)",
                 label: entry.bucket,
                 identityKey: entry.bucket,
                 count: entry.count,
                 icon: bucketIcon(entry.bucket),
-                tint: Theme.gold,
+                tint: Self.okabeIto[idx % Self.okabeIto.count],
                 isSource: false
             )
         }
@@ -672,9 +691,11 @@ struct SankeyFlowView: View {
                          var sourceID: String; var destID: String;
                          var tint: Color; var count: Int }
         var bucketsByKey: [String: Bucket] = [:]
-        // Tint per source ID — gold for junk, orange for mixed.
-        let tintBySourceID: [String: Color] = Dictionary(
-            uniqueKeysWithValues: sources.map { ($0.id, $0.tint) }
+        // Tint per destination ID — each destination category has its own
+        // Okabe-Ito color; ribbons carry the destination color so the user
+        // reads "what does this become?" from the ribbon hue.
+        let tintByDestID: [String: Color] = Dictionary(
+            uniqueKeysWithValues: destinations.map { ($0.id, $0.tint) }
         )
         for p in proposals {
             let srcID = visibleSrcIDs.contains("src:\(p.sourceFolder)")
@@ -684,7 +705,7 @@ struct SankeyFlowView: View {
                 ? "dst:\(p.bucket)"
                 : otherDestID
             let key = "\(srcID)→\(dstID)"
-            let tint = tintBySourceID[srcID] ?? Theme.gold
+            let tint = tintByDestID[dstID] ?? .secondary
             if var existing = bucketsByKey[key] {
                 existing.count += 1
                 bucketsByKey[key] = existing

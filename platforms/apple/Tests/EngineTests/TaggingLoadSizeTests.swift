@@ -15,7 +15,7 @@ import ImageIO
 import UniformTypeIdentifiers
 @testable import FileIDEngine
 
-@Suite("Tagging.loadImageAndEXIF reuses the discovered size (F-C6-008)")
+@Suite("Tagging image loading")
 struct TaggingLoadSizeTests {
 
     /// Writes a real, decodable PNG (>256 B) to a fresh temp dir; returns its URL.
@@ -37,6 +37,32 @@ struct TaggingLoadSizeTests {
         let dest = try #require(CGImageDestinationCreateWithURL(
             url as CFURL, UTType.png.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(dest, cg, nil)
+        #expect(CGImageDestinationFinalize(dest))
+        return url
+    }
+
+    private func makeTempJPEGWithEmbeddedThumbnail() throws -> URL {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = try #require(CGContext(
+            data: nil, width: 640, height: 480, bitsPerComponent: 8,
+            bytesPerRow: 0, space: cs,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 640, height: 480))
+        let cg = try #require(ctx.makeImage())
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDTaggingThumbnail-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("with-thumbnail.jpg")
+        let dest = try #require(CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(
+            dest,
+            cg,
+            [kCGImageDestinationEmbedThumbnail: true] as CFDictionary
+        )
         #expect(CGImageDestinationFinalize(dest))
         return url
     }
@@ -84,5 +110,61 @@ struct TaggingLoadSizeTests {
         let result = Tagging.loadImageAndEXIF(url: url, sizeBytes: 0)
         #expect(result != nil,
                 "a 0 discovered size must re-stat and decode, not skip a valid image as corrupt")
+    }
+
+    @Test("bounded decode ignores undersized embedded JPEG thumbnails")
+    func ignoresEmbeddedThumbnail() throws {
+        let url = try makeTempJPEGWithEmbeddedThumbnail()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+
+        let embeddedOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 512
+        ]
+        let embedded = try #require(CGImageSourceCreateThumbnailAtIndex(
+            source, 0, embeddedOptions as CFDictionary))
+        #expect(embedded.width == 160)
+        #expect(embedded.height == 120)
+
+        let decoded = try #require(decodeBoundedImage(source, maxPixelSize: 512))
+        #expect(decoded.width == 512)
+        #expect(decoded.height == 384)
+
+        let taggingResult = try #require(Tagging.loadImageAndEXIF(
+            url: url,
+            sizeBytes: 1_000_000
+        ))
+        #expect(taggingResult.0.width == 640)
+        #expect(taggingResult.0.height == 480)
+    }
+
+    @Test("PDFs over 20 MiB bypass extraction during scan tagging")
+    func largePDFBypassesExtraction() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDLargePDF-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appendingPathComponent("corrupt.pdf")
+        try Data("not a PDF".utf8).write(to: url)
+        let tagged = await Tagging.processFile(
+            discovered: DiscoveredFile(
+                url: url,
+                sizeBytes: 20 * 1_048_576 + 1,
+                creationDate: nil,
+                modificationDate: nil,
+                kind: .pdf,
+                fileRef: nil
+            ),
+            worker: VisionWorker()
+        )
+
+        #expect(!tagged.failed)
+        #expect(tagged.tagsEvaluated)
+        #expect(tagged.visionTags == ["PDF", "Large_Document"])
+        #expect(tagged.docText == nil)
+        #expect(!tagged.textStageDone)
     }
 }

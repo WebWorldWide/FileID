@@ -1,6 +1,4 @@
-// Port of the Windows engine's redaction_tests (platform.rs): the
-// passthrough must be anchored to FileID's own state root — an
-// arbitrary user path embedding "Application Support" must redact.
+// Port of the Windows engine's redaction_tests (platform.rs).
 import Testing
 import Foundation
 @testable import FileIDShared
@@ -13,11 +11,12 @@ struct PathRedactionTests {
             .first!.appendingPathComponent("FileID", isDirectory: true).path
     }
 
-    @Test("own state tree passes through verbatim")
-    func ownTreePassesThrough() {
+    @Test("own state tree is redacted like every other user path")
+    func ownTreeRedacts() {
         let p = stateRoot + "/Models/sface/weights.onnx"
-        #expect(redactPathForLog(p) == p)
-        #expect(redactPathForLog(stateRoot) == stateRoot)
+        #expect(redactPathForLog(p) == "…/sface/weights.onnx")
+        #expect(!redactPathForLog(p).contains(NSHomeDirectory()))
+        #expect(!redactPathForLog(stateRoot).contains(NSHomeDirectory()))
     }
 
     @Test("sibling dir that merely starts with the root name redacts")
@@ -41,6 +40,12 @@ struct PathRedactionTests {
         #expect(!r.contains("adam"))
     }
 
+    @Test("home directory root drops the username")
+    func homeRoot() {
+        #expect(redactPathForLog("/Users/alice") == "…")
+        #expect(redactPathForLog("/home/alice") == "…")
+    }
+
     @Test("file directly under a home directory drops the username")
     func fileDirectlyUnderHome() {
         let r = redactPathForLog("/Users/adam/notes.txt")
@@ -58,6 +63,25 @@ struct PathRedactionTests {
     @Test("one level below home keeps the (non-username) parent")
     func oneLevelBelowHomeKeepsParent() {
         #expect(redactPathForLog("/Users/adam/Pictures/IMG.jpg") == "…/Pictures/IMG.jpg")
+    }
+
+    @Test("Windows drive paths drop the drive, username, and folder tree")
+    func windowsDrivePath() {
+        let deep = redactPathForLog(#"C:\Users\alice\Private\photo.jpg"#)
+        #expect(deep == "…/Private/photo.jpg")
+        #expect(!deep.contains("alice"))
+        #expect(!deep.contains("C:"))
+        #expect(redactPathForLog(#"C:\Users\alice"#) == "…")
+        #expect(redactPathForLog(#"C:\Users\alice\notes.txt"#) == "…/notes.txt")
+    }
+
+    @Test("UNC paths retain only a safe tail")
+    func uncPath() {
+        let deep = redactPathForLog(#"\\server\private-share\Family\photo.jpg"#)
+        #expect(deep == "…/Family/photo.jpg")
+        #expect(!deep.contains("server"))
+        #expect(!deep.contains("private-share"))
+        #expect(redactPathForLog(#"\\server\private-share"#) == "…")
     }
 
     @Test("empty input collapses to ellipsis")

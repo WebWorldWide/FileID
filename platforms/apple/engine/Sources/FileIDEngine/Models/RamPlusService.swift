@@ -52,8 +52,11 @@ public final class RamPlusService: @unchecked Sendable {
     private var precisionFloor: Float = RamPlusService.defaultPrecisionFloor
     private var maxTags: Int = RamPlusService.defaultMaxTags
     private var suppressExtra: Set<String> = []
-    // Match ArcFace's ANE-thrash cap.
-    private let inferenceSem = DispatchSemaphore(value: 4)
+    // Match ArcFace's ANE-thrash cap: defaults to 4, raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
+    private static let inferenceConcurrency: Int =
+        ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
+            .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
+    private let inferenceSem = DispatchSemaphore(value: RamPlusService.inferenceConcurrency)
 
     private init() {}
 
@@ -97,7 +100,14 @@ public final class RamPlusService: @unchecked Sendable {
 
         do {
             let tagsText = try String(contentsOf: Self.tagsURL, encoding: .utf8)
-            let parsedTags = tagsText.split(separator: "\n", omittingEmptySubsequences: false)
+            // Grapheme-safe newline split. The installed sidecars use CRLF, and
+            // Swift collapses "\r\n" into a SINGLE Character — so split(separator:
+            // "\n") finds zero separators and folds the whole 46 KB vocab into one
+            // tag (then every inference trips the logits-vs-tags count guard and
+            // RAM++ silently falls back to CLIP scene tags). Split on isNewline
+            // (matches \n, \r, and the \r\n grapheme) and trim with
+            // .whitespacesAndNewlines (strips any stray \r).
+            let parsedTags = tagsText.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             // Keep trailing empties out, but DON'T filter interior blanks — the
             // index must stay aligned with the logit vector. A blank line in the
@@ -128,7 +138,8 @@ public final class RamPlusService: @unchecked Sendable {
             // present). Otherwise loaded if it matches the tag count.
             var perClass: [Float]?
             if envThreshold == nil, let tText = try? String(contentsOf: Self.thresholdsURL, encoding: .utf8) {
-                let vals = tText.split(separator: "\n").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                let vals = tText.split(whereSeparator: { $0.isNewline })
+                    .compactMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 if vals.count == trimmedTags.count {
                     perClass = vals
                 } else {
@@ -140,19 +151,30 @@ public final class RamPlusService: @unchecked Sendable {
             // Optional suppress sidecar (lowercased), merged with the built-in set.
             var extra: Set<String> = []
             if let sText = try? String(contentsOf: Self.suppressURL, encoding: .utf8) {
-                for line in sText.split(separator: "\n") {
-                    let t = line.trimmingCharacters(in: .whitespaces).lowercased()
+                for line in sText.split(whereSeparator: { $0.isNewline }) {
+                    let t = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                     if !t.isEmpty, !t.hasPrefix("#") { extra.insert(t) }
                 }
             }
 
+            lock.lock()
+            let cachedEnv = self.env
+            lock.unlock()
             let ortEnv: ORTEnv
-            if let existing = self.env { ortEnv = existing }
+            if let existing = cachedEnv { ortEnv = existing }
             else { ortEnv = try ORTEnv(loggingLevel: ORTLoggingLevel.warning) }
             let opts = try ORTSessionOptions()
+            // MLComputeUnits = All (ANE + GPU + CPU): NOT setting useCPUAndGPU/
+            // useCPUOnly leaves compute units at the All default so the ANE can
+            // take the CoreML-assigned partitions (useCPUAndGPU would EXCLUDE it).
+            // We deliberately do NOT use MLProgram here: on-hardware, MLProgram on
+            // the 926 MB RAM++ Swin made the ANE reject the compiled program
+            // ("re-compile the E5 bundle"), ballooned session creation to ~234 s,
+            // and ran SLOWER per inference than the NeuralNetwork format — a clear
+            // regression. NeuralNetwork loads in ~9 s and is equal-or-faster.
             let coremlOpts = ORTCoreMLExecutionProviderOptions()
             coremlOpts.enableOnSubgraphs = true
-            coremlOpts.useCPUAndGPU = true
+            coremlOpts.onlyAllowStaticInputShapes = true
             try opts.appendCoreMLExecutionProvider(with: coremlOpts)
             let ortSession = try ORTSession(env: ortEnv, modelPath: Self.onnxURL.path, sessionOptions: opts)
             guard let firstInput = try ortSession.inputNames().first else {

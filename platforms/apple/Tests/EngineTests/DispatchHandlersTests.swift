@@ -15,6 +15,14 @@ import FileIDShared
 @Suite("Engine dispatch handlers (F-C3-032/021)", .serialized)
 struct DispatchHandlersTests {
 
+    @Test("database-open UI errors never expose local paths")
+    func databaseOpenErrorIsGeneric() {
+        let message = FileIDEngineMain.databaseOpenFailureMessage
+        #expect(!message.contains("/Users/"))
+        #expect(!message.contains("Library/Application Support"))
+        #expect(message.contains("local library database"))
+    }
+
     private func waitFor(_ needles: [Data], in cap: WireCapture,
                          timeout: TimeInterval = 10) async -> Data {
         let deadline = Date().addingTimeInterval(timeout)
@@ -31,7 +39,8 @@ struct DispatchHandlersTests {
         let cap = WireCapture()
         let sink = cap.sink
         let cmd = IPCCommand(payload: .startScan(
-            rootPath: "/tmp/does-not-matter", rootDisplay: nil, rescan: false))
+            rootPath: "/tmp/does-not-matter", rootDisplay: nil,
+            rescan: false, excludedPaths: nil))
 
         await FileIDEngineMain.dispatch(cmd, coordinator: ScanCoordinator(),
                                         sink: sink, database: nil)
@@ -60,7 +69,8 @@ struct DispatchHandlersTests {
         // Empty library → an empty (but real) plan. Proves the dead IPC is wired
         // to proposeAll instead of returning not_implemented_yet.
         await FileIDEngineMain.dispatch(
-            IPCCommand(payload: .planRestructure(libraryRoot: tmp.path)),
+            IPCCommand(payload: .planRestructure(
+                libraryRoot: tmp.path, supportsPagedPlans: false)),
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let planNeedle = Data("\"restructurePlan\"".utf8)
         let notImpl = Data("\"not_implemented_yet\"".utf8)
@@ -70,7 +80,8 @@ struct DispatchHandlersTests {
 
         // applyRestructure with no moves → a real (zero) result.
         await FileIDEngineMain.dispatch(
-            IPCCommand(payload: .applyRestructure(libraryRoot: tmp.path, moves: [], useSymlinks: false)),
+            IPCCommand(payload: .applyRestructure(
+                libraryRoot: tmp.path, moves: [], useSymlinks: false, planID: nil)),
             coordinator: ScanCoordinator(), sink: sink, database: db)
         let applyNeedle = Data("\"restructureApplyResult\"".utf8)
         out = await waitFor([applyNeedle], in: cap)
@@ -78,6 +89,68 @@ struct DispatchHandlersTests {
 
         #expect(out.range(of: applyNeedle) != nil,
                 "applyRestructure must emit a restructureApplyResult event")
+    }
+
+    // Audit R3: the schema promises shortcutUndoToken "undo[es] only the
+    // shortcut-mode run identified by this opaque token; never consume the
+    // real-move undo journal" — but macOS has no shortcut/symlink-apply mode
+    // at all, so there is no shortcut journal to replay. The engine must fail
+    // closed (reject) instead of silently falling through to undoLast() and
+    // replaying the real-move journal, which would violate that contract.
+    @Test("undoRestructure with a shortcutUndoToken fails closed and doesn't wedge the reservation")
+    func undoRestructureShortcutTokenFailsClosed() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoShortcutToken-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let coordinator = ScanCoordinator()
+
+        let cap = WireCapture()
+        let sink = cap.sink
+
+        await FileIDEngineMain.dispatch(
+            IPCCommand(payload: .undoRestructure(
+                libraryRoot: tmp.path, shortcutUndoToken: UUID().uuidString)),
+            coordinator: coordinator, sink: sink, database: db)
+
+        let errNeedle = Data("\"undo_restructure\"".utf8)
+        let resultNeedle = Data("\"restructureApplyResult\"".utf8)
+        let out = await waitFor([errNeedle, resultNeedle], in: cap)
+
+        #expect(out.range(of: errNeedle) != nil,
+                "a non-nil shortcutUndoToken must be rejected with an undo_restructure error")
+        // Single string literal: #expect's second parameter is a `Comment`, which
+        // is ExpressibleByStringLiteral — a `+` concatenation is an expression, not
+        // a literal, so it fails to convert.
+        #expect(out.range(of: resultNeedle) != nil,
+                "the rejection must still emit a terminal restructureApplyResult so EngineClient's undoRestructureInFlight flag clears (audit R2-app) instead of latching forever")
+
+        // Exactly ONE terminal result must appear — if the rejection had fallen
+        // through to undoLast() instead of returning early, THAT call would emit
+        // a SECOND restructureApplyResult, which this catches.
+        let text = String(decoding: out, as: UTF8.self)
+        let resultCount = text.components(separatedBy: "\"restructureApplyResult\"").count - 1
+        #expect(resultCount == 1,
+                "undoLast() must not also have run and emitted its own result")
+
+        // The reservation must not be wedged: a normal restructure command right
+        // after must be accepted, not bounced with restructure_busy. Reusing the
+        // SAME coordinator is the point — a leaked reservation from the rejected
+        // undo would still be held here.
+        await FileIDEngineMain.dispatch(
+            IPCCommand(payload: .planRestructure(
+                libraryRoot: tmp.path, supportsPagedPlans: false)),
+            coordinator: coordinator, sink: sink, database: db)
+        let planNeedle = Data("\"restructurePlan\"".utf8)
+        let busyNeedle = Data("\"restructure_busy\"".utf8)
+        let out2 = await waitFor([planNeedle], in: cap)
+        await cap.finish()
+
+        #expect(out2.range(of: planNeedle) != nil,
+                "a normal plan request right after the rejection must go through")
+        #expect(out2.range(of: busyNeedle) == nil,
+                "the rejected undo must not have left a stale restructure reservation")
     }
 
     @Test("restructurePlan DTO maps proposals and rolls up category counts")
@@ -120,6 +193,39 @@ struct DispatchHandlersTests {
         #expect(plan.folderClassifications?.mixedFolders == 1)
         #expect(plan.folderClassifications?.anchorFolders == 0)
         #expect(plan.folderClassifications?.junkFolders == 0)
+    }
+
+    @Test("restructurePlan DTO publishes complete confidence totals")
+    func restructurePlanConfidenceCounts() throws {
+        let proposals = [
+            RestructureProposal(fileID: 1, oldPath: "/a/1.jpg",
+                                newPath: "/lib/1.jpg", bucket: "photo",
+                                confidence: "auto"),
+            RestructureProposal(fileID: 2, oldPath: "/a/2.jpg",
+                                newPath: "/lib/2.jpg", bucket: "photo",
+                                confidence: "AUTO"),
+            RestructureProposal(fileID: 3, oldPath: "/a/3.jpg",
+                                newPath: "/lib/3.jpg", bucket: "photo",
+                                confidence: "review"),
+            RestructureProposal(fileID: 4, oldPath: "/a/4.jpg",
+                                newPath: "/lib/4.jpg", bucket: "photo",
+                                confidence: "ask"),
+            RestructureProposal(fileID: 5, oldPath: "/a/5.jpg",
+                                newPath: "/lib/5.jpg", bucket: "photo",
+                                confidence: "")
+        ]
+        let planResult = Restructure.PlanResult(
+            proposals: proposals, tierByFolder: [:],
+            anchorFolders: 0, mixedFolders: 1, junkFolders: 0)
+        let plan = FileIDEngineMain.restructurePlan(
+            from: planResult, libraryRoot: "/lib")
+        let counts = try #require(plan.confidenceCounts)
+
+        #expect(counts.auto == 2)
+        #expect(counts.review == 1)
+        #expect(counts.ask == 1)
+        #expect(counts.unknown == 1)
+        #expect(counts.auto + counts.review + counts.ask + counts.unknown == plan.moves.count)
     }
 
     // F-C1-004 lockstep: a homogeneous source folder the semantic butler actively

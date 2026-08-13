@@ -10,8 +10,10 @@ struct SettingsTab: View {
     let engine: EngineClient
     let store: ReadStore
     @AppStorage(AppSettings.cleanupAutoTagKey) private var cleanupAutoTag: Bool = AppSettings.cleanupAutoTagDefault
+    @AppStorage(AppSettings.restructureGranularityKey) private var restructureGranularity: String = AppSettings.restructureGranularityDefault
     @State private var showAdvanced = false
     @State private var sessions: [ReadStore.ScanSessionRow] = []
+    @State private var confirmFactoryReset = false
 
     var body: some View {
         ScrollView {
@@ -36,10 +38,28 @@ struct SettingsTab: View {
                     }
                 }
 
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restructure").font(.headline)
+                        Picker("Folder granularity", selection: $restructureGranularity) {
+                            Text("Looser").tag("loose")
+                            Text("Balanced").tag("normal")
+                            Text("Tighter").tag("tight")
+                        }
+                        .pickerStyle(.segmented)
+                        Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                DeepAnalyzeExclusionsCard()
+
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
                 CLIPSemanticSearchCard()
                 RamPlusTaggerCard()
+                BGEDocCard()
 
                 DeepAnalyzeModelPickerCard(engine: engine)
                 FaceEmbedderCard(engine: engine, store: store)
@@ -83,8 +103,8 @@ struct SettingsTab: View {
                                 Text("Storage").font(.subheadline.bold())
                                 infoRow("Total files",   "\(store.totalFiles)")
                                 infoRow("Images tagged", "\(store.totalImages)")
-                                infoRow("Duplicate groups", "\(store.totalDuplicateGroups)")
-                                infoRow("Reclaimable",   String(format: "%.1f MB", store.totalReclaimableMB))
+                                infoRow("Stored duplicate hints", "\(store.totalDuplicateGroups)")
+                                infoRow("Hint reclaimable", String(format: "%.1f MB", store.totalReclaimableMB))
                                 infoRow("Database", ReadStore.defaultDBURL.path)
                                 Button("Show database in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
@@ -129,6 +149,34 @@ struct SettingsTab: View {
                                     .buttonStyle(.bordered)
                                 }
                             }
+
+                            Divider().opacity(0.3)
+
+                            // Danger Zone
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Danger Zone").font(.subheadline.bold()).foregroundStyle(.red)
+                                Text("Permanently erase FileID's library, local models, settings, and caches.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button(role: .destructive) {
+                                    confirmFactoryReset = true
+                                } label: {
+                                    Text("Factory Reset & Quit")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .confirmationDialog(
+                                    "Are you sure you want to completely erase FileID?",
+                                    isPresented: $confirmFactoryReset,
+                                    titleVisibility: .visible
+                                ) {
+                                    Button("Erase Everything and Quit", role: .destructive) {
+                                        engine.factoryResetAndQuit()
+                                    }
+                                    Button("Cancel", role: .cancel) { }
+                                } message: {
+                                    Text("This will permanently delete the database, all tags, faces, settings, FileID-managed models, and caches. Shared Deep Analyze model downloads are kept. This action cannot be undone.")
+                                }
+                            }
                         }
                         .padding(.top, 8)
                     } label: {
@@ -146,10 +194,10 @@ struct SettingsTab: View {
             .padding(24)
         }
         .onAppear {
-            sessions = store.recentSessions()
+            Task { sessions = store.recentSessions() }
         }
         .onChange(of: showAdvanced) { _, expanded in
-            if expanded { sessions = store.recentSessions() }
+            if expanded { Task { sessions = store.recentSessions() } }
         }
     }
 
@@ -202,6 +250,87 @@ struct SettingsTab: View {
     }
 }
 
+// MARK: - Deep Analyze exclusions card
+
+/// Folders to skip during a whole-library Deep Analyze pass — separate from
+/// the (currently unsurfaced) scan-exclusion list: a folder can be fine to
+/// catalog/tag/search but too slow or private to run the VLM over. Nothing
+/// is removed from the library, so unlike the model-install cards above
+/// there's no purge-in-flight state to track — just persist the list; it
+/// takes effect starting with the next whole-library Deep Analyze run.
+struct DeepAnalyzeExclusionsCard: View {
+    @State private var settings = DeepAnalyzeSettings.shared
+    @State private var message: (text: String, isError: Bool)?
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Deep Analyze exclusions").font(.headline)
+                Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().opacity(0.3)
+
+                if let message {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(message.isError ? .red : .green)
+                        Text(message.text)
+                            .font(.caption)
+                            .foregroundStyle(message.isError ? .red : .secondary)
+                        Spacer()
+                    }
+                }
+
+                if settings.excludedFolders.isEmpty {
+                    Text("No folders are excluded from Deep Analyze.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    ForEach(settings.excludedFolders, id: \.self) { folder in
+                        HStack(spacing: 8) {
+                            Text(folder)
+                                .font(.caption.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button {
+                                settings.removeExcludedFolder(folder)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(.secondary)
+                            .help("Stop excluding \(folder) from Deep Analyze")
+                        }
+                    }
+                }
+
+                Button("Add folder…") { pickExcludedFolder() }
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func pickExcludedFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a folder to exclude from Deep Analyze"
+        panel.prompt = "Exclude"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        switch settings.addExcludedFolder(url.path) {
+        case .added:
+            message = ("Excluded. Deep Analyze will skip this folder starting with the next whole-library run.", false)
+        case .alreadyExcluded:
+            message = ("That folder is already excluded from Deep Analyze.", false)
+        case .invalid:
+            message = ("Couldn't exclude that folder — pick a folder on this Mac.", true)
+        }
+    }
+}
+
 // MARK: - CLIP semantic-search card
 
 /// Settings card for the CLIP semantic-search tier. State-driven —
@@ -210,6 +339,12 @@ struct SettingsTab: View {
 struct CLIPSemanticSearchCard: View {
     @State private var installer = CLIPModelInstaller.shared
     @State private var confirmUninstall = false
+
+    private var downloadSizeLabel: String {
+        ByteCountFormatter.string(
+            fromByteCount: CLIPModelInstaller.approxDownloadBytes,
+            countStyle: .file)
+    }
 
     var body: some View {
         GlassCard {
@@ -250,15 +385,17 @@ struct CLIPSemanticSearchCard: View {
             titleVisibility: .visible
         ) {
             Button("Remove", role: .destructive) {
-                installer.uninstall()
-                // Drop the in-memory text encoder too — otherwise semantic
-                // search keeps running against the model we just deleted until
-                // the next app launch, with no fallback. (F-C4-017)
-                CLIPTextEncoder.shared.unload()
+                Task {
+                    await installer.uninstall()
+                    // Drop the in-memory text encoder too — otherwise semantic
+                    // search keeps running against the model we just deleted until
+                    // the next app launch, with no fallback. (F-C4-017)
+                    CLIPTextEncoder.shared.unload()
+                }
             }
             Button("Keep", role: .cancel) {}
         } message: {
-            Text("Frees ~350 MB. Semantic search will revert to keyword search until you reinstall.")
+            Text("Frees approximately \(downloadSizeLabel). Semantic search will revert to keyword search until you reinstall.")
         }
     }
 
@@ -273,7 +410,7 @@ struct CLIPSemanticSearchCard: View {
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(reason).font(.caption2).foregroundStyle(.secondary)
-                    Text("~210 MB download from huggingface.co (Apple's MobileCLIP repo + OpenAI's BPE vocabulary).")
+                    Text("Approximately \(downloadSizeLabel) from huggingface.co (Xenova CLIP ViT-B/32 + OpenAI BPE vocabulary).")
                         .font(.caption2).foregroundStyle(.tertiary)
                 }
                 Spacer()
@@ -499,6 +636,92 @@ struct RamPlusTaggerCard: View {
     }
 }
 
+// AI Models — BGE document embedder. The engine's restructure clusters documents by
+// content when this is installed, else by filename — so installing is purely an upgrade.
+struct BGEDocCard: View {
+    @State private var installer = BGEModelInstaller.shared
+    @State private var confirmUninstall = false
+
+    private var modelPath: String {
+        BGEModelInstaller.modelsRoot.appendingPathComponent("bge_text/bge_small.onnx").path
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("AI Models — document understanding").font(.headline)
+                Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
+                    .font(.callout).foregroundStyle(.secondary)
+                Divider().opacity(0.3)
+                HStack(alignment: .top, spacing: 8) {
+                    statusIcon.padding(.top, 2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("BGE-small-en-v1.5").font(.callout.bold())
+                        Text("384-d BERT text embedder · runs on the Neural Engine").font(.caption).foregroundStyle(.secondary)
+                        Text(modelPath)
+                            .font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer()
+                }
+                footer.padding(.leading, 24)
+            }
+        }
+        .onAppear { installer.refreshStatus() }
+        .confirmationDialog(
+            "Remove document understanding?",
+            isPresented: $confirmUninstall,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
+            Button("Keep", role: .cancel) { confirmUninstall = false }
+        } message: {
+            Text("Frees ~135 MB. Documents fall back to filename-based grouping in Restructure.")
+        }
+    }
+
+    @ViewBuilder private var statusIcon: some View {
+        switch installer.status {
+        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
+        case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        default: Image(systemName: "xmark.circle").foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder private var footer: some View {
+        switch installer.status {
+        case .unknown:
+            EmptyView()
+        case .missing:
+            Button { installer.install() } label: {
+                Label("Install (~135 MB)", systemImage: "arrow.down.circle.fill")
+            }
+            .buttonStyle(.borderedProminent)
+        case .downloading(let fraction, let message, _, _):
+            VStack(alignment: .leading, spacing: 4) {
+                ProgressView(value: fraction).frame(maxWidth: 280)
+                HStack {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Cancel") { installer.cancel() }.font(.caption)
+                }
+            }
+        case .installed(let sizeBytes):
+            HStack(spacing: 8) {
+                Text("Installed · \(sizeBytes / 1_048_576) MB").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Remove", role: .destructive) { confirmUninstall = true }.font(.caption)
+            }
+        case .installFailed(let msg):
+            VStack(alignment: .leading, spacing: 4) {
+                Text(msg).font(.caption).foregroundStyle(.red)
+                Button("Retry") { installer.install() }.buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
 struct FaceEmbedderCard: View {
     let engine: EngineClient
     let store: ReadStore
@@ -509,7 +732,7 @@ struct FaceEmbedderCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(.headline)
-                Text("On-device face embedder for clustering people. Pre-converted from Buffalo (Immich) ONNX — install with one click, no Python required.")
+                Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
                 ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in

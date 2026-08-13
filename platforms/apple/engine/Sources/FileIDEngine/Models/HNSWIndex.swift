@@ -234,11 +234,16 @@ final class HNSWIndex {
             liveVectors.append(node.vec)
         }
 
-        // Reset and reinsert.
+        // Reset and reinsert. Rewind the level-draw RNG to its fixed seed so the
+        // rebuilt topology is identical to building fresh from these survivors —
+        // otherwise compact() would keep drawing from the advanced stream and the
+        // determinism contract above (stable cluster IDs / inherited names across
+        // re-clusters) would silently break. (audit F-C3-006)
         nodes = []
         entryPoint = -1
         entryLevel = 0
         deletedCount = 0
+        rngState = HNSWIndex.levelSeed
         for vec in liveVectors {
             insert(vec)
         }
@@ -248,6 +253,90 @@ final class HNSWIndex {
     /// Health metric — fraction of tombstoned slots.
     var deletedFraction: Double {
         nodes.isEmpty ? 0 : Double(deletedCount) / Double(nodes.count)
+    }
+
+    // MARK: - Heap helpers
+
+    private struct MinHeap {
+        private var storage: [(Int32, Float)] = []
+        var isEmpty: Bool { storage.isEmpty }
+        var count: Int { storage.count }
+        var min: (Int32, Float)? { storage.first }
+        mutating func reserveCapacity(_ n: Int) { storage.reserveCapacity(n) }
+        mutating func insert(_ item: (Int32, Float)) {
+            storage.append(item)
+            var i = storage.count - 1
+            while i > 0 {
+                let p = (i - 1) >> 1
+                if storage[p].1 <= storage[i].1 { break }
+                storage.swapAt(i, p)
+                i = p
+            }
+        }
+        @discardableResult
+        mutating func extractMin() -> (Int32, Float)? {
+            guard !storage.isEmpty else { return nil }
+            if storage.count == 1 { return storage.removeLast() }
+            let top = storage[0]
+            storage[0] = storage.removeLast()
+            var i = 0
+            let n = storage.count
+            while true {
+                let l = 2 * i + 1, r = l + 1
+                var s = i
+                if l < n && storage[l].1 < storage[s].1 { s = l }
+                if r < n && storage[r].1 < storage[s].1 { s = r }
+                if s == i { break }
+                storage.swapAt(i, s)
+                i = s
+            }
+            return top
+        }
+    }
+
+    private struct MaxHeap {
+        private var storage: [(Int32, Float)] = []
+        var isEmpty: Bool { storage.isEmpty }
+        var count: Int { storage.count }
+        var max: (Int32, Float)? { storage.first }
+        mutating func reserveCapacity(_ n: Int) { storage.reserveCapacity(n) }
+        mutating func insert(_ item: (Int32, Float)) {
+            storage.append(item)
+            var i = storage.count - 1
+            while i > 0 {
+                let p = (i - 1) >> 1
+                if storage[p].1 >= storage[i].1 { break }
+                storage.swapAt(i, p)
+                i = p
+            }
+        }
+        @discardableResult
+        mutating func extractMax() -> (Int32, Float)? {
+            guard !storage.isEmpty else { return nil }
+            if storage.count == 1 { return storage.removeLast() }
+            let top = storage[0]
+            storage[0] = storage.removeLast()
+            var i = 0
+            let n = storage.count
+            while true {
+                let l = 2 * i + 1, r = l + 1
+                var s = i
+                if l < n && storage[l].1 > storage[s].1 { s = l }
+                if r < n && storage[r].1 > storage[s].1 { s = r }
+                if s == i { break }
+                storage.swapAt(i, s)
+                i = s
+            }
+            return top
+        }
+        func sortedAscending() -> [(Int32, Float)] {
+            var copy = self
+            var out: [(Int32, Float)] = []
+            out.reserveCapacity(storage.count)
+            while let item = copy.extractMax() { out.append(item) }
+            out.reverse()
+            return out
+        }
     }
 
     // MARK: - Internals
@@ -303,9 +392,12 @@ final class HNSWIndex {
         return (current, currentDist)
     }
 
-    /// Beam search at a given layer — returns up to ef best (id, dist) pairs.
-    /// Uses two heaps tracked as sorted arrays (small ef, so O(ef) inserts
-    /// are fine and the constant factor beats a real heap).
+    /// Beam search at a given layer — returns up to ef best (id, dist) pairs
+    /// sorted ascending. MinHeap for the candidate frontier (O(log ef) extract-min)
+    /// and MaxHeap for the bounded result window (O(1) peek-max, O(log ef) evict).
+    /// O(ef·M·log ef) per call — replaces the O(ef²·M) sorted-array path that
+    /// caused the HNSW build to stall on large face libraries (efConstruction=200,
+    /// N=200K → ~30 min with sorted arrays; <1 min with heaps).
     private func searchLayer(
         query: [Float],
         entries: [(Int32, Float)],
@@ -313,21 +405,20 @@ final class HNSWIndex {
         layer: Int
     ) -> [(Int32, Float)] {
         var visited = Set<Int32>()
-        var candidates: [(Int32, Float)] = []  // ascending distance
-        var results:    [(Int32, Float)] = []  // ascending distance
+        var candidates = MinHeap()
+        var results = MaxHeap()
+        candidates.reserveCapacity(ef * 2)
+        results.reserveCapacity(ef + 1)
 
         for entry in entries {
             visited.insert(entry.0)
-            insertSorted(&candidates, entry, ascending: true)
-            insertSorted(&results,    entry, ascending: true)
+            candidates.insert(entry)
+            results.insert(entry)
         }
-        if results.count > ef { results = Array(results.prefix(ef)) }
+        while results.count > ef { results.extractMax() }
 
-        while let (curID, curDist) = candidates.first {
-            candidates.removeFirst()
-            // results.last is the worst kept. Stop when even the closest
-            // unvisited candidate is farther than our worst kept.
-            if let worst = results.last?.1, curDist > worst, results.count >= ef {
+        while let (curID, curDist) = candidates.extractMin() {
+            if let worst = results.max?.1, curDist > worst, results.count >= ef {
                 break
             }
             let curNode = nodes[Int(curID)]
@@ -337,14 +428,14 @@ final class HNSWIndex {
                 let nIdx = Int(nID)
                 if nodes[nIdx].deleted { continue }
                 let d = l2(query, nodes[nIdx].vec)
-                if results.count < ef || d < (results.last?.1 ?? .infinity) {
-                    insertSorted(&candidates, (nID, d), ascending: true)
-                    insertSorted(&results,    (nID, d), ascending: true)
-                    if results.count > ef { results.removeLast() }
+                if results.count < ef || d < (results.max?.1 ?? .infinity) {
+                    candidates.insert((nID, d))
+                    results.insert((nID, d))
+                    if results.count > ef { results.extractMax() }
                 }
             }
         }
-        return results
+        return results.sortedAscending()
     }
 
     /// Heuristic neighbour selection — for now, take the top-M by distance.
@@ -368,22 +459,6 @@ final class HNSWIndex {
         }
         let kept = scored.sorted { $0.1 < $1.1 }.prefix(cap)
         return kept.map { $0.0 }
-    }
-
-    /// Sorted insert helper. `ascending = true` keeps min at index 0.
-    private func insertSorted(
-        _ arr: inout [(Int32, Float)],
-        _ item: (Int32, Float),
-        ascending: Bool
-    ) {
-        // Binary search for the insertion index.
-        var lo = 0, hi = arr.count
-        while lo < hi {
-            let mid = (lo + hi) >> 1
-            let cmp: Bool = ascending ? (arr[mid].1 < item.1) : (arr[mid].1 > item.1)
-            if cmp { lo = mid + 1 } else { hi = mid }
-        }
-        arr.insert(item, at: lo)
     }
 
     /// L2 distance via Accelerate. Same metric and dim-mismatch semantics

@@ -102,7 +102,8 @@ class QLPreviewProvider: NSObject, QLPreviewingController {
     // MARK: - Rendering
 
     private static func renderHTML(url: URL, info: Enrichment?) -> String {
-        let imgSrc = "file://" + url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!
+        let encodedPath = url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url.path
+        let imgSrc = "file://" + encodedPath
         let smartLine: String
         if let smart = info?.smartName, !smart.isEmpty {
             smartLine = """

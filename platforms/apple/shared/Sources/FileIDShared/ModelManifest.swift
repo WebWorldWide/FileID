@@ -79,6 +79,18 @@ public enum ModelManifest {
             url: "https://huggingface.co/Web-World-Wide/ram-plus-onnx/resolve/main/ram_plus_thresholds.txt",
             sha256: "7a69cbf2875161aefbc7db174f726a74eb1cebbd2e4538cef2e20fdc7eabb4e2",
             approxBytes: 46_000),
+        // BGE-small document text embedder — powers content-based document clustering in
+        // restructure. MIT/Apache-clean; pins mirror the Windows registry + manifest.json.
+        ModelArtifact(
+            id: "bge_model",
+            url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model.onnx",
+            sha256: "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35",
+            approxBytes: 135_000_000),
+        ModelArtifact(
+            id: "bge_vocab",
+            url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
+            sha256: "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+            approxBytes: 232_000),
     ]
 
     public static let vlmRepos: [VLMRepoPin] = [
@@ -92,6 +104,11 @@ public enum ModelManifest {
             kind: "qwen3_vl_4b",
             revision: "552af30c9952c44f1e1a27c7c5810ded58e892bc",
             approxBytes: 3_500_000_000),
+        VLMRepoPin(
+            repo: "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit",
+            kind: "qwen3_vl_8b",
+            revision: "a0afc48efd9308fb14b4d58bbd49d382f7d4f845",
+            approxBytes: 5_776_636_403),
         VLMRepoPin(
             repo: "mlx-community/gemma-3-4b-it-qat-4bit",
             kind: "gemma_3_4b",
