@@ -27,10 +27,10 @@ public sealed record RestructurePlan(
     /// <summary>Engine-authoritative Anchor/Mixed/Junk counts. Null on
     /// plans from older engine builds that didn't compute it.</summary>
     FolderClassificationCounts? FolderClassifications = null,
-    ulong? TotalMoves = null,
-    RestructureConfidenceCounts? ConfidenceCounts = null,
-    bool Truncated = false,
-    string? PlanId = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] ulong? TotalMoves = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] RestructureConfidenceCounts? ConfidenceCounts = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Truncated = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string? PlanId = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
 
