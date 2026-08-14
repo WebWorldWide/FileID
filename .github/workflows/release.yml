@@ -108,6 +108,14 @@ jobs:
         shell: pwsh
         run: python ../../shared/scripts/check_runtime_egress.py --known-blockers
 
+      - name: Download signed/non-Windows CLI/TUI bundles
+        if: steps.mode.outputs.publish == 'true'
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          pattern: '*tools-*'
+          merge-multiple: true
+          path: release-tools
+
       - name: Stage release-ready assets
         if: steps.mode.outputs.publish == 'true'
         shell: pwsh
