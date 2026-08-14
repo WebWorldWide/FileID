@@ -111,7 +111,7 @@ struct ProcessingControl: View {
         VStack(alignment: .leading, spacing: 6) {
             statRow(icon: "magnifyingglass",
                      label: "\(p.discovered.formatted()) found",
-                     trailing: (p.etaSeconds.flatMap { $0 > 0 ? "\(formatETA($0)) left" : nil }),
+                     trailing: (p.etaSeconds.flatMap { $0 > 0 ? "\(Self.formatETA($0)) left" : nil }),
                      trailingTint: Theme.gold)
             if p.processed > 0 {
                 statRow(icon: "tag",
