@@ -233,8 +233,23 @@ struct ProcessingControl: View {
         }
     }
 
-    private func formatETA(_ seconds: Double) -> String {
-        let s = Int(seconds.rounded())
+    static func scanTimingText(_ progress: ScanProgress) -> String {
+        if progress.phase == .discovering {
+            if progress.total == 0 {
+                return "Counting files — \(progress.discovered.formatted()) found"
+            }
+            return "Counting files…"
+        }
+        let stage = progress.phase == .postScan ? "Finishing up" : "Tagging"
+        guard let eta = progress.etaSeconds, eta.isFinite, eta > 0 else {
+            return "\(stage) — estimating…"
+        }
+        return "\(stage) — \(formatETA(eta)) left"
+    }
+
+    static func formatETA(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds > 0 else { return "—" }
+        let s = max(1, Int(min(seconds, 359_940).rounded()))
         let h = s / 3600
         let m = (s % 3600) / 60
         let sec = s % 60
