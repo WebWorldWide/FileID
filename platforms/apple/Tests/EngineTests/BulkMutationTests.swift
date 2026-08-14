@@ -123,7 +123,7 @@ struct BulkMutationTests {
             destinationAnchorFaceID: 101
         )
         #expect(result.succeeded == 1)
-        let row = try await db.pool.read { sql in
+        let row: Row? = try await db.pool.read { sql in
             try Row.fetchOne(sql, sql: """
                 SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b
                 FROM face_verifications
