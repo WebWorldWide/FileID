@@ -124,13 +124,17 @@
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": { "libraryRoot": { "type": "string" } } } } },
+            "properties": {
+              "libraryRoot": { "type": "string" },
+              "supportsPagedPlans": { "type": "boolean", "default": false, "description": "Opt in to a bounded move preview backed by an engine-owned plan spool. Older clients omit this and receive the legacy full plan." }
+            } } } },
 
         { "type": "object", "required": ["applyRestructure"], "additionalProperties": false,
           "properties": { "applyRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot", "moves", "useSymlinks"],
             "properties": {
               "libraryRoot": { "type": "string" },
+              "planID": { "type": ["string", "null"], "description": "Engine-owned paged plan to apply in full. When present, moves is normally empty." },
               "moves": { "type": "array", "items": {
                 "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
@@ -633,6 +637,9 @@
             "required": ["libraryRoot", "moves", "categoryCounts"],
             "properties": {
               "libraryRoot":           { "type": "string" },
+              "planID":                { "type": ["string", "null"], "description": "Opaque engine-owned plan handle. Present only for an opt-in truncated preview." },
+              "totalMoves":            { "type": ["integer", "null"], "minimum": 0, "description": "Exact move count when moves is a bounded preview." },
+              "truncated":             { "type": "boolean", "default": false, "description": "True when moves contains only a bounded preview; apply using planID rather than echoing moves." },
               "moves":                 { "type": "array", "items": { "type": "object", "additionalProperties": false,
                 "required": ["fileID", "source", "destination", "category"],
                 "properties": {
@@ -649,6 +656,21 @@
                 "required": ["category", "count"],
                 "properties": { "category": { "type": "string" }, "count": { "type": "integer", "minimum": 0 } }
               } },
+              "confidenceCounts": {
+                "anyOf": [
+                  { "type": "null" },
+                  { "type": "object", "additionalProperties": false,
+                    "required": ["auto", "review", "ask", "unknown"],
+                    "properties": {
+                      "auto": { "type": "integer", "minimum": 0 },
+                      "review": { "type": "integer", "minimum": 0 },
+                      "ask": { "type": "integer", "minimum": 0 },
+                      "unknown": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                ],
+                "description": "Engine-authoritative confidence totals for the complete plan, including rows omitted from a bounded preview. Apply-time integrity is revalidated immediately before the first move."
+              },
               "folderClassifications": {
                 "anyOf": [
                   { "type": "null" },
@@ -678,9 +700,13 @@
             "additionalProperties": false,
             "required": ["applied", "failed"],
             "properties": {
-              "applied":        { "type": "integer", "minimum": 0 },
-              "failed":         { "type": "integer", "minimum": 0 },
-              "privilegeError": { "type": ["string", "null"] }
+              "applied":           { "type": "integer", "minimum": 0 },
+              "failed":            { "type": "integer", "minimum": 0 },
+              "privilegeError":    { "type": ["string", "null"] },
+              "cancelled":         { "type": "boolean", "default": false, "description": "True when cooperative cancellation stopped the operation before every planned row was processed." },
+              "planned":           { "type": ["integer", "null"], "minimum": 0, "description": "Authoritative number of rows eligible for this apply or undo operation." },
+              "remaining":         { "type": ["integer", "null"], "minimum": 0, "description": "Eligible rows not processed because cancellation stopped the operation. Present when cancelled is true." },
+              "shortcutUndoToken": { "type": ["string", "null"], "format": "uuid", "description": "Opaque token for undoing only the shortcuts created by this apply. Present only for shortcut-mode runs that created at least one new shortcut." }
             }
           }
         }
@@ -697,7 +723,7 @@
             "additionalProperties": false,
             "required": ["action", "succeeded", "failed", "messages"],
             "properties": {
-              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|restoreFromTrash|revertMerge)(:[0-9a-fA-F-]+)?$" },
+              "action":    { "type": "string", "pattern": "^(applyTags|renameFiles|trashFiles|mergeClusters|renamePerson|markPersonsAsUnknown|markPersonsDifferent|restoreFromTrash|revertMerge|purgeExcluded)(:[0-9a-fA-F-]+)?$" },
               "succeeded": { "type": "integer", "minimum": 0 },
               "failed":    { "type": "integer", "minimum": 0 },
               "messages":  { "type": "array", "items": { "type": "object", "additionalProperties": false,
