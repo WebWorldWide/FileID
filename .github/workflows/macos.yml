@@ -204,6 +204,7 @@ jobs:
             "developer.nvidia.com"
             "schemas.microsoft.com"
             "schemas.openxmlformats.org"
+            "ai.google.dev"
           )
           hits=()
           # Find all .swift under apple/, excluding .build/ + DerivedData.
