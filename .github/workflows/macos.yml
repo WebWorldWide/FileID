@@ -235,5 +235,5 @@ jobs:
       - name: Privacy — telemetry-string scan
         run: |
           set -euo pipefail
-          python3 shared/scripts/check_binary_privacy.py .build/release/FileID .build/release/FileIDEngine
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_binary_privacy.py" .build/release/FileID .build/release/FileIDEngine
           echo "No telemetry strings detected. ✅"
