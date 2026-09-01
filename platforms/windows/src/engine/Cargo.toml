@@ -57,7 +57,7 @@ walkdir   = "2"
 # Parallel directory walk — rayon-backed, dramatically faster than walkdir
 # on NVMe (single-thread walkdir tops out ~50K stat/s; jwalk scales to
 # millions on 8+ cores with stat parallelism). MIT-licensed (deny.toml).
-jwalk     = "0.8"
+jwalk     = "0.9"
 
 # CPU/system info for worker count + memory probes.
 num_cpus  = "1"
