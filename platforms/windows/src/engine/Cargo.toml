@@ -110,7 +110,7 @@ instant-distance = "0.6"
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,
 # AND Phase 4 OOXML document text extraction (.docx/.pptx/.xlsx are zip+xml).
 # `default-features = false` skips bzip2/zstd which we don't need.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Streaming XML pull-parser for Phase 4 OOXML text extraction. Pure-Rust,
 # tiny, MIT-licensed. The alternative (`xml-rs`) is heavier + DOM-oriented.
