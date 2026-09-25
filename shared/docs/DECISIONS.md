@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-09-24 — Offer official Qwen3-VL GGUF without switching the default
+
+Official Apache-2.0 Qwen3-VL 4B/8B GGUF + F16 projector pairs now exist (superseding the 2026-05-21 “no 4B GGUF” finding). Pin each file's HF LFS SHA256 **and** its immutable repository revision in the canonical manifest rather than using a moving `main` URL; the pinned llama.cpp b9254 source supports both model and vision architectures. Add them as user-initiated Windows choices, but keep Qwen2.5-VL 7B as the default: source compatibility and disk sizes are verified, while FileID image inference, peak RAM/VRAM, and comparative quality/throughput have not been benchmarked. Linux and Windows ARM64 need a verified native runner before advertising these choices there.
+
 ## 2026-06-17 — Deep-audit triage: fixed HEIC-COM + ArcFace-guard; DEFERRED the IPCSink drainer with rationale
 
 A 4-agent whole-codebase audit (every finding independently verified — this repo has a ~40% audit false-positive history, so verification is mandatory) surfaced, beyond the 6 restructure-lockstep fixes, three engine-robustness items. Two were fixed (clear bugs with an established sibling pattern): (1) `shell/heic.rs` did WinRT activations with no COM apartment on the apartment-less decoder-pool threads, so EVERY HEIC/HEIF — the default iPhone photo format — failed `CO_E_NOTINITIALIZED` and was mis-reported to the user as "HEIF codec not installed" (silently dropping those files from tagging/faces/CLIP/thumbnails); fixed by mirroring `shell::video::ComScope` (MTA RAII guard, the correct model for blocking WinRT `.get()` on pumpless worker threads). (2) `ArcFaceService.embed` force-unwrapped `withUnsafeBytes` `baseAddress!` with no `count > 0` guard, unlike its sibling `MobileCLIPService.embedImage` — a corrupt/empty SFace `.onnx` output would trap the engine; added the same guard.

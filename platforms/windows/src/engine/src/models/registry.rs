@@ -44,6 +44,17 @@ pub enum LookupResult {
     Unknown,
 }
 
+pub(crate) fn vlm_dir_name(model_kind: &str) -> Option<&'static str> {
+    match model_kind {
+        "qwen3_vl_4b" | "qwen3-vl-4b" => Some("qwen3-vl-4b"),
+        "qwen3_vl_8b" | "qwen3-vl-8b" => Some("qwen3-vl-8b"),
+        "qwen2_5_vl_7b" | "qwen2.5-vl-7b" => Some("qwen2.5-vl-7b"),
+        "gemma_3_4b" | "gemma-3-4b" => Some("gemma-3-4b"),
+        "mistral_small_3_2" | "mistral-small-3.2" => Some("mistral-small-3.2"),
+        _ => None,
+    }
+}
+
 /// Resolve a model_kind string into a downloadable bundle.
 ///
 /// Conventions:
@@ -62,7 +73,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         Err(_) => return LookupResult::Unknown,
     };
 
-    match model_kind {
+    match vlm_dir_name(model_kind).unwrap_or(model_kind) {
         // ── Face detection (SCRFD) + Face embedding (ArcFace).
         // Bundled together as a single "arcface" install because both
         // are required to populate face_prints + face crops. Aliases
@@ -210,7 +221,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // Mistral-Small-3.2-24B (Apache-2.0) — the max-quality Deep Analyze
         // VLM, replacing the non-commercial Qwen2.5-VL-3B (Qwen Research
         // License). Multimodal GGUF + mmproj from bartowski's quant repo.
-        "mistral-small-3.2" | "mistral_small_3_2" => {
+        "mistral-small-3.2" => {
             let dir = models_root.join("vlm").join("mistral-small-3.2");
             LookupResult::Found(Model {
                 id: "mistral_small_3_2",
@@ -233,7 +244,49 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 ],
             })
         }
-        "qwen2.5-vl-7b" | "qwen2_5_vl_7b" => {
+        "qwen3-vl-4b" => {
+            let dir = models_root.join("vlm").join("qwen3-vl-4b");
+            LookupResult::Found(Model {
+                id: "qwen3_vl_4b",
+                display_name: "Qwen3-VL 4B",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/1cd86afb9a95c410a6038ab3b40d8b578c892266/Qwen3VL-4B-Instruct-Q4_K_M.gguf".to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: Some("66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a".into()),
+                        approx_bytes: 2_497_281_664,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/resolve/1cd86afb9a95c410a6038ab3b40d8b578c892266/mmproj-Qwen3VL-4B-Instruct-F16.gguf".to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: Some("256f3a43bd4205ffef48d6b92715e1e70b5b0e9aef06522584967513a9985331".into()),
+                        approx_bytes: 836_180_256,
+                    },
+                ],
+            })
+        }
+        "qwen3-vl-8b" => {
+            let dir = models_root.join("vlm").join("qwen3-vl-8b");
+            LookupResult::Found(Model {
+                id: "qwen3_vl_8b",
+                display_name: "Qwen3-VL 8B",
+                files: vec![
+                    FileEntry {
+                        url: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/Qwen3VL-8B-Instruct-Q4_K_M.gguf".to_string(),
+                        dest: dir.join("model.gguf"),
+                        sha256: Some("67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2".into()),
+                        approx_bytes: 5_027_784_800,
+                    },
+                    FileEntry {
+                        url: "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/resolve/f982a07559d4a2f6c8744d840bf6fccab30eea96/mmproj-Qwen3VL-8B-Instruct-F16.gguf".to_string(),
+                        dest: dir.join("mmproj.gguf"),
+                        sha256: Some("ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38".into()),
+                        approx_bytes: 1_159_029_824,
+                    },
+                ],
+            })
+        }
+        "qwen2.5-vl-7b" => {
             let dir = models_root.join("vlm").join("qwen2.5-vl-7b");
             LookupResult::Found(Model {
                 id: "qwen2_5_vl_7b",
@@ -256,7 +309,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
                 ],
             })
         }
-        "gemma_3_4b" | "gemma-3-4b" => {
+        "gemma-3-4b" => {
             let dir = models_root.join("vlm").join("gemma-3-4b");
             LookupResult::Found(Model {
                 id: "gemma_3_4b",
@@ -619,10 +672,14 @@ pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
 }
 
 pub fn installation_complete(model: &Model) -> bool {
-    let Some(sentinel) = sentinel_path(model).filter(|path| path.is_file()) else {
+    let Some(sentinel) = sentinel_path(model) else {
         return false;
     };
-    if !model.files.iter().all(installed_artifact_is_plausible) {
+    installation_complete_with_sentinel(model, &sentinel)
+}
+
+pub(crate) fn installation_complete_with_sentinel(model: &Model, sentinel: &Path) -> bool {
+    if !sentinel.is_file() || !model.files.iter().all(installed_artifact_is_plausible) {
         return false;
     }
     if model.files.iter().any(is_zip_entry) {
@@ -788,8 +845,8 @@ mod tests {
         // ort_openvino IS on HF, so it belongs here for real coverage.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
-            "florence2", "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2",
-            "ort_openvino_x64",
+            "florence2", "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
+            "gemma_3_4b", "mistral_small_3_2", "ort_openvino_x64",
         ];
         for kind in kinds {
             if let LookupResult::Found(m) = lookup_full(kind) {
@@ -823,6 +880,8 @@ mod tests {
         for (snake, dotted) in [
             ("mistral_small_3_2", "mistral-small-3.2"),
             ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
+            ("qwen3_vl_4b", "qwen3-vl-4b"),
+            ("qwen3_vl_8b", "qwen3-vl-8b"),
             ("gemma_3_4b", "gemma-3-4b"),
         ] {
             let LookupResult::Found(a) = lookup_full(snake) else {

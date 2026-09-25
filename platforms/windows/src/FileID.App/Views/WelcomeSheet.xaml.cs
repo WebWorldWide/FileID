@@ -250,10 +250,15 @@ public sealed partial class WelcomeSheet : UserControl
     internal string ErrorLabel(string? lastError) =>
         "Failed: " + (lastError ?? "unknown error");
 
-    /// <summary>Deep Analyze (Qwen) row title — e.g. "Deep Analyze (Qwen2.5-VL
-    /// 3B)". Reads DisplayLabel via x:Bind so the hardware-tiered recommendation
-    /// (3B ↔ 7B) updates the row text without a page reload.</summary>
-    internal string VlmTitle(string displayLabel) => $"Deep Analyze ({displayLabel})";
+    /// <summary>The welcome slot is satisfied by any installed VLM; avoid
+    /// naming a recommended model that might not be the one on disk.</summary>
+    internal string VlmTitle(string displayLabel, ModelInstallStatus status) =>
+        status == ModelInstallStatus.Installed
+            ? "Deep Analyze (vision model installed)"
+            : $"Deep Analyze ({displayLabel})";
+
+    internal string VlmInstallSize(ulong approxBytes, ModelInstallStatus status) =>
+        status == ModelInstallStatus.Installed ? string.Empty : VlmSize(approxBytes);
 
     internal string VlmSize(ulong approxBytes)
     {

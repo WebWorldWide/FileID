@@ -21,6 +21,8 @@ public sealed class ModelLicenseGateTests
 
     [Theory]
     [InlineData("qwen2_5_vl_7b")]
+    [InlineData("qwen3_vl_4b")]
+    [InlineData("qwen3_vl_8b")]
     [InlineData("mistral_small_3_2")]
     [InlineData("ort_openvino_x64")]
     [InlineData("mobileclip_s2")]

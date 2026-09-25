@@ -8,7 +8,7 @@
 //! second call still streams bytes into the same .part).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -132,6 +132,12 @@ fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'stat
     }
 }
 
+async fn write_install_sentinel(model: &registry::Model, tmp: &Path) -> std::io::Result<()> {
+    let body = registry::installation_attestation(model)
+        .ok_or_else(|| std::io::Error::other("installed model files are missing or unreadable"))?;
+    tokio::fs::write(tmp, body).await
+}
+
 pub(crate) async fn handle_prewarm_model(
     sink: Sink,
     model_kind: String,
@@ -241,21 +247,19 @@ pub(crate) async fn handle_prewarm_model(
 
     tracing::info!(model = %model.id, files = model.files.len(), "starting prewarm");
 
-    if let Some(sentinel) = registry::sentinel_path(&model) {
-        if sentinel.exists() {
-            sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
-                ModelDownloadProgress {
-                    model_kind: model_kind.clone(),
-                    fraction: 1.0,
-                    message: format!("{} already installed", model.display_name),
-                    bytes_done: None,
-                    total_bytes: None,
-                },
-            ))))
-            .await;
-            tracing::info!(model_kind = %model_kind, outcome = "already_installed", "[PREWARM] exiting");
-            return;
-        }
+    if registry::installation_complete(&model) {
+        sink.send(IpcEvent::now(EventPayload::ModelDownloadProgress(Wrap::new(
+            ModelDownloadProgress {
+                model_kind: model_kind.clone(),
+                fraction: 1.0,
+                message: format!("{} already installed", model.display_name),
+                bytes_done: None,
+                total_bytes: None,
+            },
+        ))))
+        .await;
+        tracing::info!(model_kind = %model_kind, outcome = "already_installed", "[PREWARM] exiting");
+        return;
     }
 
     let total_bytes_estimate: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
@@ -538,7 +542,7 @@ pub(crate) async fn handle_prewarm_model(
             }
         }
         let tmp = sentinel.with_extension("installed.tmp");
-        if let Err(err) = tokio::fs::write(&tmp, model.id.as_bytes()).await {
+        if let Err(err) = write_install_sentinel(&model, &tmp).await {
             tracing::error!(?err, tmp = %tmp.display(), "sentinel tmp write failed");
             // A failed write can leave a partial .tmp behind; remove it (mirroring
             // the rename path below) so a half-written marker isn't left on disk.
@@ -612,5 +616,72 @@ mod tests {
             prewarm_cancel_flag("test_kind_gamma").load(Ordering::Relaxed),
             "a cancel before first fetch must still be recorded"
         );
+    }
+    #[tokio::test]
+    async fn prewarm_sentinel_accepts_extracted_runtime_and_pinned_weight() {
+        use sha2::Digest as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "fileid-prewarm-sentinel-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let runtime = root.join("runtime");
+        let weights = root.join("weights");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&weights).unwrap();
+        let server = runtime.join("llama-server");
+        let cli = runtime.join("llama-mtmd-cli");
+        let mtmd = runtime.join("libmtmd.so");
+        std::fs::write(&server, b"server-a").unwrap();
+        std::fs::write(&cli, b"cli").unwrap();
+        std::fs::write(&mtmd, b"library").unwrap();
+        let runtime_model = registry::Model {
+            id: "test_runtime",
+            display_name: "Test runtime",
+            files: vec![ModelFile {
+                url: "https://huggingface.co/test/llama-runtime.zip".into(),
+                dest: runtime.join("llama-runtime.zip"),
+                sha256: Some("00".repeat(32)),
+                approx_bytes: 1,
+            }],
+        };
+        let sentinel = root.join("runtime.installed");
+        std::fs::write(&sentinel, runtime_model.id).unwrap();
+        assert!(!registry::installation_complete_with_sentinel(&runtime_model, &sentinel));
+        let tmp = root.join("runtime.installed.tmp");
+        write_install_sentinel(&runtime_model, &tmp).await.unwrap();
+        std::fs::rename(&tmp, &sentinel).unwrap();
+        assert!(registry::installation_complete_with_sentinel(&runtime_model, &sentinel));
+        std::fs::write(&server, b"server-b").unwrap();
+        assert!(!registry::installation_complete_with_sentinel(&runtime_model, &sentinel));
+        std::fs::write(&server, b"server-a").unwrap();
+        std::fs::remove_file(&cli).unwrap();
+        assert!(!registry::installation_complete_with_sentinel(&runtime_model, &sentinel));
+
+        let weight = weights.join("model.onnx");
+        std::fs::write(&weight, b"weight-a").unwrap();
+        let weight_model = registry::Model {
+            id: "test_weights",
+            display_name: "Test weights",
+            files: vec![ModelFile {
+                url: "https://huggingface.co/test/model.onnx".into(),
+                dest: weight.clone(),
+                sha256: Some(hex::encode(sha2::Sha256::digest(b"weight-a"))),
+                approx_bytes: 8,
+            }],
+        };
+        let weight_sentinel = root.join("weights.installed");
+        write_install_sentinel(&weight_model, &weight_sentinel).await.unwrap();
+        assert!(registry::installation_complete_with_sentinel(
+            &weight_model,
+            &weight_sentinel
+        ));
+        std::fs::write(weight, b"weight-b").unwrap();
+        assert!(!registry::installation_complete_with_sentinel(
+            &weight_model,
+            &weight_sentinel
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

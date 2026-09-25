@@ -1,9 +1,5 @@
-﻿// Regression for the Deep Analyze "Installed" badge: the wire model_kind is
-// snake_case ("mistral_small_3_2") but the engine registry installs the
-// weights under a dotted dir ("vlm\mistral-small-3.2"), so probing
-// vlm\<kind> reported every installed VLM as missing — the app-side twin of
-// the engine's vlm::find_weights bug. VlmWeightDirs is the one mapping.
-
+﻿using System;
+using System.IO;
 using FileID.Services;
 using Xunit;
 
@@ -12,18 +8,33 @@ namespace FileID.App.Tests;
 public class VlmWeightDirsTests
 {
     [Theory]
-    [InlineData("mistral_small_3_2", "mistral-small-3.2")]
+    [InlineData("qwen3_vl_4b", "qwen3-vl-4b")]
+    [InlineData("qwen3_vl_8b", "qwen3-vl-8b")]
     [InlineData("qwen2_5_vl_7b", "qwen2.5-vl-7b")]
-    [InlineData("gemma_3_4b", "gemma-3-4b")]
-    public void WireKind_MapsToRegistryDir(string kind, string dir)
+    public void ModelCard_OnlyReportsItsOwnCompleteWeightsInstalled(string kind, string dirName)
     {
-        Assert.Equal(dir, VlmWeightDirs.DirNameFor(kind));
-    }
+        var modelsDir = Path.Combine(Path.GetTempPath(), "fileid-vlm-" + Guid.NewGuid());
+        try
+        {
+            var selectedDir = Path.Combine(modelsDir, "vlm", dirName);
+            var otherDir = Path.Combine(modelsDir, "vlm", "gemma-3-4b");
+            Directory.CreateDirectory(selectedDir);
+            Directory.CreateDirectory(otherDir);
+            using (var file = File.Create(Path.Combine(otherDir, "model.gguf"))) file.SetLength(1_048_576);
+            using (var file = File.Create(Path.Combine(otherDir, "mmproj.gguf"))) file.SetLength(1_048_576);
+            Assert.False(VlmWeightDirs.WeightsPresent(modelsDir, kind));
 
-    [Fact]
-    public void UnknownKind_PassesThrough()
-    {
-        // A caller already holding the dir spelling must still resolve.
-        Assert.Equal("mistral-small-3.2", VlmWeightDirs.DirNameFor("mistral-small-3.2"));
+            using (var file = File.Create(Path.Combine(selectedDir, "model.gguf"))) file.SetLength(1_048_576);
+            Assert.False(VlmWeightDirs.WeightsPresent(modelsDir, kind));
+
+            using (var file = File.Create(Path.Combine(selectedDir, "mmproj.gguf"))) file.SetLength(1_048_575);
+            Assert.False(VlmWeightDirs.WeightsPresent(modelsDir, kind));
+            using (var file = File.Create(Path.Combine(selectedDir, "mmproj.gguf"))) file.SetLength(1_048_576);
+            Assert.True(VlmWeightDirs.WeightsPresent(modelsDir, kind));
+        }
+        finally
+        {
+            if (Directory.Exists(modelsDir)) Directory.Delete(modelsDir, recursive: true);
+        }
     }
 }

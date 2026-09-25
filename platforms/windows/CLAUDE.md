@@ -47,11 +47,11 @@ Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo cli
 
 ## Current status
 
-Engine and app are both feature-complete across the six tabs. The commercial-clean / Apache-2.0 model stack is merged to `main` and CI-green, on-hardware verified (RTX 2060, DirectML):
+Engine and app cover all six tabs. The existing commercial-clean model stack was on-hardware verified (RTX 2060, DirectML); optional Qwen3-VL inference remains unverified without installed weights:
 - **Tagging:** RAM++ (Swin-L @384, 4585-tag ONNX) primary, per-class thresholds + generic-tag suppress-list; CLIP zero-shot scene tags are the fallback.
 - **Search:** CLIP ViT-B/32 (512-d image + text).
 - **Faces:** YuNet detect + SFace embed (128-d) + 5-point alignment; density clustering.
-- **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (default) / Gemma 3 / Mistral-Small-3.2.
+- **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (unchanged default) / Gemma 3 / Mistral-Small-3.2, plus optional pinned official Qwen3-VL 4B and 8B GGUF + mmproj bundles (Apache-2.0). Select and install them on the Deep Analyze tab; they are not auto-recommended.
 - EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU); NVIDIA without the CUDA pack runs DirectML. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
 
 In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.

@@ -1,8 +1,6 @@
 # Models — canonical registry
 
-FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. **Every artifact is SHA256-pinned in `engine/src/models/registry.rs`** — the canonical hash is the `oid sha256:` from each HuggingFace LFS pointer (or the sha256 of the GitHub/NVIDIA release asset); the engine downloader verifies the downloaded bytes against the pin before use, and a CI gate (`windows-engine.yml`) fails the build on any unpinned (`sha256: None`) entry. No telemetry on the download.
-
-This file is the cross-platform source of truth for what FileID asks for and where it lives. Per-platform installers (`platforms/apple/scripts/install_clip_models.sh`, `platforms/windows/build/install-models.ps1`, future Linux equivalent) read this list.
+FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the canonical URL, pin, size, platform, and license record. The Windows compiled registry (`platforms/windows/src/engine/src/models/registry.rs`) is locked to it by `tests/manifest_consistency.rs`; MLX VLM repositories instead pin immutable revisions and resolve their files' hashes from that revision.
 
 ## Licensing posture — commercial-clean (Apache-2.0 project)
 
@@ -20,7 +18,7 @@ As of the 2026-05 commercial-clean pass, **every weight FileID downloads by defa
 | Face detection + 5-pt landmarks | Apple Vision (`VNDetectFaceRectanglesRequest`) | **YuNet (ONNX, OpenCV Zoo)** | YuNet is MIT. Different detectors → boxes aren't byte-identical, but 5-pt landmarks feed a shared alignment template so embeddings match. |
 | Face embedding | SFace (ONNX via CoreML EP) *(lockstep pending)* | **SFace (ONNX via DirectML / CUDA / CPU EP)** | SFace (OpenCV Zoo) is Apache-2.0, **128-d** L2-normalized. Replaces 512-d ArcFace; person-clustering DBs round-trip once both platforms are on SFace. |
 | OCR | Apple Vision `VNRecognizeTextRequest` (fast tier) | Windows.Media.Ocr (built-in WinRT) default; PaddleOCR ONNX opt-in | Built-in OCR is fast + free + multilingual on both. |
-| Vision-language models (Deep Analyze) | MLX: Qwen 2.5-VL · Gemma 3 · PaliGemma | llama.cpp: Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only; llama.cpp covers Windows on every GPU. Curated lineup per platform to use the best-supported quants. |
+| Vision-language models (Deep Analyze) | MLX: Qwen 2.5-VL · Gemma 3 · PaliGemma | llama.cpp: Qwen 2.5-VL 7B · optional Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small-3.2 | MLX is Apple-Silicon-only. The pinned Windows llama.cpp runtimes are x64; Linux and Windows ARM64 VLM runners remain unverified. |
 
 ## In-scan tagger
 
@@ -129,13 +127,17 @@ All default/recommended VLMs are commercial-clean (Apache-2.0). Gemma-3-4B is op
 
 ### Curated Windows lineup (llama.cpp GGUF Q4_K_M unless noted)
 
-| Model | Size on disk | RAM est. | Use case | License | Source |
+| Model | Disk (GGUF + projector) | RAM est. | Use case | License | Source |
 |---|---|---|---|---|---|
-| **Qwen 2.5-VL 7B** | ~5 GB | ~12 GB | **Recommended default** (≥ 16 GB + dGPU) | Apache-2.0 | [Qwen/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/Qwen) — pinned, GGUF + mmproj |
-| **Gemma 3 4B (vision)** | ~3 GB | ~8 GB | Lighter / weak-box fallback | Gemma Terms (opt-in) | [google/gemma-3-4b-it](https://huggingface.co/google/gemma-3-4b-it) GGUF |
-| **Mistral-Small-3.2 24B** | ~14.3 GB | ~20 GB | Max-quality captioner | Apache-2.0 | [bartowski/Mistral-Small-3.2 GGUF](https://huggingface.co/bartowski) + mmproj |
+| **Qwen 2.5-VL 7B** | ~6.1 GB | ~12 GB | **Recommended default** (≥ 16 GB + dGPU) | Apache-2.0 | [ggml-org/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF) |
+| **Qwen3-VL 4B** | **3,333,461,920 bytes** | Not measured | Optional, manually selected | Apache-2.0 | [Official Qwen GGUF, revision `1cd86afb9a95c410a6038ab3b40d8b578c892266`](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF/tree/1cd86afb9a95c410a6038ab3b40d8b578c892266) |
+| **Qwen3-VL 8B** | **6,186,814,624 bytes** | Not measured | Optional, manually selected | Apache-2.0 | [Official Qwen GGUF, revision `f982a07559d4a2f6c8744d840bf6fccab30eea96`](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF/tree/f982a07559d4a2f6c8744d840bf6fccab30eea96) |
+| **Gemma 3 4B (vision)** | ~3.35 GB | ~8 GB | Lighter / weak-box fallback | Gemma Terms (opt-in) | [ggml-org/gemma-3-4b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF) |
+| **Mistral-Small-3.2 24B** | ~15.18 GB | ~20 GB | Large opt-in captioner | Apache-2.0 | [bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF) |
 
-(Exact pinned commits + SHA256s live in the platform-specific installer scripts, so the doc isn't a SHA copy-pasta target.)
+The Qwen3-VL 4B pair is 2,497,281,664 bytes Q4_K_M GGUF + 836,180,256 bytes F16 vision projector; the 8B pair is 5,027,784,800 + 1,159,029,824 bytes respectively. Their four immutable-revision URLs and LFS SHA256 pins are in `shared/models/manifest.json`. The existing RAM figures above are estimates, not measured Qwen3 working sets.
+
+The pinned [llama.cpp b9254](https://github.com/ggml-org/llama.cpp/releases/tag/b9254) source recognizes [Qwen3-VL 4B/8B](https://github.com/ggml-org/llama.cpp/blob/b9254/src/models/qwen3vl.cpp) and its [vision projector](https://github.com/ggml-org/llama.cpp/blob/b9254/tools/mtmd/clip.cpp). FileID has **not** run these weights for image inference or measured their VRAM, RAM, caption quality, or throughput. Keep Qwen2.5-VL 7B as the default pending a representative benchmark. Linux has no supported installed VLM runner yet (the engine probes `.exe`/PE and the runtime registry pins Windows ZIPs); Windows ARM64 likewise has no pinned native runner. Do not advertise Qwen3 inference on those platforms.
 
 ### macOS lineup (MLX)
 
@@ -149,7 +151,7 @@ All default/recommended VLMs are commercial-clean (Apache-2.0). Gemma-3-4B is op
 
 VLMs cache to:
 - macOS: `~/Documents/huggingface/models/<repo>/` (MLX / swift-transformers convention)
-- Windows: `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (FileID's own download path; outside Documents to avoid surprising users with several GB in there)
+- Windows: `%LOCALAPPDATA%\FileID\Models\vlm\<model-dir>\{model.gguf,mmproj.gguf\}` (user-initiated installs; outside Documents)
 
 ## Performance Packs (Windows GPU runtimes)
 

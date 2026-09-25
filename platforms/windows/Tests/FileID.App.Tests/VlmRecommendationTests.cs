@@ -117,6 +117,23 @@ public sealed class VlmRecommendationTests
         Assert.Equal(VlmRecommendation.Gemma, selected);
     }
 
+    [Theory]
+    [InlineData(VlmRecommendation.Qwen3Four)]
+    [InlineData(VlmRecommendation.Qwen3Eight)]
+    public void InstalledOptionalSelectionHonorsPersistedModelWithoutRamEstimate(string kind)
+    {
+        var profile = new VlmHardwareProfile(
+            TotalRamGb: 12,
+            AvailableRamGb: 8,
+            DedicatedVramMb: 0,
+            GpuVendor: "none",
+            Architecture: Architecture.X64,
+            FreeDiskBytes: PlentyOfDisk);
+
+        Assert.Equal(kind, VlmRecommendation.ResolveInstalledSelection(
+            kind, VlmRecommendation.Qwen, profile, installed => installed == kind));
+    }
+
     [Fact]
     public void InstalledSelectionFallsBackFromMissingPersistedModel()
     {

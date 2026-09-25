@@ -218,8 +218,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Svc.Clip.Fraction = 1.0;
             });
         }
-        // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
-        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
+        // Any supported VLM marks the shared onboarding slot installed.
+        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("qwen3_vl_4b")
+             || SentinelExists("qwen3_vl_8b") || SentinelExists("gemma_3_4b")
              || SentinelExists("mistral_small_3_2"))
             && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
@@ -231,18 +232,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private static bool SentinelExists(string modelId)
-    {
-        try
-        {
-            return System.IO.File.Exists(System.IO.Path.Combine(
-                AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    private static bool SentinelExists(string modelId) => SentinelProbe.Installed(modelId);
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
     {

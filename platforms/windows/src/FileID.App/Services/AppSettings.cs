@@ -107,13 +107,10 @@ internal sealed class AppSettings
     /// used only if the device already provides it.)</summary>
     public bool DisableAutoInstallOpenVino { get; set; } = false;
 
-    /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
-    /// tab uses for full caption + smart-rename + tags. Auto-tagging during
-    /// scans uses RAM++ (CLIP scene tags as fallback); this is the opt-in
-    /// higher-quality path. Accepted values mirror registry.rs ids
-    /// (qwen2_5_vl_7b, gemma_3_4b, mistral_small_3_2); Sanitize() coerces
-    /// anything else to the default qwen2_5_vl_7b. The non-commercial
-    /// qwen2_5_vl_3b (Qwen Research License) was removed.</summary>
+    /// <summary>Persisted Deep Analyze VLM model — the model Deep Analyze
+    /// uses for captions, smart renames, and tags. Auto-tagging during scans
+    /// uses RAM++ (CLIP fallback). Accepted values mirror the engine registry;
+    /// the default remains Qwen2.5-VL-7B for existing and new installs.</summary>
     public string SelectedVlmModelKind { get; set; } = "qwen2_5_vl_7b";
 
     /// <summary>Schema version of this settings.json. Fresh installs start at
@@ -135,7 +132,7 @@ internal sealed class AppSettings
     /// model_kind into the auto-chain deepAnalyzeAll call.</summary>
     private static readonly HashSet<string> AllowedVlmKinds =
         new(StringComparer.OrdinalIgnoreCase)
-        { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
+        { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
 
     /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
     /// can install. The Deep Analyze card guards use this to reject removed /

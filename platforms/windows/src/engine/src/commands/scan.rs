@@ -85,10 +85,7 @@ pub(crate) async fn handle_start_scan(
                 LookupResult::Found(m) => m,
                 LookupResult::Unknown => return Some(*kind),
             };
-            match models::registry::sentinel_path(&model) {
-                Some(p) if p.exists() => None,
-                _ => Some(*kind),
-            }
+            (!models::registry::installation_complete(&model)).then_some(*kind)
         })
         .collect();
     if !missing_models.is_empty() {

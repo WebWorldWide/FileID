@@ -6,15 +6,14 @@
 // fraction, bytes done / total, an EMA bytes-per-second, ETA seconds.
 //
 // Engine progress events are authoritative when a download is in flight.
-// Sentinel files (`.fileid-installed`) are consulted at startup to seed
-// Installed state for previously-completed models AND verified at the
-// 100% transition so a buggy engine path can't lie to the user.
+// Flat or content-hashed `.sentinels/{id}*.installed` markers and required
+// artifacts are checked at startup and at the 100% transition so an
+// incomplete download cannot appear installed.
 //
 // PRIVACY: never makes a network call. Only sends IPC commands; the
 // engine is the sole network surface.
 
 using System.ComponentModel;
-using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using FileID.IpcSchema;
@@ -25,11 +24,9 @@ namespace FileID.Services;
 
 internal sealed class ModelInstallerService : INotifyPropertyChanged
 {
-    // Sentinel model-id constants. The engine writes one sentinel file
-    // per installed model bundle at `%LOCALAPPDATA%\FileID\Models\.sentinels\
-    // {model.id}.installed` (atomic temp+rename; see engine main.rs
-    // handle_prewarm_model). The id strings here MUST match `Model.id`
-    // in engine/src/models/registry.rs.
+    // The engine writes a flat or content-hashed completion marker in
+    // `%LOCALAPPDATA%\FileID\Models\.sentinels\` for each model bundle.
+    // These ids must match engine/src/models/registry.rs.
     //
     // Static field init runs in source order, so these MUST be declared
     // before Instance — its ctor calls SeedFromSentinels which reads them.
@@ -39,12 +36,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     // because they download from different paths in the Xenova mobileclip_s2
     // HuggingFace repo. The pre-scan validation in main.rs::handle_start_scan
     // requires both sentinels, so the slot's "Installed" state must reflect
-    // that. The DeepVlm slot is the optional Deep Analyze model — hardware-
-    // tiered Qwen / Gemma; any of 3B / 7B / Gemma satisfies the slot. ArcFace
-    // stays a single-sentinel "any-of".
+    // that. DeepVlm is the optional Deep Analyze slot: any supported
+    // VLM sentinel satisfies onboarding. Its welcome recommendation stays
+    // Qwen2.5-VL-7B or Gemma, not the opt-in Qwen3 models.
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
-    private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
+    private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     // one-button GPU acceleration pack on the welcome sheet.
@@ -82,9 +79,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// ONNX). Optional; when absent the engine falls back to CLIP scene tags,
     /// so it is NOT (yet) a gate on <see cref="AllInstalled"/>.</summary>
     public ModelSlot RamPlus { get; }
-    /// <summary>Deep Analyze model — hardware-tiered Qwen2.5-VL 7B / Gemma 3 4B
-    /// / Mistral-Small 3.2. Installing persists AppSettings.SelectedVlmModelKind
-    /// so the Deep Analyze tab picks the freshly-installed model by default.</summary>
+    /// <summary>Deep Analyze welcome slot; recommends Qwen2.5-VL-7B or
+    /// Gemma 3 4B. The Deep Analyze tab separately offers other VLMs,
+    /// including optional Qwen3-VL 4B/8B.</summary>
     public ModelSlot DeepVlm { get; }
     /// <summary> one-button GPU acceleration pack. On NVIDIA the
     /// Install action downloads cuDNN; on AMD/Intel/Qualcomm/CPU the slot
@@ -367,9 +364,12 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 slotsToInstall.Add(Accelerator);
             }
+            // A Deep Analyze card can already be installing another VLM.
+            // Never reset its shared slot or dispatch the welcome recommendation
+            // in parallel: progress/cancel tracking holds only one model kind.
+            slotsToInstall.RemoveAll(slot => slot.Status is ModelInstallStatus.Installed or ModelInstallStatus.Downloading);
             foreach (var slot in slotsToInstall)
             {
-                if (slot.Status == ModelInstallStatus.Installed) continue;
                 slot.ResetForRetry();
                 slot.Status = ModelInstallStatus.Downloading;
                 slot.Message = "Queued — starting download…";
@@ -485,14 +485,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         return Task.WhenAll(group.Select(k => EngineClient.Instance.CancelPrewarmAsync(k)));
     }
 
-    /// <summary>Deep Analyze model recommendation for the welcome-sheet DeepVlm
-    /// row, tiered to the machine: a roomy box (≥16 GB RAM or a discrete GPU
-    /// with ≥8 GB VRAM) gets Qwen 2.5-VL 7B for the best captions; everything
-    /// else gets the 3B (the smallest Qwen — ~3.2 GB download, ~3.5 GB RAM).
-    /// Does NOT persist the choice — that happens when the user actually
-    /// installs the row (PersistSelectedVlmModelKind), so a model the user
-    /// explicitly picked in the Deep Analyze tab is never stomped. No-op once
-    /// the row is mid-flight or installed.</summary>
+    /// <summary>Welcome-sheet Deep Analyze recommendation: roomy machines
+    /// get Qwen2.5-VL-7B, otherwise Gemma 3 4B. This does not persist until
+    /// the user installs the row, preserving explicit Deep Analyze picks.
+    /// Optional Qwen3 choices never become automatic recommendations.</summary>
     public void UpdateDeepVlmRecommendation(double ramGB, ulong vramMB, string? gpuVendor)
     {
         if (DeepVlm.Status == ModelInstallStatus.Downloading
@@ -811,6 +807,8 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             case "arcface_mobileface":
                 return Arcface;
             case "qwen2_5_vl_7b":
+            case "qwen3_vl_4b":
+            case "qwen3_vl_8b":
             case "gemma_3_4b":
             case "mistral_small_3_2":
             case "mistral-small-3.2":
@@ -940,7 +938,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             return;
         }
         var sentinelIds = SentinelIdsFor(slot);
-        slot.Apply(p, () => SentinelExistsForAnyOf(sentinelIds));
+        slot.Apply(p, () => ReferenceEquals(slot, DeepVlm)
+            ? SentinelInstalled(p.ModelKind)
+            : SentinelExistsForAnyOf(sentinelIds));
     }
 
     private void HandleEngineError(EngineError? error)
@@ -1042,20 +1042,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         return false;
     }
 
-    /// <summary>Probe for the engine's canonical install marker at
-    /// `%LOCALAPPDATA%\FileID\Models\.sentinels\{id}.installed`. Engine
-    /// writes the file atomically (tmp+rename) only after every file in
-    /// the bundle has landed successfully, so file presence is sufficient
-    /// — no need for the defensive "is the dir empty?" check we used to
-    /// do under the legacy per-model-dir sentinel layout.</summary>
-    private static bool SentinelInstalled(string modelId)
-    {
-        try
-        {
-            return File.Exists(Path.Combine(AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
-        }
-        catch { return false; }
-    }
+    /// <summary>Only report a model installed after its sentinel and required
+    /// artifacts are present. The engine can write flat or hashed sentinels.</summary>
+    private static bool SentinelInstalled(string modelId) => SentinelProbe.Installed(modelId);
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
