@@ -10,7 +10,7 @@
 - **Store architecture:** initial package is x64. Add ARM64 only after `fetch-runtime-deps.ps1` supplies the correct ARM64 ORT, DirectML, and pdfium binaries; it currently stages x64 native DLLs.
 - **Before each Store update:** increment `AppxPackageVersion` and `Package.appxmanifest` identity version together. The initial Store version is `1.0.0.0` because Store version rules disallow a zero first component; it is independent of FileID's `0.1.0` product version. Install/launch smoke-test on Windows. WACK is deprecated and optional for local preflight; Partner Center runs the official certification after submission.
 - **Partner Center draft:** FileID name reserved, Store ID `9PC8HSD86887`, package identity `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`. Microsoft warned the reservation expires about 2026-12-27 if no submission is made.
-- The public privacy policy already exists at `https://github.com/anolle/FileID/blob/main/shared/docs/PRIVACY.md` (the app opens this same policy). Complete the Store listing with description, fresh screenshots captured on Windows, age rating, price/availability, and any account-specific submission fields. Review the listing and the first package before starting or submitting a release.
+- The public privacy policy already exists at `https://github.com/WebWorldWide/FileID/blob/main/shared/docs/PRIVACY.md` (the app opens this same policy). Complete the Store listing with description, fresh screenshots captured on Windows, age rating, price/availability, and any account-specific submission fields. Review the listing and the first package before starting or submitting a release.
 
 ## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
 
