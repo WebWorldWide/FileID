@@ -3371,3 +3371,7 @@ When FILEID_TEST_INSTANCE is set, the app derives a stable per-test mutex from t
 ## 2026-09-28 — Hold restructure Apply until the engine outcome is known
 
 A plan arriving during an apply does not prove the file operation finished. Keep the single-flight guard through plan changes and timeouts; release it after the engine reports completion and a fresh plan arrives, or when the owning engine process ends. This prevents a second apply against a partially moved library. A timed-out operation reports an uncertain outcome rather than claiming files are unchanged.
+
+## 2026-09-28 — Share restructure selection state with the full drill-down
+
+The first 200 files in an outcome remain a compact inline preview, but "See all" uses a virtualized list of every matching row. It reuses the exact row objects from the rendered plan so dialog toggles change the authoritative Apply set and survive view recreation. Stale row and card callbacks are ignored after a re-plan.

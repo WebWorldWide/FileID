@@ -257,6 +257,19 @@ public sealed partial class RestructureView : UserControl
     internal static bool IsFrozenPlanCurrent(object? frozen, object? live, object? rendered)
         => frozen is not null && ReferenceEquals(frozen, live) && ReferenceEquals(frozen, rendered);
 
+    internal static bool IsCurrentRecommendation(object? rendered, object? candidate)
+        => rendered is not null && ReferenceEquals(rendered, candidate);
+
+    internal static bool IsCurrentFileRow(object? rendered, object? candidate)
+        => rendered is not null && ReferenceEquals(rendered, candidate);
+
+    internal static T? ResolveRepeaterItem<T>(IList<T> rows, int realizedIndex) where T : class
+        => realizedIndex >= 0 && realizedIndex < rows.Count ? rows[realizedIndex] : null;
+
+    private bool IsRenderedRecommendation(RestructureRecommendationVm vm)
+        => IsCurrentRecommendation(
+            ResolveRepeaterItem(_recommendations, _recommendations.IndexOf(vm)), vm);
+
     private static void ReleaseApplyGuard()
     {
         _applying = false;
@@ -414,9 +427,16 @@ public sealed partial class RestructureView : UserControl
 
     // ---- Selection ------------------------------------------------------
 
-    private void OnFileSelectionChanged()
+    private void OnFileSelectionChanged(RestructureFileRowVm row)
     {
-        if (_suppressRecompute) return;
+        if (!_allFileRows.TryGetValue(row.FileId, out var current)
+            || !IsCurrentFileRow(current, row))
+        {
+            return;
+        }
+        if (row.IsSelected) _deselectedFileIds.Remove(row.FileId);
+        else _deselectedFileIds.Add(row.FileId);
+        if (_suppressRecompute || _unloaded) return;
         RecomputeSelection();
     }
 
@@ -465,15 +485,14 @@ public sealed partial class RestructureView : UserControl
             if (sender is CheckBox cb && cb.DataContext is RestructureFileRowVm f)
             {
                 f.IsSelected = cb.IsChecked == true;
-                if (f.IsSelected) _deselectedFileIds.Remove(f.FileId);
-                else _deselectedFileIds.Add(f.FileId);
             }
         });
 
     private void OnRecReviewClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRecReviewClicked), () =>
         {
-            if ((sender as FrameworkElement)?.DataContext is RestructureRecommendationVm vm)
+            if ((sender as FrameworkElement)?.DataContext is RestructureRecommendationVm vm
+                && IsRenderedRecommendation(vm))
             {
                 vm.IsExpanded = !vm.IsExpanded;
             }
@@ -482,7 +501,11 @@ public sealed partial class RestructureView : UserControl
     private void OnRecApproveClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRecApproveClicked), () =>
         {
-            if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm) return;
+            if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm
+                || !IsRenderedRecommendation(vm))
+            {
+                return;
+            }
             bool approve = !vm.IsApproved;
             if (_filesByOutcome.TryGetValue(vm.Outcome, out var files))
             {
@@ -490,8 +513,6 @@ public sealed partial class RestructureView : UserControl
                 foreach (var f in files)
                 {
                     f.IsSelected = approve;
-                    if (approve) _deselectedFileIds.Remove(f.FileId);
-                    else _deselectedFileIds.Add(f.FileId);
                 }
                 _suppressRecompute = false;
             }
@@ -500,9 +521,17 @@ public sealed partial class RestructureView : UserControl
 
     private async void OnSeeAllClicked(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm) return;
+        if ((sender as FrameworkElement)?.DataContext is not RestructureRecommendationVm vm
+            || !IsRenderedRecommendation(vm))
+        {
+            return;
+        }
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null) return;
+        if (!IsFrozenPlanCurrent(plan, EngineClient.Instance.LastRestructurePlan, _renderedPlan)
+            || !_filesByOutcome.TryGetValue(vm.Outcome, out var rows))
+        {
+            return;
+        }
         var title = vm.Outcome switch
         {
             RestructureOutcome.Tidy => "Tidying - files moving out of mixed folders",
@@ -510,7 +539,7 @@ public sealed partial class RestructureView : UserControl
             _ => "Files staying put",
         };
         var sheet = new DrillDownSheet();
-        sheet.SetOutcomeFilter(plan, vm.Outcome, title);
+        sheet.SetSelectableRows(rows, title);
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
@@ -578,10 +607,11 @@ public sealed partial class RestructureView : UserControl
     private async Task RefreshDeepAnalyzeHintAsync()
     {
         if (EngineClient.Instance.DeepAnalyzeProgress != null) return; // running: handled by UpdateDeepAnalyzeBanner
+        var libraryRoot = AppViewModel.Instance.FolderPath;
         int captioned = 0, total = 0;
         try
         {
-            (captioned, total) = await Task.Run(QueryCaptionedFraction).ConfigureAwait(true);
+            (captioned, total) = await Task.Run(() => QueryCaptionedFraction(libraryRoot)).ConfigureAwait(true);
         }
         catch { /* keep zeros -> banner hidden */ }
 
@@ -618,11 +648,62 @@ public sealed partial class RestructureView : UserControl
         }
     }
 
-    private static (int captioned, int total) QueryCaptionedFraction()
+    internal readonly record struct RestructureQualityStats(
+        bool Available,
+        int Total,
+        int Captioned,
+        int ContentEligible,
+        int ClipEmbeddings,
+        int TextEmbeddings);
+
+    internal static RestructureQualityStats QueryRestructureQuality(
+        Microsoft.Data.Sqlite.SqliteConnection connection, string? libraryRoot)
+    {
+        if (string.IsNullOrWhiteSpace(libraryRoot)) return default;
+        var rootPrefix = libraryRoot.TrimEnd('\\', '/') + "\\";
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            WITH scoped AS (
+                SELECT f.kind,
+                    CASE WHEN TRIM(COALESCE(f.vlm_description, '')) <> ''
+                           OR TRIM(COALESCE(f.vlm_full_model, '')) <> ''
+                         THEN 1 ELSE 0 END AS captioned,
+                    CASE WHEN c.file_id IS NOT NULL THEN 1 ELSE 0 END AS has_clip,
+                    CASE WHEN t.file_id IS NOT NULL THEN 1 ELSE 0 END AS has_text,
+                    CASE WHEN d.file_id IS NOT NULL AND TRIM(d.text) <> ''
+                         THEN 1 ELSE 0 END AS has_document
+                FROM files f
+                LEFT JOIN clip_embeddings c ON c.file_id = f.id
+                LEFT JOIN text_embeddings t ON t.file_id = f.id
+                LEFT JOIN doc_text d ON d.file_id = f.id
+                WHERE f.failed = 0
+                  AND substr(f.path_text, 1, length($root)) = $root COLLATE NOCASE
+            )
+            SELECT
+                COALESCE(SUM(CASE WHEN kind IN ('image', 'video', 'audio', 'model') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN kind IN ('image', 'video', 'audio', 'model') AND captioned = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN captioned = 0 AND (has_clip = 1 OR has_text = 1 OR has_document = 1) THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN captioned = 0 AND has_clip = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN captioned = 0 AND has_text = 1 THEN 1 ELSE 0 END), 0)
+            FROM scoped
+            """;
+        command.Parameters.AddWithValue("$root", rootPrefix);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return default;
+        return new RestructureQualityStats(
+            true,
+            reader.GetInt32(0),
+            reader.GetInt32(1),
+            reader.GetInt32(2),
+            reader.GetInt32(3),
+            reader.GetInt32(4));
+    }
+
+    private static (int captioned, int total) QueryCaptionedFraction(string? libraryRoot)
     {
         try
         {
-            if (!System.IO.File.Exists(AppPaths.DbPath)) return (0, 0);
+            if (string.IsNullOrWhiteSpace(libraryRoot) || !System.IO.File.Exists(AppPaths.DbPath)) return (0, 0);
             using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                 new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                 {
@@ -630,19 +711,8 @@ public sealed partial class RestructureView : UserControl
                     Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
                 }.ToString());
             conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText =
-                "SELECT COUNT(*), " +
-                "SUM(CASE WHEN vlm_description IS NOT NULL AND vlm_description <> '' THEN 1 ELSE 0 END) " +
-                "FROM files";
-            using var reader = cmd.ExecuteReader();
-            if (reader.Read())
-            {
-                int total = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
-                int captioned = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
-                return (captioned, total);
-            }
-            return (0, 0);
+            var stats = QueryRestructureQuality(conn, libraryRoot);
+            return (stats.Captioned, stats.Total);
         }
         catch { return (0, 0); }
     }

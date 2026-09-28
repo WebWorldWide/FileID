@@ -95,6 +95,23 @@ public class RestructurePagedPlanGuardTests
     }
 
     [Fact]
+    public void FileSelection_MustBeTheExactRenderedRow()
+    {
+        var rendered = new RestructureFileRowVm
+        {
+            Move = new RestructureMove(1, @"C:\Library\a.jpg", @"C:\Library\Photos\a.jpg", "Photos", "Mixed", "review"),
+        };
+        var stale = new RestructureFileRowVm
+        {
+            Move = rendered.Move,
+        };
+
+        Assert.True(RestructureView.IsCurrentFileRow(rendered, rendered));
+        Assert.False(RestructureView.IsCurrentFileRow(rendered, stale));
+        Assert.False(RestructureView.IsCurrentFileRow(null, rendered));
+    }
+
+    [Fact]
     public void SelectableDrillDown_PreservesEverySharedRowWithoutACap()
     {
         var rows = Enumerable.Range(0, 250)
