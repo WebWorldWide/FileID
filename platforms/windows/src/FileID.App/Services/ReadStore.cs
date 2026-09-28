@@ -590,11 +590,44 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
+    public async Task<IReadOnlyList<long>> PersonFileIdsAsync(long personId, CancellationToken ct)
+    {
+        var ids = new List<long>();
+        if (_connection == null) return ids;
+
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return ids;
+
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT DISTINCT fp.file_id
+                FROM face_prints fp
+                INNER JOIN files f ON f.id = fp.file_id
+                WHERE fp.person_id = $personId AND f.failed = 0
+                ORDER BY fp.file_id
+                """;
+            cmd.Parameters.AddWithValue("$personId", personId);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                ids.Add(reader.GetInt64(0));
+            }
+
+            return ids;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>Item 5: the person's name for file tagging — the non-empty
     /// [title, first, middle, last, suffix] joined by single spaces, else the legacy
     /// `name`. Byte-faithful with the macOS `ReadStore.personTagName` so a person is
     /// tagged identically on both platforms.</summary>
-    private static string FormatPersonTagName(string? title, string? first, string? middle,
+    internal static string FormatPersonTagName(string? title, string? first, string? middle,
                                               string? last, string? suffix, string? legacy)
     {
         var parts = new List<string>(5);

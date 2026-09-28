@@ -2,7 +2,7 @@
 
 ## 2026-09-28 — Current release gate
 
-- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 120 C# error lines after path, folder picker, and isolated instance fixes; run the suite after it compiles. Keep the safety assertions intact.
+- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 115 C# error lines after path, picker, isolated instance, sidebar status, and person query fixes; run the suite after it compiles. Keep the safety assertions intact.
 - Rebuild and validate the x64 `.msixupload` from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo. The downloaded artifact in `ci-ce74f83` predates the current fixes.
 - Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
 
