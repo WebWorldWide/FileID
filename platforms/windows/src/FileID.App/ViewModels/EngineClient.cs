@@ -751,8 +751,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         //     engine if the C# app dies),
         //   - the engine's GPU TDR detection (sticky cancellation +
         //     EngineError), and
-        //   - per-command timeouts on the C# side (WaitForReadyAsync,
-        //     CudaAutoInstaller's 30-min cap, etc).
+        //   - per-command timeouts on the C# side (WaitForReadyAsync
+        //     and model install stall guards).
         // A global stdout idle timer is the wrong granularity.
         while (!ct.IsCancellationRequested)
         {
@@ -1123,18 +1123,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
-                        // C1: re-arm the background auto-installers BEFORE
-                        // flipping State to Ready. Their one-shot attempt gate
-                        // latches after the first fire; a crash that interrupted
-                        // a mid-flight model download would otherwise abandon the
-                        // model for the rest of the session (no VLM tags until a
-                        // full app restart). Re-arming here lets the State=Ready
-                        // PropertyChanged below re-trigger them; each re-checks
-                        // its sentinel/weights and only re-downloads if still
-                        // missing. Harmless on the first Ready (nothing attempted
-                        // yet → the gate is already 0).
-                        Services.LlamaRuntimeAutoInstaller.ResetAttempt();
-                        Services.CudaAutoInstaller.ResetAttempt();
                         State = LifecycleState.Ready;
                         CrashReason = null;
                         // R5-07: record when the engine reached Ready, but do NOT

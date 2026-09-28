@@ -121,11 +121,11 @@ impl VlmRunner {
             bail!(
                 "The installed llama.cpp runtime is too old for image analysis \
                  (missing llama-mtmd-cli.exe, and pre-Qwen2.5-VL). Update it from \
-                 Settings -> Performance -> 'Install llama.cpp runtime'."
+                 Deep Analyze -> Install for your chosen model."
             )
         }
         bail!(
-            "llama.cpp runtime not found under {}. Install it from Settings -> Performance -> 'Install llama.cpp runtime'.",
+            "llama.cpp runtime not found under {}. Install your chosen model from Deep Analyze to get the runtime.",
             vulkan_dir.display()
         )
     }

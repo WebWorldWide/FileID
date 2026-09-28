@@ -299,17 +299,21 @@ public sealed partial class DeepAnalyzeView : UserControl
         HighlightActiveCard();
     }
 
-    /// <summary>True when both gguf halves for this model_kind are on disk under
-    /// %LOCALAPPDATA%\FileID\Models\vlm\&lt;kind&gt;\. Mirrors the engine's
-    /// vlm::find_weights so a card's "Installed" badge matches what Deep Analyze
-    /// can actually run.</summary>
+    /// <summary>Show Installed only when the model and a runnable runtime are present.</summary>
     private static bool VlmWeightsPresent(string kind)
     {
         try
         {
             var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
-            return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
-                && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
+            if (!System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
+                || !System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"))) return false;
+            foreach (var runtime in new[] { "llama.cpp-cuda", "llama.cpp" })
+            {
+                var runtimeDir = System.IO.Path.Combine(AppPaths.ModelsDir, runtime);
+                if (System.IO.File.Exists(System.IO.Path.Combine(runtimeDir, "llama-mtmd-cli.exe"))
+                    || System.IO.File.Exists(System.IO.Path.Combine(runtimeDir, "bin", "llama-mtmd-cli.exe"))) return true;
+            }
+            return false;
         }
         catch { return false; }
     }
@@ -798,6 +802,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             // (which is where CurrentModelKind would otherwise be set).
             ModelInstallerService.Instance.DeepVlm.CurrentModelKind = modelId;
             SyncCards();
+            await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64");
             await EngineClient.Instance.PrewarmModelAsync(modelId);
         }
         catch (Exception ex)

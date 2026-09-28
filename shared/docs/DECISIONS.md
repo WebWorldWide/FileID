@@ -3390,3 +3390,7 @@ A sent bulk command does not prove which files changed, and an acknowledged reve
 ## 2026-09-28 — Require keeper-bound byte proof for exact cleanup
 
 The Cleanup UI previously sent only file IDs after a duplicate-group preview, while large-file group hashes can be head/tail composites. Exact cleanup now hashes the selected victims and keeper before the command, includes their paths, sizes, and SHA-256 values in `trashFiles.exactIdentities`, and has the engine revalidate them before trashing each file. Ordinary trash commands keep the optional proof absent. A missing, malformed, or changed proof rejects deletion, and the engine confirms each result individually. This adds disk reads to a destructive action so the user never has to rely on a stale grouping result as proof of identical bytes.
+
+## 2026-09-28 — Optional runtime downloads require an explicit install action
+
+Approval to use official GitHub and NVIDIA download hosts covers where optional packs come from, not silent installation on startup. A fresh Windows launch exposed the Vulkan llama.cpp runtime downloading as soon as the engine became ready, and Intel hardware also had a silent OpenVINO path. Remove those startup installers. The Deep Analyze model Install action now requests its local runtime alongside the selected model; Settings retains explicit GPU pack Install buttons. This preserves on-device processing and the user-initiated download policy without leaving Deep Analyze unable to obtain a runtime.

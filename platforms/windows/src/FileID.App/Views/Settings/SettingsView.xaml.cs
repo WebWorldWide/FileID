@@ -317,10 +317,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var s = AppViewModel.Instance.Settings;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
-            // Inverted: AppSettings stores "Disable…" but the UI shows
-            // "Auto-install on" (truthy = enabled).
-            AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
-
             // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
@@ -346,27 +342,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             var s = AppViewModel.Instance.Settings;
             s.CleanupAutoTagKept = CleanupAutoTagToggle.IsOn;
             s.Save();
-        });
-
-    private void OnAutoInstallCudaToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnAutoInstallCudaToggled), () =>
-        {
-            if (_initializingToggles) return;
-            var s = AppViewModel.Instance.Settings;
-            s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
-            s.Save();
-            // Project policy forbids a silent GPU-pack fetch, so there is no
-            // engine-ready auto-install left to gate — persisting the flag alone
-            // left this toggle dead. Flipping it ON is itself the explicit user
-            // action that installs the CUDA llama.cpp pack now (skip when it is
-            // already on disk or an install is in flight: the button disables in
-            // both cases). OFF just persists the opt-out.
-            if (AutoInstallCudaToggle.IsOn
-                && InstallCudaLlamaButton.IsEnabled
-                && !SentinelExists("llama_runtime_cuda_x64"))
-            {
-                _ = InstallCudaLlamaAsync(InstallCudaLlamaButton);
-            }
         });
 
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)

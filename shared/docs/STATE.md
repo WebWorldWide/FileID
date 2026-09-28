@@ -8,6 +8,13 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-28 — Store preflight and post release roadmap
+
+- Pushed the shared post release brief for best takes, batch conversion/compression/upscaling, and improved folder organization (`6e63683`). The first Store release remains the priority.
+- Hosted x64 Store packaging passed for exact-cleanup commit `97fd357`; the inspected `.msixupload` and hash are in `NEXT.md`. Full Rust tests and clippy, 47 IPC tests, x64 Release app build, binary privacy, and runtime egress gate pass locally. Windows app CI remains red on 57 missing safety-test API references.
+- The requested local package script reached MSBuild packaging but failed with Visual Studio 2026 `APPX0002` / `MSB4018`. An unsigned package install failed because its publisher is not in the unsigned namespace; loose registration requires Developer Mode. Extracted engine IPC and loose app launch worked with isolated state.
+- That launch exposed a silent optional llama runtime download on fresh startup. The startup installers were removed and explicit Deep Analyze model Install now requests the runtime. A rebuilt loose app stayed running and logged no prewarm dispatch; the final package must be rebuilt and smoke tested after this fix lands.
+
 ## 2026-09-28 — Store readiness: exact cleanup proof reaches engine
 
 - Exact duplicate cleanup now snapshots the selected keeper and victims, checks full SHA-256 before sending, and sends the proof through the canonical `trashFiles.exactIdentities` IPC field. The Rust engine rechecks library identity, regular-file type, size, and both hashes before allowing each selected file into the Recycle Bin batch. Malformed or stale proof fails closed; missing library IDs now produce failed per-file results.

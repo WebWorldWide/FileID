@@ -45,6 +45,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private static readonly string[] ClipSentinelIds = { "mobileclip_s2", "clip_text" };
     private static readonly string[] ArcfaceSentinelIds = { "arcface" };
     private static readonly string[] DeepVlmSentinelIds = { "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2" };
+    private static readonly string[] LlamaRuntimeSentinelIds = { "llama_runtime_x64", "llama_runtime_cuda_x64" };
     // RAM++ — the in-scan multi-label tagger. Single-sentinel "any-of".
     private static readonly string[] RamPlusSentinelIds = { "ram_plus" };
     // one-button GPU acceleration pack on the welcome sheet.
@@ -174,6 +175,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 // Deep Analyze tab + manual auto-chain use what the user just
                 // downloaded.
                 PersistSelectedVlmModelKind(_deepVlmModelKind);
+                await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64").ConfigureAwait(false);
                 await PrewarmAsync(_deepVlmModelKind).ConfigureAwait(false);
             });
         // GPU Acceleration Pack. Display label + Message are
@@ -607,6 +609,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(Arcface, ArcfaceSentinelIds);
         SeedSlot(RamPlus, RamPlusSentinelIds);
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
+        if (DeepVlm.Status == ModelInstallStatus.Installed
+            && !SentinelExistsForAnyOf(LlamaRuntimeSentinelIds))
+            DeepVlm.Status = ModelInstallStatus.NotInstalled;
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,
@@ -829,14 +834,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
     }
 
-    /// <summary>model_kinds the engine auto-installs at startup
-    /// (LlamaRuntime + variants). These flow through ModelDownloadProgress
-    /// events the welcome sheet doesn't have rows for; previously each one
-    /// emitted a "no slot — progress event dropped" warn that flooded
-    /// app.log. Demote them to a single debug line here. The auto-
-    /// installer services (LlamaRuntimeAutoInstaller, CudaAutoInstaller)
-    /// handle these progress events through their own paths.</summary>
-    private static bool IsAutoInstallerOnly(string? modelKind)
+    private static bool IsRuntimePackWithoutSlot(string? modelKind)
     {
         return modelKind is "llama_runtime_x64"
             or "llama_runtime_cuda_x64"
@@ -925,11 +923,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         var slot = SlotFor(p.ModelKind);
         if (slot is null)
         {
-            // well-known auto-installer model_kinds are routed
-            // through their own services (LlamaRuntimeAutoInstaller,
-            // CudaAutoInstaller); demote the no-slot log so app.log
-            // isn't flooded during their auto-install progress streams.
-            if (IsAutoInstallerOnly(p.ModelKind))
+            if (IsRuntimePackWithoutSlot(p.ModelKind))
             {
                 DebugLog.Debug($"[INSTALL] runtime-pack progress (no welcome-sheet slot): {p.ModelKind} {p.Fraction:P0}");
             }
@@ -1008,11 +1002,10 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             DebugLog.Info($"[INSTALL] OpenVINO pack unavailable ({kind}); staying on DirectML. {error.Message}");
             // "Leave the slot alone" assumed it still read pseudo-Installed,
             // but the engine's unconditional Queued event already flipped it
-            // to Downloading — and the auto-install bypasses PrewarmAsync, so
+            // to Downloading — and this pack bypasses PrewarmAsync, so
             // no watchdog ever rescues it. Restore the Intel DirectML state
             // instead of leaving the row downloading forever (C11). Only
-            // CudaAutoInstaller's Intel path prewarms this kind, so the
-            // hard-coded vendor is safe.
+            // OpenVINO is only offered for Intel, so the vendor is known.
             if (Accelerator.Status == ModelInstallStatus.Downloading)
             {
                 UpdateAcceleratorForVendor("intel");

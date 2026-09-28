@@ -397,18 +397,6 @@
                                     ToolTipService.ToolTip="Downloads llama-bXXXX-bin-win-cuda-cu12.4-x64.zip from github.com/ggml-org/llama.cpp/releases." />
                         </Grid>
 
-                        <!-- Auto-install toggle. On by default — the CUDA
-                             llama.cpp prewarm fires silently when an NVIDIA
-                             GPU is detected on the first launch. Users who
-                             prefer the Vulkan build (smaller, identical UX)
-                             can opt out here. -->
-                        <ToggleSwitch x:Name="AutoInstallCudaToggle"
-                                      Header="Auto-install CUDA acceleration"
-                                      OffContent="Off — leave Deep Analyze on Vulkan"
-                                      OnContent="On — install CUDA llama.cpp on first launch"
-                                      IsOn="True"
-                                      Toggled="OnAutoInstallCudaToggled" />
-
                         <!-- Row 2: cuDNN for scanning ORT EP. -->
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
