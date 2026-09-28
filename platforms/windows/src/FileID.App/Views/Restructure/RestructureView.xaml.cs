@@ -55,11 +55,11 @@ public sealed partial class RestructureView : UserControl
     private static bool _applyRequestInFlight;
     private static bool _awaitingFreshPlan;
     private static int _applyingGeneration;
-    private static RestructureApplyResult? _resultBeforeApply;
+    private static RestructureApplyResult? _lastSurfacedApplyResult;
     private RestructurePlan? _renderedPlan;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
-    private EngineError? _lastHandledError;
+    private static EngineError? _lastHandledError;
     // Apply timeout: if the engine doesn't reply with a RestructureApplyResult
     // within this window (crash / pipe death mid-apply), fire on the UI thread,
     // release _applying, and surface an error. Instance timer so it's cancelled
@@ -130,10 +130,14 @@ public sealed partial class RestructureView : UserControl
             {
                 ReleaseApplyGuard();
             }
-            if (_applyRequestInFlight && !ReferenceEquals(
-                    _resultBeforeApply, EngineClient.Instance.LastRestructureApplyResult))
+            if (IsUnhandledCompletion(
+                    EngineClient.Instance.LastRestructureApplyResult, _lastSurfacedApplyResult))
             {
                 SyncApplyResult();
+            }
+            if (IsUnhandledCompletion(EngineClient.Instance.LastError, _lastHandledError))
+            {
+                SyncEngineError();
             }
             if (EngineClient.Instance.LastRestructurePlan is not null)
             {
@@ -262,6 +266,9 @@ public sealed partial class RestructureView : UserControl
 
     internal static bool IsCurrentFileRow(object? rendered, object? candidate)
         => rendered is not null && ReferenceEquals(rendered, candidate);
+
+    internal static bool IsUnhandledCompletion<T>(T? current, T? surfaced) where T : class
+        => current is not null && !ReferenceEquals(current, surfaced);
 
     internal static T? ResolveRepeaterItem<T>(IList<T> rows, int realizedIndex) where T : class
         => realizedIndex >= 0 && realizedIndex < rows.Count ? rows[realizedIndex] : null;
@@ -783,7 +790,6 @@ public sealed partial class RestructureView : UserControl
         _applyRequestInFlight = true;
         _awaitingFreshPlan = false;
         _applyingGeneration = EngineClient.Instance.SpawnGeneration;
-        _resultBeforeApply = EngineClient.Instance.LastRestructureApplyResult;
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
@@ -878,9 +884,9 @@ public sealed partial class RestructureView : UserControl
     private void SyncApplyResult()
     {
         var r = EngineClient.Instance.LastRestructureApplyResult;
-        if (r is null) return;
+        if (r is null || !IsUnhandledCompletion(r, _lastSurfacedApplyResult)) return;
+        _lastSurfacedApplyResult = r;
         _applyRequestInFlight = false;
-        _resultBeforeApply = r;
         _awaitingFreshPlan = r.Applied > 0;
         // The result arrived — disarm the watchdog timer before touching any state.
         _applyTimeoutTimer?.Stop();
@@ -956,7 +962,7 @@ public sealed partial class RestructureView : UserControl
     private void SyncEngineError()
     {
         var err = EngineClient.Instance.LastError;
-        if (err is null || ReferenceEquals(err, _lastHandledError)) return;
+        if (err is null || !IsUnhandledCompletion(err, _lastHandledError)) return;
         if (!IsPlanRestructureErrorKind(err.Kind)
             && err.Kind != "apply_restructure"
             && err.Kind != "undo_restructure")

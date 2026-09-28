@@ -228,7 +228,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public EngineError? LastError
     {
         get => _lastError;
-        private set => Set(ref _lastError, value);
+        private set
+        {
+            if (ReferenceEquals(_lastError, value)) return;
+            _lastError = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastError)));
+        }
     }
 
     private EngineError? _lastWarning;
@@ -301,7 +306,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public RestructureApplyResult? LastRestructureApplyResult
     {
         get => _lastRestructureApplyResult;
-        private set => Set(ref _lastRestructureApplyResult, value);
+        private set
+        {
+            if (ReferenceEquals(_lastRestructureApplyResult, value)) return;
+            _lastRestructureApplyResult = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastRestructureApplyResult)));
+        }
     }
 
     private bool _canUndoRestructure;

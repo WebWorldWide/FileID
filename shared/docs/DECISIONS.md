@@ -3375,3 +3375,7 @@ A plan arriving during an apply does not prove the file operation finished. Keep
 ## 2026-09-28 — Share restructure selection state with the full drill-down
 
 The first 200 files in an outcome remain a compact inline preview, but "See all" uses a virtualized list of every matching row. It reuses the exact row objects from the rendered plan so dialog toggles change the authoritative Apply set and survive view recreation. Stale row and card callbacks are ignored after a re-plan.
+
+## 2026-09-28 — Reconcile restructure completions by event identity
+
+The engine can return two equal-valued results for separate attempts. The app now publishes every new error and apply-result object and remembers the last surfaced reference across Restructure tab recreation. A completion that arrived while the view was unloaded is handled once on load; the same cached object is ignored.
