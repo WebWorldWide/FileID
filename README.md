@@ -426,6 +426,7 @@ Cross-platform principles live in the root [`CLAUDE.md`](CLAUDE.md).
 - [`shared/docs/NEXT.md`](shared/docs/NEXT.md) — next-session priorities + acceptance criteria
 - [`shared/docs/DECISIONS.md`](shared/docs/DECISIONS.md) — append-only rationale for non-obvious calls
 - [`shared/docs/SHIP.md`](shared/docs/SHIP.md) — v1.0 release-readiness inventory
+- [`shared/docs/POST_STORE_FEATURES.md`](shared/docs/POST_STORE_FEATURES.md) — requested features after the first Store release
 
 ---
 

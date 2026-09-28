@@ -9,6 +9,8 @@
 
 ## After the first Store release — requested features
 
+Shared requirements and acceptance criteria for macOS, Windows, and Linux: [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md). These are not gates for the first Store submission.
+
 - **Best takes:** Local natural-language search across photos, audio, and video, including queries such as “show me videos only where he gets a hit.” Return matching files or timestamped moments with a reviewable ranking. Reuse the commercial-clean on-device model stack; preserve the no-telemetry boundary.
 - **Conversion, compression, and upscaling:** Batch workflows for supported media formats with output presets, quality and size previews, and safe destination/overwrite behavior. Review codec, model, and binary licenses before choosing any new dependency.
 - **Folder organization:** Improve proposal quality and user control for large libraries using the real corpus, clear previews, and reliable undo. Keep macOS as the visual and behavioral reference across ports.
