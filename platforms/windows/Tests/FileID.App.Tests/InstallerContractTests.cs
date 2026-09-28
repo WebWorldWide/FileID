@@ -171,8 +171,39 @@ public sealed class InstallerContractTests
             RegexOptions.Multiline));
         Assert.Contains("Assert-MicrosoftSignature", publishScript, StringComparison.Ordinal);
         Assert.Contains("Bootstrap.TryInitialize(0x00010007u", program, StringComparison.Ordinal);
+        Assert.Contains("if (!HasPackageIdentity())", program, StringComparison.Ordinal);
         Assert.Contains("Bootstrap.Shutdown()", program, StringComparison.Ordinal);
         Assert.Contains("Windows App SDK 1.7 runtime", program, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StoreMsix_UsesReservedIdentityAndIncludesFullTrustEnginePayload()
+    {
+        var manifest = XDocument.Load(PathInRepo(
+            "platforms", "windows", "installer", "FileID.StorePackage", "Package.appxmanifest"));
+        var project = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "installer", "FileID.StorePackage", "FileID.StorePackage.wapproj"));
+        XNamespace appx = "http://schemas.microsoft.com/appx/manifest/foundation/windows10";
+        XNamespace rescap = "http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities";
+
+        var identity = manifest.Root!.Element(appx + "Identity")!;
+        Assert.Equal("AdamNolle.FileID", (string?)identity.Attribute("Name"));
+        Assert.Equal("CN=B6BC6354-0217-4C63-8B82-7040B465A25E", (string?)identity.Attribute("Publisher"));
+        var packageVersion = (string?)identity.Attribute("Version");
+        var projectVersion = XDocument.Parse(project).Descendants()
+            .Single(element => element.Name.LocalName == "AppxPackageVersion").Value;
+        Assert.Equal(packageVersion, projectVersion);
+        Assert.Matches("^[1-9][0-9]{0,4}\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.0$", projectVersion);
+        Assert.Equal("Windows.FullTrustApplication", (string?)manifest.Descendants(appx + "Application").Single().Attribute("EntryPoint"));
+        Assert.Contains(manifest.Descendants(rescap + "Capability"),
+            element => string.Equals((string?)element.Attribute("Name"), "runFullTrust", StringComparison.Ordinal));
+        Assert.Contains("Microsoft.WindowsAppRuntime.1.7", manifest.ToString(), StringComparison.Ordinal);
+        Assert.Contains("FileIDEngine.exe", project, StringComparison.Ordinal);
+        Assert.Contains("onnxruntime.dll", project, StringComparison.Ordinal);
+        Assert.Contains("DirectML.dll", project, StringComparison.Ordinal);
+        Assert.Contains("pdfium.dll", project, StringComparison.Ordinal);
+        Assert.Contains("<UapAppxPackageBuildMode>StoreUpload</UapAppxPackageBuildMode>", project, StringComparison.Ordinal);
+        Assert.Contains("<AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>", project, StringComparison.Ordinal);
     }
 
     [Fact]

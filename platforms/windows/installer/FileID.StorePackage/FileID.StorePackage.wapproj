@@ -1,0 +1,67 @@
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup>
+    <WapProjPath Condition="'$(WapProjPath)' == ''">$(MSBuildExtensionsPath)\Microsoft\DesktopBridge\</WapProjPath>
+  </PropertyGroup>
+  <Import Project="$(WapProjPath)\Microsoft.DesktopBridge.props" />
+
+  <PropertyGroup>
+    <ProjectGuid>{0C0A408E-4C84-44B5-B8A1-711A34E36C41}</ProjectGuid>
+    <TargetPlatformVersion>10.0.26100.0</TargetPlatformVersion>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <!-- Store package version is independent from FileID's 0.1.0 product
+         version. Start at 1.0.0.0 to satisfy Store version rules; increment
+         this and the manifest Identity version for every Store update. -->
+    <AppxPackageVersion>1.0.0.0</AppxPackageVersion>
+    <UapAppxPackageBuildMode>StoreUpload</UapAppxPackageBuildMode>
+    <AppxBundle>Never</AppxBundle>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+    <AppxPackageDir>$(MSBuildThisFileDirectory)..\..\dist\store-packages\</AppxPackageDir>
+    <EntryPointProjectUniqueName>..\..\src\FileID.App\FileID.App.csproj</EntryPointProjectUniqueName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+    <Content Include="Images\StoreLogo.png" />
+    <Content Include="Images\Square44x44Logo.png" />
+    <Content Include="Images\Square150x150Logo.png" />
+    <Content Include="..\..\dist\x64\FileID\FileIDEngine.exe">
+      <Link>FileIDEngine.exe</Link>
+      <TargetPath>FileIDEngine.exe</TargetPath>
+    </Content>
+    <Content Include="..\..\dist\x64\FileID\onnxruntime.dll">
+      <Link>onnxruntime.dll</Link>
+      <TargetPath>onnxruntime.dll</TargetPath>
+    </Content>
+    <Content Include="..\..\dist\x64\FileID\onnxruntime_providers_shared.dll">
+      <Link>onnxruntime_providers_shared.dll</Link>
+      <TargetPath>onnxruntime_providers_shared.dll</TargetPath>
+    </Content>
+    <Content Include="..\..\dist\x64\FileID\DirectML.dll">
+      <Link>DirectML.dll</Link>
+      <TargetPath>DirectML.dll</TargetPath>
+    </Content>
+    <Content Include="..\..\dist\x64\FileID\pdfium.dll">
+      <Link>pdfium.dll</Link>
+      <TargetPath>pdfium.dll</TargetPath>
+    </Content>
+    <ProjectReference Include="..\..\src\FileID.App\FileID.App.csproj">
+      <SkipGetTargetFrameworkProperties>True</SkipGetTargetFrameworkProperties>
+      <TrustLevel>Full</TrustLevel>
+      <PublishProfile Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">Properties\PublishProfiles\Store-x64.pubxml</PublishProfile>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Import Project="$(WapProjPath)\Microsoft.DesktopBridge.targets" />
+</Project>

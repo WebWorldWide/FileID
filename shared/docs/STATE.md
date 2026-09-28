@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-27 — Microsoft Store draft and Windows MSIX packaging path
+
+- Reserved `FileID` in Partner Center as an MSIX/PWA draft, Store ID `9PC8HSD86887`; package identity is `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`.
+- Added a separate Windows Application Packaging Project for an x64 Store upload package. It includes the WinUI app, `FileIDEngine.exe`, ORT/DirectML/pdfium runtime files, and Store logos. The app now skips the Windows App SDK bootstrapper when it has package identity; the existing unpackaged MSI path retains its bootstrapper.
+- Added a Windows workflow and packaging script to build the release payload, apply the binary privacy gate, create the unsigned `.msixupload` for Store signing, and inspect the package payload.
+- The first Store package version is `1.0.0.0`, separate from FileID's in-app/MSI version `0.1.0`; increment the MSIX version before each Store update.
+- **Not yet verified on Windows:** this checkout is on macOS without `dotnet`/MSBuild. Run the Windows Store MSIX workflow before treating the package as ready. Initial Store architecture is x64; ARM64 package support needs architecture-correct runtime DLLs. The Partner Center product remains an unsubmitted draft.
+
 ## 2026-08-12 — Windows: Proposed Smart-Rename database sync fix & 95K bulk rename apply
 
 Fixed a sync bug in the Windows engine's bulk-rename command and successfully processed the massive pending smart-rename backlog directly on the user's hard drive:

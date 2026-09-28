@@ -111,10 +111,8 @@ internal static class ModelLicenseGate
     private static string AcceptanceKey(Policy policy)
         => $"ModelLicenseAccepted:{policy.Key}:{policy.ReviewedAt}";
 
-    // The app is UNPACKAGED (WiX MSI / Burn bundle — no MSIX, no package
-    // identity), so Windows.Storage.ApplicationData.Current is unavailable and
-    // throws. Persist acceptance to a small JSON file beside app-settings.json,
-    // the same file-based store every other setting uses.
+    // Keep license acceptance in the same explicit file store for the WiX and
+    // Store package builds, beside app-settings.json.
     private static string AcceptancePath =>
         System.IO.Path.Combine(AppPaths.Root, "model-licenses.json");
 

@@ -1,9 +1,9 @@
-﻿// Custom entry point for the WinUI 3 unpackaged desktop app.
+﻿// Custom entry point for the WinUI 3 app.
 //
 // Why we replace the XAML-generated Main:
-//   1. Run the WinAppSDK bootstrapper before XAML touches anything. Unpackaged
-//      apps need DynamicDependency.Bootstrap to find + load the matching
-//      framework package; without it XAML's first ComWrappers call fails.
+//   1. Run the WinAppSDK bootstrapper before XAML touches anything in the
+//      unpackaged MSI build. Store MSIX apps get the runtime through their
+//      declared framework dependency and already have package identity.
 //   2. Single-instance gate via a named mutex. A second launch surfaces the
 //      first window instead of spawning a duplicate process — matches the
 //      macOS pattern where a second `open FileID.app` reuses the running app.
@@ -31,6 +31,8 @@ internal static class Program
     /// reuse it for anything else.
     /// </summary>
     private const string SingleInstanceMutexName = "Local\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
+    private const int ErrorInsufficientBuffer = 122;
+    private const int AppModelErrorNoPackage = 15700;
 
     /// <summary>harness hook. When the app is launched with
     /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a
@@ -83,20 +85,35 @@ internal static class Program
             return 0;
         }
 
-        // Bootstrap the Windows App SDK runtime. Required for unpackaged
-        // framework-dependent apps; the bootstrapper finds the framework
-        // package on the user's machine and wires it into the activation
-        // context. MUST match the WinAppSDK package version pinned in
-        // Directory.Packages.props — 1.7 = 0x00010007.
-        if (!Bootstrap.TryInitialize(0x00010007u, out int hr))
+        // Unpackaged MSI builds need the bootstrapper. Store MSIX builds
+        // declare the Windows App SDK framework package in their manifest.
+        bool bootstrapInitialized = false;
+        bool hasPackageIdentity;
+        try
         {
-            ShowFatalDialog(
-                "Windows App SDK runtime not found",
-                $"FileID needs the Windows App SDK 1.7 runtime to launch. " +
-                $"Install it via:\n\n  winget install Microsoft.WindowsAppRuntime.1.7\n\n" +
-                $"Error code: 0x{hr:X8}"
-            );
-            return hr;
+            hasPackageIdentity = HasPackageIdentity();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            ShowFatalDialog("Windows package identity check failed", ex.Message);
+            return ex.NativeErrorCode;
+        }
+
+        if (!hasPackageIdentity)
+        {
+            // MUST match the WinAppSDK package version pinned in
+            // Directory.Packages.props — 1.7 = 0x00010007.
+            if (!Bootstrap.TryInitialize(0x00010007u, out int hr))
+            {
+                ShowFatalDialog(
+                    "Windows App SDK runtime not found",
+                    $"FileID needs the Windows App SDK 1.7 runtime to launch. " +
+                    $"Install it via:\n\n  winget install Microsoft.WindowsAppRuntime.1.7\n\n" +
+                    $"Error code: 0x{hr:X8}"
+                );
+                return hr;
+            }
+            bootstrapInitialized = true;
         }
 
         // Startup-trace: every step of the launch path writes to a small
@@ -158,8 +175,11 @@ internal static class Program
         }
         finally
         {
-            Trace("Bootstrap.Shutdown");
-            Bootstrap.Shutdown();
+            if (bootstrapInitialized)
+            {
+                Trace("Bootstrap.Shutdown");
+                Bootstrap.Shutdown();
+            }
             Trace("end");
         }
 
@@ -177,8 +197,20 @@ internal static class Program
         _ = NativeMessageBox(System.IntPtr.Zero, message, title, 0x10u);
     }
 
+    private static bool HasPackageIdentity()
+    {
+        uint packageFullNameLength = 0;
+        int result = GetCurrentPackageFullName(ref packageFullNameLength, System.IntPtr.Zero);
+        if (result == AppModelErrorNoPackage) return false;
+        if (result is ErrorInsufficientBuffer or 0) return true;
+        throw new System.ComponentModel.Win32Exception(result);
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern int NativeMessageBox(System.IntPtr hWnd, string text, string caption, uint type);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
+    private static extern int GetCurrentPackageFullName(ref uint packageFullNameLength, System.IntPtr packageFullName);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool EnumWindows(EnumWindowsProc enumProc, System.IntPtr lParam);

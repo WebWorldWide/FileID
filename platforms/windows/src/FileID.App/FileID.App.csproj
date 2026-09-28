@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    FileID — WinUI 3 unpackaged desktop app.
+    FileID — WinUI 3 desktop app. The app project remains unpackaged for the
+    WiX installer; FileID.StorePackage wraps its published output as MSIX.
 
-    Unpackaged means we ship as a folder of .exe + DLLs (installed by WiX
-    MSI), not as MSIX. Rationale in shared/docs/DECISIONS.md (2026-05-02
-    "Windows engine in Rust + UI in WinUI 3" entry):
+    The WiX release remains an unpackaged folder of .exe + DLLs installed by
+    MSI. The separate Store package uses the same app output plus package
+    identity, the engine, and native runtime files. The dual path preserves
+    the rationale in shared/docs/DECISIONS.md (2026-05-02 entry):
       - No Microsoft Store dependency
       - No MSIX file-system sandbox restrictions
       - Standard `C:\Program Files\FileID\` install

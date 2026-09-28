@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity
+    Name="AdamNolle.FileID"
+    Publisher="CN=B6BC6354-0217-4C63-8B82-7040B465A25E"
+    Version="1.0.0.0" />
+  <Properties>
+    <DisplayName>FileID</DisplayName>
+    <PublisherDisplayName>Adam Nolle</PublisherDisplayName>
+    <Logo>Images\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.19041.0"
+      MaxVersionTested="10.0.26100.0" />
+    <PackageDependency
+      Name="Microsoft.WindowsAppRuntime.1.7"
+      Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+      MinVersion="7000.0.0.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+  <Applications>
+    <Application
+      Id="FileID"
+      Executable="FileID.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="FileID"
+        Description="On-device AI file organization."
+        BackgroundColor="transparent"
+        Square44x44Logo="Images\Square44x44Logo.png"
+        Square150x150Logo="Images\Square150x150Logo.png" />
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

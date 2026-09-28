@@ -1,0 +1,70 @@
+name: Windows Store MSIX
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/windows-store-package.yml'
+  pull_request:
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/windows-store-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and validate Store upload package — x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup MSBuild (VS WinUI and MSIX tooling)
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.90
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry and build output
+        uses: actions/cache@0057852bfaa9a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            platforms/windows/src/engine/target
+          key: cargo-store-x64-${{ hashFiles('platforms/windows/src/engine/Cargo.lock', 'platforms/windows/src/engine/Cargo.toml') }}
+          restore-keys: |
+            cargo-store-x64-
+
+      - name: Cache NuGet
+        uses: actions/cache@0057852bfaa9a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-store-x64-${{ hashFiles('platforms/windows/Directory.Packages.props') }}
+          restore-keys: |
+            nuget-store-x64-
+
+      - name: Build and validate Store MSIX upload package
+        shell: pwsh
+        run: ./build/publish-store-msix.ps1
+        working-directory: platforms/windows
+
+      - name: Upload Store submission artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: FileID-Store-x64
+          path: platforms/windows/dist/store-packages/*.msixupload
+          if-no-files-found: error
