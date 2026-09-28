@@ -110,7 +110,13 @@ try {
             throw "The source manifest must match the reserved Store identity and AppxPackageVersion $expectedPackageVersion."
         }
 
-        $manifestEntry = $packageZip.GetEntry("AppxManifest.xml")
+    $expectedExecutable = "FileID.App\FileID.exe"
+    $sourceApplication = $sourceManifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Applications']/*[local-name()='Application']")
+    if (-not $sourceApplication -or $sourceApplication.GetAttribute("Executable") -ne $expectedExecutable) {
+        throw "The source manifest must launch '$expectedExecutable'."
+    }
+
+    $manifestEntry = $packageZip.GetEntry("AppxManifest.xml")
         if (-not $manifestEntry) {
             throw "The MSIX package is missing AppxManifest.xml."
         }
@@ -130,9 +136,14 @@ try {
             throw "The packaged identity does not match the reserved Store identity and AppxPackageVersion $expectedPackageVersion."
         }
 
+        $packageApplication = $packageManifest.SelectSingleNode("/*[local-name()='Package']/*[local-name()='Applications']/*[local-name()='Application']")
+        if (-not $packageApplication -or $packageApplication.GetAttribute("Executable") -ne $expectedExecutable) {
+            throw "The packaged manifest must launch '$expectedExecutable'."
+        }
         foreach ($name in @("FileID.exe", "FileIDEngine.exe", "onnxruntime.dll", "onnxruntime_providers_shared.dll", "DirectML.dll", "pdfium.dll")) {
+            $name = "FileID.App\$name"
             if (-not $entries.Contains($name)) {
-                throw "The MSIX package is missing required root payload '$name'."
+                throw "The MSIX package is missing required app payload '$name'."
             }
         }
         foreach ($name in @("Images\Square44x44Logo.png", "Images\Square150x150Logo.png")) {

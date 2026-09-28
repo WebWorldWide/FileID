@@ -29,7 +29,7 @@
   <Applications>
     <Application
       Id="FileID"
-      Executable="FileID.exe"
+      Executable="FileID.App\FileID.exe"
       EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="FileID"

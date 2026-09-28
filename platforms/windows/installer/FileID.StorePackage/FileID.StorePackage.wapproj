@@ -37,24 +37,24 @@
     <Content Include="Images\Square44x44Logo.png" />
     <Content Include="Images\Square150x150Logo.png" />
     <Content Include="..\..\dist\x64\FileID\FileIDEngine.exe">
-      <Link>FileIDEngine.exe</Link>
-      <TargetPath>FileIDEngine.exe</TargetPath>
+      <Link>FileID.App\FileIDEngine.exe</Link>
+      <TargetPath>FileID.App\FileIDEngine.exe</TargetPath>
     </Content>
     <Content Include="..\..\dist\x64\FileID\onnxruntime.dll">
-      <Link>onnxruntime.dll</Link>
-      <TargetPath>onnxruntime.dll</TargetPath>
+      <Link>FileID.App\onnxruntime.dll</Link>
+      <TargetPath>FileID.App\onnxruntime.dll</TargetPath>
     </Content>
     <Content Include="..\..\dist\x64\FileID\onnxruntime_providers_shared.dll">
-      <Link>onnxruntime_providers_shared.dll</Link>
-      <TargetPath>onnxruntime_providers_shared.dll</TargetPath>
+      <Link>FileID.App\onnxruntime_providers_shared.dll</Link>
+      <TargetPath>FileID.App\onnxruntime_providers_shared.dll</TargetPath>
     </Content>
     <Content Include="..\..\dist\x64\FileID\DirectML.dll">
-      <Link>DirectML.dll</Link>
-      <TargetPath>DirectML.dll</TargetPath>
+      <Link>FileID.App\DirectML.dll</Link>
+      <TargetPath>FileID.App\DirectML.dll</TargetPath>
     </Content>
     <Content Include="..\..\dist\x64\FileID\pdfium.dll">
-      <Link>pdfium.dll</Link>
-      <TargetPath>pdfium.dll</TargetPath>
+      <Link>FileID.App\pdfium.dll</Link>
+      <TargetPath>FileID.App\pdfium.dll</TargetPath>
     </Content>
     <ProjectReference Include="..\..\src\FileID.App\FileID.App.csproj">
       <SkipGetTargetFrameworkProperties>True</SkipGetTargetFrameworkProperties>

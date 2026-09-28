@@ -196,10 +196,12 @@ public sealed class InstallerContractTests
         Assert.Equal(packageVersion, projectVersion);
         Assert.Matches("^[1-9][0-9]{0,4}\\.(?:0|[1-9][0-9]{0,4})\\.(?:0|[1-9][0-9]{0,4})\\.0$", projectVersion);
         Assert.Equal("Windows.FullTrustApplication", (string?)manifest.Descendants(appx + "Application").Single().Attribute("EntryPoint"));
+        Assert.Equal(@"FileID.App\FileID.exe", (string?)manifest.Descendants(appx + "Application").Single().Attribute("Executable"));
         Assert.Contains(manifest.Descendants(rescap + "Capability"),
             element => string.Equals((string?)element.Attribute("Name"), "runFullTrust", StringComparison.Ordinal));
         Assert.Contains("Microsoft.WindowsAppRuntime.1.7", manifest.ToString(), StringComparison.Ordinal);
         Assert.Contains("FileIDEngine.exe", project, StringComparison.Ordinal);
+        Assert.Contains(@"<TargetPath>FileID.App\FileIDEngine.exe</TargetPath>", project, StringComparison.Ordinal);
         Assert.Contains("onnxruntime.dll", project, StringComparison.Ordinal);
         Assert.Contains("DirectML.dll", project, StringComparison.Ordinal);
         Assert.Contains("pdfium.dll", project, StringComparison.Ordinal);
@@ -208,18 +210,19 @@ public sealed class InstallerContractTests
     }
 
     [Fact]
-    public void WindowsWorkflow_RunsBothTestProjects_AndOnlyRetriesTheFormatProbeRace()
+    public void WindowsWorkflow_RunsBothTestProjects_WithVisualStudioMsBuild()
     {
         var workflow = File.ReadAllText(PathInRepo(".github", "workflows", "windows-app.yml"));
 
         Assert.Contains(
-            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj",
+            "msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj",
+            "msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build",
             workflow,
             StringComparison.Ordinal);
+        Assert.Contains("vstest.console.exe", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
         Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
         Assert.Contains("-p:RuntimeIdentifier=win-x64", workflow, StringComparison.Ordinal);
