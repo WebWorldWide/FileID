@@ -5,6 +5,14 @@
 > **Format:** `## YYYY-MM-DD — Title`
 > Body: short paragraph stating the decision, the alternatives considered, and the reason for the choice. If a decision is later reversed, add a new entry that supersedes the old one (don't edit history).
 
+## 2026-09-27 — Keep the WAP app directory intact in the Store MSIX
+
+The Windows Application Packaging Project stages the WinUI project under `FileID.App\`. The Store manifest therefore launches `FileID.App\FileID.exe`, and the Rust engine plus native inference DLLs are placed in the same directory. Flattening only the executable path would leave the manifest or engine lookup wrong. The package script verifies both the launch path and required colocated payload in the built MSIX.
+
+## 2026-09-27 — Gate thumbnail trace writes without gating forensic logs
+
+Thumbnail request and cache messages run during scrolling and previously used synchronous `DebugLog.Debug` file writes. They now use a disabled-by-default trace gate, including a call-site check that skips path formatting. Debug, warning, and error messages remain durable for crash and apply diagnostics. Existing trace gate tests cover the intended behavior once the app test project is reconciled.
+
 ## 2026-09-27 — Add Store MSIX alongside the existing Windows installer
 
 Keep `FileID.App` unpackaged for the existing WiX MSI/Burn distribution and add a separate Windows Application Packaging Project for Store MSIX. FileID ships two executables (`FileID.exe` and `FileIDEngine.exe`), so single-project MSIX is insufficient; the package project includes both plus the native runtime DLLs. The Store package uses the reserved `AdamNolle.FileID` identity and an x64 Store upload package, with package identity guarding the Windows App SDK bootstrapper. Store package versioning starts independently at `1.0.0.0` and must increment for each Store update. Store signing and hosting avoid procurement of a paid Authenticode certificate for Store users; the separate downloadable MSI/EXE path still needs Authenticode. ARM64 remains deferred until the runtime fetch script can stage architecture-correct native dependencies.
