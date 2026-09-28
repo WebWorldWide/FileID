@@ -24,10 +24,14 @@ use anyhow::{Context, Result};
 #[cfg(windows)]
 pub fn root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("LOCALAPPDATA") {
-        return Ok(PathBuf::from(s).join("FileID"));
+        if !s.trim().is_empty() {
+            return Ok(PathBuf::from(s).join("FileID"));
+        }
     }
     if let Ok(home) = std::env::var("USERPROFILE") {
-        return Ok(PathBuf::from(home).join("AppData").join("Local").join("FileID"));
+        if !home.trim().is_empty() {
+            return Ok(PathBuf::from(home).join("AppData").join("Local").join("FileID"));
+        }
     }
     anyhow::bail!("could not resolve %LOCALAPPDATA% or %USERPROFILE% for FileID state dir")
 }
@@ -45,11 +49,18 @@ pub fn root() -> Result<PathBuf> {
     anyhow::bail!("could not resolve $XDG_DATA_HOME or $HOME for FileID state dir")
 }
 
-pub fn db_path()      -> Result<PathBuf> { Ok(root()?.join("fileid.sqlite")) }
+pub fn db_path() -> Result<PathBuf> {
+    if let Ok(s) = std::env::var("FILEID_DB") {
+        if !s.trim().is_empty() {
+            return Ok(PathBuf::from(s));
+        }
+    }
+    Ok(root()?.join("fileid.sqlite"))
+}
 pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
 pub fn models_dir() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("FILEID_MODELS_DIR") {
-        if !s.is_empty() {
+        if !s.trim().is_empty() {
             return Ok(PathBuf::from(s));
         }
     }
@@ -57,7 +68,7 @@ pub fn models_dir() -> Result<PathBuf> {
 }
 #[allow(dead_code)]
 pub fn engine_models_dir() -> Result<PathBuf> { models_dir() }
-pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
+pub fn hf_cache_dir() -> Result<PathBuf> { Ok(models_dir()?.join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
 pub fn runtime_dir()  -> Result<PathBuf> { Ok(root()?.join("runtime")) }

@@ -8,6 +8,12 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-28 — Store readiness: path and picker safety
+
+- Aligned C# and Rust state path resolution for `LOCALAPPDATA`, `USERPROFILE`, `FILEID_DB`, and `FILEID_MODELS_DIR`; Hugging Face cache now follows the selected models directory.
+- Folder picker now rejects a missing owner window, treats the Windows cancellation HRESULT as cancellation, and validates the selected folder through one path. Debug test instances use a stable isolated mutex when both database and app data are isolated.
+- VS MSBuild x64 Release app build, engine clippy, and engine tests pass. Debug app test compilation improved from 137 to 120 error lines; the full app suite still cannot run. Store submission remains on hold. The existing `.msixupload` was built from the earlier `ce74f83` commit.
+
 ## 2026-09-27 — Store PR validation and release gate triage
 
 - Opened draft PR #183 from `codex/store-msix`; the website and README state that the x64 Microsoft Store release is pending. GitHub Pages serves `main`, so the site change is not live yet.

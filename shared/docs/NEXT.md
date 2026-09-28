@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## 2026-09-28 — Current release gate
+
+- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 120 C# error lines after path, folder picker, and isolated instance fixes; run the suite after it compiles. Keep the safety assertions intact.
+- Rebuild and validate the x64 `.msixupload` from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo. The downloaded artifact in `ci-ce74f83` predates the current fixes.
+- Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
+
 ## 2026-09-27 — FileID Microsoft Store package validation and listing
 
 - **Draft PR #183:** `codex/store-msix` is pushed. Hosted VS 2022 produces and validates the x64 Store package; repository policy passes. Keep the PR draft and Partner Center product unsubmitted while the Windows app tests cannot compile. Reconcile and run those tests, smoke-test install and launch, then complete the Store listing. The website update is on this branch; GitHub Pages will not serve it until merge to `main`.

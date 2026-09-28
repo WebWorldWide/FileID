@@ -3363,3 +3363,7 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   This is the high-integrity reading of "finish everything": every item reaches a terminal state —
   landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
   unverifiable changes that risk regressing shipped features.
+
+## 2026-09-28 — Isolated Windows test instances
+
+When FILEID_TEST_INSTANCE is set, the app derives a stable per-test mutex from the test identity and requires both FILEID_DB and LOCALAPPDATA. Normal launches retain the existing singleton mutex. This lets GUI test processes run independently without sharing the user's live database or app state; missing isolation paths fail before startup.
