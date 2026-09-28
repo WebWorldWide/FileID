@@ -195,6 +195,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // ─── Observable surface (mirror of macOS @Observable) ──────────────
 
     private LifecycleState _state = LifecycleState.Starting;
+    internal const string StoppedReason = "Engine stopped";
     public LifecycleState State
     {
         get => _state;
@@ -882,19 +883,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // or trigger the auto-respawn — that would drag the engine
             // back up after the user explicitly asked it to stop.
             // Interlocked.Exchange both reads + clears in one atomic op.
+            var expectedExit = false;
             if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
             {
                 var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
-                if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
-                {
-                    State = LifecycleState.Crashed; // "stopped" UI; user can manually start
-                    CrashReason = string.Empty;
-                    return;
-                }
-                // Stale flag: a shutdown was requested long ago but the engine
-                // never exited then. This exit is a real (later) crash — fall
-                // through to the auto-respawn path.
-                DebugLog.Warn("EngineClient: stale _expectingExit ignored; treating exit as a crash.");
+                expectedExit = DateTime.UtcNow - setAt <= ExpectingExitWindow;
+            }
+            if (expectedExit)
+            {
+                ResetProcessBoundScanState();
+                CrashReason = StoppedReason;
+                State = LifecycleState.Crashed;
+                return;
             }
 
             // Auto-respawn with bounded backoff. The 3-strike window is

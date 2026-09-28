@@ -146,6 +146,19 @@ internal sealed partial class EngineClient
         _shownPhaseRank = -1;
     }
 
+    private void ResetProcessBoundScanState()
+    {
+        Phase = null;
+        LastProgress = null;
+        LastBatch = null;
+        IsPaused = false;
+        LastScanDuration = TimeSpan.Zero;
+        LastScanProcessedFiles = 0;
+        _scanStartedAt = null;
+        _lastProgressPhase = null;
+        _shownPhaseRank = -1;
+    }
+
     // internal (not private) so FileID.App.Tests can assert the classification
     // headlessly — the EngineClient singleton itself needs a UI-thread
     // DispatcherQueue and can't be constructed in a test worker.
