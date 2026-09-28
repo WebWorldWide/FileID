@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-27 — Windows Store preflight results
+
+- Ran `platforms/windows/build/publish-store-msix.ps1` on Windows. The Release app build and binary privacy gate completed, but WAP packaging failed in `GenerateAppxPackageRecipe` with `APPX0002` / `NullReferenceException`; no `.msixupload` or `.msix` was produced. The installed VS 2022 Build Tools lacks Appx/DesktopBridge tasks; using the installed VS 18 WAP tasks reached the same packaging failure.
+- The restore generated `installer/FileID.StorePackage/packages.lock.json`; retain it with the new package project. Corrected the new installer contract test to match the app's variable-guarded package identity check.
+- CI lock-mode inspection found `RestoreLockedMode` remains empty when `GITHUB_ACTIONS=true` because its condition is evaluated before `ContinuousIntegrationBuild` is assigned. An experimental reorder exposed incompatible RID/no-RID lock graphs in IPC/Theme, so that change was reverted pending a runtime-matrix lock strategy.
+- Existing Windows checks: Rust clippy passed; 394 Rust unit tests and 2 manifest tests passed (2 throughput tests ignored); .NET Release build and format verification passed; IPC schema tests passed (46). The app test project does not compile: 152 C# diagnostics across 17 test files reference members absent from the current app code, so those tests could not run. The Windows app workflow's `Test-Path Tests` guard checked a nonexistent nested directory and skipped both test projects; that guard has been removed.
+- Partner Center was left as a draft; no package was uploaded and no submission was started.
+
 ## 2026-09-27 — Microsoft Store draft and Windows MSIX packaging path
 
 - Reserved `FileID` in Partner Center as an MSIX/PWA draft, Store ID `9PC8HSD86887`; package identity is `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`.

@@ -171,7 +171,8 @@ public sealed class InstallerContractTests
             RegexOptions.Multiline));
         Assert.Contains("Assert-MicrosoftSignature", publishScript, StringComparison.Ordinal);
         Assert.Contains("Bootstrap.TryInitialize(0x00010007u", program, StringComparison.Ordinal);
-        Assert.Contains("if (!HasPackageIdentity())", program, StringComparison.Ordinal);
+        Assert.Contains("hasPackageIdentity = HasPackageIdentity();", program, StringComparison.Ordinal);
+        Assert.Contains("if (!hasPackageIdentity)", program, StringComparison.Ordinal);
         Assert.Contains("Bootstrap.Shutdown()", program, StringComparison.Ordinal);
         Assert.Contains("Windows App SDK 1.7 runtime", program, StringComparison.Ordinal);
     }

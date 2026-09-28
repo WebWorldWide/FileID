@@ -125,6 +125,8 @@ End users (no source needed):
 
 Unsigned/self-signed v0.1.0 release builds are available on the [releases page](https://github.com/WebWorldWide/FileID/releases/latest) — or compile your own via [Build from source](#build-from-source) below.
 
+An x64 Microsoft Store package is in preparation. The Store listing is not live; use the Windows installer on the releases page for now.
+
 ---
 
 ## Build from source
