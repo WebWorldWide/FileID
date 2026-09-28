@@ -3382,3 +3382,7 @@ The engine can return two equal-valued results for separate attempts. The app no
 ## 2026-09-28 — Allow reviewed official vendor runtime downloads
 
 The user approved official vendor downloads for optional Windows GPU and media runtime packs. Keep model weights on Hugging Face and permit only the six exact, SHA-256-pinned runtime URLs already in the registry, fetched from official GitHub releases and NVIDIA's CDN. The release egress gate checks both the exact URL set and the downloader's HTTPS redirect host allowlist. This supersedes the Hugging Face-only network rule for these optional packs; it does not permit telemetry, arbitrary vendor URLs, or unpinned downloads.
+
+## 2026-09-28 — Journal bulk edits after terminal per-file confirmation
+
+A sent bulk command does not prove which files changed, and an acknowledged reverse command does not prove undo completed. Bulk rename and tag history now records only IDs confirmed by a terminal `BulkActionResult` and keeps reverse actions retryable until every expected ID is confirmed. All tag modes snapshot prior user tags before applying; unavailable snapshots fail the operation rather than yielding an empty inverse.

@@ -8,6 +8,12 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-28 — Store readiness: verified bulk action undo
+
+- Bulk rename now creates undo entries only after the engine confirms per-file successes. The inverse includes only those files, and undo remains retryable unless the engine confirms every reverse rename.
+- Bulk tag add, remove, and replace now capture prior user tags before applying, journal only confirmed files through the existing `TagChangeJournal`, and validate every reverse batch. A failed tag snapshot stops the apply instead of creating an empty undo.
+- All 17 focused bulk action and tag grouping tests pass. VS MSBuild x64 Release app build and targeted `dotnet format --verify-no-changes` pass. Full app-test compilation has 63 remaining diagnostics in lifecycle, cleanup, restructure undo, health waiters, and exact cleanup proof.
+
 ## 2026-09-28 — Store readiness: official runtime sources and current package
 
 - User approved official vendor downloads for optional runtime packs. The strict egress gate now allows the six reviewed, SHA-256-pinned GitHub/NVIDIA artifact URLs and rejects other vendor URLs; the policy workflow and release workflow run that strict gate. Runtime egress policy tests pass.
