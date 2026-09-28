@@ -39,7 +39,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
 
       - name: Cache cargo registry and build output
-        uses: actions/cache@0057852bfaa9a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -50,7 +50,7 @@ jobs:
             cargo-store-x64-
 
       - name: Cache NuGet
-        uses: actions/cache@0057852bfaa9a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.nuget/packages
           key: nuget-store-x64-${{ hashFiles('platforms/windows/Directory.Packages.props') }}
