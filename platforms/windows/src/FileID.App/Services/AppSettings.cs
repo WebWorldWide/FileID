@@ -76,6 +76,13 @@ internal sealed class AppSettings
     /// Once true the banner stays hidden across launches.</summary>
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
+    // Retained so existing settings files round-trip without discarding their values.
+    // Runtime downloads now start only from explicit Install actions.
+    public bool DisableAutoInstallCuda { get; set; } = false;
+    public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
+    public bool DisableAutoInstallCudnn { get; set; } = false;
+    public bool DisableAutoInstallOpenVino { get; set; } = false;
+
     /// <summary>Persisted Deep Analyze VLM model — the model the Deep Analyze
     /// tab uses for full caption + smart-rename + tags. Auto-tagging during
     /// scans uses RAM++ (CLIP scene tags as fallback); this is the opt-in
