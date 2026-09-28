@@ -6,7 +6,7 @@
 #   1. Toolchain probes  (cargo, dotnet, MSBuild via VS Build Tools)
 #   2. Optional clean    (cargo clean + dotnet clean + remove dist/)
 #   3. Engine build      (Rust release LTO, x64)
-#   4. App build         (dotnet build solution OR dotnet publish for -Release)
+#   4. App build         (dotnet build solution OR VS MSBuild publish for -Release)
 #   5. Stage             (copy FileIDEngine.exe alongside FileID.exe)
 #   6. Smoke             (verify both binaries present, sized sanely)
 #   7. Optional run      (Start-Process FileID.exe)
@@ -162,6 +162,9 @@ if (-not $SkipEngine) {
 
 if (-not $SkipApp) {
     Require-Command "dotnet" "Install .NET 8 SDK: winget install Microsoft.DotNet.SDK.8"
+    if ($Release) {
+        Require-Command "msbuild" "Install Visual Studio with Windows App SDK and MSIX build tools."
+    }
     # `dotnet` the host shim can be on PATH with NO SDK installed (runtime-only,
     # or a fresh box). In that case `dotnet --version` exits non-zero, which
     # $PSNativeCommandUseErrorActionPreference would turn into a raw
@@ -375,14 +378,16 @@ if (-not $SkipApp) {
     $cpuCount = [Environment]::ProcessorCount
     if ($Release) {
         Write-Host "Publishing FileID.App ($Configuration, $AppRid, self-contained, -m:$cpuCount)..." -ForegroundColor Cyan
-        & dotnet publish $AppCsproj `
-            -c $Configuration `
-            -r $AppRid `
-            --self-contained true `
+        & msbuild $AppCsproj `
+            /t:Publish `
+            /p:Configuration=$Configuration `
+            /p:RuntimeIdentifier=$AppRid `
+            /p:SelfContained=true `
             /p:PublishReadyToRun=true `
-            -p:Platform=$ArchLabel `
-            "-m:$cpuCount" `
-            --nologo
+            /p:Platform=$ArchLabel `
+            /restore `
+            "/m:$cpuCount" `
+            /nologo
     } else {
         Write-Host "Building FileID solution ($Configuration, x64, -m:$cpuCount)..." -ForegroundColor Cyan
         & dotnet build $Solution -c $Configuration -p:Platform=$ArchLabel "-m:$cpuCount" --nologo

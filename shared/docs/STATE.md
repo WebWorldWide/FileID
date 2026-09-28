@@ -8,6 +8,13 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-27 — Store PR validation and release gate triage
+
+- Opened draft PR #183 from `codex/store-msix`; the website and README state that the x64 Microsoft Store release is pending. GitHub Pages serves `main`, so the site change is not live yet.
+- Corrected the pinned `actions/cache` revision that prevented the Store workflow from starting. Reviewed the Store startup change in `Program.cs` and refreshed its network boundary digest; the local action pin and runtime egress tests pass.
+- Changed the Windows app workflow to compile WinUI test projects with Visual Studio MSBuild and run their assemblies with VSTest. `dotnet test` fails earlier because the standalone SDK lacks Visual Studio's PriGen task. The app test project still has 148 C# compile error lines in Debug across 17 files and remains a Store release blocker.
+- The first clean runner reached the Release app publish but failed because `dotnet publish` could not load Visual Studio's PriGen task. A direct Visual Studio MSBuild Release publish passed locally; `build-all.ps1 -Release` now uses that tool. The requested local Store script then reached WAP and failed again at `GenerateAppxPackageRecipe` (`APPX0002` / `NullReferenceException`); no `.msixupload` exists. A clean runner retry is pending. Partner Center shows FileID as Not started, with no upload or submission.
+
 ## 2026-09-27 — Windows Store preflight results
 
 - Ran `platforms/windows/build/publish-store-msix.ps1` on Windows. The Release app build and binary privacy gate completed, but WAP packaging failed in `GenerateAppxPackageRecipe` with `APPX0002` / `NullReferenceException`; no `.msixupload` or `.msix` was produced. The installed VS 2022 Build Tools lacks Appx/DesktopBridge tasks; using the installed VS 18 WAP tasks reached the same packaging failure.

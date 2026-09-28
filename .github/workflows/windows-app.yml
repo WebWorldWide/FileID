@@ -117,14 +117,21 @@ jobs:
         # V15.3: was IpcSchema-only with continue-on-error. Now runs every
         # discoverable test project in Tests/, fails on red. Tests run on
         # x64 only — ARM64 cross-building tests is rarely useful here.
-        # `dotnet test` triggers its own restore for the Tests/ projects;
-        # safe to run here because the x64 build is already complete.
+        # Build WinUI test references with Visual Studio MSBuild, then run the
+        # compiled assemblies with VSTest. The .NET SDK's MSBuild lacks PriGen.
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
+          msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsInstall = & $vswhere -latest -products * -property installationPath
+          $vstest = Join-Path $vsInstall 'Common7/IDE/Extensions/TestPlatform/vstest.console.exe'
+          & $vstest FileID.IpcSchema.Tests/bin/Debug/net8.0/FileID.IpcSchema.Tests.dll '/Platform:x64' '/Logger:console;verbosity=minimal'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $vstest FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/FileID.App.Tests.dll '/Platform:x64' '/Logger:console;verbosity=minimal'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 

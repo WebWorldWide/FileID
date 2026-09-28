@@ -153,7 +153,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/tui/src/scan.rs": "3fc5136a054247f27278bd7e3050272038e828c6bfd8fcee54ddcb3e3d3a7983",
   "platforms/windows/src/FileID.App/App.xaml.cs": "5e0c0c3dd9d861b23bf5271b52e77802422ce149cdbb65fc0d47d1fc09414891",
   "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "fcdc4b46c4451f3dfac9cff8f26c7166aef96153c1fef81eca82175accef1774",
-  "platforms/windows/src/FileID.App/Program.cs": "9b54df9561ad3a2e4276851bf0c8be38e97748e02409f27894d48e3077c75be2",
+  "platforms/windows/src/FileID.App/Program.cs": "6c2e47e6f696a3b670e93868b7945f4b9e7bc7747711fa1bfff95ce5d532ae00",
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "1f78bb2431791bd623cd655d240c2d84e7374e9b9df8d031e65e2db4ccc2525f",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "717209d1c5e474c05d2980cc2fcdc50971692815fd357c98d88002e74a6396e5",
