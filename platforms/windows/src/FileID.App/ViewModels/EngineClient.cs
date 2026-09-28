@@ -62,15 +62,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // — so all four caps are kept symmetric. Bumped 32→64 MiB (R3-07B/R5-12) to hold
     // a full ~200k-move whole-library plan while still bounding a runaway line. An
     // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
-    private const int MaxFrameChars = 64 * 1024 * 1024;
+    private const int MaxFrameBytes = 64 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state (#22). Owned by a single
     /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
     /// loop from a respawn can't race another's buffer/resync flag.</summary>
-    private sealed class StdoutFraming
+    internal sealed class StdoutFraming
     {
         public readonly StringBuilder Buffer = new();
         public readonly char[] Chunk = new char[16 * 1024];
+        public readonly Encoder Utf8Encoder = Encoding.UTF8.GetEncoder();
+        public long BufferedBytes;
         // How many leading buffer chars are already confirmed newline-free, so a
         // multi-MB frame isn't rescanned from index 0 on every chunk (the old
         // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
@@ -622,12 +624,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>S4: read one newline-delimited engine frame, bounded to
-    /// <see cref="MaxFrameChars"/>. A frame that exceeds the cap before a
+    /// <see cref="MaxFrameBytes"/>. A frame that exceeds the cap before a
     /// newline arrives is discarded and we resync to the next newline, so a
     /// never-terminating line can't OOM the UI. Returns null at EOF. All framing
     /// state lives in the caller-owned <paramref name="st"/>, so each
     /// StdoutLoopAsync owns its own — no cross-loop sharing (#22).</summary>
-    private static async Task<string?> ReadBoundedFrameAsync(StreamReader reader, StdoutFraming st, CancellationToken ct)
+    internal static async Task<string?> ReadBoundedFrameAsync(
+        StreamReader reader, StdoutFraming st, CancellationToken ct, int maxFrameBytes = MaxFrameBytes)
     {
         while (true)
         {
@@ -646,11 +649,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 string frame = st.Buffer.ToString(0, nl);
                 st.Buffer.Remove(0, nl + 1);
                 st.Scanned = 0;
+                st.Utf8Encoder.Reset();
+                st.BufferedBytes = st.Utf8Encoder.GetByteCount(st.Buffer.ToString().AsSpan(), flush: false);
                 if (st.Resyncing)
                 {
                     // This frame is the tail of an oversize line — drop it and
                     // resume normal framing from the next one.
                     st.Resyncing = false;
+                    continue;
+                }
+                if (Encoding.UTF8.GetByteCount(frame) > maxFrameBytes)
+                {
+                    st.OversizeDropped = true;
                     continue;
                 }
                 if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
@@ -660,11 +670,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             st.Scanned = st.Buffer.Length;
             // No newline yet: if the buffer crossed the cap, the engine is
             // emitting an oversize/garbage frame. Drop it and resync.
-            if (st.Buffer.Length > MaxFrameChars)
+            if (st.BufferedBytes > maxFrameBytes)
             {
-                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
+                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {maxFrameBytes} UTF-8 bytes); discarding and resyncing.");
                 st.Buffer.Clear();
                 st.Scanned = 0;
+                st.Utf8Encoder.Reset();
+                st.BufferedBytes = 0;
                 st.Resyncing = true;
                 st.OversizeDropped = true;
             }
@@ -677,6 +689,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     string tail = st.Buffer.ToString();
                     st.Buffer.Clear();
                     st.Scanned = 0;
+                    st.Utf8Encoder.Reset();
+                    st.BufferedBytes = 0;
+                    if (Encoding.UTF8.GetByteCount(tail) > maxFrameBytes)
+                    {
+                        st.OversizeDropped = true;
+                        return null;
+                    }
                     if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
                     return tail;
                 }
@@ -689,6 +708,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // accumulated buffer (the O(n^2) on a large frame). (audit A0)
             int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
+            st.BufferedBytes += st.Utf8Encoder.GetByteCount(st.Chunk.AsSpan(0, read), flush: false);
             if (Array.IndexOf(st.Chunk, '\n', 0, read) >= 0)
             {
                 st.Scanned = bufLenBefore;

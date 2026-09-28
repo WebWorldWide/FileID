@@ -373,6 +373,21 @@ public sealed class EngineLifecycleSafetyContractTests
     }
 
     [Fact]
+    public async Task OversizeEngineFrameResynchronizesAtTheNextNewline()
+    {
+        var payload = string.Concat(Enumerable.Repeat("é", 20)) + "\nok\n";
+        await using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(payload));
+        using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+        var framing = new EngineClient.StdoutFraming();
+
+        var frame = await EngineClient.ReadBoundedFrameAsync(
+            reader, framing, CancellationToken.None, maxFrameBytes: 32);
+
+        Assert.Equal("ok", frame);
+        Assert.True(framing.OversizeDropped);
+    }
+
+    [Fact]
     public void StopTimeoutIsExplicitAndRestartFailsClosed()
     {
         var commands = File.ReadAllText(PathInRepo(
