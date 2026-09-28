@@ -4,8 +4,7 @@
 
 - Resolve the 92 remaining Windows app-test compiler diagnostics, then run the complete x64 app suite. Keep the lifecycle, cleanup, bulk action, and restructure safety assertions intact.
 - Resolve the runtime egress policy conflict: optional vendor runtime packs currently download from NVIDIA and GitHub although the release rule allows only user-initiated Hugging Face downloads. Review artifact licenses and SHA-256 pins before choosing a compliant source or changing availability.
-- Re-run the hosted Store package workflow after its recursive upload glob change. Validate the downloaded `.msixupload` from the final commit and install/launch it on Windows before any Partner Center upload.
-- Hosted VS 2022 validated the x64 `.msixupload` at `d85f2ef`; the downloaded copy is `platforms/windows/dist/store-packages/ci-d85f2ef/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `3B3ACC91905A0E5BDB54A71413276C14399B5A87B81DE9FD999B2DF59BB04325`). Rebuild from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo.
+- Hosted VS 2022 package workflow passed on `062d9d8`; downloaded upload is `platforms/windows/dist/store-packages/ci-062d9d8/local-20260928-111705-6732/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `DA9A521DA2E73500015F1E0B2670795EB58E72520363A431B59C6A33E13AFF95`). Install and launch on Windows, then exercise engine IPC, model fallback, cleanup, and undo before any Partner Center upload.
 - Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
 
 ## After the first Store release — requested features
