@@ -8,6 +8,11 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-28 — Store readiness: official runtime sources and current package
+
+- User approved official vendor downloads for optional runtime packs. The strict egress gate now allows the six reviewed, SHA-256-pinned GitHub/NVIDIA artifact URLs and rejects other vendor URLs; the policy workflow and release workflow run that strict gate. Runtime egress policy tests pass.
+- Hosted VS 2022 Store workflow succeeded for `137c3d8`. Downloaded `platforms/windows/dist/store-packages/ci-137c3d8/local-20260928-115932-7384/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `311DF5ACFA93AB770254ED521D6CD8C6EF6A23889A169D64A943D8BBB0C1508A`). Checked x64 Store identity, manifest launch path, bundled engine and ONNX Runtime DLL. Hosted x64 app test build still fails on missing safety behavior. Partner Center remains a draft without an upload.
+
 ## 2026-09-28 — Store readiness: path and picker safety
 
 - Restructure now replays an apply result or error that arrived while its tab was unloaded exactly once, using event object identity across view recreation. Equal-valued new engine errors and apply results now raise `PropertyChanged`, so retries cannot disappear. All 23 focused restructure plan, quality, and reconciliation tests pass; x64 Release app build, format, and reviewed egress audit pass. Clean full app-test rebuild has 78 compiler diagnostics.

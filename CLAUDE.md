@@ -28,7 +28,7 @@ Read the one for the work in front of you:
 
 ## Cross-platform principles (apply everywhere)
 
-- **No telemetry, ever.** No analytics, crash-reporting, update pings, or download instrumentation. The only network egress is user-initiated model downloads from `huggingface.co`. CI scans every shipped binary for telemetry strings as a release blocker. Never propose a feature that violates this.
+- **No telemetry, ever.** No analytics, crash-reporting, update pings, or download instrumentation. Approved network egress is model downloads from `huggingface.co` and SHA-256-pinned optional runtime packs from the official GitHub and NVIDIA URLs reviewed by the runtime egress gate. CI scans every shipped binary for telemetry strings as a release blocker. Never propose a feature that violates this.
 - **Commercial-clean, Apache-2.0.** The project is Apache-2.0 (root `LICENSE`); every default model weight is permissively licensed (Apache-2.0 / MIT) so the app can be open-sourced *and* commercialized. No non-commercial weights in the shipped set. New models go through `shared/docs/MODELS.md` with the license vetted.
 - **Performance is a feature.** Match or beat the macOS pipeline (≥140 files/s on comparable mid-tier hardware). Use the GPU/NPU when present; degrade gracefully to CPU.
 - **The IPC contract is the contract.** Anything new lands in `shared/ipc-schema/ipc.schema.json` first; the per-platform DTOs mirror it. Schema drift = build break.

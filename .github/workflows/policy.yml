@@ -29,7 +29,7 @@ jobs:
       - name: Test runtime egress release gate
         run: python shared/scripts/test_check_runtime_egress.py
       - name: Reject unreviewed runtime egress additions
-        run: python shared/scripts/check_runtime_egress.py --known-blockers
+        run: python shared/scripts/check_runtime_egress.py
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
       - name: Test model license policy

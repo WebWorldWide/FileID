@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release gate: shipped engine downloads must remain Hugging Face-only."""
+"""Release gate: runtime downloads use reviewed model and vendor sources."""
 
 from __future__ import annotations
 
@@ -658,9 +658,9 @@ def policy_source_wiring_violations(policy_workflow: Path) -> list[str]:
             f"{policy_workflow}: policy jobs and enforcement steps must not be conditional or failure-masking"
         )
     test_step = "        run: python shared/scripts/test_check_runtime_egress.py\n"
-    blocker_step = "        run: python shared/scripts/check_runtime_egress.py --known-blockers\n"
-    if text.count(test_step) != 1 or text.count(blocker_step) != 1:
-        failures.append(f"{policy_workflow}: runtime egress tests and known-blocker audit must each run once")
+    gate_step = "        run: python shared/scripts/check_runtime_egress.py\n"
+    if text.count(test_step) != 1 or text.count(gate_step) != 1:
+        failures.append(f"{policy_workflow}: runtime egress tests and strict gate must each run once")
     return failures
 
 
@@ -819,11 +819,14 @@ def violations(registry: Path, downloader: Path) -> list[str]:
     failures, urls, hosts = analyze(registry, downloader)
     for url in sorted(urls):
         parsed = urlparse(url)
-        if parsed.scheme != "https" or not _approved(parsed.hostname):
-            failures.append(f"{registry}: non-Hugging-Face runtime URL: {url}")
-    if hosts != APPROVED_HOSTS:
+        if parsed.scheme != "https" or not (
+            _approved(parsed.hostname) or url in KNOWN_OFF_POLICY_URLS
+        ):
+            failures.append(f"{registry}: unapproved runtime URL: {url}")
+    expected_hosts = APPROVED_HOSTS | KNOWN_EXTRA_HOSTS
+    if hosts != expected_hosts:
         failures.append(
-            f"{downloader}: download host allowlist must be exactly {sorted(APPROVED_HOSTS)}; got {sorted(hosts)}"
+            f"{downloader}: download host allowlist must be exactly {sorted(expected_hosts)}; got {sorted(hosts)}"
         )
     return failures
 
@@ -850,7 +853,7 @@ def release_wiring_violations(release_workflow: Path) -> list[str]:
         "      - name: Enforce reviewed runtime egress before publication\n"
         "        if: steps.mode.outputs.publish == 'true'\n"
         "        shell: pwsh\n"
-        "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n"
+        "        run: python ../../shared/scripts/check_runtime_egress.py\n"
         "\n"
         "      - name: Download signed/non-Windows CLI/TUI bundles\n"
     )
@@ -899,7 +902,7 @@ def main() -> int:
     if args.known_blockers:
         print("Runtime egress audit passed: no additions beyond the reviewed release-blocking baseline.")
     else:
-        print("Runtime egress release gate passed: registry and redirects are Hugging Face-only.")
+        print("Runtime egress release gate passed: registry URLs and redirect hosts are reviewed.")
     return 0
 
 

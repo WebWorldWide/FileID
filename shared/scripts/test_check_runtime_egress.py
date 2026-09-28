@@ -111,7 +111,7 @@ class RuntimeEgressTests(unittest.TestCase):
         )
         return registry, downloader
 
-    def test_accepts_only_hugging_face_and_subdomains(self) -> None:
+    def test_accepts_hugging_face_and_subdomains(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry, downloader = self.files(
                 directory,
@@ -119,7 +119,16 @@ class RuntimeEgressTests(unittest.TestCase):
                     "https://huggingface.co/org/model/resolve/main/file.bin",
                     "https://cdn-lfs.hf.co/file.bin",
                 ],
-                ["huggingface.co", "hf.co"],
+                ["huggingface.co", "hf.co", "github.com", "githubusercontent.com", "download.nvidia.com", "developer.nvidia.com"],
+            )
+            self.assertEqual(violations(registry, downloader), [])
+
+    def test_accepts_pinned_official_vendor_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry, downloader = self.files(
+                directory,
+                ["https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"],
+                ["huggingface.co", "hf.co", "github.com", "githubusercontent.com", "download.nvidia.com", "developer.nvidia.com"],
             )
             self.assertEqual(violations(registry, downloader), [])
 
@@ -128,10 +137,10 @@ class RuntimeEgressTests(unittest.TestCase):
             registry, downloader = self.files(
                 directory,
                 ["https://github.com/org/repo/releases/download/v1/runtime.zip"],
-                ["huggingface.co", "hf.co", "github.com"],
+                ["huggingface.co", "hf.co", "github.com", "githubusercontent.com", "download.nvidia.com", "developer.nvidia.com", "evil.example"],
             )
             failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            self.assertTrue(any("unapproved runtime URL" in failure for failure in failures))
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
 
     def test_rejects_dynamic_url_comment_decoy_and_redirect_bypass(self) -> None:
@@ -614,8 +623,8 @@ class RuntimeEgressTests(unittest.TestCase):
         repository = Path(__file__).resolve().parents[2]
         original = (repository / ".github/workflows/release.yml").read_text(encoding="utf-8")
         mutated = original.replace(
-            "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n",
-            "        run: python ../../shared/scripts/check_runtime_egress.py --known-blockers\n        continue-on-error: true\n",
+            "        run: python ../../shared/scripts/check_runtime_egress.py\n",
+            "        run: python ../../shared/scripts/check_runtime_egress.py\n        continue-on-error: true\n",
             1,
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -637,7 +646,7 @@ class RuntimeEgressTests(unittest.TestCase):
             registry.write_text('FileEntry { url: "http://huggingface.co/file" }\n', encoding="utf-8")
             downloader.write_text("fn main() {}\n", encoding="utf-8")
             failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            self.assertTrue(any("unapproved runtime URL" in failure for failure in failures))
             self.assertTrue(any("expected exactly one" in failure for failure in failures))
 
 

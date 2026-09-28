@@ -10,6 +10,8 @@ using System.Linq;
 using FileID.Views.Library;
 using Xunit;
 
+#pragma warning disable CA1861
+
 namespace FileID.App.Tests;
 
 public class BulkTagReplaceUndoGroupingTests

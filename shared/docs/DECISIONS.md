@@ -3379,3 +3379,6 @@ The first 200 files in an outcome remain a compact inline preview, but "See all"
 ## 2026-09-28 — Reconcile restructure completions by event identity
 
 The engine can return two equal-valued results for separate attempts. The app now publishes every new error and apply-result object and remembers the last surfaced reference across Restructure tab recreation. A completion that arrived while the view was unloaded is handled once on load; the same cached object is ignored.
+## 2026-09-28 — Allow reviewed official vendor runtime downloads
+
+The user approved official vendor downloads for optional Windows GPU and media runtime packs. Keep model weights on Hugging Face and permit only the six exact, SHA-256-pinned runtime URLs already in the registry, fetched from official GitHub releases and NVIDIA's CDN. The release egress gate checks both the exact URL set and the downloader's HTTPS redirect host allowlist. This supersedes the Hugging Face-only network rule for these optional packs; it does not permit telemetry, arbitrary vendor URLs, or unpinned downloads.
