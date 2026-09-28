@@ -342,7 +342,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::RenameFiles(RenameFilesPayload {
             renames: vec![RenameEntry { file_id: 1, new_name: "Renamed.jpg".into() }],
         }),
-        CommandPayload::TrashFiles(TrashFilesPayload { file_ids: vec![1, 2, 3] }),
+        CommandPayload::TrashFiles(TrashFilesPayload { file_ids: vec![1, 2, 3], exact_identities: None }),
         CommandPayload::MergeClusters(MergeClustersPayload {
             source_person_id: 1,
             destination_person_id: 2,

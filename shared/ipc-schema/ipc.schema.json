@@ -182,7 +182,20 @@
         { "type": "object", "required": ["trashFiles"], "additionalProperties": false,
           "properties": { "trashFiles": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs"],
-            "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
+            "properties": {
+              "fileIDs": { "type": "array", "items": { "type": "integer" } },
+              "exactIdentities": { "type": "array", "items": { "type": "object", "additionalProperties": false,
+                "required": ["fileID", "path", "sizeBytes", "sha256Hex", "keeperPath", "keeperSizeBytes", "keeperSha256Hex"],
+                "properties": {
+                  "fileID": { "type": "integer" },
+                  "path": { "type": "string" },
+                  "sizeBytes": { "type": "integer", "minimum": 0 },
+                  "sha256Hex": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+                  "keeperPath": { "type": "string" },
+                  "keeperSizeBytes": { "type": "integer", "minimum": 0 },
+                  "keeperSha256Hex": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+                } } }
+            } } } },
 
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
           "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,

@@ -8,6 +8,11 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-09-28 — Store readiness: exact cleanup proof reaches engine
+
+- Exact duplicate cleanup now snapshots the selected keeper and victims, checks full SHA-256 before sending, and sends the proof through the canonical `trashFiles.exactIdentities` IPC field. The Rust engine rechecks library identity, regular-file type, size, and both hashes before allowing each selected file into the Recycle Bin batch. Malformed or stale proof fails closed; missing library IDs now produce failed per-file results.
+- Windows focused exact-cleanup tests pass (8), IPC schema tests pass (47), Rust engine tests and clippy pass, and x64 Release app build and targeted format pass. Full app-test build still has 57 diagnostics, concentrated in lifecycle, cleanup mode switching, restructure undo, and health waiters. The final Store package and install/launch smoke checks remain pending.
+
 ## 2026-09-28 — Store readiness: verified bulk action undo
 
 - Bulk rename now creates undo entries only after the engine confirms per-file successes. The inverse includes only those files, and undo remains retryable unless the engine confirms every reverse rename.

@@ -3,7 +3,7 @@
 //! persons as unknown, find merge suggestions. They share the
 //! `emit_bulk_result` tail so the wire shape stays uniform.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ipc::{
     self, sink::Sink, BulkActionItem, BulkActionResult, EngineError, EventPayload, IpcEvent,
@@ -13,8 +13,6 @@ use crate::pipeline::face_clustering::{MERGE_SUGGEST_COS_HIGH, MERGE_SUGGEST_COS
 
 use super::trash_log::{self, TrashLogEntry, TrashLogItem};
 
-#[cfg(windows)]
-use std::path::Path;
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
@@ -407,6 +405,70 @@ pub(crate) async fn handle_rename_files(
     emit_bulk_result(&sink, "renameFiles", result).await;
 }
 
+fn exact_trash_proof_error(
+    file_id: i64,
+    db_path: &str,
+    db_size: i64,
+    keeper_snapshot: Option<(i64, i64)>,
+    proof: &ipc::ExactTrashIdentity,
+) -> Option<&'static str> {
+    if proof.file_id != file_id || proof.path != db_path || proof.size_bytes != db_size {
+        return Some("selected file no longer matches its library snapshot");
+    }
+    if proof.size_bytes < 0
+        || proof.keeper_size_bytes < 0
+        || proof.path == proof.keeper_path
+        || !Path::new(&proof.path).is_absolute()
+        || !Path::new(&proof.keeper_path).is_absolute()
+    {
+        return Some("invalid exact duplicate proof");
+    }
+    let Ok(victim_hash) = hex::decode(&proof.sha256_hex) else {
+        return Some("invalid exact duplicate hash");
+    };
+    let Ok(keeper_hash) = hex::decode(&proof.keeper_sha256_hex) else {
+        return Some("invalid keeper hash");
+    };
+    if victim_hash.len() != 32 || victim_hash != keeper_hash {
+        return Some("duplicate and keeper hashes differ");
+    }
+    let Some((keeper_id, keeper_db_size)) = keeper_snapshot else {
+        return Some("keeper is no longer in the library");
+    };
+    if keeper_id == file_id || keeper_db_size != proof.keeper_size_bytes {
+        return Some("keeper no longer matches its library snapshot");
+    }
+    for (path, size) in [
+        (&proof.path, proof.size_bytes),
+        (&proof.keeper_path, proof.keeper_size_bytes),
+    ] {
+        let Ok(metadata) = std::fs::symlink_metadata(
+            crate::util::path_safety::to_extended_length(Path::new(path)),
+        ) else {
+            return Some("duplicate or keeper is missing");
+        };
+        if !metadata.file_type().is_file() || metadata.len() != size as u64 {
+            return Some("duplicate or keeper changed type or size");
+        }
+    }
+    let Ok(victim_actual) = crate::util::content_hash::exact_file_sha256(
+        Path::new(&proof.path), proof.size_bytes as u64,
+    ) else {
+        return Some("duplicate changed during verification");
+    };
+    let keeper_actual = if let Ok(hash) = crate::util::content_hash::exact_file_sha256(
+        Path::new(&proof.keeper_path), proof.keeper_size_bytes as u64,
+    ) {
+        hash
+    } else {
+        return Some("keeper changed during verification");
+    };
+    if victim_actual.as_slice() != victim_hash || keeper_actual != victim_actual {
+        return Some("duplicate no longer matches its keeper");
+    }
+    None
+}
+
 /// Trash a set of files. Looks up paths from the DB, hands a Vec<PathBuf>
 /// to shell::trash::trash, removes the rows on success.
 pub(crate) async fn handle_trash_files(
@@ -418,6 +480,44 @@ pub(crate) async fn handle_trash_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
+        let exact_by_id = payload.exact_identities.as_ref().map(|identities| {
+            identities
+                .iter()
+                .map(|identity| (identity.file_id, identity))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
+        if let Some(exact) = &exact_by_id {
+            let mut authorization_bytes = 0i64;
+            let valid = !payload.file_ids.is_empty()
+                && payload.file_ids.len() <= 5_000
+                && exact.len() == payload.file_ids.len()
+                && payload.file_ids.iter().all(|id| exact.contains_key(id))
+                && payload.exact_identities.as_ref().is_some_and(|identities| {
+                    identities.iter().all(|identity| {
+                        identity.size_bytes >= 0
+                            && identity.keeper_size_bytes >= 0
+                            && identity.size_bytes
+                                .checked_add(identity.keeper_size_bytes)
+                                .and_then(|bytes| authorization_bytes.checked_add(bytes))
+                                .is_some_and(|total| {
+                                    authorization_bytes = total;
+                                    total <= 64 * 1024 * 1024 * 1024
+                                })
+                    })
+                });
+            if !valid {
+                return Ok(BulkActionResult {
+                    action: "trashFiles".into(),
+                    succeeded: 0,
+                    failed: payload.file_ids.len() as u32,
+                    messages: payload.file_ids.iter().map(|id| BulkActionItem {
+                        file_id: Some(*id),
+                        ok: false,
+                        message: Some("invalid exact duplicate authorization".into()),
+                    }).collect(),
+                });
+            }
+        }
         // ENG-93: capture each path's pre-op existence. shell::trash::trash_path
         // is idempotent — a source that is already gone returns Ok (reported as
         // `true`). That is correct for the shell layer but must not be recorded
@@ -427,13 +527,44 @@ pub(crate) async fn handle_trash_files(
         let mut path_for_id: Vec<(i64, PathBuf, bool)> = Vec::with_capacity(payload.file_ids.len());
 
         {
-            let conn = db.lock();
             for fid in &payload.file_ids {
-                if let Ok(p) = conn.query_row(
-                    "SELECT path_text FROM files WHERE id = ?1",
+                let (row, keeper_snapshot) = {
+                    let conn = db.lock();
+                    let row = conn.query_row(
+                    "SELECT path_text, size_bytes FROM files WHERE id = ?1",
                     rusqlite::params![fid],
-                    |r| r.get::<_, String>(0),
-                ) {
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                    );
+                    let keeper_snapshot = exact_by_id.as_ref().and_then(|exact| {
+                        conn.query_row(
+                            "SELECT id, size_bytes FROM files WHERE path_text = ?1 LIMIT 1",
+                            rusqlite::params![exact[fid].keeper_path],
+                            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                        ).ok()
+                    });
+                    (row, keeper_snapshot)
+                };
+                if let Ok((p, db_size)) = row {
+                    if let Some(exact) = &exact_by_id {
+                        let reason = if keeper_snapshot.is_some_and(|(keeper_id, _)| {
+                            exact.contains_key(&keeper_id)
+                        }) {
+                            Some("keeper is also selected for trash")
+                        } else {
+                            exact_trash_proof_error(
+                                *fid, &p, db_size, keeper_snapshot, exact[fid],
+                            )
+                        };
+                        if let Some(reason) = reason {
+                            failed += 1;
+                            messages.push(BulkActionItem {
+                                file_id: Some(*fid),
+                                ok: false,
+                                message: Some(reason.into()),
+                            });
+                            continue;
+                        }
+                    }
                     let path = PathBuf::from(p);
                     // Verbatim (\\?\) probe so a >260-char file is classified as
                     // present (and trashed) instead of "already missing" (#28).
@@ -442,6 +573,13 @@ pub(crate) async fn handle_trash_files(
                     )
                     .is_ok();
                     path_for_id.push((*fid, path, existed));
+                } else {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(*fid),
+                        ok: false,
+                        message: Some("file is no longer in the library".into()),
+                    });
                 }
             }
         }
@@ -523,7 +661,11 @@ pub(crate) async fn handle_trash_files(
         // Tag the BulkActionResult.action with the batch id so the app can
         // store it on the UndoStack entry without an extra IPC.
         Ok(BulkActionResult {
-            action: format!("trashFiles:{}", batch_id),
+            action: if succeeded > 0 {
+                format!("trashFiles:{}", batch_id)
+            } else {
+                "trashFiles".into()
+            },
             succeeded,
             failed,
             messages,
@@ -1116,6 +1258,95 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-bulk-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn exact_trash_identity_uses_canonical_ipc_keys() {
+        let payload = ipc::TrashFilesPayload {
+            file_ids: vec![2],
+            exact_identities: Some(vec![ipc::ExactTrashIdentity {
+                file_id: 2,
+                path: "/library/copy".into(),
+                size_bytes: 4,
+                sha256_hex: "a".repeat(64),
+                keeper_path: "/library/keeper".into(),
+                keeper_size_bytes: 4,
+                keeper_sha256_hex: "a".repeat(64),
+            }]),
+        };
+        let encoded = serde_json::to_value(payload).unwrap();
+        assert_eq!(encoded["fileIDs"][0], 2);
+        assert_eq!(encoded["exactIdentities"][0]["fileID"], 2);
+        assert_eq!(encoded["exactIdentities"][0]["sha256Hex"], "a".repeat(64));
+        assert_eq!(encoded["exactIdentities"][0]["keeperSha256Hex"], "a".repeat(64));
+    }
+
+    #[test]
+    fn exact_trash_proof_rejects_changed_victim_or_keeper() {
+        use sha2::Digest;
+
+        let dir = unique_temp_dir("exact-proof");
+        let keeper = dir.join("keeper.bin");
+        let victim = dir.join("victim.bin");
+        std::fs::write(&keeper, b"same").unwrap();
+        std::fs::write(&victim, b"same").unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(b"same"));
+        let proof = ipc::ExactTrashIdentity {
+            file_id: 2,
+            path: victim.to_string_lossy().into_owned(),
+            size_bytes: 4,
+            sha256_hex: hash.clone(),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 4,
+            keeper_sha256_hex: hash,
+        };
+        assert_eq!(
+            exact_trash_proof_error(2, &proof.path, 4, Some((1, 4)), &proof),
+            None
+        );
+
+        std::fs::write(&victim, b"edit").unwrap();
+        assert!(exact_trash_proof_error(
+            2, &proof.path, 4, Some((1, 4)), &proof
+        ).is_some());
+        std::fs::write(&victim, b"same").unwrap();
+        std::fs::remove_file(&keeper).unwrap();
+        assert!(exact_trash_proof_error(
+            2, &proof.path, 4, Some((1, 4)), &proof
+        ).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exact_trash_proof_rejects_stale_database_and_malformed_hash() {
+        use sha2::Digest;
+
+        let dir = unique_temp_dir("exact-db");
+        let keeper = dir.join("keeper.bin");
+        let victim = dir.join("victim.bin");
+        std::fs::write(&keeper, b"same").unwrap();
+        std::fs::write(&victim, b"same").unwrap();
+        let hash = hex::encode(sha2::Sha256::digest(b"same"));
+        let mut proof = ipc::ExactTrashIdentity {
+            file_id: 2,
+            path: victim.to_string_lossy().into_owned(),
+            size_bytes: 4,
+            sha256_hex: hash.clone(),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 4,
+            keeper_sha256_hex: hash,
+        };
+        assert!(exact_trash_proof_error(
+            2, &proof.path, 5, Some((1, 4)), &proof
+        ).is_some());
+        assert!(exact_trash_proof_error(
+            2, &proof.path, 4, None, &proof
+        ).is_some());
+        proof.sha256_hex = "not-a-hash".into();
+        assert!(exact_trash_proof_error(
+            2, &proof.path, 4, Some((1, 4)), &proof
+        ).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // C1-012: the recovery line carries the file_id + src + dst so disk vs DB

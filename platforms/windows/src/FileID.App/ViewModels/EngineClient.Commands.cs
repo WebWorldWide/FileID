@@ -2,8 +2,10 @@
 // Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
 // stdout loop, event router) stays separate from the per-command surface.
 
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -740,6 +742,19 @@ internal sealed partial class EngineClient
 
     public Task TrashFilesAsync(IReadOnlyList<long> fileIds) =>
         SendCommandAsync(new TrashFilesCommand(fileIds));
+
+    internal static TrashFilesCommand CreateExactTrashCommand(
+        IReadOnlyList<ExactTrashIdentity> identities)
+    {
+        if (identities.Count == 0) throw new ArgumentException("No exact trash identities were supplied.", nameof(identities));
+        var ids = identities.Select(identity => identity.FileId).ToArray();
+        if (ids.Any(id => id <= 0) || ids.Distinct().Count() != ids.Length)
+            throw new ArgumentException("Exact trash identities must have unique positive file IDs.", nameof(identities));
+        return new TrashFilesCommand(ids, identities.ToArray());
+    }
+
+    public Task TrashExactFilesAsync(IReadOnlyList<ExactTrashIdentity> identities) =>
+        SendCommandAsync(CreateExactTrashCommand(identities));
 
     public Task MergeClustersAsync(long sourcePersonId, long destinationPersonId) =>
         SendCommandAsync(new MergeClustersCommand(sourcePersonId, destinationPersonId));

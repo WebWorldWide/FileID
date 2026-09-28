@@ -15,6 +15,27 @@ namespace FileID.IpcSchema.Tests;
 public class IpcCommandTests
 {
     [Fact]
+    public void ExactTrashProof_RoundTripsWithCanonicalFieldNames()
+    {
+        var identity = new ExactTrashIdentity(
+            2, @"C:\Photos\copy.jpg", 4, new string('a', 64),
+            @"C:\Photos\keeper.jpg", 4, new string('a', 64));
+        var command = new IpcCommand("exact", new TrashFilesCommand([2], [identity]));
+        var json = IpcCoder.Encode(command);
+
+        Assert.Contains("\"exactIdentities\"", json);
+        Assert.Contains("\"fileID\":2", json);
+        Assert.Contains("\"sha256Hex\"", json);
+        Assert.Contains("\"keeperSha256Hex\"", json);
+        var decoded = Assert.IsType<TrashFilesCommand>(
+            IpcCoder.Decode<IpcCommand>(json).Payload);
+        Assert.Equal(identity, Assert.Single(decoded.ExactIdentities!));
+
+        var ordinary = IpcCoder.Encode(new IpcCommand("ordinary", new TrashFilesCommand([2])));
+        Assert.DoesNotContain("exactIdentities", ordinary);
+    }
+
+    [Fact]
     public void StartScan_WithRootDisplay_RoundTrips()
     {
         var cmd = new IpcCommand("test-1", new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures"));

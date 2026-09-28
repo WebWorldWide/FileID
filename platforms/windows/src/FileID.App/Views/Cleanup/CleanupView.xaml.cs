@@ -347,22 +347,19 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     private async System.Threading.Tasks.Task TrashNonKeepersAsync()
     {
-        var ids = new List<long>();
-        long bytes = 0;
-        foreach (var grp in ViewModel.Groups)
+        IReadOnlyList<ExactCleanupGroupRequest> requests;
+        long bytes;
+        try
         {
-            // FEAT-CRIT-2: skipped groups are excluded from the global
-            // "Trash non-keepers" run.
-            if (grp.IsSkipped) continue;
-            foreach (var m in grp.Members)
-            {
-                if (!m.IsKeeper)
-                {
-                    ids.Add(m.Id);
-                    bytes += m.SizeBytes;
-                }
-            }
+            requests = SnapshotExactGroups(ViewModel.Groups.Where(group => !group.IsSkipped));
+            bytes = checked(requests.Sum(group => group.Victims.Sum(victim => victim.SizeBytes)));
         }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Selection needs review", ex.Message);
+            return;
+        }
+        var ids = requests.SelectMany(group => group.Victims).Select(victim => victim.FileId).ToList();
         if (ids.Count == 0)
         {
             await ShowAlertAsync(
@@ -382,6 +379,22 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         };
         var choice = await confirm.ShowAsync();
         if (choice != ContentDialogResult.Primary) return;
+
+        ExactCleanupProof proof;
+        try
+        {
+            proof = await ExactCleanupProofBuilder.BuildAsync(requests, null, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Exact verification failed", ex.Message);
+            return;
+        }
+        if (proof.Rejections.Count > 0 || proof.Identities.Count != ids.Count)
+        {
+            await ShowAlertAsync("Duplicates changed", "One or more selected files no longer match their keeper. Refresh Cleanup and review the groups before trying again.");
+            return;
+        }
 
         // UndoStack still captures the same reply independently (it listens
         // on its own PropertyChanged subscription); leave it in place.
@@ -407,15 +420,17 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
-                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
-                TimeSpan.FromSeconds(30));
-            if (result.Failed > 0)
+                () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
+                ExactCleanupProofBuilder.EngineTimeout(proof.AuthorizationBytes));
+            if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
                 var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
                 await ShowAlertAsync(
                     "Some files weren't trashed",
-                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                    result.Failed == 0
+                        ? "The engine did not confirm every selected file. Re-run the scan before trying again."
+                        : $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
                 return;
             }
         }
@@ -423,7 +438,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             await ShowAlertAsync(
                 "Trash didn't confirm",
-                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+                "The engine didn't confirm the trash. The files may or may not have moved — re-run the scan to check before retrying.");
             return;
         }
         catch (Exception ex)
@@ -433,6 +448,26 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
 
         await ViewModel.RefreshAsync(CancellationToken.None);
+    }
+
+    internal static IReadOnlyList<ExactCleanupGroupRequest> SnapshotExactGroups(
+        IEnumerable<DuplicateGroup> groups)
+    {
+        var requests = new List<ExactCleanupGroupRequest>();
+        foreach (var group in groups)
+        {
+            var victims = group.Members.Where(member => !member.IsKeeper).ToArray();
+            if (victims.Length == 0) continue;
+            var keepers = group.Members.Where(member => member.IsKeeper).ToArray();
+            if (keepers.Length != 1)
+                throw new InvalidOperationException("Choose exactly one keeper in each duplicate group.");
+            var keeper = keepers[0];
+            requests.Add(new ExactCleanupGroupRequest(
+                new ExactCleanupFile(keeper.Id, keeper.Path, keeper.SizeBytes),
+                victims.Select(member => new ExactCleanupFile(
+                    member.Id, member.Path, member.SizeBytes)).ToArray()));
+        }
+        return requests;
     }
 
     private static string FormatSize(long bytes)
@@ -556,12 +591,19 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         var grp = GroupFromFlyoutItem(sender);
         if (grp == null) return;
-        var ids = new List<long>();
-        long bytes = 0;
-        foreach (var m in grp.Members)
+        IReadOnlyList<ExactCleanupGroupRequest> requests;
+        long bytes;
+        try
         {
-            if (!m.IsKeeper) { ids.Add(m.Id); bytes += m.SizeBytes; }
+            requests = SnapshotExactGroups([grp]);
+            bytes = checked(requests.Sum(group => group.Victims.Sum(victim => victim.SizeBytes)));
         }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Selection needs review", ex.Message);
+            return;
+        }
+        var ids = requests.SelectMany(group => group.Victims).Select(victim => victim.FileId).ToList();
         if (ids.Count == 0) return;
         var confirm = new ContentDialog
         {
@@ -573,6 +615,21 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             DefaultButton = ContentDialogButton.Close,
         };
         if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        ExactCleanupProof proof;
+        try
+        {
+            proof = await ExactCleanupProofBuilder.BuildAsync(requests, null, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            await ShowAlertAsync("Exact verification failed", ex.Message);
+            return;
+        }
+        if (proof.Rejections.Count > 0 || proof.Identities.Count != ids.Count)
+        {
+            await ShowAlertAsync("Duplicates changed", "One or more selected files no longer match their keeper. Refresh Cleanup and review the group before trying again.");
+            return;
+        }
         // UndoStack still captures the same reply independently; leave it in place.
         Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
@@ -590,15 +647,17 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
-                () => ViewModels.EngineClient.Instance.TrashFilesAsync(ids),
-                TimeSpan.FromSeconds(30));
-            if (result.Failed > 0)
+                () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
+                ExactCleanupProofBuilder.EngineTimeout(proof.AuthorizationBytes));
+            if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
                 var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
                 await ShowAlertAsync(
                     "Some files weren't trashed",
-                    $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
+                    result.Failed == 0
+                        ? "The engine did not confirm every selected file. Re-run the scan before trying again."
+                        : $"Trashed {result.Succeeded}; {result.Failed} failed{detail}. The failed files are still in place — they may be open, read-only, or you may not have permission. Close them or check permissions, then try again.");
                 return;
             }
         }
@@ -606,7 +665,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         {
             await ShowAlertAsync(
                 "Trash didn't confirm",
-                "The engine didn't confirm the trash within 30 seconds. The files may or may not have moved — re-run the scan to check before retrying.");
+                "The engine didn't confirm the trash. The files may or may not have moved — re-run the scan to check before retrying.");
             return;
         }
         catch (Exception ex)

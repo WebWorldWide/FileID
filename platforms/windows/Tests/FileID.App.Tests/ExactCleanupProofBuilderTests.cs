@@ -6,12 +6,34 @@ using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
+using FileID.Views.Cleanup;
 using Xunit;
 
 namespace FileID.App.Tests;
 
 public sealed class ExactCleanupProofBuilderTests : IDisposable
 {
+    [Fact]
+    public void CleanupSelectionSnapshotsOneKeeperAndAllVictims()
+    {
+        var group = new DuplicateGroup
+        {
+            ContentHash = "same",
+            Members =
+            [
+                new DuplicateMember { Id = 1, Path = @"C:\Photos\keeper.jpg", FileName = "keeper.jpg", SizeBytes = 4, GroupKey = "same", IsKeeper = true },
+                new DuplicateMember { Id = 2, Path = @"C:\Photos\copy.jpg", FileName = "copy.jpg", SizeBytes = 4, GroupKey = "same" },
+            ],
+        };
+
+        var request = Assert.Single(CleanupView.SnapshotExactGroups([group]));
+        Assert.Equal(1, request.Keeper.FileId);
+        Assert.Equal(2, Assert.Single(request.Victims).FileId);
+        Assert.Throws<InvalidOperationException>(() => CleanupView.SnapshotExactGroups(
+            [new DuplicateGroup { ContentHash = "invalid", Members = group.Members.Select(member =>
+                new DuplicateMember { Id = member.Id, Path = member.Path, FileName = member.FileName, SizeBytes = member.SizeBytes, GroupKey = "invalid" }).ToArray() }]));
+    }
+
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"fileid-exact-proof-{Guid.NewGuid():N}");
 
     public ExactCleanupProofBuilderTests() => Directory.CreateDirectory(_root);

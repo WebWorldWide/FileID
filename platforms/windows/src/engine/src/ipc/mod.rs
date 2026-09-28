@@ -351,6 +351,21 @@ pub struct RenameEntry {
 pub struct TrashFilesPayload {
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_identities: Option<Vec<ExactTrashIdentity>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExactTrashIdentity {
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub path: String,
+    pub size_bytes: i64,
+    pub sha256_hex: String,
+    pub keeper_path: String,
+    pub keeper_size_bytes: i64,
+    pub keeper_sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,6 +1210,7 @@ mod tests {
             }),
             CommandPayload::TrashFiles(TrashFilesPayload {
                 file_ids: vec![1, 2, 3],
+                exact_identities: None,
             }),
             CommandPayload::MergeClusters(MergeClustersPayload {
                 source_person_id: 1,

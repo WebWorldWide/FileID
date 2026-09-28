@@ -22,8 +22,9 @@ across the macOS GRDB and Windows rusqlite stores).
 These hold for every shipped feature, on every platform.
 
 - **No telemetry, ever.** No analytics, no crash reporting, no update pings, no
-  download instrumentation. The only network egress is user-initiated model
-  downloads from `huggingface.co`. CI scans the shipped binaries for telemetry
+  download instrumentation. Approved egress is model downloads from
+  `huggingface.co` and pinned optional runtimes from reviewed official GitHub
+  and NVIDIA URLs. CI scans the shipped binaries for telemetry
   strings as a release blocker. See [`PRIVACY.md`](PRIVACY.md).
 - **Apache-2.0.** Root `LICENSE`. Every weight FileID downloads by default is
   Apache-2.0 or MIT — no non-commercial or research-only models in the core

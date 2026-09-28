@@ -3386,3 +3386,7 @@ The user approved official vendor downloads for optional Windows GPU and media r
 ## 2026-09-28 — Journal bulk edits after terminal per-file confirmation
 
 A sent bulk command does not prove which files changed, and an acknowledged reverse command does not prove undo completed. Bulk rename and tag history now records only IDs confirmed by a terminal `BulkActionResult` and keeps reverse actions retryable until every expected ID is confirmed. All tag modes snapshot prior user tags before applying; unavailable snapshots fail the operation rather than yielding an empty inverse.
+
+## 2026-09-28 — Require keeper-bound byte proof for exact cleanup
+
+The Cleanup UI previously sent only file IDs after a duplicate-group preview, while large-file group hashes can be head/tail composites. Exact cleanup now hashes the selected victims and keeper before the command, includes their paths, sizes, and SHA-256 values in `trashFiles.exactIdentities`, and has the engine revalidate them before trashing each file. Ordinary trash commands keep the optional proof absent. A missing, malformed, or changed proof rejects deletion, and the engine confirms each result individually. This adds disk reads to a destructive action so the user never has to rely on a stale grouping result as proof of identical bytes.

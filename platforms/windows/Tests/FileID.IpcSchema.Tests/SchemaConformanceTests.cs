@@ -157,7 +157,10 @@ public class SchemaConformanceTests
             UseSymlinks: false),
         new ApplyTagsCommand(_exampleFileIds, _exampleTags, "replace"),
         new RenameFilesCommand(new[] { new RenameEntry(1, "Renamed.jpg") }),
-        new TrashFilesCommand(_exampleFileIds),
+        new TrashFilesCommand(
+            _exampleFileIds,
+            [new ExactTrashIdentity(1, @"C:\Pictures\copy.jpg", 4, new string('a', 64),
+                @"C:\Pictures\keeper.jpg", 4, new string('a', 64))]),
         new MergeClustersCommand(1, 2),
         new EmbedTextQueryCommand("sunset at the beach", "q-1"),
         new RenamePersonCommand(1, Title: "Dr", FirstName: "Mary", MiddleName: "Q", LastName: "Smith", Suffix: "Jr"),
