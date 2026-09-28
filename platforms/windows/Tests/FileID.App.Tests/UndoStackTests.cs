@@ -63,11 +63,11 @@ public class UndoStackTests
     }
 
     [Fact]
-    public async Task Capacity_DropsOldestEntriesPast16()
+    public async Task Capacity_DropsOldestEntriesPast500()
     {
         await DrainAsync();
-        // Push 20; only the most recent 16 should remain.
-        for (int i = 0; i < 20; i++)
+        // ChangeLog retains at most 500 live reverse closures.
+        for (int i = 0; i < 505; i++)
         {
             int captured = i;
             UndoStack.Instance.Push($"op-{captured}", () => Task.FromResult(true));
@@ -78,6 +78,6 @@ public class UndoStackTests
             await UndoStack.Instance.UndoAsync();
             count++;
         }
-        Assert.Equal(16, count);
+        Assert.Equal(500, count);
     }
 }
