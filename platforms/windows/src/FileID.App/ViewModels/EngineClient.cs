@@ -84,6 +84,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private Process? _process;
+    private int _spawnGeneration;
     private CancellationTokenSource? _readCts;
     private Task? _stdoutLoop;
     private Task? _stderrLoop;
@@ -199,6 +200,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         get => _state;
         private set => Set(ref _state, value);
     }
+    public int SpawnGeneration => Volatile.Read(ref _spawnGeneration);
 
     private string? _crashReason;
     public string? CrashReason
@@ -580,6 +582,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 var p = Process.Start(psi)
                         ?? throw new InvalidOperationException("Process.Start returned null");
                 _process = p;
+                Interlocked.Increment(ref _spawnGeneration);
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
                 _stdin = p.StandardInput;
 
                 _readCts = new CancellationTokenSource();
@@ -969,6 +973,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             try { p.Dispose(); } catch { }
         }
         _process = null;
+        Interlocked.Increment(ref _spawnGeneration);
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
 
         // R5-06: release the auto-advance gates on every engine teardown. A crash
         // mid-clustering (or mid-deep-analyze) never emits the Complete/Failed

@@ -52,6 +52,11 @@ public sealed partial class RestructureView : UserControl
     // re-rendering the SAME cached pre-apply plan (keep it engaged).
     private static bool _applying;
     private static RestructurePlan? _applyingPlan;
+    private static bool _applyRequestInFlight;
+    private static bool _awaitingFreshPlan;
+    private static int _applyingGeneration;
+    private static RestructureApplyResult? _resultBeforeApply;
+    private RestructurePlan? _renderedPlan;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private EngineError? _lastHandledError;
@@ -120,6 +125,16 @@ public sealed partial class RestructureView : UserControl
             _ = RefreshDeepAnalyzeHintAsync();
             if (_unloaded) return;
             SyncUndoAffordance();   // R2: reflect any pending undoable run on open
+            if (ShouldReleaseApplyGuardOnEngineChange(
+                    _applying, _applyingGeneration, EngineClient.Instance.SpawnGeneration))
+            {
+                ReleaseApplyGuard();
+            }
+            if (_applyRequestInFlight && !ReferenceEquals(
+                    _resultBeforeApply, EngineClient.Instance.LastRestructureApplyResult))
+            {
+                SyncApplyResult();
+            }
             if (EngineClient.Instance.LastRestructurePlan is not null)
             {
                 SyncPlan();
@@ -170,6 +185,18 @@ public sealed partial class RestructureView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:RestructureView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncEngineError(); });
                     break;
+                case nameof(EngineClient.SpawnGeneration):
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded || !ShouldReleaseApplyGuardOnEngineChange(
+                                _applying, _applyingGeneration, EngineClient.Instance.SpawnGeneration))
+                        {
+                            return;
+                        }
+                        ReleaseApplyGuard();
+                        RecomputeSelection();
+                    });
+                    break;
                 case nameof(EngineClient.DeepAnalyzeProgress):
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
                     break;
@@ -216,24 +243,41 @@ public sealed partial class RestructureView : UserControl
 
     // ---- Plan rendering -------------------------------------------------
 
+    internal static bool IsPlanRestructureErrorKind(string? kind)
+        => kind is "plan_restructure_failed" or "plan_restructure_db" or "plan_restructure_store";
+
+    internal static bool ShouldReleaseApplyGuardOnPlanArrival(
+        bool requestInFlight, object? arrivingPlan, object? applyingPlan)
+        => !requestInFlight && !ReferenceEquals(arrivingPlan, applyingPlan);
+
+    internal static bool ShouldReleaseApplyGuardOnEngineChange(
+        bool guardEngaged, int applyingGeneration, int currentGeneration)
+        => guardEngaged && applyingGeneration != currentGeneration;
+
+    internal static bool IsFrozenPlanCurrent(object? frozen, object? live, object? rendered)
+        => frozen is not null && ReferenceEquals(frozen, live) && ReferenceEquals(frozen, rendered);
+
+    private static void ReleaseApplyGuard()
+    {
+        _applying = false;
+        _applyingPlan = null;
+        _applyRequestInFlight = false;
+        _awaitingFreshPlan = false;
+    }
+
     private void SyncPlan()
     {
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null) return;
 
-        // R6-04: a GENUINELY fresh plan supersedes any in-flight apply — release the
-        // single-flight guard (F-C5-003). But the view is recreated on every tab
-        // switch, so a returning instance can re-enter here with the SAME cached
-        // pre-apply plan while the apply is still mid-flight; releasing then would
-        // re-enable Apply and let a duplicate apply fire against already-moved
-        // sources (the false "some changes couldn't be applied" alarm this guard
-        // exists to prevent). Every plan event deserializes a NEW record instance,
-        // so the post-apply re-plan is a different reference and still releases.
-        if (!ReferenceEquals(plan, _applyingPlan))
+        // A plan arriving while Apply is running must not enable a second Apply.
+        if (_applying && ShouldReleaseApplyGuardOnPlanArrival(
+                _applyRequestInFlight, plan, _applyingPlan))
         {
-            _applying = false;
-            _applyingPlan = null;
+            ReleaseApplyGuard();
         }
+
+        _renderedPlan = plan;
 
         _allFileRows.Clear();
         _filesByOutcome.Clear();
@@ -653,7 +697,11 @@ public sealed partial class RestructureView : UserControl
     {
         if (_applying) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
-        if (plan is null || plan.Moves.Count == 0) return;
+        if (plan is null || !IsFrozenPlanCurrent(plan, EngineClient.Instance.LastRestructurePlan, _renderedPlan)
+            || plan.Moves.Count == 0)
+        {
+            return;
+        }
         var sel = new List<RestructureMove>();
         foreach (var m in plan.Moves)
         {
@@ -662,6 +710,10 @@ public sealed partial class RestructureView : UserControl
         if (sel.Count == 0) return;
         _applying = true;
         _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
+        _applyRequestInFlight = true;
+        _awaitingFreshPlan = false;
+        _applyingGeneration = EngineClient.Instance.SpawnGeneration;
+        _resultBeforeApply = EngineClient.Instance.LastRestructureApplyResult;
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
@@ -683,7 +735,7 @@ public sealed partial class RestructureView : UserControl
             // never arrives). Surface it instead of a silent hang.
             _applyTimeoutTimer?.Stop();
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
-            _applying = false;
+            ReleaseApplyGuard();
             RecomputeSelection();
             ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
             await ShowAlertAsync("Couldn't apply changes",
@@ -714,15 +766,11 @@ public sealed partial class RestructureView : UserControl
             sender.Stop();
             if (_unloaded || !_applying) return;
             DebugLog.Warn("[RESTRUCTURE] apply timed out — engine didn't reply within 90 s");
-            _applying = false;
-            _applyingPlan = null;
-            RecomputeSelection();
-            ApplyStatusText.Text = "Apply timed out — the engine stopped responding. Your files are unchanged.";
+            ApplyStatusText.Text = "Apply has not been confirmed. Restart FileID before trying again.";
             _ = ShowAlertAsync("Apply timed out",
                 "The engine didn't confirm the reorganization within 90 seconds. " +
-                "Your files are most likely unchanged, but check the engine log at " +
-                "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl to be sure.\n\n" +
-                "Try restarting the app and applying again.");
+                "Some files may have moved. Check your files and the engine log at " +
+                "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl, then restart FileID before trying again.");
         });
 
     // R2 reversibility: show/hide the "Undo last run" button from the engine's
@@ -761,6 +809,9 @@ public sealed partial class RestructureView : UserControl
     {
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (r is null) return;
+        _applyRequestInFlight = false;
+        _resultBeforeApply = r;
+        _awaitingFreshPlan = r.Applied > 0;
         // The result arrived — disarm the watchdog timer before touching any state.
         _applyTimeoutTimer?.Stop();
 
@@ -787,19 +838,17 @@ public sealed partial class RestructureView : UserControl
                         if (_unloaded) return;
                         DebugLog.Warn("Restructure post-apply re-plan failed: "
                             + t.Exception?.GetBaseException().Message);
-                        _applying = false;
-                        RecomputeSelection();
+                        ApplyStatusText.Text = "Planning failed after Apply. Generate a fresh plan before trying again.";
                     }), TaskContinuationOptions.OnlyOnFaulted);
             }
             else
             {
-                _applying = false;
-                RecomputeSelection();
+                ApplyStatusText.Text = "Choose a library and generate a fresh plan before trying again.";
             }
         }
         else
         {
-            _applying = false;
+            ReleaseApplyGuard();
             RecomputeSelection();
         }
 
@@ -838,8 +887,7 @@ public sealed partial class RestructureView : UserControl
     {
         var err = EngineClient.Instance.LastError;
         if (err is null || ReferenceEquals(err, _lastHandledError)) return;
-        if (err.Kind != "plan_restructure_failed"
-            && err.Kind != "plan_restructure_db"
+        if (!IsPlanRestructureErrorKind(err.Kind)
             && err.Kind != "apply_restructure"
             && err.Kind != "undo_restructure")
         {
@@ -850,9 +898,12 @@ public sealed partial class RestructureView : UserControl
 
         // The apply itself, or the post-apply re-plan, failed - release the
         // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
-        _applying = false;
-        RecomputeSelection();
-        if (err.Kind == "plan_restructure_failed" || err.Kind == "plan_restructure_db")
+        if (err.Kind == "apply_restructure" || (!_applyRequestInFlight && !_awaitingFreshPlan))
+        {
+            ReleaseApplyGuard();
+            RecomputeSelection();
+        }
+        if (IsPlanRestructureErrorKind(err.Kind))
         {
             PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
             _ = ShowAlertAsync("Couldn't plan the reorganization",

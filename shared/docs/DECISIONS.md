@@ -3367,3 +3367,7 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
 ## 2026-09-28 — Isolated Windows test instances
 
 When FILEID_TEST_INSTANCE is set, the app derives a stable per-test mutex from the test identity and requires both FILEID_DB and LOCALAPPDATA. Normal launches retain the existing singleton mutex. This lets GUI test processes run independently without sharing the user's live database or app state; missing isolation paths fail before startup.
+
+## 2026-09-28 — Hold restructure Apply until the engine outcome is known
+
+A plan arriving during an apply does not prove the file operation finished. Keep the single-flight guard through plan changes and timeouts; release it after the engine reports completion and a fresh plan arrives, or when the owning engine process ends. This prevents a second apply against a partially moved library. A timed-out operation reports an uncertain outcome rather than claiming files are unchanged.

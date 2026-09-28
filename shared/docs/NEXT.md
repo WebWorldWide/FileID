@@ -2,7 +2,9 @@
 
 ## 2026-09-28 — Current release gate
 
-- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 96 C# error lines after UTF-8 byte bounded engine stdout framing; run the suite after it compiles. Keep the safety assertions intact.
+- Resolve the 92 remaining Windows app-test compiler diagnostics, then run the complete x64 app suite. Keep the lifecycle, cleanup, bulk action, and restructure safety assertions intact.
+- Resolve the runtime egress policy conflict: optional vendor runtime packs currently download from NVIDIA and GitHub although the release rule allows only user-initiated Hugging Face downloads. Review artifact licenses and SHA-256 pins before choosing a compliant source or changing availability.
+- Re-run the hosted Store package workflow after its recursive upload glob change. Validate the downloaded `.msixupload` from the final commit and install/launch it on Windows before any Partner Center upload.
 - Hosted VS 2022 validated the x64 `.msixupload` at `d85f2ef`; the downloaded copy is `platforms/windows/dist/store-packages/ci-d85f2ef/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `3B3ACC91905A0E5BDB54A71413276C14399B5A87B81DE9FD999B2DF59BB04325`). Rebuild from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo.
 - Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
 
