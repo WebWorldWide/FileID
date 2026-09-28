@@ -2,9 +2,15 @@
 
 ## 2026-09-28 — Current release gate
 
-- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 115 C# error lines after path, picker, isolated instance, sidebar status, and person query fixes; run the suite after it compiles. Keep the safety assertions intact.
+- Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 103 C# error lines after thumbnail resource fixes; run the suite after it compiles. Keep the safety assertions intact.
 - Rebuild and validate the x64 `.msixupload` from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo. The downloaded artifact in `ci-ce74f83` predates the current fixes.
 - Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
+
+## After the first Store release — requested features
+
+- **Best takes:** Local natural-language search across photos, audio, and video, including queries such as “show me videos only where he gets a hit.” Return matching files or timestamped moments with a reviewable ranking. Reuse the commercial-clean on-device model stack; preserve the no-telemetry boundary.
+- **Conversion, compression, and upscaling:** Batch workflows for supported media formats with output presets, quality and size previews, and safe destination/overwrite behavior. Review codec, model, and binary licenses before choosing any new dependency.
+- **Folder organization:** Improve proposal quality and user control for large libraries using the real corpus, clear previews, and reliable undo. Keep macOS as the visual and behavioral reference across ports.
 
 ## 2026-09-27 — FileID Microsoft Store package validation and listing
 

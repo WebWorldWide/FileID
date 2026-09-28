@@ -42,6 +42,40 @@ public readonly record struct ThumbnailDiagnostics(
 
 internal sealed class ThumbnailService : IDisposable
 {
+    internal const int QueueCapacity = 256;
+    internal const long MaxFallbackEncodedBytes = 32L * 1024 * 1024;
+
+    internal static Channel<ThumbnailRequest> CreateRequestChannel() =>
+        Channel.CreateBounded<ThumbnailRequest>(new BoundedChannelOptions(QueueCapacity)
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.DropOldest,
+        }, dropped => dropped.Completion.TrySetResult(null));
+
+    internal static async Task<byte[]> ReadFallbackFileBytesAsync(string path, CancellationToken ct)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 64 * 1024, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+        if (stream.Length > MaxFallbackEncodedBytes)
+        {
+            throw new InvalidDataException("Image is too large for thumbnail fallback decoding.");
+        }
+
+        using var output = new MemoryStream((int)stream.Length);
+        var buffer = new byte[64 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) != 0)
+        {
+            if (output.Length + read > MaxFallbackEncodedBytes)
+            {
+                throw new InvalidDataException("Image grew beyond the thumbnail fallback limit.");
+            }
+            output.Write(buffer, 0, read);
+        }
+        return output.ToArray();
+    }
+
     /// <summary>Decoded-BitmapImage L1 cache, bounded by a real BYTE budget
     /// (not an entry count). Each cached BitmapImage holds a DECODED bitmap
     /// (~ThumbnailRequestPx² × 4 bytes), so the old 5000-entry cap was really
@@ -115,12 +149,7 @@ internal sealed class ThumbnailService : IDisposable
         // 50+ requests/sec. The previous 64-slot cap dropped older
         // requests within ~1 second of fast scrolling. 256 absorbs
         // burst scroll without dropping anything visible.
-        _queue = Channel.CreateBounded<ThumbnailRequest>(new BoundedChannelOptions(256)
-        {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.DropOldest,
-        });
+        _queue = CreateRequestChannel();
         // attach a fault sink so a DrainAsync exception leaves a
         // forensic trail instead of becoming an UnobservedTaskException
         // at GC time.
@@ -608,7 +637,7 @@ internal sealed class ThumbnailService : IDisposable
         {
             try
             {
-                var fileBytes = await File.ReadAllBytesAsync(path, ct).ConfigureAwait(false);
+                var fileBytes = await ReadFallbackFileBytesAsync(path, ct).ConfigureAwait(false);
                 var bmp = await RenderFromBytesOnDispatcherAsync(fileBytes, dispatcher, ct).ConfigureAwait(false);
                 if (bmp != null)
                 {
@@ -648,6 +677,10 @@ internal sealed class ThumbnailService : IDisposable
         Windows.Storage.FileProperties.StorageItemThumbnail thumb,
         CancellationToken ct)
     {
+        if (thumb.Size > MaxFallbackEncodedBytes)
+        {
+            throw new InvalidDataException("Shell thumbnail exceeds the encoded image limit.");
+        }
         var size = (uint)thumb.Size;
         var buffer = new Windows.Storage.Streams.Buffer(size);
         await thumb.ReadAsync(buffer, size, Windows.Storage.Streams.InputStreamOptions.None)
@@ -760,7 +793,7 @@ internal sealed class ThumbnailService : IDisposable
         try { _cts.Dispose(); } catch { /* swallow */ }
     }
 
-    private sealed record ThumbnailRequest(
+    internal sealed record ThumbnailRequest(
         string Path,
         double? ModifiedAt,
         TaskCompletionSource<BitmapImage?> Completion,
