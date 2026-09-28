@@ -10,12 +10,13 @@
 
 ## 2026-09-28 — Store readiness: path and picker safety
 
+- Hosted VS 2022 Store packaging passed at `d85f2ef`; downloaded `platforms/windows/dist/store-packages/ci-d85f2ef/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `3B3ACC91905A0E5BDB54A71413276C14399B5A87B81DE9FD999B2DF59BB04325`) and independently checked the launch manifest plus app, engine, and native DLL layout. Local packaging script now discovers a VS installation with AppX tasks and writes into a unique output directory, preserving CI artifacts. The local run still fails in installed VS 2026 WAP with `APPX0002` / `NullReferenceException` in `GenerateAppxPackageRecipe`; it produced no local `.msixupload`.
 - Bounded thumbnail image fallback reads to 32 MiB and completed evicted requests so fast scrolling cannot leave tiles waiting indefinitely. Four focused thumbnail resource tests pass under VSTest. The full app test project now has 103 compiler error lines and remains blocked.
 - Runtime egress gate exposed stale reviewed digests for the changed `Program.cs` and `FolderPickerService.cs`; reviewed those local-only changes and refreshed the digests. All 23 local runtime egress checks pass.
 - User chose to ship the current release before adding best-takes media search, batch conversion/enhancement, and stronger folder organization. Those features are recorded in `NEXT.md` for post-release design and implementation.
 - Aligned C# and Rust state path resolution for `LOCALAPPDATA`, `USERPROFILE`, `FILEID_DB`, and `FILEID_MODELS_DIR`; Hugging Face cache now follows the selected models directory.
 - Folder picker now rejects a missing owner window, treats the Windows cancellation HRESULT as cancellation, and validates the selected folder through one path. Debug test instances use a stable isolated mutex when both database and app data are isolated.
-- Fixed blank engine crash status and stopped-state tooltip, and added a person-to-file query that excludes failed files and deduplicates face matches. VS MSBuild x64 Release app build, engine clippy and tests, and .NET format pass. Store submission remains on hold. The downloaded `.msixupload` was built from the earlier `ce74f83` commit.
+- Fixed blank engine crash status and stopped-state tooltip, and added a person-to-file query that excludes failed files and deduplicates face matches. VS MSBuild x64 Release app build, engine clippy and tests, and .NET format pass. Store submission remains on hold.
 
 ## 2026-09-27 — Store PR validation and release gate triage
 

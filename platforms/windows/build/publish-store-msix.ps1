@@ -7,10 +7,24 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $RepoRoot = (Resolve-Path (Join-Path $PlatformDir "..\..")).Path
 $StoreProject = Join-Path $PlatformDir "installer/FileID.StorePackage/FileID.StorePackage.wapproj"
-$PackageDir = Join-Path $PlatformDir "dist/store-packages"
+$PackageDir = Join-Path $PlatformDir ("dist/store-packages/local-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-$PID")
 $StoreAppPublishDir = Join-Path $PlatformDir "dist/store-app-publish"
 $AppPublishDir = Join-Path $PlatformDir "src/FileID.App/bin/x64/Release/net8.0-windows10.0.19041.0/win-x64/publish"
 
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+if (Test-Path -LiteralPath $vswhere) {
+    $preferredInstalls = @(& $vswhere -version '[17.0,18.0)' -products * -requires Microsoft.Component.MSBuild -property installationPath)
+    $fallbackInstalls = @(& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath)
+    foreach ($vsInstall in @($preferredInstalls) + @($fallbackInstalls) | Select-Object -Unique) {
+        $msbuildDir = Join-Path $vsInstall "MSBuild/Current/Bin"
+        $packagingTasks = Get-ChildItem -Path (Join-Path $vsInstall "MSBuild/Microsoft/VisualStudio") -Filter "Microsoft.Build.Packaging.Pri.Tasks.dll" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ((Test-Path -LiteralPath (Join-Path $msbuildDir "MSBuild.exe")) -and $packagingTasks) {
+            $env:PATH = "$msbuildDir;$env:PATH"
+            Write-Host "Store packaging MSBuild: $(Join-Path $msbuildDir 'MSBuild.exe')"
+            break
+        }
+    }
+}
 if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
     throw "MSBuild was not found. Install the Visual Studio MSBuild and Windows App Packaging components."
 }
@@ -41,10 +55,15 @@ try {
         throw "The Store package payload failed the binary privacy gate."
     }
 
-    if (Test-Path $PackageDir) {
-        Remove-Item -LiteralPath $PackageDir -Recurse -Force
-    }
     if (Test-Path $StoreAppPublishDir) {
+        $distRoot = [System.IO.Path]::GetFullPath((Join-Path $PlatformDir "dist")) + [System.IO.Path]::DirectorySeparatorChar
+        $resolvedPublishDir = [System.IO.Path]::GetFullPath($StoreAppPublishDir)
+        if (-not $resolvedPublishDir.StartsWith($distRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Store publish cleanup path is outside the workspace dist directory."
+        }
+        if ((Get-Item -LiteralPath $StoreAppPublishDir).Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Store publish cleanup path is a reparse point."
+        }
         Remove-Item -LiteralPath $StoreAppPublishDir -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null

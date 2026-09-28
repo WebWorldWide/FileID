@@ -3,7 +3,7 @@
 ## 2026-09-28 — Current release gate
 
 - Continue reconciling Windows app safety tests with production code. The latest VS MSBuild Debug compile has 103 C# error lines after thumbnail resource fixes; run the suite after it compiles. Keep the safety assertions intact.
-- Rebuild and validate the x64 `.msixupload` from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo. The downloaded artifact in `ci-ce74f83` predates the current fixes.
+- Hosted VS 2022 validated the x64 `.msixupload` at `d85f2ef`; the downloaded copy is `platforms/windows/dist/store-packages/ci-d85f2ef/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `3B3ACC91905A0E5BDB54A71413276C14399B5A87B81DE9FD999B2DF59BB04325`). Rebuild from the final commit, then install and launch it on Windows and exercise engine IPC, model fallback, cleanup, and undo.
 - Keep PR #183 draft and Partner Center FileID `9PC8HSD86887` unsubmitted until app tests, package smoke checks, and CI pass. Then complete listing assets and certification, merge the website wording to `main`, and update it with the live Store link after publication.
 
 ## After the first Store release — requested features
