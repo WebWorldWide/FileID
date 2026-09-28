@@ -11,7 +11,7 @@
 ## 2026-09-28 — Store readiness: official runtime sources and current package
 
 - User approved official vendor downloads for optional runtime packs. The strict egress gate now allows the six reviewed, SHA-256-pinned GitHub/NVIDIA artifact URLs and rejects other vendor URLs; the policy workflow and release workflow run that strict gate. Runtime egress policy tests pass.
-- Hosted VS 2022 Store workflow succeeded for `137c3d8`. Downloaded `platforms/windows/dist/store-packages/ci-137c3d8/local-20260928-115932-7384/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `311DF5ACFA93AB770254ED521D6CD8C6EF6A23889A169D64A943D8BBB0C1508A`). Checked x64 Store identity, manifest launch path, bundled engine and ONNX Runtime DLL. Hosted x64 app test build still fails on missing safety behavior. Partner Center remains a draft without an upload.
+- Hosted VS 2022 Store workflow succeeded for `137c3d8`. Downloaded `platforms/windows/dist/store-packages/ci-137c3d8/local-20260928-115932-7384/FileID.StorePackage_1.0.0.0_x64.msixupload` (SHA-256 `311DF5ACFA93AB770254ED521D6CD8C6EF6A23889A169D64A943D8BBB0C1508A`). Checked x64 Store identity, manifest launch path, bundled engine and ONNX Runtime DLL. Hosted x64 app test build still fails on missing safety behavior; local MSBuild now reports 69 diagnostics after clearing analyzer errors. Partner Center remains a draft without an upload.
 
 ## 2026-09-28 — Store readiness: path and picker safety
 
