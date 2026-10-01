@@ -8,6 +8,8 @@ on:
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
       - 'platforms/windows/Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
       - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
@@ -22,6 +24,8 @@ on:
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
       - 'platforms/windows/Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
       - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
@@ -117,6 +121,11 @@ jobs:
           -m
         shell: pwsh
 
+      - name: Test report gate regression checks (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: ./build/test-assert-test-report.ps1
+
       - name: Test — IPC schema (x64 only)
         if: matrix.arch == 'x64'
         shell: pwsh
@@ -125,8 +134,7 @@ jobs:
         run: |
           dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger "trx;LogFileName=ipc-schema.trx" --results-directory TestResults
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [xml]$results = Get-Content TestResults/ipc-schema.trx
-          if ([int]$results.TestRun.ResultSummary.Counters.executed -lt 1) { throw "IPC schema suite executed no tests." }
+          ../build/assert-test-report.ps1 -Path TestResults/ipc-schema.trx
 
       - name: Test — app services (x64 only)
         if: matrix.arch == 'x64'
@@ -138,8 +146,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --no-build --no-restore --verbosity minimal --logger "trx;LogFileName=app-services.trx" --results-directory TestResults --blame-hang-timeout 5m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [xml]$results = Get-Content TestResults/app-services.trx
-          if ([int]$results.TestRun.ResultSummary.Counters.executed -lt 1) { throw "App services suite executed no tests." }
+          ../build/assert-test-report.ps1 -Path TestResults/app-services.trx
 
       - name: Upload test results (x64 only)
         if: always() && matrix.arch == 'x64'
