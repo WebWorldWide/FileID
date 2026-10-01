@@ -5,6 +5,13 @@
 > [`STATE.md`](STATE.md); for *what's next* see [`NEXT.md`](NEXT.md); for *why*
 > see [`DECISIONS.md`](DECISIONS.md).
 
+
+## Next-version release status (2026-10-01)
+
+The next-version branch is not release-ready. Its implemented foundation and unfinished features are tracked in [NEXT_VERSION.md](NEXT_VERSION.md). Native macOS catalog/manual-marker UI and sampled timeline jobs do not establish automatic chapters, best takes, chat, conversion/enhancement, or port parity. The existing notarized v0.1.0 release remains separate from this work.
+
+Block release until all accepted feature milestones, held-out accuracy tests, 100,000-file search/interactive-contention benchmarks, original/derived output fidelity, protected-source write tracing, offline network capture, exact dependency/model distribution review, native platform builds, hardware acceptance, signing, and hosted CI pass. Record measured results; do not present proposed targets as achieved.
+
 ## What FileID is
 
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename

@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-10-01 — Next-version implementation in progress
+
+Branch `codex/fileid-next-version` contains Adlon/project-original mutation guards, canonical v21 catalog migrations and IPC v1.1 mirrors, persistent name/evidence FTS, manual chapter editing with durable Undo, macOS frame-sampling jobs with isolated cancellable decoding, and concise naming. See [NEXT_VERSION.md](NEXT_VERSION.md) for the complete accepted delivery ledger, validation commands, and unfinished features. This is not a next-version release.
+
+Next priorities: certify all source/output/companion writes with internal fixtures; finish persistent hybrid indexes and the memory-budgeted scheduler; improve People; implement local chat and unified reversible operations; then add dense timeline/ASR/tracks, automatic chapters, best takes, media tools, broad adapters, and native port UI. Preserve the fast scan and run accuracy/fidelity/hardware gates before promoting models or shipping. The current sampler needs an already loaded visual model, can miss events between samples, and retains incomplete coverage. Windows/Linux have catalog backend contracts, not the new macOS panel or timeline worker.
+
+All tests and generated media in this work use internal temporary directories. Do not modify Adlon or the notarized installed release. Do not overwrite the prior release/signing history below.
+
 ## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
 
 A `/deep-research` sweep (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure

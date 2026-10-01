@@ -57,6 +57,7 @@ enum ModelStorage {
         for directory in directories {
             guard fileManager.fileExists(atPath: directory.path) else { continue }
             do {
+                try ReadOnlyLocations.requireWritable(directory)
                 try fileManager.removeItem(at: directory)
                 removedCount += 1
             } catch {

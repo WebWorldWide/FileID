@@ -186,6 +186,7 @@ fn assert_tag_sets_match(
 /// compilation here until its wire tag + an exemplar below are added.
 fn command_tag(payload: &CommandPayload) -> &'static str {
     match payload {
+        CommandPayload::CatalogRequest(_) => "catalogRequest",
         CommandPayload::StartScan(_) => "startScan",
         CommandPayload::PauseScan(_) => "pauseScan",
         CommandPayload::ResumeScan(_) => "resumeScan",
@@ -224,6 +225,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 /// compilation here until its wire tag + an exemplar below are added.
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
+        EventPayload::CatalogResponse(_) => "catalogResponse",
         EventPayload::Ready(_) => "ready",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
@@ -292,6 +294,7 @@ fn restructure_move() -> RestructureMove {
 /// exercised against the schema's `properties`.
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
         CommandPayload::StartScan(StartScanPayload {
             root_path: r"C:\Photos".to_string(),
             root_display: None,
@@ -394,6 +397,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
 /// exercised against the schema's `properties`.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
         EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),
             pid: 4242,

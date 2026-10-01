@@ -32,6 +32,8 @@ jobs:
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
+      - name: Enforce catalog migration parity
+        run: python shared/scripts/check_catalog_schema.py
       - name: Test model license policy
         run: python shared/scripts/test_check_model_license_policy.py
       - name: Enforce reviewed model license policy

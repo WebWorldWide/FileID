@@ -81,12 +81,14 @@ public final class ArcFaceModelInstaller {
     public func uninstall(_ kind: FaceEmbedderKind) {
         cancel(kind)
         let url = Self.destination(for: kind)
+        guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { status[kind] = .installFailed("This model location is protected example data."); return }
         try? FileManager.default.removeItem(at: url)
         refreshStatus()
     }
 
     private func runInstall(_ kind: FaceEmbedderKind) async {
         let modelsRoot = FaceEmbedderKind.modelsDirectory
+        guard (try? ReadOnlyLocations.requireWritable(modelsRoot)) != nil, (try? ReadOnlyLocations.requireWritable(Self.destination(for: kind))) != nil else { status[kind] = .installFailed("This model location is protected example data."); return }
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
 
         // Reclaim parts orphaned by a kill mid-download BEFORE the

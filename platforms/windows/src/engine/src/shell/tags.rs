@@ -81,6 +81,8 @@ pub fn write_tags_full(path: &Path, tags: &[String]) -> Result<bool> {
 }
 
 fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
+    crate::util::read_only::require_source_mutation(path)?;
+    crate::util::read_only::require_writable(&sidecar_path(path))?;
     let sidecar = sidecar_path(path);
     if tags.is_empty() {
         if sidecar.exists() {
@@ -106,6 +108,7 @@ fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
 /// failure. Closes the on-disk-tag-loss + cross-attribution gap on rename /
 /// restructure (#27).
 pub fn move_sidecar(old: &Path, new: &Path) {
+    if crate::util::read_only::require_source_mutation(old).is_err() || crate::util::read_only::require_source_mutation(new).is_err() { return; }
     let from = sidecar_path(old);
     if std::fs::symlink_metadata(&from).is_err() {
         return;

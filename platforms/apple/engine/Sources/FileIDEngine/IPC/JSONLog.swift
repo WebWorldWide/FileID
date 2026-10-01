@@ -22,13 +22,14 @@ public final class JSONLog: @unchecked Sendable {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("FileID/logs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         self.url = base.appendingPathComponent("scan.jsonl")
 
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
         e.outputFormatting = []
         self.encoder = e
+        guard (try? ReadOnlyLocations.requireWritable(base)) != nil, (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
 
         // Rotate the log if it's >32 MB. Per-batch + per-file events average
         // ~250 bytes/line; a 60K-file scan emits ~10 MB. 32 MB cap means we

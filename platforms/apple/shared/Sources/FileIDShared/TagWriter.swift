@@ -58,6 +58,7 @@ public enum TagWriter {
     /// Uses `NSURL.setResourceValue(_:forKey:)` rather than the
     /// `URLResourceValues.tagNames` setter, which is macOS 26-only.
     public static func setTags(_ tags: [String], at url: URL) throws {
+        try ReadOnlyLocations.requireSourceMutation(url)
         // Normalize: trim whitespace, drop empties, dedupe preserving order.
         var seen: Set<String> = []
         let cleaned = tags

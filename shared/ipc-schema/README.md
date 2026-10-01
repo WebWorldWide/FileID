@@ -1,6 +1,6 @@
 # IPC schema — canonical contract
 
-`ipc.schema.json` is the single source of truth for the wire protocol between the FileID app and the FileIDEngine. Every platform (macOS Swift, Windows Rust + C#, future Linux) implements types that conform to it.
+`ipc.schema.json` is the single source of truth for the wire protocol between the FileID app and the FileIDEngine. Every platform (macOS Swift, Windows Rust + C#, Linux) implements types that conform to it.
 
 ## Wire format
 
@@ -18,7 +18,7 @@ Each platform's "generated" types currently live as hand-maintained files that a
 |---|---|
 | Swift (macOS) | `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` |
 | Rust (Windows engine) | `platforms/windows/src/engine/src/ipc/mod.rs` |
-| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/Generated.cs` |
+| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`, `EventPayload.cs`, and `CatalogProtocol.cs` |
 
 The `generators/` subdirectory will hold scripted codegen once the schema settles. Until then, when adding/modifying a variant:
 
@@ -36,3 +36,7 @@ The current major version is `1.x`. Engines reject command frames with an unreco
 ## Privacy clause
 
 Every payload field carrying user-content data (file paths, OCR text, EXIF) is logged through path-redaction primitives (`PathRedaction.swift` on Apple; `redact_path_for_log` in Rust; equivalent on C#). The schema's role is contract, not privacy enforcement — but the codegen targets must wire payloads through the redactor for any log output.
+
+## Catalog v1.1
+
+`catalogRequest`/`catalogResponse` carry typed search, chapter edit/Undo, and durable timeline job controls. Swift mirrors are in `CatalogProtocol.swift`; Rust mirrors are in `ipc/catalog.rs`, shared by Windows and Linux. Optional C# fields omit nulls to match Swift/Rust. Timeline execution is currently macOS-only; Rust rejects unavailable enqueue/resume actions explicitly. The general conversion/chat/capability API is still pending.

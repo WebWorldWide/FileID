@@ -86,6 +86,7 @@ public enum Restructure {
         guard let directory = override ?? storedPlansDirectory else {
             throw CocoaError(.fileNoSuchFile)
         }
+        try ReadOnlyLocations.requireWritable(directory)
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: true)
         // An engine kill mid-plan orphans the planning scratch DB (the defer
@@ -1115,6 +1116,7 @@ public enum Restructure {
             throw CocoaError(.fileNoSuchFile)
         }
         let fm = FileManager.default
+        try ReadOnlyLocations.requireWritable(directory)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         if let files = try? fm.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: nil)
@@ -1154,6 +1156,8 @@ public enum Restructure {
             guard written == totalMoves else { throw CocoaError(.fileWriteUnknown) }
             try handle.synchronize()
             try handle.close()
+            try ReadOnlyLocations.requireWritable(temporaryURL)
+            try ReadOnlyLocations.requireSourceMutation(finalURL)
             try fm.moveItem(at: temporaryURL, to: finalURL)
         } catch {
             try? handle.close()
@@ -1278,7 +1282,9 @@ public enum Restructure {
         journalAppender: (UndoEntry, FileHandle) throws -> Void = Restructure.appendUndoEntry
     ) async throws -> ApplyResult {
         let fm = FileManager.default
+        try ReadOnlyLocations.requireWritable(libraryRoot)
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
+        if let journalURL { try ReadOnlyLocations.requireWritable(journalURL) }
         let undoHandle: FileHandle?
         if recordUndo {
             guard let journalURL else {
@@ -1361,6 +1367,10 @@ public enum Restructure {
             }
             let oldURL = URL(fileURLWithPath: p.oldPath)
             let plannedURL = URL(fileURLWithPath: p.newPath)
+            if (try? ReadOnlyLocations.requireSourceMutation(oldURL)) == nil || (try? ReadOnlyLocations.requireSourceMutation(plannedURL)) == nil {
+                failed += 1
+                continue
+            }
 
             // B4 stale-plan / identity guard: the payload `oldPath` is not
             // authoritative on its own. Re-read the live row for this fileID and
@@ -1494,6 +1504,8 @@ public enum Restructure {
             }
 
             do {
+                try ReadOnlyLocations.requireSourceMutation(oldURL)
+                try ReadOnlyLocations.requireSourceMutation(finalURL)
                 try fm.moveItem(at: oldURL, to: finalURL)
             } catch {
                 failed += 1
@@ -1594,6 +1606,7 @@ public enum Restructure {
     /// Open the undo journal truncating (fresh batch) for incremental append.
     /// "Last run only" semantics are established at the start of the batch.
     static func openUndoJournalTruncating(at url: URL) throws -> FileHandle {
+        try ReadOnlyLocations.requireWritable(url)
         let fm = FileManager.default
         try fm.createDirectory(at: url.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
@@ -1659,6 +1672,7 @@ public enum Restructure {
     /// Deepest-first so nested empties fully collapse. Best-effort.
     /// (R2 → reversibility completeness)
     private static func cleanupEmptyDirs(from journal: URL, root: URL) {
+        guard (try? ReadOnlyLocations.requireWritable(root)) != nil else { return }
         guard let reader = try? NDJSONLineReader(url: journal) else { return }
         let decoder = JSONDecoder()
         let fm = FileManager.default
@@ -1699,7 +1713,13 @@ public enum Restructure {
         isCancelled: @Sendable () -> Bool = { Task.isCancelled },
         undoJournal: URL? = nil
     ) async -> ApplyResult {
+        guard (try? ReadOnlyLocations.requireWritable(libraryRoot)) != nil else {
+            return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+        }
         let journalURL = undoJournal ?? Self.defaultUndoJournalURL
+        if let journalURL, (try? ReadOnlyLocations.requireWritable(journalURL)) == nil {
+            return ApplyResult(moved: 0, skipped: 0, failed: 1, conflicts: [])
+        }
         guard let journalURL else {
             return ApplyResult(moved: 0, skipped: 0, failed: 0, conflicts: [])
         }
@@ -1849,6 +1869,7 @@ public enum Restructure {
         guard let dir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("FileID/logs", isDirectory: true) else { return }
+        guard (try? ReadOnlyLocations.requireWritable(dir)) != nil else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("restructure_recover.ndjson")
         let obj: [String: Any] = ["file_id": fileID, "src": src, "dst": dst]

@@ -437,6 +437,7 @@ struct CleanupView: View {
                         }
                     }
                     do {
+                        try ReadOnlyLocations.requireSourceMutation(item.url)
                         try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
                         return TrashResult(
                             id: item.id, size: item.size, success: true,

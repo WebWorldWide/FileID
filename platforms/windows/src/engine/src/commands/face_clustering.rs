@@ -70,7 +70,7 @@ pub(crate) async fn handle_run_face_clustering(
                         continue;
                     }
                     let mut embedding = Vec::with_capacity(blob.len() / 4);
-                    for chunk in blob.chunks_exact(4) {
+                    for chunk in blob.as_chunks::<4>().0 {
                         embedding
                             .push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                     }

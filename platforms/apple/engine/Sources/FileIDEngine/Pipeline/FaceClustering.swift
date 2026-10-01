@@ -2016,6 +2016,7 @@ public enum FaceClustering {
     /// Idempotent — overwrites if the file already exists.
     private static func saveFaceCrop(faceID: Int64, croppedCGImage cropped: CGImage) {
         let url = faceCropURL(faceID: faceID)
+        guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true

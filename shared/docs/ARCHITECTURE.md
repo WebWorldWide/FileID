@@ -21,13 +21,13 @@ FileID is split across three platform implementations that share a contract, a d
                                               fileid.sqlite
 ```
 
-Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and stdout (engine → app). The app reads the DB via a read-only connection; the engine is the sole writer. SQLite WAL allows concurrent readers without blocking the writer.
+Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and the engine event stream (macOS fd 2/stderr; Rust stdout). The app reads the DB via a read-only connection; the engine is the sole writer. SQLite WAL allows concurrent readers without blocking the writer.
 
 When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16 s within a 60 s window). Three failures in a row puts the app in `.crashed` state; user dismisses or retries.
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned through v18 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v21 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`
@@ -88,9 +88,9 @@ Performance target: ≥ 140 files/s on M1 Pro (macOS) or comparable mid-tier x64
 
 ### macOS
 - Apple Vision (face rects + quality + OCR)
-- CoreML (MobileCLIP image, CLIP text)
-- ONNX Runtime + CoreML EP (ArcFace face embedder)
-- MLX (VLMs for Deep Analyze: Qwen, Gemma, PaliGemma)
+- ONNX Runtime (CLIP ViT-B/32 image/text, RAM++, BGE-small; CoreML EP when supported, CPU fallback)
+- ONNX Runtime + CoreML EP/CPU (SFace 128-d embedder; legacy service names still say ArcFace)
+- MLX (Deep Analyze: Qwen2.5-VL, Qwen3-VL, Gemma 3, Mistral Small 3.2, PaliGemma)
 
 ### Windows
 - ONNX Runtime with auto-detected EP (CUDA / OpenVINO / DirectML / QNN / CPU) — see GPU acceleration strategy below
@@ -135,3 +135,17 @@ Three rules every change should follow:
 1. **The IPC schema is the source of truth.** Changing a payload means editing `shared/ipc-schema/ipc.schema.json` first, then updating all three (current: two) DTO files in lockstep.
 2. **The macOS app is the visual reference.** The Windows port is 1:1 with macOS, not a "Windows-style reinterpretation". Linux will be the same against macOS.
 3. **No telemetry, ever.** Don't propose features that violate this even if the integration is "tiny". The privacy posture is a product feature.
+
+## Next-version catalog and timeline (2026-10-01)
+
+Canonical `shared/catalog/v21.sql` is included directly by Rust and mirrored byte-for-byte in Swift `CatalogSchema.swift`; `check_catalog_schema.py` enforces parity. Rust now includes the existing Swift v19 text-stage and v20 full-model migrations before v21. Existing names, identities, corrections, and legacy undo records remain in their original tables. New catalog records include revisions, chapters, coverage, passages, observations/tracks, events/takes, derivative relationships, jobs, operations, recipes, corrections, and local chat. Most entities are storage foundations, not implemented product features.
+
+Persistent FTS indexes are incrementally maintained for file names/descriptions and chapter/passage evidence. Source size/mtime changes stale dependent observations, discard model-separated catalog embeddings, and clear generated filename/caption proposals without renaming originals. User markers remain available for reconfirmation. Embedding storage enforces model/dimensionality separation; persistent ANN retrieval is pending.
+
+IPC v1.1 adds bounded typed catalog requests/responses. The new macOS panel sends all catalog writes to the engine. Existing `ReadStore` user-correction and mutation paths still use writable queues: the broad claim that the UI is entirely read-only is a target, not a description of every existing path. Move those legacy writes behind IPC before claiming a sole-writer architecture application-wide.
+
+macOS timeline jobs persist state/checkpoints, recover interrupted work as paused, and reuse captions keyed by source revision, pinned model, and sample time. They still run on the existing serial major-job queue. A separate engine subprocess decodes each requested frame, reports actual presentation time, and is killed on timeout/cancellation. Model inference remains in-process. Ten-second frame sampling records incomplete coverage and unverified captions; automatic event outcomes, ASR, shot analysis, tracks, chapters, and best takes are pending.
+
+Manual chapter edits and deletion atomically journal corrections and inverse operations. Undo survives restart and marks restored evidence stale if its source revision changed. Decoder output, caches, databases, downloads, logs, and original mutations use protected-location checks; full application write tracing remains required.
+
+See [NEXT_VERSION.md](NEXT_VERSION.md) for implementation boundaries and release gates.
