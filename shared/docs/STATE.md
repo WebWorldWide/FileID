@@ -8,6 +8,13 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Local chat, shared history, and interactive queue priority
+
+IPC v1.3 adds local conversation requests and streamed evidence responses across Swift/Rust/C#. Native macOS Chat is accessible from all six tabs, returns files/pages/timestamps immediately, seeks available video evidence, persists deletable local history, and reuses an already loaded model for bounded summaries without downloading weights. Model text cannot execute file changes, SQL, or shell commands. Pending interactive summaries precede background jobs; active heavy work remains serialized. Clear/cancel suppresses stale responses and preserves catalog files. Rust keyword retrieval/history is cross-engine compatible, with model summaries explicitly unavailable. See CHAT.md for limits.
+
+Native verification passed 414 tests; Rust passed 378 library tests, 379 executable tests, and two integration tests (two existing benchmarks ignored), with actual pinned Rust 1.90 Clippy passing. C# conformance passed 46 tests and the new DTO passed focused formatting. Actual cross-engine conversation persistence/clear preserved source hashes. Shared migration parity, runtime-egress checks including all 23 policy tests, and binary privacy checks pass. The prior pushed People/Tools milestone has all 18 hosted checks green; chat requires its own post-push CI run. No loaded-model inference benchmark or native port UI acceptance is claimed. Adlon and the installed release remain untouched; owner release/signing edits are preserved.
+
+
 ## 2026-10-01 — Safer face alignment and shared geometry fixtures
 
 Native landmark matching now requires overlapping face boxes, size-relative center agreement, and an unambiguous candidate; nearby faces cannot supply each other's landmarks merely because their centers are within 8% of an image. Ambiguous matching retains the existing bbox-crop fallback. Render alignment pixels once per image rather than once per face, with byte-equivalence tests. Swift/Rust reject nonfinite geometry and empty Rust images; bounded edge sampling avoids unsafe integer conversion. Shared rights-clear alignment fixtures run in both engines. Swift bbox parsing rejects shifted malformed fields and invalid dimensions. Corrected the obsolete InsightFace/preprocessing header; the active model remains OpenCV SFace with raw RGB input.

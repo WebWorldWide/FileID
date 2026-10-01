@@ -15,6 +15,7 @@ namespace FileID.IpcSchema;
 
 [JsonConverter(typeof(CommandPayloadJsonConverter))]
 public abstract record CommandPayload;
+public sealed record ChatRequestCommand(ChatRequest Request) : CommandPayload;
 public sealed record ToolRequestCommand(ToolRequest Request) : CommandPayload;
 public sealed record CatalogRequestCommand(CatalogRequest Request) : CommandPayload;
 
@@ -179,6 +180,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
 
         CommandPayload payload = variant switch
         {
+            "chatRequest" => JsonSerializer.Deserialize<ChatRequestCommand>(ref reader, options) ?? throw new JsonException("chatRequest: null body"),
             "toolRequest" => JsonSerializer.Deserialize<ToolRequestCommand>(ref reader, options) ?? throw new JsonException("toolRequest: null body"),
             "catalogRequest" => JsonSerializer.Deserialize<CatalogRequestCommand>(ref reader, options) ?? throw new JsonException("catalogRequest: null body"),
             "startScan" => JsonSerializer.Deserialize<StartScanCommand>(ref reader, options) ?? throw new JsonException("startScan: null body"),
@@ -231,6 +233,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
         writer.WriteStartObject();
         switch (value)
         {
+            case ChatRequestCommand c: WriteVariant(writer, "chatRequest", c, options); break;
             case ToolRequestCommand c: WriteVariant(writer, "toolRequest", c, options); break;
             case CatalogRequestCommand c: WriteVariant(writer, "catalogRequest", c, options); break;
             case StartScanCommand c: WriteVariant(writer, "startScan", c, options); break;

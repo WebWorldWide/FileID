@@ -10,6 +10,8 @@
 //!
 //! Edit this file in lockstep with `ipc.schema.json`. The two MUST agree.
 
+pub mod chat;
+pub use chat::*;
 pub mod tools;
 pub use tools::*;
 pub mod catalog;
@@ -55,6 +57,9 @@ impl IpcEvent {
 pub enum CommandPayload {
     #[serde(rename = "toolRequest")]
     ToolRequest(ToolRequestPayload),
+
+    #[serde(rename = "chatRequest")]
+    ChatRequest(ChatRequestPayload),
     #[serde(rename = "catalogRequest")]
     CatalogRequest(CatalogRequestPayload),
     #[serde(rename = "startScan")]
@@ -495,6 +500,9 @@ pub enum EventPayload {
     CatalogResponse(Wrap<CatalogResponse>),
     #[serde(rename = "toolResponse")]
     ToolResponse(Wrap<ToolResponse>),
+
+    #[serde(rename = "chatResponse")]
+    ChatResponse(Wrap<ChatResponse>),
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
 

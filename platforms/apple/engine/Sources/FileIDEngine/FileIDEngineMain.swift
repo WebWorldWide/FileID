@@ -212,6 +212,12 @@ struct FileIDEngineMain {
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
                           sink: IPCSink, database: Database?) async {
         switch cmd.payload {
+        case .chatRequest(let request):
+            guard let database else {
+                await sink.emit(.chatResponse(ChatResponse(requestID: request.requestID, conversationID: request.conversationID, status: "error", message: "The catalog database is unavailable.")))
+                return
+            }
+            Task { await ChatService.shared.handle(request, database: database, sink: sink) }
         case .toolRequest(let request):
             guard let database else {
                 await sink.emit(.toolResponse(ToolResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))

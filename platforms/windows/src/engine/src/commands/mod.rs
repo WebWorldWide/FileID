@@ -17,4 +17,5 @@ pub(crate) mod wipe;
 
 pub mod catalog;
 
+pub mod chat;
 pub mod tools;

@@ -18,7 +18,7 @@ Each platform's "generated" types currently live as hand-maintained files that a
 |---|---|
 | Swift (macOS) | `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` |
 | Rust (Windows engine) | `platforms/windows/src/engine/src/ipc/mod.rs` |
-| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`, `EventPayload.cs`, and `CatalogProtocol.cs`, and `ToolProtocol.cs` |
+| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`, `EventPayload.cs`, and `CatalogProtocol.cs`, `ToolProtocol.cs`, and `ChatProtocol.cs` |
 
 The `generators/` subdirectory will hold scripted codegen once the schema settles. Until then, when adding/modifying a variant:
 
@@ -44,3 +44,7 @@ Every payload field carrying user-content data (file paths, OCR text, EXIF) is l
 ## Tools v1.2
 
 `toolRequest`/`toolResponse` carry capabilities, history, immutable export preview, execution, cancellation, and Undo. Swift mirrors are in `ToolProtocol.swift`, Rust in `ipc/tools.rs`, and C# in `ToolProtocol.cs`. See `shared/docs/TOOLS.md` for exact supported pairs and adapter limits. Cancellation is available in the macOS worker; the Rust adapter reports it unavailable.
+
+### v1.3 local chat
+
+`chatRequest` carries typed send/history/clear/cancel actions. `chatResponse` streams retrieval/queue/progress/completion with local messages and evidence hits. Model summaries are capability-specific; schema support does not imply that a platform has a generation runtime or native panel. See shared/docs/CHAT.md.

@@ -186,6 +186,7 @@ fn assert_tag_sets_match(
 /// compilation here until its wire tag + an exemplar below are added.
 fn command_tag(payload: &CommandPayload) -> &'static str {
     match payload {
+        CommandPayload::ChatRequest(_) => "chatRequest",
         CommandPayload::ToolRequest(_) => "toolRequest",
         CommandPayload::CatalogRequest(_) => "catalogRequest",
         CommandPayload::StartScan(_) => "startScan",
@@ -226,6 +227,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 /// compilation here until its wire tag + an exemplar below are added.
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
+        EventPayload::ChatResponse(_) => "chatResponse",
         EventPayload::ToolResponse(_) => "toolResponse",
         EventPayload::CatalogResponse(_) => "catalogResponse",
         EventPayload::Ready(_) => "ready",
@@ -296,6 +298,7 @@ fn restructure_move() -> RestructureMove {
 /// exercised against the schema's `properties`.
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","recipe":{"kind":"photo","format":"png","maxDimension":4096},"operationID":"plan"}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
         CommandPayload::StartScan(StartScanPayload {
@@ -400,6 +403,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
 /// exercised against the schema's `properties`.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"chatResponse":{"_0":{"requestID":"chat","conversationID":"c","status":"completed","message":"Found","messages":[{"id":"m","role":"user","text":"birthday","createdAt":1}],"hits":[]}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"toolResponse":{"_0":{"requestID":"tool","status":"ok","message":"Exported","operationID":"plan","outputs":[{"fileID":1,"sourcePath":"/internal/a.png","outputPath":"/internal/b.png","state":"completed","message":"Original preserved"}],"capabilities":[{"id":"photo","available":true,"inputFormats":["png"],"outputFormats":["png"],"detail":"Conversion"}]}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
         EventPayload::Ready(Wrap::new(EngineInfo {

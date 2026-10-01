@@ -28,6 +28,7 @@ public struct IPCCommand: Codable, Sendable {
         case cancelScan
         case cancelRestructure
         case catalogRequest(request: CatalogRequest)
+        case chatRequest(request: ChatRequest)
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
         case requestStatus
@@ -199,6 +200,7 @@ public struct IPCEvent: Codable, Sendable {
 
     public enum Payload: Codable, Sendable {
         case catalogResponse(CatalogResponse)
+        case chatResponse(ChatResponse)
         case toolResponse(ToolResponse)
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
