@@ -8,9 +8,25 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Reconcile the focused Windows test gate with current PR186
+
+PR186 advanced to 56541c6 with local chat and contextual media-filter changes. Merge that exact base into PR187 without altering its product changes. Resolve only concurrent STATE/NEXT/DECISIONS entries by preserving both histories; keep the mandatory Windows test/report gate intact. Broader app contract repair remains pending approval. Validation for the reconciled head is tracked in draft PR187; prior-head success does not establish current-head Windows results.
+
 ## 2026-10-01 — Require genuine Windows .NET test execution
 
 Draft PR187 repairs the nested `Tests` directory guard, requires both projects with the native VS build path, rejects empty/missing test reports, uploads TRX evidence and triggers on test/schema changes. Restore the existing narrowly matched dotnet-format probe retry. No test assertions or policies are suppressed. Exact first-head hosted evidence: ARM64 green; x64 build/publish green; IPC46/46; app compilation red with158 diagnostics. All later x64 gates skipped. Broad product restoration is pending scope approval; owner changes and Store branch remain untouched. Follow-on contract uncertainty and validation plan: [WINDOWS_TEST_GATE.md](WINDOWS_TEST_GATE.md).
+
+## 2026-10-01 — Contextual chat media filters
+
+Shared parser fixtures now preserve a subject across explicit refinements, switch media types, combine keywords, reset fresh queries, and keep unsupported negations literal. File and timestamp/page evidence filters apply before SQL result limits. Swift stores the user message and reads its recent conversation context in one transaction. Actual Swift → Rust → Swift search refinement and clear pass without modifying source files. Full native tests passed 416; Rust passed 380 library/381 executable plus two integrations, with pinned 1.90 Clippy. Semantic/person/event retrieval and general request planning remain pending. Adlon remains untouched.
+
+
+## 2026-10-01 — Local chat, shared history, and interactive queue priority
+
+IPC v1.3 adds local conversation requests and streamed evidence responses across Swift/Rust/C#. Native macOS Chat is accessible from all six tabs, returns files/pages/timestamps immediately, seeks available video evidence, persists deletable local history, and reuses an already loaded model for bounded summaries without downloading weights. Model text cannot execute file changes, SQL, or shell commands. Pending interactive summaries precede background jobs; active heavy work remains serialized. Clear/cancel suppresses stale responses and preserves catalog files. Rust keyword retrieval/history is cross-engine compatible, with model summaries explicitly unavailable. See CHAT.md for limits.
+
+Native verification passed 414 tests; Rust passed 378 library tests, 379 executable tests, and two integration tests (two existing benchmarks ignored), with actual pinned Rust 1.90 Clippy passing. C# conformance passed 46 tests and the new DTO passed focused formatting. Actual cross-engine conversation persistence/clear preserved source hashes. Shared migration parity, runtime-egress checks including all 23 policy tests, and binary privacy checks pass. The prior pushed People/Tools milestone has all 18 hosted checks green; chat requires its own post-push CI run. No loaded-model inference benchmark or native port UI acceptance is claimed. Adlon and the installed release remain untouched; owner release/signing edits are preserved.
+
 
 ## 2026-10-01 — Safer face alignment and shared geometry fixtures
 

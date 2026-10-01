@@ -2,6 +2,16 @@
 
 Windows test gate repair is tracked in draft PR187. The app suite remains blocked by production/test contract divergence (158 native compile/analyzer diagnostics); do not call the Windows gate or Store release green. Broader contract repair is pending approval. Preserve tests and use the evidence/repair sequence in [WINDOWS_TEST_GATE.md](WINDOWS_TEST_GATE.md).
 
+## 2026-10-01 — Search refinement landed; continue scheduler and hybrid retrieval
+
+Contextual media-filtered keyword search now works in both engines and cross-engine history. Continue memory/resource admission and model residency, persistent model-separated hybrid retrieval, versioned People processing, and typed reversible chat operations before timeline/ASR/tracks, best takes, video tools, broad adapters, port UI, and release acceptance. Continue verified incremental pushes to PR #186; preserve owner edits and strictly read-only Adlon.
+
+
+## 2026-10-01 — Continue after local chat
+
+Work on codex/fileid-next-version-current and draft PR #186. Initial native chat and cross-engine local history now work; CHAT.md records precise boundaries. Complete contextual/filtered hybrid retrieval, resource-budgeted scheduling and model routing, persistent indexes, versioned People processing and incremental assignments, and typed chat operations. Then complete dense timeline/ASR/tracks, automatic chapters, goal-conditioned best takes, video/audio/enhancement/reframing and broad format adapters. Wire and validate native port interfaces before release. Keep pushing verified milestones, leaving AGENT_HANDOFF.md current, and checking hosted CI. Do not modify Adlon or absorb owner release/signing changes.
+
+
 ## 2026-10-01 — Continue the accepted plan from PR #186
 
 Continue on codex/fileid-next-version-current. Safe initial photo/chapter tools are now implemented; consult TOOLS.md for exact pairs and limits. AGENT_HANDOFF.md has continuation instructions and correct pinned-Clippy invocation. Keep pushing coherent verified milestones to draft PR #186, inspect hosted CI, and preserve uncommitted owner release/signing work.

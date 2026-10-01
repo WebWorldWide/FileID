@@ -31,13 +31,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
         "search" => {
             let query = request.query.as_deref().unwrap_or_default();
             if query.trim().is_empty() || query.chars().count() > 2000 { bail!("Invalid search query") }
-            let quoted = query.split_whitespace().filter(|s| s.chars().any(char::is_alphanumeric)).map(|s| format!("\"{}\"", s.replace('"', "\"\""))).collect::<Vec<_>>().join(" ");
-            if quoted.is_empty() { return Ok(result); }
-            let mut statement = conn.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid WHERE catalog_file_fts MATCH ?1 ORDER BY bm25(catalog_file_fts) LIMIT 100")?;
-            result.hits = statement.query_map([&quoted], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<_>>()?;
-            let mut statement = conn.prepare("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE catalog_evidence_fts MATCH ?1 AND (c.stale=0 OR p.stale=0) ORDER BY bm25(catalog_evidence_fts) LIMIT 100")?;
-            let hits = statement.query_map([&quoted], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:r.get(4)?,start_seconds:r.get(5)?,page:r.get(6)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            result.hits.extend(hits);
+            result.hits = search(conn,query,&[])?;
         }
         "detail" => result.chapters = chapters(conn, request.file_id.ok_or_else(|| anyhow::anyhow!("File selection required"))?)?,
         "saveChapter" => {
@@ -160,4 +154,21 @@ mod tests {
         assert!(execute(&mut conn,&undo).unwrap().chapters.is_empty());
         assert!(execute(&mut conn,&undo).is_err());
     }
+}
+
+pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result<Vec<CatalogHit>> {
+    if !kinds.iter().all(|kind| ["image","video","pdf","doc","audio","other","model"].contains(&kind.as_str())) { bail!("Invalid media filter") }
+    let filter = if kinds.is_empty() { None } else { Some(serde_json::to_string(kinds)?) };
+            let quoted = query.split_whitespace().filter(|s| s.chars().any(char::is_alphanumeric)).map(|s| format!("\"{}\"", s.replace('"', "\"\""))).collect::<Vec<_>>().join(" ");
+            if quoted.is_empty() {
+                let Some(filter) = filter else { return Ok(vec![]); };
+                let mut statement = conn.prepare("SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files WHERE kind IN (SELECT value FROM json_each(?1)) ORDER BY id DESC LIMIT 100")?;
+                return Ok(statement.query_map([filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<Vec<_>>>()?);
+            }
+            let mut statement = conn.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid WHERE catalog_file_fts MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) ORDER BY bm25(catalog_file_fts) LIMIT 100")?;
+            let mut hits = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut statement = conn.prepare("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE catalog_evidence_fts MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (c.stale=0 OR p.stale=0) ORDER BY bm25(catalog_evidence_fts) LIMIT 100")?;
+            let evidence = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:r.get(4)?,start_seconds:r.get(5)?,page:r.get(6)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            hits.extend(evidence);
+            Ok(hits)
 }

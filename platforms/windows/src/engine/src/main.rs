@@ -716,6 +716,9 @@ async fn handle_line(
     };
 
     match cmd.payload {
+            CommandPayload::ChatRequest(payload) => {
+                tokio::spawn(commands::chat::handle(sink.clone(), db.cloned(), payload.request));
+            }
         CommandPayload::ToolRequest(payload) => {
             let sink = sink.clone();
             let database = db.cloned();

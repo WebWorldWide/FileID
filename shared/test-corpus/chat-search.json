@@ -1,0 +1,15 @@
+[
+  {"messages":["Please show me birthday files"],"query":"birthday","kinds":[]},
+  {"messages":["find birthday","only videos"],"query":"birthday","kinds":["video"]},
+  {"messages":["birthday videos","now photos"],"query":"birthday","kinds":["image"]},
+  {"messages":["birthday videos","and gift"],"query":"birthday gift","kinds":["video"]},
+  {"messages":["birthday videos","all photos"],"query":"","kinds":["image"]},
+  {"messages":["birthday videos","now all files"],"query":"","kinds":[]},
+  {"messages":["birthday videos","wedding"],"query":"wedding","kinds":[]},
+  {"messages":["roof documents"],"query":"roof","kinds":["doc","pdf"]},
+  {"messages":["roof documents","only PDFs"],"query":"roof","kinds":["pdf"]},
+  {"messages":["birthday photos and videos"],"query":"birthday","kinds":["image","video"]},
+  {"messages":["all videos"],"query":"","kinds":["video"]},
+  {"messages":["birthday except videos"],"query":"birthday except videos","kinds":[]},
+  {"messages":["Please find birthday “videos”"],"query":"birthday","kinds":["video"]}
+]

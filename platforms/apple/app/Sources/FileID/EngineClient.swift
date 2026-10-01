@@ -24,6 +24,7 @@ public final class EngineClient {
     /// `.onChange` on this monotonic counter rather than `lastError?.message`
     /// — two consecutive identical failures must still re-fire the handler.
     public private(set) var lastErrorSignal: Int = 0
+    public private(set) var latestChatResponse: ChatResponse?
     public private(set) var toolResponses: [String: ToolResponse] = [:]
     private var toolResponseOrder: [String] = []
     private var catalogResponseOrder: [String] = []
@@ -510,6 +511,8 @@ public final class EngineClient {
 
     private func handleEvent(_ event: IPCEvent) {
         switch event.payload {
+        case .chatResponse(let response):
+            latestChatResponse = response
         case .toolResponse(let response):
             if toolResponses[response.requestID] == nil {
                 if toolResponseOrder.count >= 64 { toolResponses.removeValue(forKey: toolResponseOrder.removeFirst()) }

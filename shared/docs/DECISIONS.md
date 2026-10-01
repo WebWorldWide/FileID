@@ -3388,6 +3388,14 @@ A full Rust run reproduced different approximate neighbor sets for identical fix
 
 Hosted native tests need FILEID_TEST_ENGINE_PATH to select the built engine, otherwise CommandLine.arguments[0] names the test runner rather than a photo worker. Set that path explicitly to the verified release product in macOS CI; retain the production engine's existing self-worker behavior. Do not skip export assertions or weaken the worker boundary.
 
+## 2026-10-01 — Evidence-first local chat on the existing inference lane
+
+Return keyword/evidence matches before queued inference. Reuse an already loaded model, bound result/context/output size, and keep conversation messages separate from factual catalog evidence. Treat retrieved text as untrusted input; expose no SQL/shell or implicit file-operation execution through generated text. Clear/cancel owns request IDs and suppresses late responses. Prioritize queued interactive summaries while preserving the existing one-heavy-job limit; this is not a resource-budgeted or multi-model scheduler. Keep the portable adapter's missing generation capability explicit instead of silently downloading or pretending to infer. Native port UI, contextual/hybrid retrieval, typed reversible execution, grounding benchmarks, and full memory admission remain required.
+
+## 2026-10-01 — Deterministic conversational media filters before retrieval limits
+
+Resolve explicit media words and refinement markers through shared fixtures instead of a model-generated SQL clause. Preserve prior subjects only for explicit refinements, reset fresh queries, and filter both file/evidence SQL before limiting results. Bind a validated model-independent kind list through JSON parameters. Keep unsupported exclusions literal; this limited parser does not claim open-ended request understanding. Store the current message and retrieve recent context atomically on Swift; Rust already serializes the connection.
+
 ## 2026-10-01 — Mandatory Windows test projects and honest failure evidence
 
 A successful `Test-Path Tests` guard inside the Tests directory could skip both intended suites. Require explicit project paths, VS MSBuild for WinUI test compilation, matching x64 build/test properties, nonzero executed TRX counters and retained artifacts. Preserve failures and existing assertions. Restore only the format retry matching exit4 and the upstream CLI-probe diagnostic. A broad historical source restoration was explored and discarded because missing app implementations span many contracts and depend on absent Rust/canonical IPC operations; the reason for those historical deletions is unproven. Continue broad repair only after the intended contract and expanded scope are settled. See WINDOWS_TEST_GATE.md.

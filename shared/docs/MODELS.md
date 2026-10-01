@@ -202,3 +202,7 @@ Enhancement/conversion research: [Real-ESRGAN](https://github.com/xinntao/Real-E
 The October 2026 photo/chapter export milestone uses system ImageIO/CoreGraphics on macOS and the existing locked image-rs/SHA-256 crates in Rust. Downsize and format conversion do not imply AI upscaling. No research candidate or enhancement weight was promoted or bundled; model benchmark, hash, and distribution gates above remain unchanged.
 
 2026-10-01 face processing clarification: the historical `ArcFaceService` symbol loads OpenCV SFace, not InsightFace/Buffalo. SFace consumes raw RGB [0,255] Float32 NCHW. Shared geometry fixtures now verify template order and similarity transforms across Swift/Rust; no replacement face weights or measured identity-accuracy claim accompanies this change.
+
+## 2026-10-01 — Chat inference integration
+
+Initial macOS chat reuses the already loaded, existing MLX model; no candidate weight or runtime has been promoted. Catalog evidence is bounded to eight results, captions to 600 characters each, and generation to 192 tokens at temperature zero. Keyword retrieval works without weights. This reduces context/output work but does not establish latency or grounding quality; benchmark identical fixtures under background contention before model promotion. Rust chat generation and separate resident task models remain pending.
