@@ -1868,22 +1868,18 @@ public enum FaceClustering {
                 let result = autoreleasepool { () -> [PendingExtract] in
                     let url = URL(fileURLWithPath: path)
                     guard let cg = loadCGImage(url: url) else { return [] }
-                    // FaceAlign (opt-in): detect 5-point landmarks ONCE per image so
-                    // each face can be similarity-ALIGNED to the SFace template
-                    // (matching the Windows YuNet+align pipeline the thresholds assume)
-                    // instead of a raw bbox crop. Default off → falls back to the bbox
-                    // crop, behavior identical to before. (macOS lockstep)
                     let detected = FaceAlign.enabled ? detectFaceLandmarks(in: cg) : []
+                    let pixels = detected.isEmpty ? nil : FaceAlign.pixels(source: cg)
                     var aligned = 0
                     var out: [PendingExtract] = []
                     out.reserveCapacity(rows.count)
                     for row in rows {
                         var crop: CGImage?
-                        if FaceAlign.enabled,
+                        if let pixels,
                            let pts = matchLandmarks(forBBox: row.bbox,
                                                     imageWidth: cg.width, imageHeight: cg.height,
                                                     in: detected),
-                           let acrop = FaceAlign.align112(source: cg, landmarks: pts) {
+                           let acrop = FaceAlign.align112(source: pixels, landmarks: pts) {
                             crop = acrop
                             aligned += 1
                         } else {
@@ -1924,16 +1920,16 @@ public enum FaceClustering {
     /// The bbox-area filter at insertion time already drops obvious
     /// background extras; this is the catch-net for low-res source
     /// images where 0.5% area = ~30px on a 400px frame.
-    /// Detect 5-point face landmarks (FaceAlign opt-in). One
+    /// Detect 5-point face landmarks once per image. One
     /// VNDetectFaceLandmarksRequest on the full image → per detected face, its
-    /// normalized (bottom-left) bbox center + the 5 landmarks in SOURCE-PIXEL
+    /// normalized (bottom-left) bbox + the 5 landmarks in SOURCE-PIXEL
     /// top-left coords, FileID template order [hi-x eye, lo-x eye, nose, hi-x
     /// mouth corner, lo-x mouth corner]. Eye/mouth points are assigned to template
     /// slots by IMAGE-X (not Vision's subject/viewer naming) so they line up with
     /// the template's x-layout regardless of naming convention.
     private static func detectFaceLandmarks(
         in cg: CGImage
-    ) -> [(center: CGPoint, points: [(Float, Float)])] {
+    ) -> [(bounds: CGRect, points: [(Float, Float)])] {
         let req = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
@@ -1950,7 +1946,7 @@ public enum FaceClustering {
             for p in pts { sx += p.0; sy += p.1 }
             return (sx / Float(pts.count), sy / Float(pts.count))
         }
-        var result: [(CGPoint, [(Float, Float)])] = []
+        var result: [(CGRect, [(Float, Float)])] = []
         for obs in (req.results ?? []) {
             guard let lm = obs.landmarks,
                   let le = lm.leftEye, let re = lm.rightEye,
@@ -1969,33 +1965,22 @@ public enum FaceClustering {
             let hiEye = eyeA.0 >= eyeB.0 ? eyeA : eyeB
             let loEye = eyeA.0 >= eyeB.0 ? eyeB : eyeA
             let five: [(Float, Float)] = [hiEye, loEye, noseC, mouthHi, mouthLo]
-            result.append((CGPoint(x: obs.boundingBox.midX, y: obs.boundingBox.midY), five))
+            result.append((obs.boundingBox, five))
         }
         return result
     }
 
-    /// Match a stored normalized (bottom-left) "x,y,w,h" bbox to the nearest
-    /// detected face by center; returns its 5 landmarks only on a confident match
-    /// (else nil → caller falls back to the bbox crop, never mis-aligns).
     private static func matchLandmarks(
         forBBox bboxString: String,
         imageWidth: Int, imageHeight: Int,
-        in detected: [(center: CGPoint, points: [(Float, Float)])]
+        in detected: [(bounds: CGRect, points: [(Float, Float)])]
     ) -> [(Float, Float)]? {
         guard !detected.isEmpty,
               let b = FaceBBox.parseNormalized(bboxString, imageWidth: imageWidth, imageHeight: imageHeight)
         else { return nil }
-        let cx = CGFloat(b.x + b.w / 2)
-        let cy = CGFloat(b.y + b.h / 2)
-        var best: (dist: CGFloat, pts: [(Float, Float)])?
-        for d in detected {
-            let dist = hypot(d.center.x - cx, d.center.y - cy)
-            if best == nil || dist < best!.dist { best = (dist, d.points) }
-        }
-        // Centers within ~8% of the frame — a looser match risks aligning to the
-        // wrong face in a group photo.
-        if let b = best, b.dist < 0.08 { return b.pts }
-        return nil
+        let bounds = CGRect(x: b.x, y: b.y, width: b.w, height: b.h)
+        guard let index = FaceLandmarkMatch.index(stored: bounds, candidates: detected.map(\.bounds)) else { return nil }
+        return detected[index].points
     }
 
     static func cropFaceCGImage(cgImage: CGImage, bboxString: String) -> CGImage? {

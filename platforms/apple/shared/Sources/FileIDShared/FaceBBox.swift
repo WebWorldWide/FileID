@@ -32,7 +32,8 @@ public enum FaceBBox {
                   let data = t.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let px = numeric(obj["x"]), let py = numeric(obj["y"]),
-                  let pw = numeric(obj["w"]), let ph = numeric(obj["h"]) else { return nil }
+                  let pw = numeric(obj["w"]), let ph = numeric(obj["h"]),
+                  [px, py, pw, ph].allSatisfy(\.isFinite), pw > 0, ph > 0 else { return nil }
             let w = pw / Double(imageWidth)
             let h = ph / Double(imageHeight)
             let x = px / Double(imageWidth)
@@ -43,8 +44,10 @@ public enum FaceBBox {
 
         // macOS CSV: normalized, bottom-left — passthrough (byte-identical to the
         // prior `split(",").compactMap(Double.init)` parse).
-        let parts = t.split(separator: ",").compactMap { Double($0) }
-        guard parts.count >= 4 else { return nil }
+        let fields = t.split(separator: ",", omittingEmptySubsequences: false)
+        guard fields.count >= 4 else { return nil }
+        let parts = fields.prefix(4).compactMap { Double($0) }
+        guard parts.count == 4, parts.allSatisfy(\.isFinite), parts[2] > 0, parts[3] > 0 else { return nil }
         return (parts[0], parts[1], parts[2], parts[3])
     }
 

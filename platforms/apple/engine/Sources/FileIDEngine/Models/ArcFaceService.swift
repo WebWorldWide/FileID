@@ -1,19 +1,6 @@
-// ArcFace face embedder — Buffalo-L (iResNet50) or Buffalo-S
-// (MobileFace) ONNX, run via ONNX Runtime with the CoreML execution
-// provider (ANE acceleration on Apple Silicon).
-//
-// Why ONNX instead of CoreML: matches Immich's posture exactly. We
-// pull the original Buffalo ONNX from the upstream Immich HuggingFace
-// repo at runtime; we never redistribute the InsightFace pre-trained
-// weights. Same legal posture, no on-device conversion step.
-//
-// Preprocessing — formerly baked into the CoreML graph via ImageType
-// scale/bias — now happens here in Swift: resize face crop to 112×112
-// RGB, normalize as (pixel − 127.5) / 127.5, pack as Float32 NCHW.
-//
-// Double-checked locking on load (avoid concurrent compile-and-load
-// races from the worker pool); DispatchSemaphore caps in-flight
-// predictions at 4 to keep the ANE from thrashing.
+// OpenCV SFace ONNX via ONNX Runtime. The model accepts raw RGB [0,255]
+// Float32 NCHW and applies its own normalization. Keep the historical API name
+// for database and caller compatibility; InsightFace weights are not used.
 import Foundation
 import CoreGraphics
 import Accelerate

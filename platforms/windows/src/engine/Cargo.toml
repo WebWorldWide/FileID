@@ -106,6 +106,7 @@ crossbeam-channel = "0.5"
 # becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
 instant-distance = "0.6"
+rayon = "1.12"
 
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,
 # AND Phase 4 OOXML document text extraction (.docx/.pptx/.xlsx are zip+xml).

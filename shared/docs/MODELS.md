@@ -200,3 +200,5 @@ Enhancement/conversion research: [Real-ESRGAN](https://github.com/xinntao/Real-E
 ## Initial exports do not add models
 
 The October 2026 photo/chapter export milestone uses system ImageIO/CoreGraphics on macOS and the existing locked image-rs/SHA-256 crates in Rust. Downsize and format conversion do not imply AI upscaling. No research candidate or enhancement weight was promoted or bundled; model benchmark, hash, and distribution gates above remain unchanged.
+
+2026-10-01 face processing clarification: the historical `ArcFaceService` symbol loads OpenCV SFace, not InsightFace/Buffalo. SFace consumes raw RGB [0,255] Float32 NCHW. Shared geometry fixtures now verify template order and similarity transforms across Swift/Rust; no replacement face weights or measured identity-accuracy claim accompanies this change.

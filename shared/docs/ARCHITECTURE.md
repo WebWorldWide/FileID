@@ -153,3 +153,5 @@ See [NEXT_VERSION.md](NEXT_VERSION.md) for implementation boundaries and release
 ## Typed exports (IPC v1.2)
 
 Tool requests carry supported recipes or saved operation IDs. Preview pins file selection, source SHA-256, chapter snapshots, and destination names; execution rejects changed evidence and publishes new outputs without overwriting. Both engines store export relationships and persistent Undo receipts in the catalog. macOS photo decoding runs in a bounded engine subprocess with cancellation and parent-death checks. Rust currently uses bounded in-process image-rs decoding and reports cancellation unavailable. See TOOLS.md; the general resource scheduler, restart reconciliation, video tools, and native port toolbox remain pending.
+
+Face backfill matches Vision landmarks by overlapping normalized bbox with an ambiguity check, then aligns all faces against a single per-image pixel buffer. SFace consumes raw RGB values and normalizes internally. Swift/Rust share deterministic alignment fixtures; identity accuracy and old-cache refresh remain separate gates.

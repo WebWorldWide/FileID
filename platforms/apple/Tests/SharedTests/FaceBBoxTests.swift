@@ -34,6 +34,11 @@ import Foundation
     func malformed() {
         #expect(FaceBBox.parseNormalized("", imageWidth: 100, imageHeight: 100) == nil)
         #expect(FaceBBox.parseNormalized("0.1,0.2,0.3", imageWidth: 100, imageHeight: 100) == nil) // <4
+        #expect(FaceBBox.parseNormalized("0.1,,0.2,0.3,0.4", imageWidth: 100, imageHeight: 100) == nil)
+        #expect(FaceBBox.parseNormalized("0.1,broken,0.2,0.3,0.4", imageWidth: 100, imageHeight: 100) == nil)
+        #expect(FaceBBox.parseNormalized("nan,0.2,0.3,0.4", imageWidth: 100, imageHeight: 100) == nil)
+        #expect(FaceBBox.parseNormalized("0.1,0.2,-0.3,0.4", imageWidth: 100, imageHeight: 100) == nil)
+        #expect(FaceBBox.parseNormalized(#"{"x":1,"y":2,"w":0,"h":4}"#, imageWidth: 100, imageHeight: 100) == nil)
         #expect(FaceBBox.parseNormalized(#"{"x":1,"y":2,"h":4}"#, imageWidth: 100, imageHeight: 100) == nil) // missing w
         #expect(FaceBBox.parseNormalized(#"{"x":1,"y":2,"w":3,"h":4}"#, imageWidth: 0, imageHeight: 0) == nil) // bad dims
     }

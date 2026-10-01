@@ -83,3 +83,5 @@ Reproduce using `shared/scripts/benchmark_catalog_search.py --runtime swift|rust
 ## Export milestone
 
 See [TOOLS.md](TOOLS.md) for the exact supported format matrix, metadata/color limits, worker/cancellation differences, persistent history, Undo recovery, and remaining restart gates. Actual Swift/Rust cross-engine preview/execution/Undo passed using internal PNG fixtures. Full release scope remains unfinished.
+
+Face alignment follow-up: overlapping/unique landmark correspondence, one rendered pixel buffer per image, finite geometry and malformed bbox rejection, and shared Swift/Rust fixtures are implemented. Existing cached embeddings remain; versioned rebuild/incremental assignment and measured identity accuracy remain pending.

@@ -30,7 +30,7 @@ struct MediaToolsTests {
         #expect(preview.status == "ok")
         let id = try #require(preview.operationID)
         let exported = await tools.handle(ToolRequest(requestID: "e", action: "execute", operationID: id), database: db)
-        #expect(exported.status == "ok")
+        #expect(exported.status == "ok", "\(exported.message)")
         let output = URL(fileURLWithPath: try #require(exported.outputs.first).outputPath)
         let rasterSource = try #require(CGImageSourceCreateWithURL(output as CFURL, nil))
         let image = try #require(CGImageSourceCreateImageAtIndex(rasterSource, 0, nil))

@@ -45,11 +45,27 @@ enum FaceAlign {
     /// degenerate fit or if the source can't be rendered. The result feeds
     /// `ArcFaceService.embed(_:)` exactly like the old bbox crop did.
     static func align112(source: CGImage, landmarks: [(Float, Float)]) -> CGImage? {
+        guard let pixels = pixels(source: source) else { return nil }
+        return align112(source: pixels, landmarks: landmarks)
+    }
+
+    struct SourcePixels: Sendable {
+        let rgba: [UInt8]
+        let width: Int
+        let height: Int
+    }
+
+    static func pixels(source: CGImage) -> SourcePixels? {
+        guard let (rgba, width, height) = renderRGBA8(source) else { return nil }
+        return SourcePixels(rgba: rgba, width: width, height: height)
+    }
+
+    static func align112(source: SourcePixels, landmarks: [(Float, Float)]) -> CGImage? {
         guard landmarks.count == 5 else { return nil }
-        guard let (rgba, w, h) = renderRGBA8(source) else { return nil }
+        let (rgba, w, h) = (source.rgba, source.width, source.height)
         guard let (a, b, tx, ty) = fitSimilarity(src: landmarks, dst: template) else { return nil }
         let det = a * a + b * b
-        if abs(det) < 1e-9 { return nil }
+        if !det.isFinite || abs(det) < 1e-9 { return nil }
 
         var outRGBA = [UInt8](repeating: 255, count: out * out * 4) // alpha pre-filled
         for oy in 0..<out {
@@ -75,7 +91,9 @@ enum FaceAlign {
     /// Least-squares 2D similarity fit: solve (a, b, tx, ty) minimizing
     /// Σ‖[[a,−b],[b,a]]·src_i + [tx,ty] − dst_i‖² via the 4×4 normal equations.
     static func fitSimilarity(src: [(Float, Float)], dst: [(Float, Float)]) -> (Float, Float, Float, Float)? {
-        guard src.count == dst.count, !src.isEmpty else { return nil }
+        guard src.count == dst.count, !src.isEmpty,
+              src.allSatisfy({ $0.0.isFinite && $0.1.isFinite }),
+              dst.allSatisfy({ $0.0.isFinite && $0.1.isFinite }) else { return nil }
         let n = Double(src.count)
         var sxx = 0.0, sx = 0.0, sy = 0.0
         var ba = 0.0, bb = 0.0, bxx = 0.0, byy = 0.0
@@ -97,6 +115,7 @@ enum FaceAlign {
             [sy, sx, 0.0, n],
         ]
         guard let p = solve4(m, [ba, bb, bxx, byy]) else { return nil }
+        guard p.allSatisfy({ Float($0).isFinite }) else { return nil }
         return (Float(p[0]), Float(p[1]), Float(p[2]), Float(p[3]))
     }
 
@@ -132,6 +151,8 @@ enum FaceAlign {
     /// Bilinear RGB sample with edge clamping from a tightly-packed RGBA8
     /// buffer (stride 4; alpha ignored).
     private static func bilinear(_ rgba: [UInt8], _ width: Int, _ height: Int, _ x: Float, _ y: Float) -> (UInt8, UInt8, UInt8) {
+        let x = min(max(x, 0), Float(width - 1))
+        let y = min(max(y, 0), Float(height - 1))
         let x0 = Int(floor(x))
         let y0 = Int(floor(y))
         let fx = x - Float(x0)
