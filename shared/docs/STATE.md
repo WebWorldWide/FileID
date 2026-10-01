@@ -8,9 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Model headroom, cancellable residency, and independent decoder deadlines
+
+Initial shared memory admission reserves system/app headroom and rejects missing probes, oversized models, and current pressure before loading. Native model load/unload/inference now share a cancellable exclusive gate; cancelled handoffs do not release resources still owned by active work. Rust checks GGUF/projection sizes before server/per-file startup. Corrected speculative-page double counting against Apple’s kernel header. Full native testing exposed cooperative-executor watchdog delay; a dispatch timer now preserves the original one-second timeout/five-second assertion under the full suite. See SCHEDULER.md for conservative budgets and remaining parallel/resource controls.
+
+Native full suite passed 420 tests; Rust passed 381 library/382 executable tests plus two integrations, with actual pinned 1.90 Clippy. Focused native residency/worker tests pass, including 32 cancellation handoffs. This does not establish actual model residency/latency or dedicated-GPU headroom on untested hardware. No dependencies, model weights, Adlon writes, or installed-release changes were introduced.
+
+
 ## 2026-10-01 — Reconcile the focused Windows test gate with current PR186
 
-PR186 advanced to 56541c6 with local chat and contextual media-filter changes. Merge that exact base into PR187 without altering its product changes. Resolve only concurrent STATE/NEXT/DECISIONS entries by preserving both histories; keep the mandatory Windows test/report gate intact. Broader app contract repair remains pending approval. Validation for the reconciled head is tracked in draft PR187; prior-head success does not establish current-head Windows results.
+PR186 advanced through 56541c6 (chat/search) to 1ed2ae8 (model headroom/residency) during validation. Merge those exact bases into PR187 without altering their product changes. Resolve only concurrent STATE/NEXT/DECISIONS entries by preserving both histories and placing gate notes beside existing milestones; keep the mandatory Windows test/report gate intact. Broader app contract repair remains pending approval. Validation for the reconciled head is tracked in draft PR187; prior-head success does not establish current-head Windows results.
 
 ## 2026-10-01 — Require genuine Windows .NET test execution
 

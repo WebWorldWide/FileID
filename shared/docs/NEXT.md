@@ -1,5 +1,10 @@
 # NEXT — resume here
 
+## 2026-10-01 — Continue from initial model admission
+
+Initial physical/available-memory checks and native residency leases now protect model switches; SCHEDULER.md defines exact limits. Continue persistent hybrid indexes and processing-version caches, durable CPU/I/O/GPU/NPU reservations, multi-model/task routing, fairness and general restart recovery. Then complete typed chat operations, timeline speech/shots/tracks/dense outcomes, automatic chapters, best takes, video/broad tools and native port UI. Preserve owner work and strictly read-only Adlon; push coherent verified milestones to PR #186.
+
+
 Windows test gate repair is tracked in draft PR187. The app suite remains blocked by production/test contract divergence (158 native compile/analyzer diagnostics); do not call the Windows gate or Store release green. Broader contract repair is pending approval. Preserve tests and use the evidence/repair sequence in [WINDOWS_TEST_GATE.md](WINDOWS_TEST_GATE.md).
 
 ## 2026-10-01 — Search refinement landed; continue scheduler and hybrid retrieval

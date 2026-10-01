@@ -46,6 +46,7 @@ public actor DeepAnalyze {
     /// promptly. Unstructured by design (shared across callers), so
     /// cancellation is wired explicitly, not inherited.
     private var loadTask: Task<Void, Error>?
+    private let residencyGate = ExclusiveResourceGate()
     private var loadTaskKind: AIModelKind?
     /// Waiter ref-count for the shared single-flight load (R-11). The shared
     /// loadTask is cancelled only when its LAST joined waiter bails, so a
@@ -111,6 +112,8 @@ public actor DeepAnalyze {
     public func isCancelled() -> Bool { cancelRequested }
 
     func answerCatalog(prompt: String, onToken: @escaping @Sendable (String) async -> Void) async throws -> String {
+        let lease = try await residencyGate.acquire()
+        defer { Task { await residencyGate.release(lease) } }
         guard let container else { throw CancellationError() }
         let collector = TokenCollector()
         let parameters = MLXLMCommon.GenerateParameters(maxTokens: 192, temperature: 0, topP: 1)
@@ -265,6 +268,15 @@ public actor DeepAnalyze {
         kind: AIModelKind,
         progress: (@Sendable (Double, String, Int64, Int64) -> Void)?
     ) async throws {
+        let lease = try await residencyGate.acquire()
+        defer { Task { await residencyGate.release(lease) } }
+        try Task.checkCancellation()
+        let totalMB = ProcessInfo.processInfo.physicalMemory / 1_048_576
+        let requestedMB = UInt64((kind.ramBudgetGB * 1024).rounded(.up))
+        if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: totalMB, requestedMB: requestedMB) {
+            loadState = .failed(reason)
+            throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+        }
         if container != nil {
             container = nil
             loadedKind = nil
@@ -279,6 +291,10 @@ public actor DeepAnalyze {
         JSONLog.shared.flush()
 
         do {
+            let availableMB = UInt64(max(0, Hardware.availableMemoryMB()))
+            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: availableMB, requestedMB: requestedMB) {
+                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+            }
             let config = Self.vlmConfig(for: kind)
             if kind == .qwen3VL4B || kind == .qwen3VL8B {
                 _ = Self.qwen3VLWeightAdapterInstalled
@@ -353,7 +369,9 @@ public actor DeepAnalyze {
 
     /// Free GPU weights. Called when the user changes models or shuts
     /// the engine down. Reload costs ~10 s.
-    public func unload() {
+    public func unload() async {
+        guard let lease = try? await residencyGate.acquire() else { return }
+        defer { Task { await residencyGate.release(lease) } }
         container = nil
         loadedKind = nil
         loadState = .notLoaded
@@ -441,6 +459,8 @@ public actor DeepAnalyze {
     /// the post-clustering pass to resolve the borderline L2 band that
     /// the bootstrap face-print clustering can't reliably classify.
     public func compareFaces(cropA: URL, cropB: URL) async -> FaceComparison {
+        guard let lease = try? await residencyGate.acquire() else { return FaceComparison(sameClass: false, confidence: 0) }
+        defer { Task { await residencyGate.release(lease) } }
         guard let container else {
             return FaceComparison(sameClass: false, confidence: 0)
         }
@@ -584,6 +604,8 @@ public actor DeepAnalyze {
         faceNames: [String] = [],
         onToken: (@Sendable (String) async -> Void)? = nil
     ) async -> AnalysisResult {
+        guard let lease = try? await residencyGate.acquire() else { return AnalysisResult(description: "Inference failed: Cancelled.", proposedName: nil) }
+        defer { Task { await residencyGate.release(lease) } }
         guard let container else {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }
