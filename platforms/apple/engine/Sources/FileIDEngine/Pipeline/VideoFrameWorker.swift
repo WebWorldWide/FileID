@@ -139,7 +139,7 @@ enum CancellableProcess {
         private let process: Process
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Int32, Error>?
-        private var timeout: Task<Void, Never>?
+        private var timeout: DispatchSourceTimer?
         private var cancelled = false
         private var timedOut = false
         private var finished = false
@@ -149,11 +149,13 @@ enum CancellableProcess {
             if cancelled { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
             self.continuation = continuation
             process.terminationHandler = { [weak self] process in self?.finish(.success(process.terminationStatus)) }
+            let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+            // A cooperative executor can be busy when the worker deadline expires.
+            timer.schedule(deadline: .now() + .seconds(Int(min(timeoutSeconds, 86_400))))
+            timer.setEventHandler { [weak self] in self?.cancel(timedOut: true) }
+            timeout = timer
+            timer.resume()
             do { try process.run() } catch { lock.unlock(); finish(.failure(error)); return }
-            timeout = Task { [weak self] in
-                do { try await Task.sleep(nanoseconds: timeoutSeconds * 1_000_000_000) } catch { return }
-                self?.cancel(timedOut: true)
-            }
             lock.unlock()
         }
         func cancel(timedOut: Bool = false) {

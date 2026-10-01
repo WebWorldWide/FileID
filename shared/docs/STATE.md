@@ -8,6 +8,13 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Model headroom, cancellable residency, and independent decoder deadlines
+
+Initial shared memory admission reserves system/app headroom and rejects missing probes, oversized models, and current pressure before loading. Native model load/unload/inference now share a cancellable exclusive gate; cancelled handoffs do not release resources still owned by active work. Rust checks GGUF/projection sizes before server/per-file startup. Corrected speculative-page double counting against Apple’s kernel header. Full native testing exposed cooperative-executor watchdog delay; a dispatch timer now preserves the original one-second timeout/five-second assertion under the full suite. See SCHEDULER.md for conservative budgets and remaining parallel/resource controls.
+
+Native full suite passed 420 tests; Rust passed 381 library/382 executable tests plus two integrations, with actual pinned 1.90 Clippy. Focused native residency/worker tests pass, including 32 cancellation handoffs. This does not establish actual model residency/latency or dedicated-GPU headroom on untested hardware. No dependencies, model weights, Adlon writes, or installed-release changes were introduced.
+
+
 ## 2026-10-01 — Contextual chat media filters
 
 Shared parser fixtures now preserve a subject across explicit refinements, switch media types, combine keywords, reset fresh queries, and keep unsupported negations literal. File and timestamp/page evidence filters apply before SQL result limits. Swift stores the user message and reads its recent conversation context in one transaction. Actual Swift → Rust → Swift search refinement and clear pass without modifying source files. Full native tests passed 416; Rust passed 380 library/381 executable plus two integrations, with pinned 1.90 Clippy. Semantic/person/event retrieval and general request planning remain pending. Adlon remains untouched.

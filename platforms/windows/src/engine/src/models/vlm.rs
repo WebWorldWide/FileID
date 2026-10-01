@@ -213,6 +213,8 @@ pub async fn caption(
 
     #[cfg(not(feature = "vlm-native"))]
     {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+        crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path).await?;
         let mut cmd = Command::new(&runner.binary);
         cmd.arg("-m").arg(&req.gguf_path);
         cmd.arg("--mmproj").arg(&req.mmproj_path);

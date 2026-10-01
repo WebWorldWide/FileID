@@ -206,3 +206,5 @@ The October 2026 photo/chapter export milestone uses system ImageIO/CoreGraphics
 ## 2026-10-01 — Chat inference integration
 
 Initial macOS chat reuses the already loaded, existing MLX model; no candidate weight or runtime has been promoted. Catalog evidence is bounded to eight results, captions to 600 characters each, and generation to 192 tokens at temperature zero. Keyword retrieval works without weights. This reduces context/output work but does not establish latency or grounding quality; benchmark identical fixtures under background contention before model promotion. Rust chat generation and separate resident task models remain pending.
+
+Initial runtime memory admission now checks physical/system reserves and available headroom before native MLX loads or Rust VLM process startup. Registry and byte-based estimates are provisional; dedicated-GPU/context/quantization measurements remain required. Native residency leases prevent a prewarm swap from overlapping active inference. No new model candidate is promoted by these policy tests. See SCHEDULER.md.

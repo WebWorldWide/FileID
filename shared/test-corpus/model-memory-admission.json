@@ -1,0 +1,13 @@
+[
+  {"totalMB":4096,"availableMB":3072,"requestedMB":1024,"accepted":true},
+  {"totalMB":4096,"availableMB":3072,"requestedMB":4096,"accepted":false},
+  {"totalMB":8192,"availableMB":6144,"requestedMB":5120,"accepted":true},
+  {"totalMB":16384,"availableMB":8192,"requestedMB":5120,"accepted":true},
+  {"totalMB":16384,"availableMB":6144,"requestedMB":8704,"accepted":false},
+  {"totalMB":16384,"availableMB":12000,"requestedMB":16000,"accepted":false},
+  {"totalMB":65536,"availableMB":50000,"requestedMB":32000,"accepted":true},
+  {"totalMB":16384,"availableMB":0,"requestedMB":5120,"accepted":false},
+  {"totalMB":0,"availableMB":8192,"requestedMB":5120,"accepted":false},
+  {"totalMB":16384,"availableMB":8192,"requestedMB":0,"accepted":false},
+  {"totalMB":16384,"availableMB":18446744073709551615,"requestedMB":18446744073709551615,"accepted":false}
+]
