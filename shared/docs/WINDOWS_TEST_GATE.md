@@ -1,0 +1,23 @@
+# Windows test gate and follow-on contract repair
+
+## Focused repair
+
+Draft PR [187](https://github.com/WebWorldWide/FileID/pull/187) is stacked on PR186 (`codex/fileid-next-version-current`, inspected head `c74ebc7a18a95adc8716aaca9d541f62381d83a7`). Neither that branch's owner changes nor the Store branch were changed.
+
+The previous workflow entered `platforms/windows/Tests` and then tested for another `Tests` directory. [Run 36926611217](https://github.com/WebWorldWide/FileID/actions/runs/36926611217/job/110585395800) therefore reported success while skipping both .NET suites. The repair names both required projects, builds the WinUI test project with Visual Studio MSBuild, runs the tests with the matching x64 RID, rejects missing/zero-executed TRX results, and uploads available test results even after failure. Test/schema-only changes now trigger the workflow. The existing format contract permits one retry only for exit code 4 plus `Unable to locate dotnet CLI`; all other failures remain failures.
+
+No assertions, suites, warning policies, runtime permissions, credentials, branch protection, dependencies, or release/signing configuration were weakened or changed.
+
+## Native evidence
+
+The first corrected-gate head `4f624c26d3fd8f8c07396d72d839119129306e3a` completed [Windows run 36929259302](https://github.com/WebWorldWide/FileID/actions/runs/36929259302). ARM64 passed. x64 Debug, Release and publish passed, then IPC passed 46/46 with zero skipped tests. App services failed to compile, with 158 diagnostics: 148 C# API/type errors and 10 analyzer errors (CA2255/CA1861). Subsequent x64 format/privacy/output/smoke gates were skipped because compilation failed. This is a genuine red gate, not a release-ready result.
+
+The existing IPC suite also passed 46/46 on the Mac. A temporary harness runs the unchanged `InstallerContractTests.WindowsWorkflow_RunsBothTestProjects_AndOnlyRetriesTheFormatProbeRace` assertion. Neither result substitutes for native Windows app tests. The existing Windows VM accepted SSH but exposed no `dotnet` or `git` command; no tools, credentials or persistent access were changed there.
+
+## Follow-on repair plan (approval pending)
+
+1. Establish the intended production contract before restoring code. History commit `879985e` (duplicate-history commit `a1d7108`) removes substantial app implementations while retaining tests that require them. Its stated People/UI commit message does not establish whether those removals were intentional. A temporary restoration experiment was discarded: about 50 app files and 10,000 added lines were required, and the app-only restoration referenced commands absent from current Rust/C# IPC and the canonical schema. The reason for the historical rollback is not established; do not infer that every old implementation should be reinstated.
+2. Inventory the retained tests by contract: lifecycle/generation health and stdout framing; persisted restructure/shortcut undo and truthful completion; exact-cleanup identities/selection; confirmed rename/tag journaling; isolated paths/picker behavior; bounded thumbnails and event handlers; installer/bootstrap/signing/version contracts. Keep the assertions as acceptance evidence. Separate source-string contracts from behavioral tests when evaluating intended semantics, without weakening either to make CI green.
+3. Resolve shared transport differences before activating old app callers. Check `healthCheck`, exclusion/purge behavior, exact-trash proof fields, restructure cancellation/token fields, and paged-plan fields against the current schema, Swift reference, Rust implementation and C# serialization. Add and test only the agreed contracts; preserve PR186 catalog/tools and source/output safeguards. Test unsupported commands, stale generations, cancellation, bounded frames and failed/partial mutations.
+4. Repair one coherent contract at a time on a separate branch. Integrate lifecycle/health waiters into actual transport, hydrate undo metadata through the production path, and use confirmed mutation receipts for undo. Avoid standalone helper stubs that merely satisfy compilation. Keep all mutation fixtures internal and Adlon/external archives read-only. Fix the 10 analyzer diagnostics without disabling analyzers or tests.
+5. Run both full Windows suites and every subsequent x64 gate on each candidate head. Validate x64 and ARM64 builds, format/BOM, privacy/vulnerability/output and x64 smoke checks through completion. Packaging/GPU/real-hardware acceptance and release submission remain separate gates. No merge or production release is authorized by this repair.

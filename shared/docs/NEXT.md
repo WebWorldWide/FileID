@@ -1,5 +1,7 @@
 # NEXT — resume here
 
+Windows test gate repair is tracked in draft PR187. The app suite remains blocked by production/test contract divergence (158 native compile/analyzer diagnostics); do not call the Windows gate or Store release green. Broader contract repair is pending approval. Preserve tests and use the evidence/repair sequence in [WINDOWS_TEST_GATE.md](WINDOWS_TEST_GATE.md).
+
 ## 2026-10-01 — Continue the accepted plan from PR #186
 
 Continue on codex/fileid-next-version-current. Safe initial photo/chapter tools are now implemented; consult TOOLS.md for exact pairs and limits. AGENT_HANDOFF.md has continuation instructions and correct pinned-Clippy invocation. Keep pushing coherent verified milestones to draft PR #186, inspect hosted CI, and preserve uncommitted owner release/signing work.

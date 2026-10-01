@@ -8,6 +8,10 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Require genuine Windows .NET test execution
+
+Draft PR187 repairs the nested `Tests` directory guard, requires both projects with the native VS build path, rejects empty/missing test reports, uploads TRX evidence and triggers on test/schema changes. Restore the existing narrowly matched dotnet-format probe retry. No test assertions or policies are suppressed. Exact first-head hosted evidence: ARM64 green; x64 build/publish green; IPC46/46; app compilation red with158 diagnostics. All later x64 gates skipped. Broad product restoration is pending scope approval; owner changes and Store branch remain untouched. Follow-on contract uncertainty and validation plan: [WINDOWS_TEST_GATE.md](WINDOWS_TEST_GATE.md).
+
 ## 2026-10-01 — Safer face alignment and shared geometry fixtures
 
 Native landmark matching now requires overlapping face boxes, size-relative center agreement, and an unambiguous candidate; nearby faces cannot supply each other's landmarks merely because their centers are within 8% of an image. Ambiguous matching retains the existing bbox-crop fallback. Render alignment pixels once per image rather than once per face, with byte-equivalence tests. Swift/Rust reject nonfinite geometry and empty Rust images; bounded edge sampling avoids unsafe integer conversion. Shared rights-clear alignment fixtures run in both engines. Swift bbox parsing rejects shifted malformed fields and invalid dimensions. Corrected the obsolete InsightFace/preprocessing header; the active model remains OpenCV SFace with raw RGB input.

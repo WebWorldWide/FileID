@@ -122,7 +122,11 @@ jobs:
         shell: pwsh
         working-directory: platforms/windows/Tests
         timeout-minutes: 10
-        run: dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger "trx;LogFileName=ipc-schema.trx"
+        run: |
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger "trx;LogFileName=ipc-schema.trx" --results-directory TestResults
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$results = Get-Content TestResults/ipc-schema.trx
+          if ([int]$results.TestRun.ResultSummary.Counters.executed -lt 1) { throw "IPC schema suite executed no tests." }
 
       - name: Test — app services (x64 only)
         if: matrix.arch == 'x64'
@@ -130,10 +134,19 @@ jobs:
         working-directory: platforms/windows/Tests
         timeout-minutes: 20
         run: |
-          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug -p:Platform=x64 --no-build --no-restore --verbosity minimal --logger "trx;LogFileName=app-services.trx" --blame-hang-timeout 5m
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --no-build --no-restore --verbosity minimal --logger "trx;LogFileName=app-services.trx" --results-directory TestResults --blame-hang-timeout 5m
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$results = Get-Content TestResults/app-services.trx
+          if ([int]$results.TestRun.ResultSummary.Counters.executed -lt 1) { throw "App services suite executed no tests." }
+
+      - name: Upload test results (x64 only)
+        if: always() && matrix.arch == 'x64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-test-results-x64
+          path: platforms/windows/Tests/TestResults
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
       # caused `dotnet format FileID.sln`'s solution-level restore to
@@ -143,7 +156,23 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
+        shell: pwsh
+        run: |
+          $dotnet = (Get-Command dotnet -ErrorAction Stop).Source
+          $env:DOTNET_HOST_PATH = $dotnet
+          $env:DOTNET_ROOT = Split-Path -Parent $dotnet
+
+          $formatOutput = & $dotnet format FileID.sln --verify-no-changes 2>&1
+          $formatExit = $LASTEXITCODE
+          $formatOutput | ForEach-Object { Write-Host $_ }
+
+          if ($formatExit -eq 4 -and (($formatOutput | Out-String) -like '*Unable to locate dotnet CLI*')) {
+            Write-Warning 'dotnet format hit its upstream CLI-probe race; retrying once.'
+            & $dotnet format FileID.sln --verify-no-changes
+            exit $LASTEXITCODE
+          }
+
+          exit $formatExit
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'
