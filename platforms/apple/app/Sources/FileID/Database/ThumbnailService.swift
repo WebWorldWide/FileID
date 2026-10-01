@@ -16,6 +16,7 @@ import SwiftUI
 import AppKit
 import CryptoKit
 import QuickLookThumbnailing
+import FileIDShared
 
 /// Async permit gate (counting semaphore) limiting concurrent QL decodes.
 /// File-scope global so the nonisolated `generate` can reach it without
@@ -104,7 +105,9 @@ public final class ThumbnailService {
         }
         await thumbDecodeGate.release()
         if let jpegData {
-            try? jpegData.write(to: diskURL, options: .atomic)
+            if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
+                try? jpegData.write(to: diskURL, options: .atomic)
+            }
         }
         return jpegData
     }
@@ -145,7 +148,9 @@ private actor ThumbnailGate {
 private enum ThumbnailDiskCache {
     static let dir: URL = {
         let d = AppSupportPath.fileID.appendingPathComponent("thumbnails", isDirectory: true)
-        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        if (try? ReadOnlyLocations.requireWritable(d)) != nil {
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        }
         return d
     }()
 

@@ -18,6 +18,7 @@ public enum ModelLicenseAcceptance {
     public static func recordAcceptance(for kind: AIModelKind) throws {
         guard kind.licenseTermsURL != nil else { return }
         let marker = try markerURL(for: kind)
+        try ReadOnlyLocations.requireWritable(marker)
         let directory = marker.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -61,6 +62,7 @@ public enum ModelLicenseAcceptance {
     static func recordAcceptance(for kind: AIModelKind, root: URL) throws {
         guard kind.licenseTermsURL != nil else { return }
         let marker = try markerURL(for: kind, root: root)
+        try ReadOnlyLocations.requireWritable(marker)
         try FileManager.default.createDirectory(
             at: marker.deletingLastPathComponent(),
             withIntermediateDirectories: true

@@ -28,6 +28,8 @@ use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
 /// longPathAware manifest); mirrors restructure_apply.rs::move_file (B3).
 #[cfg(windows)]
 fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
+    crate::util::read_only::require_source_mutation(src)?;
+    crate::util::read_only::require_source_mutation(dst)?;
     use std::os::windows::ffi::OsStrExt;
     let src_ext = crate::util::path_safety::to_extended_length(src);
     let dst_ext = crate::util::path_safety::to_extended_length(dst);
@@ -53,6 +55,8 @@ fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[cfg(not(windows))]
 fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    crate::util::read_only::require_source_mutation(src)?;
+    crate::util::read_only::require_source_mutation(dst)?;
     std::fs::rename(
         crate::util::path_safety::to_extended_length(src),
         crate::util::path_safety::to_extended_length(dst),
@@ -895,7 +899,7 @@ pub(crate) async fn handle_find_merge_suggestions(
         };
 
         let decode = |blob: &[u8]| -> Vec<f32> {
-            blob.chunks_exact(4)
+            blob.as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect()
         };

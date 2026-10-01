@@ -7,6 +7,7 @@
 // whole app on a render path. Replace with a single helper that
 // degrades gracefully to `~/tmp` instead of crashing.
 import Foundation
+import FileIDShared
 
 enum AppSupportPath {
     /// `~/Library/Application Support` for the current user, with a
@@ -26,7 +27,9 @@ enum AppSupportPath {
     /// to repeat the boilerplate.
     static var fileID: URL {
         let url = root.appendingPathComponent("FileID", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        if (try? ReadOnlyLocations.requireWritable(url)) != nil {
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
         return url
     }
 
@@ -34,7 +37,9 @@ enum AppSupportPath {
     /// downloaded ML model lives.
     static var models: URL {
         let url = fileID.appendingPathComponent("Models", isDirectory: true)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        if (try? ReadOnlyLocations.requireWritable(url)) != nil {
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
         return url
     }
 }

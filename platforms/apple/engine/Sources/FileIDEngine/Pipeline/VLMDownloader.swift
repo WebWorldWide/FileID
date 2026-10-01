@@ -60,6 +60,7 @@ public actor VLMDownloader {
         let modelDir = documentsHF
             .appending(component: "models")
             .appending(component: repo)
+        try ReadOnlyLocations.requireWritable(modelDir)
 
         // Size-based skip is only trusted once a prior fetch of THIS
         // revision fully verified — otherwise pre-hardening installs
@@ -91,6 +92,7 @@ public actor VLMDownloader {
         let downloadable = files.filter { Self.shouldDownload($0) }
         guard !downloadable.isEmpty else { throw VLMDownloaderError.noFilesListed }
 
+        try ReadOnlyLocations.requireWritable(modelDir)
         try FileManager.default.createDirectory(at: modelDir, withIntermediateDirectories: true)
 
         let unverified = downloadable.filter { $0.sha256 == nil }.map(\.path)
@@ -264,6 +266,7 @@ public actor VLMDownloader {
             encoder.outputFormatting = [.sortedKeys]
             return try encoder.encode(manifest)
         }.value
+        try ReadOnlyLocations.requireWritable(sentinel)
         try payload.write(to: sentinel, options: .atomic)
     }
 

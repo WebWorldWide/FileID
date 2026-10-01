@@ -3351,3 +3351,18 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   This is the high-integrity reading of "finish everything": every item reaches a terminal state —
   landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
   unverifiable changes that risk regressing shipped features.
+
+## 2026-10-01 — Shared evidence catalog, protected sources, and honest timeline coverage
+
+Use one canonical SQL migration for both engines and preserve older tables/corrections. Maintain persistent FTS through triggers; separate embedding models/dimensions in storage. A size/mtime change invalidates generated evidence/proposals while retaining user markers for reconfirmation. Same-size/same-mtime replacement detection and persistent ANN execution remain future work.
+
+Adlon is read-only example data under every workflow. Check resolved existing ancestors before output creation or source mutation; additionally protect managed media-library originals. Tests use internal protected-root fixtures. This is a path-level safeguard, not proof against a concurrent symlink swap; descriptor-based filesystem hardening and whole-app write tracing are release gates.
+
+Start temporal analysis with durable, explicitly incomplete sampling. Decode in a killable subprocess instead of adding another potentially hanging in-process Vision video path. Reuse captions by source revision, pinned model version, and requested sample time; do not label sparse captions as verified event outcomes. The existing serial major-job queue stays until a measured resource-budgeted scheduler replaces it. Manual markers use atomic correction/inverse-operation journals so Undo survives restart.
+
+Keep currently supported weights. Research candidates cannot be promoted from published benchmark claims alone; require exact license/hash/runtime verification and FileID quality/latency tests. No new application dependency or model pack was bundled in this slice. FFmpeg used to generate internal test video is a development tool only. Full next-version scope and gates live in NEXT_VERSION.md.
+
+Chapter Undo uses transaction insertion order rather than wall-clock timestamps so a system-clock adjustment cannot select the wrong inverse operation. Source changes stale take scores without deleting the user's preferred-take choice. Literal protected paths are rejected before any filesystem probing, then existing alias-resolution checks still protect indirect destinations.
+
+Reject dangling file/directory symlinks before opening an output. A missing symlink target can still be created by an output writer, so checking only `fileExists` and appending the missing suffix is insufficient. Internal fixtures cover both forms without touching Adlon.
+

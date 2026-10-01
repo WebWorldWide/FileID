@@ -79,11 +79,13 @@ public final class RamPlusModelInstaller {
 
     public func uninstall() {
         cancel()
+        guard (try? ReadOnlyLocations.requireWritable(Self.dir)) != nil else { status = .installFailed("This model location is protected example data."); return }
         try? FileManager.default.removeItem(at: Self.dir)
         refreshStatus()
     }
 
     private func runInstall() async {
+        guard (try? ReadOnlyLocations.requireWritable(Self.dir)) != nil else { status = .installFailed("This model location is protected example data."); return }
         try? FileManager.default.createDirectory(at: Self.dir, withIntermediateDirectories: true)
 
         // Reclaim parts orphaned by a kill mid-download BEFORE the free-space

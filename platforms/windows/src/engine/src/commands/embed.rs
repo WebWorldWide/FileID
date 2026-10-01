@@ -46,7 +46,7 @@ pub(crate) async fn handle_embed_image_query(
                 return None;
             }
             Some(
-                b.chunks_exact(4)
+                b.as_chunks::<4>().0.iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect(),
             )

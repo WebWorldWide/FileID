@@ -3,6 +3,7 @@ import SwiftUI
 import FileIDShared
 
 struct MainWindow: View {
+    @State private var catalogPresented = false
     let engine: EngineClient
     @State private var store = ReadStore()
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = Tab.library.rawValue
@@ -77,6 +78,11 @@ struct MainWindow: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .accentColor(Theme.gold)
+        .toolbar {
+            Button { catalogPresented = true } label: { Label("Search & Moments", systemImage: "sparkle.magnifyingglass") }
+                .keyboardShortcut("j", modifiers: .command)
+        }
+        .sheet(isPresented: $catalogPresented) { CatalogWorkbench(engine: engine) }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()

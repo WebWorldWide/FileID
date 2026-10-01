@@ -716,6 +716,11 @@ async fn handle_line(
     };
 
     match cmd.payload {
+        CommandPayload::CatalogRequest(payload) => {
+            let sink = sink.clone();
+            let database = db.cloned();
+            tokio::spawn(async move { commands::catalog::handle(sink, database, payload.request).await; });
+        }
         CommandPayload::RequestStatus(_) => {
             // Re-emit ready so the app can rebuild its EngineInfo snapshot.
             commands::hardware::emit_ready(sink).await;

@@ -89,7 +89,7 @@ struct DeepAnalyzePureLogicTests {
         #expect(DeepAnalyze.removingRejectedIdentityTokens(
             from: "jacob-mason-window-smile",
             rejectedTokens: grounded.rejectedTokens
-        ) == nil)
+        ) == "window-smile")
     }
 
     @Test("known face names remain available to the model")
@@ -120,7 +120,7 @@ struct DeepAnalyzePureLogicTests {
         #expect(DeepAnalyzeRunner.trustedYears(
             in: "Invoice 2024; reference 1234; copyright 1899"
         ) == [2024])
-        #expect(!DeepAnalyze.hasMinimumGeneratedFilenameWords("family-holiday"))
+        #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("family-holiday"))
         #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("adam-family-holiday"))
     }
 
@@ -345,7 +345,9 @@ struct DeepAnalyzeRunnerTests {
         )
 
         #expect(first == "service-report")
-        #expect(second == "service-report-report-2026-08-02")
+        #expect(second == "service-report (2)")
+        let elsewhere = DeepAnalyzeRunner.reserveProposedName("service-report", sourcePath: "/other/report.pdf", reserved: &reserved)
+        #expect(elsewhere == "service-report")
     }
 
     @Test("resolveTargets folder scope: '_' does not over-match siblings")

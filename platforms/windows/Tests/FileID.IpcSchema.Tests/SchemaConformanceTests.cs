@@ -133,8 +133,11 @@ public class SchemaConformanceTests
     // app constructs them. Optional fields are set so the serialized keys
     // exercise the variant's full schema property surface.
 
+    private static CatalogChapter ExampleChapter() => new("chapter-1", 42, 12.5, 20, "Gift Opening", "Grandma opens a gift", "100:123", "user", 1, true, false);
+
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
+        new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
         new PauseScanCommand(),
         new ResumeScanCommand(),
@@ -173,6 +176,7 @@ public class SchemaConformanceTests
 
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
+        new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),

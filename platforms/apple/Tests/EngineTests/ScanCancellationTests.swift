@@ -13,9 +13,12 @@ import FileIDShared
 struct ScanCancellationTests {
 
     private static var engineBinary: URL {
+        if let override = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] {
+            return URL(fileURLWithPath: override)
+        }
         // …/platforms/apple/Tests/EngineTests/ScanCancellationTests.swift
         //   → …/platforms/apple/.build/debug/FileIDEngine
-        URL(fileURLWithPath: #filePath)
+        return URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -140,7 +143,10 @@ struct ScanCancellationTests {
             return false
         }
 
-        #expect(await waitFor("\"ready\"", timeout: 15), "engine must emit ready")
+        guard await waitFor("\"ready\"", timeout: 15) else {
+            Issue.record("engine must emit ready")
+            return
+        }
 
         let escapedRoot = root.path.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
