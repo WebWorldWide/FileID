@@ -941,7 +941,7 @@ pub struct RestructureCategoryCount {
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestructureApplyResult {
     pub applied: u32,
@@ -952,6 +952,14 @@ pub struct RestructureApplyResult {
     /// to the user via a one-shot dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privilege_error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut_undo_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

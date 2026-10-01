@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Reactive.Linq;
 using System.Threading;
 using FileID.IpcSchema;
 using FileID.Services;
@@ -713,13 +714,34 @@ internal sealed partial class EngineClient
 
     public Task PlanRestructureAsync(string libraryRoot) =>
         SendCommandAsync(new PlanRestructureCommand(libraryRoot));
-    public Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks) =>
-        SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks));
+    private bool _restructureApplyUsesSymlinks;
+    private int _restructureCommandInFlight;
+    internal bool LastRestructureResultWasUndo { get; private set; }
+    internal bool LastRestructureResultWasShortcutApply { get; private set; }
+    internal string? RestructureOperationRoot { get; private set; }
+
+    public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks)
+    {
+        if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
+            throw new InvalidOperationException("A restructure operation is already running.");
+        _restructureApplyUsesSymlinks = useSymlinks;
+        RestructureOperationRoot = libraryRoot;
+        try { await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks)).ConfigureAwait(false); }
+        catch { Interlocked.Exchange(ref _restructureCommandInFlight, 0); throw; }
+    }
     /// <summary>Reverse the most recent applyRestructure — the engine replays its
-    /// on-disk undo journal. Reply lands on LastRestructureApplyResult and clears
-    /// CanUndoRestructure. (R2)</summary>
+    /// on-disk undo journal. Reply lands on LastRestructureApplyResult; cancelled
+    /// or failed work stays retryable.</summary>
     public async Task UndoRestructureAsync(string libraryRoot)
     {
+        if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
+            throw new InvalidOperationException("A restructure operation is already running.");
+        await SendRestructureUndoCoreAsync(libraryRoot).ConfigureAwait(false);
+    }
+
+    private async Task SendRestructureUndoCoreAsync(string libraryRoot)
+    {
+        RestructureOperationRoot = libraryRoot;
         // Clear the flag if the send faults (engine not Ready) — else it latches and
         // mis-attributes the next apply's result as the undo's. (audit R2-app)
         UndoRestructureInFlight = true;
@@ -730,7 +752,52 @@ internal sealed partial class EngineClient
         catch
         {
             UndoRestructureInFlight = false;
+            Interlocked.Exchange(ref _restructureCommandInFlight, 0);
             throw;
+        }
+    }
+
+    internal async Task<RestructureApplyResult> UndoRestructureAndWaitAsync(
+        string libraryRoot, CancellationToken ct = default)
+    {
+        await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        var generation = SpawnGeneration;
+        if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
+            throw new InvalidOperationException("A restructure operation is already running.");
+        UndoRestructureInFlight = true;
+        var completion = new TaskCompletionSource<RestructureApplyResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = Events.Subscribe(ev =>
+        {
+            if (SpawnGeneration != generation) return;
+            if (ev.Payload is RestructureApplyResultEvent result) completion.TrySetResult(result.Result);
+            else if (ev.Payload is ErrorEvent { Error.Kind: "undo_restructure" } error)
+                completion.TrySetException(new InvalidOperationException(error.Error.Message));
+        }, error => completion.TrySetException(error),
+            () => completion.TrySetException(new InvalidOperationException("The engine event stream closed.")));
+        void OnLifecycleChanged(object? sender, PropertyChangedEventArgs e)
+            => DebugLog.SafeRun(nameof(OnLifecycleChanged), () =>
+            {
+                if (SpawnGeneration != generation || State != LifecycleState.Ready)
+                    completion.TrySetException(new InvalidOperationException("The engine stopped before confirming restructure undo."));
+            });
+        PropertyChanged += OnLifecycleChanged;
+        var sendStarted = false;
+        try
+        {
+            if (SpawnGeneration != generation)
+                throw new InvalidOperationException("The engine changed before restructure undo started.");
+            sendStarted = true;
+            await SendRestructureUndoCoreAsync(libraryRoot).ConfigureAwait(false);
+            return await completion.Task.WaitAsync(TimeSpan.FromMinutes(30), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            PropertyChanged -= OnLifecycleChanged;
+            if (!sendStarted)
+            {
+                UndoRestructureInFlight = false;
+                Interlocked.Exchange(ref _restructureCommandInFlight, 0);
+            }
         }
     }
 

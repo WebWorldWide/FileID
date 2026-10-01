@@ -527,6 +527,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             applied: 10,
             failed: 1,
             privilege_error: Some("Developer Mode required for symlinks".into()),
+            ..Default::default()
         })),
         EventPayload::BulkActionResult(Wrap::new(BulkActionResult {
             action: "trashFiles:00000000-0000-0000-0000-000000000000".into(),

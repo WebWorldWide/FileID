@@ -143,6 +143,48 @@ public class RestructureUndoRoutingTests
                 [unrelated, superseded, retryable]));
     }
 
+    [Fact]
+    public void ConfirmedHistoryIsRecordedWithoutRequiringTheRestructureView()
+    {
+        var root = FindRepoRoot();
+        var client = File.ReadAllText(Path.Combine(root, "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs"));
+        var view = File.ReadAllText(Path.Combine(root, "platforms/windows/src/FileID.App/Views/Restructure/RestructureView.xaml.cs"));
+        var start = client.IndexOf("case RestructureApplyResultEvent rar:", StringComparison.Ordinal);
+        var end = client.IndexOf("case BulkActionResultEvent", start, StringComparison.Ordinal);
+        var terminalRouter = client[start..end];
+        Assert.Contains("RestructureUndoPolicy.ShouldRecord", terminalRouter);
+        Assert.Contains("ChangeLog.Instance.Push", terminalRouter);
+        Assert.Contains("UndoRestructureAndWaitAsync(operationRoot)", terminalRouter);
+        Assert.DoesNotContain("ChangeLog.Instance.Push", view);
+    }
+
+    [Fact]
+    public void UndoWaiterIsRegisteredBeforeSendingAndBoundToTheEngineGeneration()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs"));
+        var start = source.IndexOf("internal async Task<RestructureApplyResult> UndoRestructureAndWaitAsync", StringComparison.Ordinal);
+        var end = source.IndexOf("public Task ApplyTagsAsync", start, StringComparison.Ordinal);
+        var waiter = source[start..end];
+        Assert.True(waiter.IndexOf("Events.Subscribe", StringComparison.Ordinal)
+            < waiter.IndexOf("SendRestructureUndoCoreAsync", StringComparison.Ordinal));
+        Assert.Contains("SpawnGeneration != generation", waiter);
+        Assert.Contains("PropertyChanged += OnLifecycleChanged", waiter);
+        Assert.Contains("PropertyChanged -= OnLifecycleChanged", waiter);
+        Assert.Contains("RunContinuationsAsynchronously", waiter);
+    }
+
+    private static string FindRepoRoot()
+    {
+        DirectoryInfo? directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+                && Directory.Exists(Path.Combine(directory.FullName, ".github"))) return directory.FullName;
+            directory = directory.Parent;
+        }
+        throw new DirectoryNotFoundException("Could not find the FileID repository.");
+    }
+
     private static ChangeLogEntry Entry(ChangeKind kind, ChangeStatus status)
     {
         var entry = new ChangeLogEntry(

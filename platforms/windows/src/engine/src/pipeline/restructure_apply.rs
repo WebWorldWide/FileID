@@ -56,6 +56,7 @@ pub struct RestructureApply {
     db_conn: Arc<Mutex<Connection>>,
     library_root: PathBuf,
     use_symlinks: bool,
+    undo_journal: Option<PathBuf>,
     // F-C6-013: cooperative cancel polled between moves. Defaults to a fresh,
     // never-set flag; the dispatcher injects a shared flag via `with_cancel` so
     // a user "stop" aborts a 100k-move apply between moves (each completed move
@@ -69,6 +70,7 @@ impl RestructureApply {
             db_conn,
             library_root,
             use_symlinks,
+            undo_journal: Self::undo_journal_path(),
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -112,12 +114,9 @@ impl RestructureApply {
         // and so a crash mid-apply still leaves every COMPLETED move undoable. (The
         // prior design buffered in memory and wrote once after the loop, losing the
         // whole batch's undo on a crash.) Best-effort: a journal that won't open
-        // just disables undo, exactly as before. (R2 → crash-safe)
-        let mut journal = if record_undo {
-            Self::open_undo_journal_truncating()
-        } else {
-            None
-        };
+        // just disables undo, exactly as before. Open only after a successful
+        // move so an empty, failed, or pre-cancelled apply preserves prior undo.
+        let mut journal = None;
         let mut undo_count = 0usize;
         // (source, final destination) of every successful real move, fed to the
         // learn-from-corrections memory in ONE lock acquisition after the loop so a
@@ -133,15 +132,18 @@ impl RestructureApply {
         // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop.
         let total = moves.len();
+        let mut processed = 0usize;
+        let mut cancelled = false;
         for (idx, m) in moves.iter().enumerate() {
             // Poll the cancel flag at the TOP of every iteration. Every move
             // already completed is durable (per-move FS op + DB update), so
             // stopping BETWEEN moves is safe and preserves per-move atomicity.
             if self.cancel.load(Ordering::Relaxed) {
+                cancelled = true;
                 tracing::info!(applied, failed, processed = idx, total, "[RESTRUCTURE] apply cancelled by user");
                 break;
             }
-            let processed = idx + 1;
+            processed = idx + 1;
             if should_emit_apply_progress(processed, total, APPLY_PROGRESS_INTERVAL) {
                 tracing::info!(applied, failed, processed, total, "[RESTRUCTURE] apply progress");
             }
@@ -212,7 +214,6 @@ impl RestructureApply {
             // sibling, and we'd rename an already-correctly-placed file —
             // churning an organized library, silently in auto-file mode. (ENG-42)
             if !self.use_symlinks && paths_equal(&m.source, &dest.to_string_lossy()) {
-                applied += 1;
                 continue;
             }
 
@@ -265,6 +266,9 @@ impl RestructureApply {
                         // Real moves only — symlink mode doesn't relocate the file.
                         // Appended + periodically fsync'd so a crash on a later move
                         // can't lose this one's undoability. (R2 → crash-safe)
+                        if record_undo && journal.is_none() {
+                            journal = self.open_undo_journal_truncating();
+                        }
                         if let Some(j) = journal.as_mut() {
                             Self::append_undo_entry(
                                 j,
@@ -285,10 +289,13 @@ impl RestructureApply {
                     applied += 1;
                 }
                 Err(ApplyError::Privilege(msg)) => {
+                    failed += 1;
                     return Ok(RestructureApplyResult {
                         applied,
                         failed,
                         privilege_error: Some(msg),
+                        planned: Some(total as u64),
+                        ..Default::default()
                     });
                 }
                 Err(ApplyError::Other(err)) => {
@@ -327,10 +334,22 @@ impl RestructureApply {
                 now,
             );
         }
-        Ok(RestructureApplyResult { applied, failed, privilege_error: None })
+        Ok(RestructureApplyResult {
+            applied,
+            failed,
+            cancelled,
+            planned: Some(total as u64),
+            remaining: cancelled.then_some((total - processed) as u64),
+            ..Default::default()
+        })
     }
 
     // ── Undo (R2 — reversible "Undo last run") ──────────────────────────────
+
+    fn still_requires_undo(&self, file_id: i64, original: &str) -> bool {
+        !matches!(current_path_in_db(&self.db_conn, file_id),
+            Ok(Some(path)) if paths_equal(&path, original) && Path::new(original).is_file())
+    }
 
     fn undo_journal_path() -> Option<PathBuf> {
         crate::paths::trash_log_path()
@@ -341,8 +360,8 @@ impl RestructureApply {
     /// Open the undo journal truncating (fresh batch). Returns a buffered writer
     /// each completed move's inverse is appended to, so the journal is durable
     /// incrementally rather than written once after the loop. (R2 → crash-safe)
-    fn open_undo_journal_truncating() -> Option<BufWriter<File>> {
-        let path = Self::undo_journal_path()?;
+    fn open_undo_journal_truncating(&self) -> Option<BufWriter<File>> {
+        let path = self.undo_journal.as_ref()?;
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -350,7 +369,7 @@ impl RestructureApply {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&path)
+            .open(path)
             .ok()?;
         Some(BufWriter::new(f))
     }
@@ -362,11 +381,11 @@ impl RestructureApply {
         let _ = writeln!(j, "{line}");
     }
 
-    fn read_undo_journal() -> Vec<(i64, String, String)> {
-        let Some(path) = Self::undo_journal_path() else {
+    fn read_undo_journal(&self) -> Vec<(i64, String, String)> {
+        let Some(path) = self.undo_journal.as_ref() else {
             return Vec::new();
         };
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = std::fs::read_to_string(path) else {
             return Vec::new();
         };
         text.lines()
@@ -386,12 +405,13 @@ impl RestructureApply {
     /// safety applies), then clear the journal so a run can't be undone twice.
     /// (RESTRUCTURE.md §6 reversibility)
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
-        let entries = Self::read_undo_journal();
+        let entries = self.read_undo_journal();
         if entries.is_empty() {
-            return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
+            return Ok(RestructureApplyResult { planned: Some(0), ..Default::default() });
         }
         let inverse: Vec<RestructureMove> = entries
             .iter()
+            .filter(|(file_id, _, to)| self.still_requires_undo(*file_id, to))
             .map(|(file_id, from, to)| RestructureMove {
                 file_id: *file_id,
                 source: from.clone(),
@@ -404,11 +424,11 @@ impl RestructureApply {
             .collect();
         // record_undo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it and
-        // put the REMAINING files back (already-restored ones stale-skip on the
-        // retry). Only a fully-completed (non-cancelled) undo clears it.
+        // put the remaining files back. Already-restored rows are excluded above;
+        // only a non-cancelled, failure-free undo clears the journal.
         let result = self.apply_with(&inverse, false)?;
-        if !self.cancel.load(Ordering::Relaxed) {
-            if let Some(path) = Self::undo_journal_path() {
+        if !result.cancelled && result.failed == 0 {
+            if let Some(path) = self.undo_journal.as_ref() {
                 let _ = std::fs::remove_file(path);
             }
             // Reversibility completeness: undo shouldn't leave the orphan empty group
@@ -836,9 +856,91 @@ mod tests {
 
         assert_eq!(res.applied, 0, "cancelled before any move applies");
         assert_eq!(res.failed, 0, "a cancel is not a failure");
+        assert!(res.cancelled);
+        assert_eq!(res.planned, Some(1));
+        assert_eq!(res.remaining, Some(1));
         assert!(src.exists(), "source untouched by a cancelled apply");
         assert!(!root.join("Sorted").join("a.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn undo_retry_skips_restored_files_and_retains_failed_moves() {
+        let root = std::env::temp_dir().join(format!("fileid-undo-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("Sorted")).unwrap();
+        let original_a = root.join("a.jpg");
+        let original_b = root.join("b.jpg");
+        let original_c = root.join("c.jpg");
+        let moved_a = root.join("Sorted/a.jpg");
+        let moved_b = root.join("Sorted/b.jpg");
+        let moved_c = root.join("Sorted/c.jpg");
+        std::fs::write(&original_a, b"AAAA").unwrap();
+        std::fs::write(&moved_b, b"BBBB").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &original_a.to_string_lossy());
+        insert_file_row(&conn, 2, &moved_b.to_string_lossy());
+        insert_file_row(&conn, 3, &moved_c.to_string_lossy());
+        let cancel = Arc::new(AtomicBool::new(true));
+        let mut apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false)
+            .with_cancel(cancel.clone());
+        let journal_path = root.join("undo.ndjson");
+        apply.undo_journal = Some(journal_path.clone());
+        let mut journal = BufWriter::new(File::create(&journal_path).unwrap());
+        for (id, from, to) in [(1, &moved_a, &original_a), (2, &moved_b, &original_b), (3, &moved_c, &original_c)] {
+            RestructureApply::append_undo_entry(&mut journal, id, &from.to_string_lossy(), &to.to_string_lossy());
+        }
+        journal.flush().unwrap();
+        drop(journal);
+        let original_journal = std::fs::read(&journal_path).unwrap();
+        let stopped = apply.undo_last().unwrap();
+        assert!(stopped.cancelled);
+        assert_eq!(stopped.planned, Some(2));
+        assert_eq!(stopped.remaining, Some(2));
+        assert_eq!(std::fs::read(&journal_path).unwrap(), original_journal);
+
+        cancel.store(false, Ordering::Relaxed);
+        let partial = apply.undo_last().unwrap();
+        assert_eq!(partial.applied, 1);
+        assert_eq!(partial.failed, 1);
+        assert_eq!(partial.planned, Some(2));
+        assert!(!partial.cancelled);
+        assert!(journal_path.exists());
+        assert_eq!(std::fs::read(&original_b).unwrap(), b"BBBB");
+
+        std::fs::write(&moved_c, b"CCCC").unwrap();
+        let retried = apply.undo_last().unwrap();
+        assert_eq!(retried.applied, 1);
+        assert_eq!(retried.failed, 0);
+        assert_eq!(retried.planned, Some(1));
+        assert!(!journal_path.exists());
+        assert_eq!(std::fs::read(&original_a).unwrap(), b"AAAA");
+        assert_eq!(std::fs::read(&original_c).unwrap(), b"CCCC");
+        assert!(!root.join("b (2).jpg").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn already_placed_file_is_not_reported_as_a_move_or_new_undo() {
+        let root = std::env::temp_dir().join(format!("fileid-noop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("a.jpg");
+        std::fs::write(&original, b"DATA").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        insert_file_row(&conn, 1, &original.to_string_lossy());
+        let mut apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), false);
+        let journal_path = root.join("undo.ndjson");
+        apply.undo_journal = Some(journal_path.clone());
+        let path = original.to_string_lossy();
+        let result = apply.apply(&[move_fixture(1, &path, &path)]).unwrap();
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.planned, Some(1));
+        assert!(!journal_path.exists());
+        assert_eq!(std::fs::read(&original).unwrap(), b"DATA");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

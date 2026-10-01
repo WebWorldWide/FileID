@@ -8,6 +8,16 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Restructure cancellation and confirmed undo
+
+- Aligned Windows Rust/C# result DTOs with cancellation/planned/remaining fields already in canonical IPC and Swift. Engine cancellation reports authoritative counts; failed/cancelled undo retains its journal, retries exclude already-restored files, and a pre-cancelled/empty forward apply preserves the prior journal.
+- App completion text distinguishes stopped moves, undo, and shortcuts. A shared command guard prevents overlapping restructure operations; a generation-bound waiter subscribes before sending undo and requires a terminal engine reply. Confirmed real moves receive history entries; cancelled/failed undo remains retryable.
+- Already-placed proposals are no longer counted as moves or made into phantom undo runs. Error text no longer claims files were untouched when engine confirmation is missing.
+- History is recorded in the engine router so leaving the Restructure tab does not lose it. Two source-contract regressions cover that placement and waiter registration before send.
+- Full Rust tests/clippy, x64 Release app build, changed app formatting, 49 IPC tests, runtime egress gate and 24 tests passed. New Windows regression proves cancellation/partial failure/retry without duplicate restores. All 17 restructure routing tests pass.
+- Full app project now has 32 compile diagnostics in three remaining safety-test files, down from 44. Temporary diagnostic subset: 350 passed, 27 failed, 377 total; the 27 failure names are unchanged. No full-suite or installed-package pass claimed. See [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). Partner Center and PR #183 remain drafts.
+- Latest required local Store rerun built/published the updated engine/app in Release, then hit the same VS 2026 `APPX0002` / `MSB4018` packaging failure. No new local upload. Log: `platforms/windows/dist/store-packages/local-build-restructure.log`.
+
 ## 2026-10-01 — Cleanup verification and Store blockers
 
 - Finished pending cleanup patch: bounded duplicate query with keeper ranking, hash-plus-size group identities, empty-hash exclusion before the cap, current-generation failure clearing, context menus bound to their placement target, and rejection of similar groups by exact-trash authorization.

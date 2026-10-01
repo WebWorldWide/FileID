@@ -999,6 +999,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // restructureApplyResult that clears this, so the next apply's result would
         // be mis-attributed as the dead undo's. (audit R2-app)
         UndoRestructureInFlight = false;
+        Interlocked.Exchange(ref _restructureCommandInFlight, 0);
     }
 
     public void Dispose()
@@ -1249,6 +1250,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
+                        if (e.Error.Kind is "apply_restructure" or "undo_restructure")
+                        {
+                            UndoRestructureInFlight = false;
+                            Interlocked.Exchange(ref _restructureCommandInFlight, 0);
+                        }
                         if (IsNonFatalWarningKind(e.Error.Kind))
                         {
                             LastWarning = e.Error;
@@ -1338,19 +1344,39 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastRestructurePlan = rp.Plan;
                         break;
                     case RestructureApplyResultEvent rar:
-                        LastRestructureApplyResult = rar.Result;
-                        // Toggle the "Undo last run" affordance: an apply that
-                        // moved files makes the run undoable; the undo's own reply
-                        // clears it. (R2)
-                        if (UndoRestructureInFlight)
+                        try
                         {
-                            UndoRestructureInFlight = false;
-                            CanUndoRestructure = false;
+                            LastRestructureResultWasUndo = UndoRestructureInFlight;
+                            LastRestructureResultWasShortcutApply = !UndoRestructureInFlight && _restructureApplyUsesSymlinks;
+                            // Toggle the "Undo last run" affordance: an apply that
+                            // moved files makes the run undoable; the undo's own reply
+                            // clears it. (R2)
+                            if (UndoRestructureInFlight)
+                            {
+                                UndoRestructureInFlight = false;
+                                CanUndoRestructure = rar.Result.Failed > 0
+                                    || (rar.Result.Cancelled && rar.Result.Remaining.GetValueOrDefault() > 0);
+                            }
+                            else
+                            {
+                                CanUndoRestructure = !_restructureApplyUsesSymlinks && rar.Result.Applied > 0;
+                            }
+                            if (!LastRestructureResultWasUndo
+                                && RestructureUndoPolicy.ShouldRecord(LastRestructureResultWasShortcutApply, rar.Result.Applied, CanUndoRestructure)
+                                && RestructureOperationRoot is { Length: > 0 } operationRoot)
+                            {
+                                DebugLog.SafeRun("EngineClient.RecordRestructureChange", () =>
+                                {
+                                    ChangeLog.Instance.Push($"Restructured {rar.Result.Applied:N0} files", ChangeKind.Restructure, async () =>
+                                    {
+                                        var undoResult = await UndoRestructureAndWaitAsync(operationRoot);
+                                        return !undoResult.Cancelled && undoResult.Failed == 0 && undoResult.Applied > 0;
+                                    });
+                                });
+                            }
+                            LastRestructureApplyResult = rar.Result;
                         }
-                        else
-                        {
-                            CanUndoRestructure = rar.Result.Applied > 0;
-                        }
+                        finally { Interlocked.Exchange(ref _restructureCommandInFlight, 0); }
                         break;
                     case BulkActionResultEvent bar:
                         LastBulkAction = bar.Result;

@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-10-01 — Restructure cancellation and undo checkpoint
+
+- Restructure result counts now reach Windows Rust/C# from the existing canonical schema; cancellation is no longer reported as success. Undo preserves cancelled/failed journals and retries skip already-restored files. The app serializes restructure commands, awaits terminal undo confirmation, and records confirmed real-move history.
+- Full Rust tests, clippy, x64 Release app build, changed app formatting, all 49 IPC tests, and runtime egress gate plus 24 tests passed. All 17 restructure routing tests now pass. Current app diagnostic subset: 350 passed / 27 failed / 377 total; failure names are unchanged.
+- Full app test compile blockers are now **32 diagnostics in three files**: lifecycle persistence (22), health waiters (9), final close (1). The older figures below are historical. Continue with those behaviors and the 27 remaining app contract failures.
+- Detailed updated scope/evidence: [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). A new exact-head hosted package and actual installed-app smoke still remain required. Partner Center stays draft.
+- Required local Store script reran on the restructure code: engine/app Release build and publish succeeded; VS 2026 WAP failed again `APPX0002` / `MSB4018` in `GenerateAppxPackageRecipe`. No new local upload; log is `platforms/windows/dist/store-packages/local-build-restructure.log`.
+
 ## 2026-10-01 — Store test checkpoint
 
 - Continue on `codex/store-msix`, draft PR #183. Partner Center `9PC8HSD86887` remains draft: no upload, submission, or publication.

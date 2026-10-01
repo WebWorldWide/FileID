@@ -53,6 +53,7 @@ public sealed partial class RestructureView : UserControl
     private static bool _applying;
     private static RestructurePlan? _applyingPlan;
     private static bool _applyRequestInFlight;
+    private static bool _undoRequestInFlight;
     private static bool _awaitingFreshPlan;
     private static int _applyingGeneration;
     private static RestructureApplyResult? _lastSurfacedApplyResult;
@@ -192,6 +193,12 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.SpawnGeneration):
                     DispatcherQueue.TryEnqueue(() =>
                     {
+                        if (_undoRequestInFlight && _applyingGeneration != EngineClient.Instance.SpawnGeneration)
+                        {
+                            _undoRequestInFlight = false;
+                            SyncUndoAffordance();
+                            ApplyStatusText.Text = "The engine stopped before undo completed. Review your files before retrying.";
+                        }
                         if (_unloaded || !ShouldReleaseApplyGuardOnEngineChange(
                                 _applying, _applyingGeneration, EngineClient.Instance.SpawnGeneration))
                         {
@@ -772,7 +779,7 @@ public sealed partial class RestructureView : UserControl
 
     private async Task ApplyAsync(bool useSymlinks)
     {
-        if (_applying) return;
+        if (_applying || _undoRequestInFlight || ChangeLog.Instance.IsUndoInFlight) return;
         var plan = EngineClient.Instance.LastRestructurePlan;
         if (plan is null || !IsFrozenPlanCurrent(plan, EngineClient.Instance.LastRestructurePlan, _renderedPlan)
             || plan.Moves.Count == 0)
@@ -816,7 +823,7 @@ public sealed partial class RestructureView : UserControl
             ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
             await ShowAlertAsync("Couldn't apply changes",
                 "FileID couldn't tell the engine to apply your reorganization (it isn't responding). " +
-                "Your files were not touched. Try restarting the app, then apply again.");
+                "Some files may already have moved. Review your files before restarting the app and trying again.");
         }
     }
 
@@ -856,23 +863,97 @@ public sealed partial class RestructureView : UserControl
     {
         var canUndo = EngineClient.Instance.CanUndoRestructure;
         UndoButton.Visibility = canUndo ? Visibility.Visible : Visibility.Collapsed;
-        UndoButton.IsEnabled = canUndo;
+        UndoButton.IsEnabled = CanStartRestructureUndo(
+            canUndo, ChangeLog.Instance.IsUndoInFlight,
+            _undoRequestInFlight || EngineClient.Instance.UndoRestructureInFlight);
+    }
+
+    internal static bool CanStartRestructureUndo(
+        bool canUndoForRoot, bool changeLogUndoInFlight, bool engineUndoInFlight)
+        => RestructureUndoPolicy.CanStart(canUndoForRoot, changeLogUndoInFlight, engineUndoInFlight);
+
+    internal static bool ShouldRecordUndoableRestructureChange(
+        bool appliedAsShortcuts, uint applied, bool canUndoThisRun)
+        => RestructureUndoPolicy.ShouldRecord(appliedAsShortcuts, applied, canUndoThisRun);
+
+    internal static ChangeLogEntry? FindLatestRestructureUndoEntry(IEnumerable<ChangeLogEntry> entries)
+        => RestructureUndoPolicy.FindLatest(entries);
+
+    internal static string FormatUndoCompletion(RestructureApplyResult result, bool wasShortcutUndo = false)
+    {
+        if (wasShortcutUndo)
+        {
+            return result.Cancelled
+                ? $"Stopped safely after removing {result.Applied:N0} restructure shortcuts. {result.Remaining ?? 0:N0} shortcuts still need to be removed. Click Undo again to continue."
+                : result.Applied == 0
+                    ? "No restructure shortcuts were removed."
+                    : $"Removed {result.Applied:N0} restructure shortcuts. {result.Failed:N0} failed.";
+        }
+
+        if (result.Cancelled)
+            return $"Stopped safely after restoring {result.Applied:N0} files. {result.Remaining ?? 0:N0} moves still need to be undone. Click Undo again to continue. {result.Failed:N0} failed.";
+        return result.Applied == 0
+            ? $"Nothing was restored. {result.Failed:N0} failed."
+            : $"Restored {result.Applied:N0} files. {result.Failed:N0} failed.";
+    }
+
+    internal static string FormatApplyCompletion(RestructureApplyResult result, bool appliedAsShortcuts)
+    {
+        if (appliedAsShortcuts)
+        {
+            return result.Cancelled
+                ? $"Stopped safely after creating {result.Applied:N0} shortcuts. Originals stayed put. {result.Remaining ?? 0:N0} eligible proposals stayed unchanged. {result.Failed:N0} failed."
+                : $"Created {result.Applied:N0} shortcuts. Originals stayed put. {result.Failed:N0} failed.";
+        }
+
+        if (result.Cancelled)
+            return $"Stopped safely after moving {result.Applied:N0} files. {result.Remaining ?? 0:N0} eligible proposals stayed unchanged. Completed moves remain undoable. {result.Failed:N0} failed.";
+        return result.Applied == 0
+            ? $"No files were moved. {result.Failed:N0} failed."
+            : $"Moved {result.Applied:N0} files. {result.Failed:N0} failed.";
     }
 
     private async void OnUndoClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnUndoClicked), async () =>
         {
-            var root = EngineClient.Instance.LastRestructurePlan?.LibraryRoot
+            if (!CanStartRestructureUndo(EngineClient.Instance.CanUndoRestructure,
+                    ChangeLog.Instance.IsUndoInFlight,
+                    _undoRequestInFlight || EngineClient.Instance.UndoRestructureInFlight))
+            {
+                return;
+            }
+
+            var root = EngineClient.Instance.RestructureOperationRoot
+                       ?? EngineClient.Instance.LastRestructurePlan?.LibraryRoot
                        ?? AppViewModel.Instance.FolderPath;
             if (string.IsNullOrEmpty(root)) return;
             UndoButton.IsEnabled = false;
+            _undoRequestInFlight = true;
+            _applyingGeneration = EngineClient.Instance.SpawnGeneration;
             ApplyStatusText.Text = "Undoing the last restructure…";
             try
             {
-                await EngineClient.Instance.UndoRestructureAsync(root!);
+                var entry = FindLatestRestructureUndoEntry(ChangeLog.Instance.Snapshot());
+                if (entry is not null)
+                {
+                    var restored = entry.Status == ChangeStatus.UndoFailed
+                        ? await ChangeLog.Instance.RetryAsync(entry)
+                        : await ChangeLog.Instance.UndoAsync(entry);
+                    if (!restored && _undoRequestInFlight)
+                    {
+                        _undoRequestInFlight = false;
+                        ApplyStatusText.Text = "Undo was not confirmed. Review Recent Changes before retrying.";
+                        SyncUndoAffordance();
+                    }
+                }
+                else
+                {
+                    await EngineClient.Instance.UndoRestructureAndWaitAsync(root!);
+                }
             }
             catch (Exception ex)
             {
+                _undoRequestInFlight = false;
                 // A faulted send (engine respawning) — re-enable so the button
                 // isn't stuck, mirroring the apply path's fault handling.
                 DebugLog.Warn("Undo restructure send failed: " + ex.Message);
@@ -886,6 +967,8 @@ public sealed partial class RestructureView : UserControl
         var r = EngineClient.Instance.LastRestructureApplyResult;
         if (r is null || !IsUnhandledCompletion(r, _lastSurfacedApplyResult)) return;
         _lastSurfacedApplyResult = r;
+        var wasUndo = _undoRequestInFlight || EngineClient.Instance.LastRestructureResultWasUndo;
+        _undoRequestInFlight = false;
         _applyRequestInFlight = false;
         _awaitingFreshPlan = r.Applied > 0;
         // The result arrived — disarm the watchdog timer before touching any state.
@@ -934,9 +1017,10 @@ public sealed partial class RestructureView : UserControl
             _ = ShowAlertAsync("Couldn't apply changes", r.PrivilegeError!);
             return;
         }
-        ApplyStatusText.Text = r.Failed == 0
-            ? $"Applied {r.Applied:N0} moves successfully."
-            : $"Applied {r.Applied:N0}, failed {r.Failed:N0}. Check %LOCALAPPDATA%\\FileID\\logs\\.";
+        ApplyStatusText.Text = wasUndo
+            ? FormatUndoCompletion(r)
+            : FormatApplyCompletion(r, EngineClient.Instance.LastRestructureResultWasShortcutApply);
+        SyncUndoAffordance();
         if (r.Failed == 0 && r.Applied > 0)
         {
             StepChip2Bg.Background = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
@@ -989,21 +1073,23 @@ public sealed partial class RestructureView : UserControl
         }
         else if (err.Kind == "undo_restructure")
         {
-            ApplyStatusText.Text = "Undo didn't complete - your files are unchanged. Try again.";
+            _undoRequestInFlight = false;
+            SyncUndoAffordance();
+            ApplyStatusText.Text = "Undo didn't complete. Review your files before trying again.";
             _ = ShowAlertAsync("Couldn't undo",
                 (string.IsNullOrWhiteSpace(err.Message)
                     ? "FileID couldn't finish undoing your reorganization."
                     : err.Message) +
-                "\n\nYour files are unchanged. Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl if this keeps happening.");
+                "\n\nCompleted moves may already have been restored. Check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl if this keeps happening.");
         }
         else
         {
-            ApplyStatusText.Text = "Apply didn't complete - your files are unchanged. Try again.";
+            ApplyStatusText.Text = "Apply was not confirmed. Review your files before trying again.";
             _ = ShowAlertAsync("Couldn't apply changes",
                 (string.IsNullOrWhiteSpace(err.Message)
                     ? "FileID couldn't finish applying your reorganization."
                     : err.Message) +
-                "\n\nYour originals are unchanged. Try again; if it keeps failing, check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
+                "\n\nSome files may already have moved. Review your files and check the engine log at %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl before retrying.");
         }
     }
 

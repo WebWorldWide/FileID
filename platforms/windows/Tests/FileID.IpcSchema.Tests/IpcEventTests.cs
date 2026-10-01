@@ -1,4 +1,4 @@
-// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
+﻿// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
 // produced for single-positional cases AND that `discoveryComplete` (the
 // only named-parameter case) is NOT `_0`-wrapped.
 
@@ -9,6 +9,28 @@ namespace FileID.IpcSchema.Tests;
 
 public class IpcEventTests
 {
+    [Fact]
+    public void RestructureCancellation_RoundTripsAuthoritativeCounts()
+    {
+        var result = new RestructureApplyResult(4, 1, Cancelled: true, Planned: 10, Remaining: 5);
+        var json = IpcCoder.Encode(IpcEvent.Now(new RestructureApplyResultEvent(result)));
+        Assert.Contains("\"cancelled\":true", json);
+        Assert.Contains("\"planned\":10", json);
+        Assert.Contains("\"remaining\":5", json);
+        var decoded = IpcCoder.Decode<IpcEvent>(json);
+        Assert.Equal(result, Assert.IsType<RestructureApplyResultEvent>(decoded.Payload).Result);
+    }
+
+    [Fact]
+    public void LegacyRestructureResult_DefaultsToUncancelledWithUnknownCounts()
+    {
+        var result = IpcCoder.Decode<RestructureApplyResult>("""{"applied":4,"failed":0}""");
+        Assert.False(result.Cancelled);
+        Assert.Null(result.Planned);
+        Assert.Null(result.Remaining);
+        Assert.Null(result.ShortcutUndoToken);
+    }
+
     [Fact]
     public void Ready_WrapsPayloadIn_0()
     {
