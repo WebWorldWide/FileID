@@ -42,14 +42,19 @@ def main():
         database = directory / "FileID/fileid.sqlite"
         with sqlite3.connect(database) as db:
             db.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,?,1,21,0,'doc','txt','Birthday gift opening')", (str(source),))
+            db.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(2,'/offline/birthday.mov',2,21,0,'video','mov','Birthday gift opening'),(3,'/offline/birthday.jpg',3,21,0,'image','jpg','Birthday gift opening')")
         for binary, swift in [(args.swift_engine, True), (args.rust_engine, False)]:
             engine = Engine(binary.resolve(), directory, swift=swift)
             try:
                 engine.wait("ready")
                 if not swift:
                     assert len(chat(engine, conversation, "history")["messages"]) == 2
-                result = chat(engine, conversation, "send", text="Please find my birthday files", useModel=False)
-                assert result["hits"][0]["fileID"] == 1
+                result = chat(engine, conversation, "send", text="Please find my birthday files" if swift else "only videos", useModel=False)
+                if swift:
+                    assert {hit["fileID"] for hit in result["hits"]} == {1, 2, 3}
+                else:
+                    assert [hit["fileID"] for hit in result["hits"]] == [2]
+                    assert "birthday" in result["message"]
                 assert len(result["messages"]) == (2 if swift else 4)
             finally:
                 engine.close()
@@ -57,14 +62,18 @@ def main():
         try:
             engine.wait("ready")
             assert len(chat(engine, conversation, "history")["messages"]) == 4
+            result = chat(engine, conversation, "send", text="now photos", useModel=False)
+            assert [hit["fileID"] for hit in result["hits"]] == [3]
+            assert "birthday" in result["message"]
+            assert len(result["messages"]) == 6
             assert chat(engine, conversation, "clear")["messages"] == []
         finally:
             engine.close()
         assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
         with sqlite3.connect(database) as db:
             assert db.execute("SELECT COUNT(*) FROM catalog_chat").fetchone()[0] == 0
-            assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 1
-        print("Swift → Rust → Swift local chat, keyword retrieval, and history deletion passed")
+            assert db.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 3
+        print("Swift → Rust → Swift local chat, contextual media filters, and history deletion passed")
 
 
 if __name__ == "__main__":

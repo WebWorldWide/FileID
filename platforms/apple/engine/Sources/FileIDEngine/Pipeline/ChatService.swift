@@ -33,15 +33,24 @@ actor ChatService {
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 2000 else { throw CatalogStore.InvalidRequest() }
                 active[request.conversationID] = request.requestID
                 latestRequest[request.conversationID] = request.requestID
-                try await Self.save(text, role: "user", conversation: request.conversationID, database: database)
-                let query = Self.query(text)
-                let hits = query.isEmpty ? [] : try await database.pool.read { db in try CatalogStore.search(db, query: query) }
+                let plan = try await database.pool.write { db in
+                    let previous = try String.fetchAll(db, sql: "SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=? AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid", arguments: [request.conversationID])
+                        .reduce(nil as ChatSearchPlan?) { ChatSearchPlan.resolve($1, previous: $0) }
+                    let plan = ChatSearchPlan.resolve(text, previous: previous)
+                    try db.execute(sql: "INSERT INTO catalog_chat(id,conversation_id,role,text,created_at) VALUES(?,?,'user',?,?)", arguments: [UUID().uuidString, request.conversationID, text, Date().timeIntervalSince1970])
+                    return plan
+                }
+                let hits = try await database.pool.read { db in try CatalogStore.search(db, query: plan.query, kinds: plan.kinds) }
                 guard active[request.conversationID] == request.requestID else { return }
-                let explanation = hits.isEmpty ? "No keyword matches in the current catalog. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event." : "Found \(hits.count) file or evidence matches for “\(query)”. Sampled-frame descriptions remain unverified."
+                let scope = plan.query.isEmpty ? "all catalog files" : "“\(plan.query)”"
+                let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.joined(separator: ", ")))"
+                let explanation = plan.query.isEmpty && plan.kinds.isEmpty ? "Add a subject or a media type such as videos or photos. No search was run." : hits.isEmpty ? "No keyword matches for \(scope)\(filter). Try names or a few descriptive terms. Unanalyzed files may still contain the requested event." : "Found \(hits.count) file or evidence matches for \(scope)\(filter). Sampled-frame descriptions remain unverified."
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
+                guard active[request.conversationID] == request.requestID else { return }
                 if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState {
                     active[request.conversationID] = request.requestID
                     await emit(request, status: "queued", message: "Results are ready. The loaded local model will summarize their evidence when its current work finishes.", hits: hits, database: database, sink: sink)
+                    guard active[request.conversationID] == request.requestID else { return }
                     await JobQueue.shared.enqueue(.init(id: "chat-" + request.requestID, category: .deepAnalyze, title: "Chat evidence summary", etaSeconds: nil, priority: .interactive) {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
@@ -61,8 +70,7 @@ actor ChatService {
     }
 
     static func query(_ text: String) -> String {
-        let excluded: Set<String> = ["find", "show", "me", "please", "search", "for", "the", "a", "an", "where", "of", "my", "files", "videos", "photos", "pictures", "documents", "clips", "with", "in", "all"]
-        return text.split(whereSeparator: \.isWhitespace).filter { !excluded.contains($0.lowercased()) }.joined(separator: " ")
+        ChatSearchPlan.resolve(text).query
     }
 
     private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink) async {

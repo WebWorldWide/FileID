@@ -2,7 +2,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection};
-use crate::ipc::{CatalogRequest, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
+use crate::ipc::{ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
 use crate::ipc::sink::Sink;
 
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ChatRequest) {
@@ -38,13 +38,20 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
         "send" => {
             let text = request.text.as_deref().unwrap_or_default();
             if text.trim().is_empty() || text.chars().count()>2000 { bail!("A message of at most 2000 characters is required") }
-            let query = query(text);
-            if !query.is_empty() {
-                response.hits = super::catalog::execute(conn,&CatalogRequest {request_id:request.request_id.clone(),action:"search".into(),query:Some(query.clone()),file_id:None,chapter:None,chapter_id:None,job_id:None,file_ids:None})?.hits;
-            }
-            response.message = if response.hits.is_empty() {
-                "No keyword matches in the current catalog. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event.".into()
-            } else { format!("Found {} file or evidence matches for “{}”. Sampled-frame descriptions remain unverified.",response.hits.len(),query) };
+            let previous = {
+                let mut statement = conn.prepare("SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=?1 AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid")?;
+                let messages = statement.query_map([&request.conversation_id], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                messages.iter().fold(None, |previous,text| Some(super::chat_search::SearchPlan::resolve(text,previous.as_ref())))
+            };
+            let plan = super::chat_search::SearchPlan::resolve(text,previous.as_ref());
+            response.hits = super::catalog::search(conn,&plan.query,&plan.kinds)?;
+            let scope = if plan.query.is_empty() { "all catalog files".to_owned() } else { format!("“{}”",plan.query) };
+            let filter = if plan.kinds.is_empty() { String::new() } else { format!(" ({})",plan.kinds.join(", ")) };
+            response.message = if plan.query.is_empty() && plan.kinds.is_empty() {
+                "Add a subject or a media type such as videos or photos. No search was run.".into()
+            } else if response.hits.is_empty() {
+                format!("No keyword matches for {scope}{filter}. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event.")
+            } else { format!("Found {} file or evidence matches for {scope}{filter}. Sampled-frame descriptions remain unverified.",response.hits.len()) };
             if request.use_model == Some(true) { response.message.push_str(" Model summaries are not yet available on this adapter; no download was started."); }
             let tx = conn.transaction()?;
             for (role,content) in [("user",text),("assistant",&response.message)] {
@@ -59,10 +66,6 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
     Ok(response)
 }
 
-fn query(text: &str) -> String {
-    let excluded = ["find","show","me","please","search","for","the","a","an","where","of","my","files","videos","photos","pictures","documents","clips","with","in","all"];
-    text.split_whitespace().filter(|part| !excluded.contains(&part.to_lowercase().as_str())).collect::<Vec<_>>().join(" ")
-}
 
 #[cfg(test)]
 mod tests {
@@ -87,6 +90,25 @@ mod tests {
     }
 
     #[test]
+    fn refinement_filters_files_and_evidence_before_limits() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for id in 1..=150 {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,0,?3,'mov','Birthday gift opening')",params![id,format!("/offline/birthday-{id}.mov"),if id == 1 { "video" } else { "image" }]).unwrap();
+        }
+        conn.execute("INSERT INTO catalog_passages(id,file_id,text,source_revision,model_version,confidence,stale) VALUES('v',1,'home run','test','test',1,0),('p',2,'home run','test','test',1,0)",[]).unwrap();
+        let videos = vec!["video".to_owned()];
+        assert_eq!(super::super::catalog::search(&conn,"birthday",&videos).unwrap().iter().map(|hit|hit.file_id).collect::<Vec<_>>(),vec![1]);
+        assert_eq!(super::super::catalog::search(&conn,"",&videos).unwrap().iter().map(|hit|hit.file_id).collect::<Vec<_>>(),vec![1]);
+        assert_eq!(super::super::catalog::search(&conn,"home run",&videos).unwrap()[0].evidence_id.as_deref(),Some("v"));
+        for text in ["find birthday","only videos"] {
+            let request = ChatRequest {request_id:uuid::Uuid::new_v4().to_string(),conversation_id:"c".into(),action:"send".into(),text:Some(text.into()),use_model:Some(false)};
+            let result = execute(&mut conn,&request).unwrap();
+            if text == "only videos" { assert_eq!(result.hits.iter().map(|hit|hit.file_id).collect::<Vec<_>>(),vec![1]); assert!(result.message.contains("birthday")); }
+        }
+    }
+
+    #[test]
     fn invalid_requests_cannot_write_history_or_change_files() {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::apply(&conn).unwrap();
@@ -95,6 +117,6 @@ mod tests {
             assert!(execute(&mut conn,&request).is_err());
         }
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM catalog_chat",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-        assert_eq!(query("Please show me my birthday videos"),"birthday");
+        assert_eq!(super::super::chat_search::SearchPlan::resolve("Please show me my birthday videos",None).query,"birthday");
     }
 }

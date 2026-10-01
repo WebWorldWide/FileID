@@ -18,4 +18,5 @@ pub(crate) mod wipe;
 pub mod catalog;
 
 pub mod chat;
+mod chat_search;
 pub mod tools;

@@ -8,6 +8,11 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Contextual chat media filters
+
+Shared parser fixtures now preserve a subject across explicit refinements, switch media types, combine keywords, reset fresh queries, and keep unsupported negations literal. File and timestamp/page evidence filters apply before SQL result limits. Swift stores the user message and reads its recent conversation context in one transaction. Actual Swift → Rust → Swift search refinement and clear pass without modifying source files. Full native tests passed 416; Rust passed 380 library/381 executable plus two integrations, with pinned 1.90 Clippy. Semantic/person/event retrieval and general request planning remain pending. Adlon remains untouched.
+
+
 ## 2026-10-01 — Local chat, shared history, and interactive queue priority
 
 IPC v1.3 adds local conversation requests and streamed evidence responses across Swift/Rust/C#. Native macOS Chat is accessible from all six tabs, returns files/pages/timestamps immediately, seeks available video evidence, persists deletable local history, and reuses an already loaded model for bounded summaries without downloading weights. Model text cannot execute file changes, SQL, or shell commands. Pending interactive summaries precede background jobs; active heavy work remains serialized. Clear/cancel suppresses stale responses and preserves catalog files. Rust keyword retrieval/history is cross-engine compatible, with model summaries explicitly unavailable. See CHAT.md for limits.
