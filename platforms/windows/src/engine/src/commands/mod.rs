@@ -16,3 +16,5 @@ pub(crate) mod trash_log;
 pub(crate) mod wipe;
 
 pub mod catalog;
+
+pub mod tools;

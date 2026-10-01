@@ -104,4 +104,3 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
         self.jobs = jobs
     }
 }
-

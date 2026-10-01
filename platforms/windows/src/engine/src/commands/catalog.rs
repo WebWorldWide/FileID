@@ -114,7 +114,7 @@ fn journal_chapter(conn: &Connection, file: i64, chapter_id: &str, before: Optio
     Ok(())
 }
 
-fn chapters(conn: &Connection, file: i64) -> Result<Vec<CatalogChapter>> {
+pub(crate) fn chapters(conn: &Connection, file: i64) -> Result<Vec<CatalogChapter>> {
     let mut statement = conn.prepare("SELECT id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale FROM catalog_chapters WHERE file_id=?1 ORDER BY start_seconds,id")?;
     let rows = statement.query_map([file], |r| Ok(CatalogChapter {id:r.get(0)?,file_id:r.get(1)?,start_seconds:r.get(2)?,end_seconds:r.get(3)?,title:r.get(4)?,summary:r.get(5)?,source_revision:r.get(6)?,model_version:r.get(7)?,confidence:r.get(8)?,user_edited:r.get(9)?,stale:r.get(10)?}))?.collect::<rusqlite::Result<_>>()?;
     Ok(rows)

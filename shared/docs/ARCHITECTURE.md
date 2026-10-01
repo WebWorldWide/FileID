@@ -149,3 +149,7 @@ macOS timeline jobs persist state/checkpoints, recover interrupted work as pause
 Manual chapter edits and deletion atomically journal corrections and inverse operations. Undo survives restart and marks restored evidence stale if its source revision changed. Decoder output, caches, databases, downloads, logs, and original mutations use protected-location checks; full application write tracing remains required.
 
 See [NEXT_VERSION.md](NEXT_VERSION.md) for implementation boundaries and release gates.
+
+## Typed exports (IPC v1.2)
+
+Tool requests carry supported recipes or saved operation IDs. Preview pins file selection, source SHA-256, chapter snapshots, and destination names; execution rejects changed evidence and publishes new outputs without overwriting. Both engines store export relationships and persistent Undo receipts in the catalog. macOS photo decoding runs in a bounded engine subprocess with cancellation and parent-death checks. Rust currently uses bounded in-process image-rs decoding and reports cancellation unavailable. See TOOLS.md; the general resource scheduler, restart reconciliation, video tools, and native port toolbox remain pending.

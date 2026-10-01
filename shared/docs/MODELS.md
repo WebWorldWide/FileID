@@ -196,3 +196,7 @@ Use [llama.cpp server capabilities](https://github.com/ggml-org/llama.cpp/blob/m
 CPU/low-memory machines serialize heavy work. Start the 16 GB M1 Pro experiments with compact chat and 4B visual models under measured pressure; larger machines may keep two models resident. Promote candidates only after all quality gates and either meaningful accuracy improvement or at least 20% latency improvement without material regression on identical FileID fixtures/hardware. No claim that one model is best on every hardware tier.
 
 Enhancement/conversion research: [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) (BSD-3-Clause code; verify chosen weights) for tiled photos, [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) (Apache-2.0 source) as an optional higher-memory video pack, with temporal/fidelity tests. No enhancement pack was bundled. FFmpeg, LibreOffice, libarchive, Assimp, and FreeCAD workers remain pending exact build/distribution review; avoid nonfree FFmpeg builds and non-commercial test assets/weights. Codec patent obligations need release-specific review.
+
+## Initial exports do not add models
+
+The October 2026 photo/chapter export milestone uses system ImageIO/CoreGraphics on macOS and the existing locked image-rs/SHA-256 crates in Rust. Downsize and format conversion do not imply AI upscaling. No research candidate or enhancement weight was promoted or bundled; model benchmark, hash, and distribution gates above remain unchanged.

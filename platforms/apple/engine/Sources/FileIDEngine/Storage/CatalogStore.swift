@@ -13,7 +13,7 @@ public enum CatalogStore {
                 return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
-                let chapters = try await database.pool.read { db in try chapters(db, fileID: fileID) }
+                let chapters = try await database.pool.read { db in try Self.chapters(db, fileID: fileID) }
                 return CatalogResponse(requestID: request.requestID, status: "ok", chapters: chapters)
             case "saveChapter":
                 guard var chapter = request.chapter, !chapter.id.isEmpty, chapter.id.count <= 200,
@@ -30,16 +30,16 @@ public enum CatalogStore {
                     var saved = edit
                     saved.sourceRevision = try revision(db, fileID: saved.fileID)
                     if let owner = try Int64.fetchOne(db, sql: "SELECT file_id FROM catalog_chapters WHERE id=?", arguments: [saved.id]), owner != saved.fileID { throw InvalidRequest() }
-                    let before = try chapters(db, fileID: saved.fileID).first { $0.id == saved.id }
+                    let before = try Self.chapters(db, fileID: saved.fileID).first { $0.id == saved.id }
                     try upsertChapter(db, chapter: saved)
                     try journalChapter(db, fileID: saved.fileID, chapterID: saved.id, before: before, after: saved)
                 }
-                let saved = try await database.pool.read { db in try chapters(db, fileID: edit.fileID) }
+                let saved = try await database.pool.read { db in try Self.chapters(db, fileID: edit.fileID) }
                 return CatalogResponse(requestID: request.requestID, status: "ok", chapters: saved)
             case "deleteChapter":
                 guard let chapterID = request.chapterID, let fileID = request.fileID else { throw InvalidRequest() }
                 try await database.pool.write { db in
-                    guard let before = try chapters(db, fileID: fileID).first(where: { $0.id == chapterID }) else { throw InvalidRequest() }
+                    guard let before = try Self.chapters(db, fileID: fileID).first(where: { $0.id == chapterID }) else { throw InvalidRequest() }
                     try db.execute(sql: "DELETE FROM catalog_chapters WHERE id=? AND file_id=?", arguments: [chapterID, fileID])
                     try journalChapter(db, fileID: fileID, chapterID: chapterID, before: before, after: nil)
                 }
@@ -61,7 +61,7 @@ public enum CatalogStore {
                     let id: String = row["id"]
                     try db.execute(sql: "UPDATE catalog_operations SET state='undone' WHERE id=?", arguments: [id])
                 }
-                return CatalogResponse(requestID: request.requestID, status: "ok", chapters: try await database.pool.read { db in try chapters(db, fileID: fileID) })
+                return CatalogResponse(requestID: request.requestID, status: "ok", chapters: try await database.pool.read { db in try Self.chapters(db, fileID: fileID) })
             case "jobs":
                 return CatalogResponse(requestID: request.requestID, status: "ok", jobs: try await jobs(database))
             case "pauseJob", "resumeJob", "cancelJob":

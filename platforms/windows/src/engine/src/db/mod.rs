@@ -61,6 +61,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         [],
     );
 
+    crate::commands::tools::recover(&conn)?;
     Ok(conn)
 }
 

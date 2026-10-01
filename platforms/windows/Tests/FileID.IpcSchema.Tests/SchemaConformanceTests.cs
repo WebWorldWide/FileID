@@ -137,6 +137,7 @@ public class SchemaConformanceTests
 
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
+        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("photo", "png", 4096), "plan")),
         new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
         new PauseScanCommand(),
@@ -176,6 +177,7 @@ public class SchemaConformanceTests
 
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
+        new ToolResponseEvent(new ToolResponse("tool", "ok", "Exported", new[] { new ToolOutput(1, "/internal/a.png", "/internal/b.png", "completed", "Original preserved") }, new[] { new ToolCapability("photo", true, _exampleTags, _exampleTags, "Conversion") }, "plan")),
         new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),

@@ -18,14 +18,14 @@ Each platform's "generated" types currently live as hand-maintained files that a
 |---|---|
 | Swift (macOS) | `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift` |
 | Rust (Windows engine) | `platforms/windows/src/engine/src/ipc/mod.rs` |
-| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`, `EventPayload.cs`, and `CatalogProtocol.cs` |
+| C# (Windows app) | `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`, `EventPayload.cs`, and `CatalogProtocol.cs`, and `ToolProtocol.cs` |
 
 The `generators/` subdirectory will hold scripted codegen once the schema settles. Until then, when adding/modifying a variant:
 
 1. Update `ipc.schema.json` first.
 2. Update the per-platform DTO files to match.
 3. Add a round-trip test on each platform that exercises the new variant.
-4. Run all platforms' tests; all must encode the same byte string for the same logical message.
+4. Run all platforms' tests; all must encode the same logical message and conform to the schema.
 
 ## Versioning
 
@@ -39,4 +39,8 @@ Every payload field carrying user-content data (file paths, OCR text, EXIF) is l
 
 ## Catalog v1.1
 
-`catalogRequest`/`catalogResponse` carry typed search, chapter edit/Undo, and durable timeline job controls. Swift mirrors are in `CatalogProtocol.swift`; Rust mirrors are in `ipc/catalog.rs`, shared by Windows and Linux. Optional C# fields omit nulls to match Swift/Rust. Timeline execution is currently macOS-only; Rust rejects unavailable enqueue/resume actions explicitly. The general conversion/chat/capability API is still pending.
+`catalogRequest`/`catalogResponse` carry typed search, chapter edit/Undo, and durable timeline job controls. Swift mirrors are in `CatalogProtocol.swift`; Rust mirrors are in `ipc/catalog.rs`, shared by Windows and Linux. Optional C# fields omit nulls to match Swift/Rust. Timeline execution is currently macOS-only; Rust rejects unavailable enqueue/resume actions explicitly. Tool capabilities and export operations are available through the v1.2 contract; chat and general analysis controls remain pending.
+
+## Tools v1.2
+
+`toolRequest`/`toolResponse` carry capabilities, history, immutable export preview, execution, cancellation, and Undo. Swift mirrors are in `ToolProtocol.swift`, Rust in `ipc/tools.rs`, and C# in `ToolProtocol.cs`. See `shared/docs/TOOLS.md` for exact supported pairs and adapter limits. Cancellation is available in the macOS worker; the Rust adapter reports it unavailable.

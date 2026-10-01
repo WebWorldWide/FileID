@@ -4,13 +4,13 @@ Accepted direction: a local catalog connects files, people, events, temporal evi
 
 ## Current implementation
 
-Work is on `codex/fileid-next-version`. This branch is an initial implementation, not a finished release of the accepted plan.
+Work is on `codex/fileid-next-version-current` ([draft PR #186](https://github.com/WebWorldWide/FileID/pull/186)). The verified foundation was replayed onto the rewritten remote history, whose baseline tree matched this checkout exactly. This branch is an initial implementation, not a finished release of the accepted plan.
 
 | Area | Implemented | Remaining |
 |---|---|---|
 | Example-data safety | Swift/Rust path guards for Adlon, existing aliases, fail-closed dangling symlinks, and managed media originals; guards on database creation, file mutations, and selected cache/model/log writes | Whole-application write tracing, companion-file tests, race-resistant descriptor-based mutation, Windows volume identification |
 | Catalog | Canonical v21 SQL, Swift/Rust migrations, provenance, coverage, chapters, passages, tracks/observations, events/takes, derivatives, jobs, recipes, corrections, operations, local chat records | Populating most new entities, native Windows/Linux-host migration acceptance, revision changes for same-size/same-mtime replacements |
-| Interfaces | IPC v1.1 catalog request/response mirrored in Swift, Rust, and C#; Linux inherits Rust DTOs | Full hybrid search, person/event/take editing, typed conversion operations, capability reporting, chat streams, port UI |
+| Interfaces | IPC v1.2 catalog/tools request/response mirrored in Swift, Rust, and C#; Linux inherits Rust DTOs | Full hybrid search, person/event/take editing, typed conversion operations, capability reporting, chat streams, port UI |
 | Search | Persistent incremental FTS for names/descriptions/chapters/passages; timestamp/page evidence, stale-evidence exclusion | Hybrid exact/semantic/person/event retrieval, model-separated persistent ANN runtime, offline availability, 100,000-file benchmark |
 | Chapters | Native macOS Search & Moments panel; playback seeking, manual markers and summaries, durable correction history and Undo; engine-backed Rust equivalent | Automatic chapter generation, synopsis/storyboard/cast, transcripts, subtitles/chapter/FCPXML export, Windows/Linux UI |
 | Timeline | macOS durable frame-sampling jobs, pause/resume/cancel, interrupted-job recovery to paused state, immutable model provenance, reusable frame captions, bounded isolated decoder process, parent-death termination, abandoned-frame cleanup | Shots/activity proposals, dense candidate analysis, ASR/alignment, face tracks, overlapping chunk processing, per-file errors, model-based timeline quality checks, portable worker |
@@ -19,7 +19,7 @@ Work is on `codex/fileid-next-version`. This branch is an initial implementation
 | Local AI | Existing installed model stack retained; updated model research shortlist documented | Benchmarks, pinned candidate packs, portable generation adapter, hardware capability probes, memory-budgeted multi-model routing |
 | Scheduling | Persistent timeline state/checkpoints on the existing macOS major-job queue | Resource-budgeted scheduler, interactive priority, residency/eviction, parallel admission, restart recovery for general operations |
 | Best takes | Event/take records with separate outcome and quality fields | Goal-conditioned grouping/ranking, eight-category evaluation, ties/abstention, highlights and corrections |
-| Conversion/tools | Derived-asset, operation, and recipe records | Video/audio/photo/document/archive/data/ebook/CAD adapters, exact format matrix, stabilization, tiled enhancement, temporal consistency, subject tracking/reframing, native Tools window |
+| Conversion/tools | Native macOS Tools panel; typed preview/execute/history/Undo; source fingerprints, collision-safe new exports, original/export relationships; isolated cancellable photo worker and chapter JSON/WebVTT exports; Rust photo/chapter adapters with explicit limitations | Video/audio/RAW/HDR/document/archive/data/ebook/CAD adapters, stabilization, tiled enhancement, temporal consistency, subject tracking/reframing, port UI, Rust decoder isolation/cancellation, general restart reconciliation |
 | Chat | Local history schema | Persistent native panel, retrieval, conversational refinement, typed reversible execution, progress/Undo, content-instruction isolation |
 
 Sampled video captions are **unverified**. Sampling every ten seconds can miss an entire action. The catalog retains incomplete coverage; it must never convert absence of a sampled observation into a claim that an event did not occur. Manual markers are user assertions. Names come from confirmed People records, not guessed real identities.
@@ -79,3 +79,7 @@ October 1, 2026, development binaries on the 16 GB M1 Pro: 100,000 synthetic uni
 | Rust | 34.15 ms | 238.22 ms | 435.01 ms |
 
 Reproduce using `shared/scripts/benchmark_catalog_search.py --runtime swift|rust --engine <native-binary>`. The script creates and removes its own internal temporary catalog; it never creates the simulated source media. Validate loaded-model contention and representative real-data retrieval separately.
+
+## Export milestone
+
+See [TOOLS.md](TOOLS.md) for the exact supported format matrix, metadata/color limits, worker/cancellation differences, persistent history, Undo recovery, and remaining restart gates. Actual Swift/Rust cross-engine preview/execution/Undo passed using internal PNG fixtures. Full release scope remains unfinished.

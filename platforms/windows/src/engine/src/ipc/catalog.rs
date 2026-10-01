@@ -80,4 +80,3 @@ pub struct CatalogResponse {
     pub chapters: Vec<CatalogChapter>,
     pub jobs: Vec<CatalogJob>,
 }
-

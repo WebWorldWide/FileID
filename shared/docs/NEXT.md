@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## 2026-10-01 — Continue the accepted plan from PR #186
+
+Continue on codex/fileid-next-version-current. Safe initial photo/chapter tools are now implemented; consult TOOLS.md for exact pairs and limits. AGENT_HANDOFF.md has continuation instructions and correct pinned-Clippy invocation. Keep pushing coherent verified milestones to draft PR #186, inspect hosted CI, and preserve uncommitted owner release/signing work.
+
+Next implement the memory-budgeted scheduler, persistent hybrid indexes, People accuracy/speed, and local chat; then dense timeline/ASR/tracks, automatic chapters, best takes, video/audio/enhancement/reframing and broad adapters, followed by native port UI and release/hardware acceptance. Rust image decoding/cancellation, complete publication recovery, and cross-filesystem Undo need explicit coverage. Adlon remains strictly read-only; tests and outputs stay internal.
+
 ## 2026-10-01 — Next-version implementation in progress
 
 Branch `codex/fileid-next-version` contains Adlon/project-original mutation guards, canonical v21 catalog migrations and IPC v1.1 mirrors, persistent name/evidence FTS, manual chapter editing with durable Undo, macOS frame-sampling jobs with isolated cancellable decoding, and concise naming. See [NEXT_VERSION.md](NEXT_VERSION.md) for the complete accepted delivery ledger, validation commands, and unfinished features. This is not a next-version release.

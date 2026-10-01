@@ -63,7 +63,7 @@ actor TimelineAnalysis {
 
     private func run(_ id: String, database: Database, sink: IPCSink) async {
         runningID = id
-        
+
         do {
             let job: (ids: [Int64], model: String, version: String, index: Int) = try await database.pool.write { db in
                 guard let row = try Row.fetchOne(db, sql: "SELECT * FROM catalog_jobs WHERE id=? AND state='queued' AND kind='timelineSample'", arguments: [id]) else { throw Interrupted() }

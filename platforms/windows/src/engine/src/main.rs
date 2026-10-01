@@ -716,6 +716,11 @@ async fn handle_line(
     };
 
     match cmd.payload {
+        CommandPayload::ToolRequest(payload) => {
+            let sink = sink.clone();
+            let database = db.cloned();
+            tokio::spawn(async move { commands::tools::handle(sink, database, payload.request).await; });
+        }
         CommandPayload::CatalogRequest(payload) => {
             let sink = sink.clone();
             let database = db.cloned();

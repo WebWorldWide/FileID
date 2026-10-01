@@ -200,3 +200,7 @@ Windows v1.0 ships when at least 4 of the rows are green — CPU plus at least o
 each from NVIDIA / AMD / Intel. All rows is the goal; Snapdragon may launch in a
 follow-on if hardware availability blocks. macOS ships once WS-MAC lockstep lands
 and its existing CI + on-device checks pass.
+
+## Initial tools milestone
+
+Native macOS photo/chapter exports and Rust adapter contracts now exist; TOOLS.md lists exact supported pairs and fidelity/recovery limits. These do not satisfy the full conversion, enhancement, reframing, broad toolbox, port UI, or hardware gates. Keep the draft PR open until the accepted feature scope and release checks are actually complete.

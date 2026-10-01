@@ -195,6 +195,7 @@ class RuntimeEgressTests(unittest.TestCase):
 
     def test_reviewed_role_inventories_are_exact(self) -> None:
         self.assertEqual(RAW_NETWORK_FILES, {
+            "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift",
             "platforms/windows/src/engine/src/downloader.rs",
             "platforms/windows/src/engine/src/models/vlm_server.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",

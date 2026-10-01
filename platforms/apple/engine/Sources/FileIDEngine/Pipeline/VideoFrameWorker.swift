@@ -58,6 +58,39 @@ enum VideoFrameWorker {
         } catch { return 3 }
     }
 
+    static func runPhoto(arguments: [String]) async -> Int32 {
+        let parentPID = getppid()
+        let monitor = Task.detached {
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                if getppid() == 1 || getppid() != parentPID { kill(getpid(), SIGKILL); return }
+            }
+        }
+        defer { monitor.cancel() }
+        do {
+            guard arguments.count == 4, ["png", "jpeg", "tiff"].contains(arguments[1]), let dimension = Int(arguments[2]), (1...8192).contains(dimension) else { return 2 }
+            let destination = URL(fileURLWithPath: arguments[3])
+            try ReadOnlyLocations.requireSourceMutation(destination)
+            guard !FileManager.default.fileExists(atPath: destination.path) else { return 2 }
+            try MediaTools.exportPhoto(source: URL(fileURLWithPath: arguments[0]), output: destination, recipe: ToolRecipe(kind: "photo", format: arguments[1], maxDimension: dimension))
+            return 0
+        } catch { return 3 }
+    }
+
+    static func exportPhoto(source: URL, output: URL, recipe: ToolRecipe) async throws {
+        try ReadOnlyLocations.requireWritable(output)
+        let process = Process()
+        var executable = CommandLine.arguments[0]
+        #if DEBUG
+        executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
+        #endif
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--export-photo", source.path, recipe.format, String(recipe.maxDimension), output.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard try await CancellableProcess.wait(process, timeoutSeconds: 30) == 0 else { throw MediaTools.Failure(text: "The photo worker could not convert this input. Check its format, animation, and readability.") }
+    }
+
     static func sample(source: URL, seconds: Double) async throws -> Sample {
         sweepAbandonedFrames()
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDTimeline-" + UUID().uuidString + ".png")
@@ -91,7 +124,7 @@ enum VideoFrameWorker {
 
 enum CancellableProcess {
     struct TimedOut: LocalizedError, Sendable {
-        var errorDescription: String? { "The video decoder exceeded its time limit. The worker was stopped; try the file again or check whether the source drive is responding." }
+        var errorDescription: String? { "The decoder exceeded its time limit. The worker was stopped; try the file again or check whether the source drive is responding." }
     }
     static func wait(_ process: Process, timeoutSeconds: UInt64) async throws -> Int32 {
         let state = WaitState(process: process)

@@ -186,6 +186,7 @@ fn assert_tag_sets_match(
 /// compilation here until its wire tag + an exemplar below are added.
 fn command_tag(payload: &CommandPayload) -> &'static str {
     match payload {
+        CommandPayload::ToolRequest(_) => "toolRequest",
         CommandPayload::CatalogRequest(_) => "catalogRequest",
         CommandPayload::StartScan(_) => "startScan",
         CommandPayload::PauseScan(_) => "pauseScan",
@@ -225,6 +226,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 /// compilation here until its wire tag + an exemplar below are added.
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
+        EventPayload::ToolResponse(_) => "toolResponse",
         EventPayload::CatalogResponse(_) => "catalogResponse",
         EventPayload::Ready(_) => "ready",
         EventPayload::Progress(_) => "progress",
@@ -294,6 +296,7 @@ fn restructure_move() -> RestructureMove {
 /// exercised against the schema's `properties`.
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","recipe":{"kind":"photo","format":"png","maxDimension":4096},"operationID":"plan"}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
         CommandPayload::StartScan(StartScanPayload {
             root_path: r"C:\Photos".to_string(),
@@ -397,6 +400,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
 /// exercised against the schema's `properties`.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"toolResponse":{"_0":{"requestID":"tool","status":"ok","message":"Exported","operationID":"plan","outputs":[{"fileID":1,"sourcePath":"/internal/a.png","outputPath":"/internal/b.png","state":"completed","message":"Original preserved"}],"capabilities":[{"id":"photo","available":true,"inputFormats":["png"],"outputFormats":["png"],"detail":"Conversion"}]}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
         EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),

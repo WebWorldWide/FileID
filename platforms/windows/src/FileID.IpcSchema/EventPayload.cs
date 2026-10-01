@@ -15,6 +15,7 @@ namespace FileID.IpcSchema;
 
 [JsonConverter(typeof(EventPayloadJsonConverter))]
 public abstract record EventPayload;
+public sealed record ToolResponseEvent(ToolResponse Response) : EventPayload;
 public sealed record CatalogResponseEvent(CatalogResponse Response) : EventPayload;
 
 public sealed record ReadyEvent(EngineInfo Info) : EventPayload;
@@ -75,6 +76,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 
         EventPayload payload = variant switch
         {
+            "toolResponse" => new ToolResponseEvent(ReadWrapped<ToolResponse>(ref reader, options)),
             "catalogResponse" => new CatalogResponseEvent(ReadWrapped<CatalogResponse>(ref reader, options)),
             "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
             "progress" => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
@@ -115,6 +117,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
         writer.WriteStartObject();
         switch (value)
         {
+            case ToolResponseEvent v: WriteWrapped(writer, "toolResponse", v.Response, options); break;
             case CatalogResponseEvent v: WriteWrapped(writer, "catalogResponse", v.Response, options); break;
             case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
             case ProgressEvent v: WriteWrapped(writer, "progress", v.Progress, options); break;

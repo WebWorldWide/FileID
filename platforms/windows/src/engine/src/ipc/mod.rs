@@ -10,6 +10,8 @@
 //!
 //! Edit this file in lockstep with `ipc.schema.json`. The two MUST agree.
 
+pub mod tools;
+pub use tools::*;
 pub mod catalog;
 pub use catalog::*;
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,8 @@ impl IpcEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandPayload {
+    #[serde(rename = "toolRequest")]
+    ToolRequest(ToolRequestPayload),
     #[serde(rename = "catalogRequest")]
     CatalogRequest(CatalogRequestPayload),
     #[serde(rename = "startScan")]
@@ -489,6 +493,8 @@ pub struct MergeSuggestions {
 pub enum EventPayload {
     #[serde(rename = "catalogResponse")]
     CatalogResponse(Wrap<CatalogResponse>),
+    #[serde(rename = "toolResponse")]
+    ToolResponse(Wrap<ToolResponse>),
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
 
@@ -1334,3 +1340,6 @@ mod tests {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogRequestPayload { pub request: CatalogRequest }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRequestPayload { pub request: ToolRequest }

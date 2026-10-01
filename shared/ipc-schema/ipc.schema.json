@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.1.0",
+  "version": "1.2.0",
 
   "$defs": {
     "IPCCommand": {
@@ -29,6 +29,27 @@
     "CommandPayload": {
       "description": "Externally-tagged union. Exactly one key matching a variant name.",
       "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "toolRequest"
+          ],
+          "properties": {
+            "toolRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request"
+              ],
+              "properties": {
+                "request": {
+                  "$ref": "#/$defs/ToolRequest"
+                }
+              }
+            }
+          }
+        },
         {
           "type": "object",
           "required": ["startScan"],
@@ -289,6 +310,27 @@
     "EventPayload": {
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "toolResponse"
+          ],
+          "properties": {
+            "toolResponse": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "_0"
+              ],
+              "properties": {
+                "_0": {
+                  "$ref": "#/$defs/ToolResponse"
+                }
+              }
+            }
+          }
+        },
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
@@ -1115,6 +1157,188 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/CatalogJob"
+          }
+        }
+      }
+    },
+    "ToolRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "format",
+        "maxDimension"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "photo",
+            "chapters"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "png",
+            "jpeg",
+            "tiff",
+            "json",
+            "vtt"
+          ]
+        },
+        "maxDimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        }
+      }
+    },
+    "ToolCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "available",
+        "inputFormats",
+        "outputFormats",
+        "detail"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "inputFormats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outputFormats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileID",
+        "sourcePath",
+        "outputPath",
+        "state",
+        "message"
+      ],
+      "properties": {
+        "fileID": {
+          "type": "integer"
+        },
+        "sourcePath": {
+          "type": "string"
+        },
+        "outputPath": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "completed",
+            "undone",
+            "failed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "action"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "capabilities",
+            "history",
+            "preview",
+            "execute",
+            "cancel",
+            "undo"
+          ]
+        },
+        "fileIDs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "destination": {
+          "type": "string"
+        },
+        "recipe": {
+          "$ref": "#/$defs/ToolRecipe"
+        },
+        "operationID": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "status",
+        "message",
+        "outputs",
+        "capabilities"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "operationID": {
+          "type": "string"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolOutput"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCapability"
           }
         }
       }

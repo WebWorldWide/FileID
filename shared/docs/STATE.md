@@ -8,6 +8,12 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Safe photo/chapter exports and incremental GitHub delivery
+
+Implemented IPC v1.2 typed export previews, execution, history, and Undo; native macOS File Tools; bounded cancellable photo workers; original/export relationships; source-byte and chapter-snapshot checks; metadata-aware photo limits; JSON/WebVTT chapters; Rust photo/chapter adapters with explicit cancellation/color-profile limits. Internal cross-engine preview → execution → persistent Undo passed in both directions. Registered staging cleanup preserves unrelated files and aliases. Full next-version scope remains in NEXT_VERSION.md. The final full native suite passed 405 tests and the native app build passed. Rust suites passed 374 library tests, 375 executable tests, and two integration tests (two existing benchmarks ignored); genuine Rust 1.90 Clippy passed with patched lockfiles. C# conformance passed 46 tests. The earlier local 1.90 claim was not reliable because Homebrew cargo-clippy was selected; the actual pinned binary is now verified.
+
+Verified foundation and CI fixes are pushed to codex/fileid-next-version-current, with draft PR #186. Remote main had rewritten history but an identical baseline tree; cherry-picking preserved owner changes. No Adlon writes, source mutations, new model weights, new application dependencies, or installed-release replacements occurred.
+
 ## 2026-10-01 — Next-version catalog foundation implemented; full plan pending
 
 Branch `codex/fileid-next-version` adds canonical v21 catalog SQL/migrations, IPC v1.1 Swift/Rust/C# mirrors, persistent incremental name/evidence FTS, stale-source invalidation, model/dimension-separated embedding storage, native macOS Search & Moments with playback seeking and manual chapter edit/Undo, and durable macOS visual-sampling jobs. Timeline decoding is isolated in a cancellable engine subprocess; sparse captions retain incomplete coverage and an unverified label. Concise filename generation now limits stems to 60 characters, abstains on generic/unchanged names, and handles collisions within each directory.
