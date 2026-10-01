@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 pub fn readable_stem(raw: &str, confirmed_subjects: &[String]) -> Option<String> {
     let mut words: Vec<String> = raw.split(|c: char| c.is_whitespace() || c == '-' || c == '_').filter(|s|!s.is_empty()).map(str::to_owned).collect();
     for prefix in [&["a","photo","of"][..], &["photo","of"][..], &["an","image","of"][..], &["image","of"][..], &["a","video","of"][..], &["video","of"][..]] {
-        if words.iter().take(prefix.len()).map(|s|s.to_lowercase()).eq(prefix.iter().map(|s|s.to_string())) { words.drain(..prefix.len()); break; }
+        if words.iter().take(prefix.len()).map(|s|s.to_lowercase()).eq(prefix.iter().map(|s|(*s).to_string())) { words.drain(..prefix.len()); break; }
     }
     let subjects: Vec<String> = confirmed_subjects.iter().map(|s|s.trim().to_string()).filter(|s|!s.is_empty()).collect::<BTreeSet<_>>().into_iter().collect();
     let subject_words: BTreeSet<String> = subjects.iter().flat_map(|s|s.split_whitespace().map(str::to_lowercase)).collect();

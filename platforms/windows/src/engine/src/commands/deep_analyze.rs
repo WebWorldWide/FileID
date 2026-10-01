@@ -149,7 +149,7 @@ pub(crate) async fn handle_deep_analyze_file(
     // stream word-by-word. Throttle wire emission to 4 Hz so a
     // 50-tok/sec VLM doesn't flood the sink.
     let caption_buf = Arc::new(Mutex::new(String::new()));
-    let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
+    let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
     let face_names = {
@@ -618,7 +618,7 @@ async fn run_deep_analyze_batch(
         // token-by-token (the macOS schema usage). (F-C2-008)
         let current_path_cb = current_path.clone();
         let caption_buf = Arc::new(Mutex::new(String::new()));
-        let last_emit = Arc::new(Mutex::new(Instant::now() - Duration::from_millis(500)));
+        let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
         let caption_buf_cb = caption_buf.clone();
         let last_emit_cb = last_emit.clone();
         let on_token = move |chunk: &str| {

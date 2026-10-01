@@ -675,7 +675,7 @@ impl ProgressState {
             // -60 s forces the first batch callback past the throttle so the
             // sidebar fills immediately; the rate anchor below uses the real
             // `now` so the first measured interval is honest.
-            last_emit: now - Duration::from_secs(60),
+            last_emit: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
             last_total: 0,
             rate_anchor: now,
             rate_anchor_total: 0,
