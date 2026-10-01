@@ -108,6 +108,12 @@ def main():
             engine.close()
         with sqlite3.connect(directory / "FileID/fileid.sqlite") as database:
             database.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/Family Birthday.mov',1,100,10,0,'video','mov')")
+            database.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(2,'/internal/Portrait.jpg',2,100,10,0,'image','jpg')")
+            database.execute("INSERT INTO persons(id,name,created_at) VALUES(7,'Confirmed Person',0)")
+            database.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(2,'fixture-revision','fixture',0)")
+            vector = b"\x00\x00\x80\x3f" + bytes(127 * 4)
+            database.execute("INSERT INTO face_prints(id,file_id,print_data,bbox,person_id,arcface_embedding,embedding_model,processing_version,source_revision) VALUES(4,2,X'00','0.1,0.1,0.2,0.2',7,?,'fixture-weight-hash','fixture-alignment','fixture-revision')", (vector,))
+            database.execute("UPDATE catalog_observations SET user_edited=1,region_json='manual face marker' WHERE id='faceprint:4'")
         chapter = dict(id="gift", fileID=1, startSeconds=8.0, endSeconds=12.0, title="Gift Opening", summary="Grandma opens presents", sourceRevision="untrusted", modelVersion="untrusted", confidence=0.0, userEdited=False, stale=True)
         engine = Engine(args.swift_engine.resolve(), directory, swift=True)
         try:
@@ -131,7 +137,12 @@ def main():
             assert not restored["stale"] and restored["modelVersion"] == "user"
         finally:
             engine.close()
-    print("Swift → Rust → Swift catalog, evidence search, and correction Undo round trip passed")
+        with sqlite3.connect(directory / "FileID/fileid.sqlite") as database:
+            assert database.execute("SELECT name FROM persons WHERE id=7").fetchone() == ("Confirmed Person",)
+            assert database.execute("SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4").fetchone() == (7,"fixture-weight-hash","fixture-alignment","fixture-revision",512)
+            assert database.execute("SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'").fetchone() == ("manual face marker",1,0)
+            assert database.execute("SELECT model,dimension,vector FROM catalog_embeddings WHERE entity_id='faceprint:4'").fetchone() == ("fixture-weight-hash|fixture-alignment",128,vector)
+    print("Swift → Rust → Swift catalog, evidence search, face provenance, and correction Undo round trip passed")
 
 
 if __name__ == "__main__":

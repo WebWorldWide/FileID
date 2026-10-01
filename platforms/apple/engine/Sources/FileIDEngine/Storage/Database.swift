@@ -518,6 +518,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v21_catalog") { db in
             try db.execute(sql: CatalogSchema.v21)
         }
+        m.registerMigration("v22_face_cache_provenance") { db in
+            try db.execute(sql: CatalogSchema.v22)
+        }
         return m
     }
 

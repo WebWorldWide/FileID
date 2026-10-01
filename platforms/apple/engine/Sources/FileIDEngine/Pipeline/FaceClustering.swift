@@ -1717,11 +1717,7 @@ public enum FaceClustering {
     }
 
     /// One face_prints row that's missing its ArcFace embedding.
-    fileprivate struct PendingRow: Sendable {
-        let id: Int64
-        let bbox: String
-        let path: String
-    }
+    fileprivate typealias PendingRow = FaceAnalysisCache.Input
 
     /// Extract ArcFace embeddings for any face_prints row that's missing
     /// one. Excluded rows are skipped entirely. `skipFaceIDs` lets callers
@@ -1739,7 +1735,7 @@ public enum FaceClustering {
         skipFaceIDs: Set<Int64> = [],
         cancelBaseline: Bool = false
     ) async {
-        guard ArcFaceService.shared.isReady else { return }
+        guard ArcFaceService.shared.isReady, let modelVersion = ArcFaceService.shared.modelVersion else { return }
         let permanentlyFailed = permanentlyFailedExtractions()
         let pending: [PendingRow]
         do {
@@ -1749,24 +1745,8 @@ public enum FaceClustering {
                 // we still surface `maxExtractionsPerRun` fresh rows past them —
                 // the front-of-window starvation fix. (F-C3-033)
                 let fetchLimit = maxExtractionsPerRun + skipFaceIDs.count + permanentlyFailed.count
-                let rows = try GRDB.Row.fetchAll(db, sql: """
-                    SELECT face_prints.id, face_prints.bbox,
-                           files.path_text AS path
-                    FROM face_prints
-                    INNER JOIN files ON files.id = face_prints.file_id
-                    WHERE files.failed = 0
-                      AND face_prints.excluded = 0
-                      AND LENGTH(COALESCE(face_prints.arcface_embedding, X'')) = 0
-                    ORDER BY face_prints.id ASC
-                    LIMIT \(fetchLimit)
-                    """)
-                let filtered = rows.compactMap { r -> PendingRow? in
-                    let id: Int64 = r["id"] ?? 0
-                    if skipFaceIDs.contains(id) || permanentlyFailed.contains(id) { return nil }
-                    return PendingRow(id: id,
-                                       bbox: r["bbox"] ?? "",
-                                       path: r["path"] ?? "")
-                }
+                let rows = try FaceAnalysisCache.pending(db, modelVersion: modelVersion, limit: fetchLimit)
+                let filtered = rows.filter { !skipFaceIDs.contains($0.id) && !permanentlyFailed.contains($0.id) }
                 return Array(filtered.prefix(maxExtractionsPerRun))
             }
         } catch {
@@ -1816,35 +1796,32 @@ public enum FaceClustering {
             baseline: cancelBaseline,
             current: ScanCoordinator.isCancelledSync(),
             shuttingDown: ScanCoordinator.isShuttingDownSync())
-        let succeeded = Set(extractedSnapshot.map { $0.id })
-        // Tally which attempted rows produced no embedding so a row that keeps
-        // failing drops out of future windows instead of blocking newer faces.
-        // (F-C3-033) — but NOT on cancel: the queued files skipped their ANE pass,
-        // so recording them as failed attempts would push otherwise-fine faces
-        // past maxExtractionAttempts and permanently retire them after a few
-        // cancels. Embeddings that DID complete are still persisted below.
-        if !cancelled {
-            recordExtractionOutcomes(attempted: pending.map { $0.id }, succeeded: succeeded)
-        }
         do {
-            try await database.pool.write { db in
+            let savedIDs = try await database.pool.write { db in
+                var saved = Set<Int64>()
                 for face in extractedSnapshot {
-                    try db.execute(
-                        sql: "UPDATE face_prints SET arcface_embedding = ? WHERE id = ?",
-                        arguments: [face.arcFace, face.id]
-                    )
+                    if try FaceAnalysisCache.persist(db, input: face.input, embedding: face.arcFace, modelVersion: modelVersion) {
+                        saved.insert(face.input.id)
+                    }
                 }
+                return saved
+            }
+            if !cancelled {
+                recordExtractionOutcomes(attempted: pending.map { $0.id }, succeeded: savedIDs)
+            }
+            for face in extractedSnapshot where savedIDs.contains(face.input.id) {
+                if let jpeg = face.jpeg { saveFaceCrop(faceID: face.input.id, jpeg: jpeg) }
             }
             if cancelled {
                 JSONLog.shared.info(ev: "face_print_extract_cancelled",
                                     extra: ["pending": AnyCodable(pending.count),
-                                            "extracted": AnyCodable(extractedSnapshot.count),
+                                            "extracted": AnyCodable(savedIDs.count),
                                             "files": AnyCodable(byPath.count)])
             } else {
                 JSONLog.shared.info(ev: "face_print_extract_done",
                                     extra: ["pending": AnyCodable(pending.count),
-                                            "extracted": AnyCodable(extractedSnapshot.count),
-                                            "failed": AnyCodable(pending.count - extractedSnapshot.count),
+                                            "extracted": AnyCodable(savedIDs.count),
+                                            "failed": AnyCodable(pending.count - savedIDs.count),
                                             "files": AnyCodable(byPath.count),
                                             "seconds": AnyCodable(Date().timeIntervalSince(start))])
             }
@@ -1867,7 +1844,8 @@ public enum FaceClustering {
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = autoreleasepool { () -> [PendingExtract] in
                     let url = URL(fileURLWithPath: path)
-                    guard let cg = loadCGImage(url: url) else { return [] }
+                    guard let identity = rows.first?.currentIdentity(), rows.allSatisfy({ $0.currentIdentity() == identity }),
+                          let cg = loadCGImage(url: url) else { return [] }
                     let detected = FaceAlign.enabled ? detectFaceLandmarks(in: cg) : []
                     let pixels = detected.isEmpty ? nil : FaceAlign.pixels(source: cg)
                     var aligned = 0
@@ -1886,10 +1864,8 @@ public enum FaceClustering {
                             crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox)
                         }
                         guard let crop else { continue }
-                        saveFaceCrop(faceID: row.id, croppedCGImage: crop)
                         guard let vec = ArcFaceService.shared.embed(crop) else { continue }
-                        out.append(PendingExtract(id: row.id,
-                                                  arcFace: ArcFaceService.embeddingToBlob(vec)))
+                        out.append(PendingExtract(input: row, arcFace: ArcFaceService.embeddingToBlob(vec), jpeg: faceCropJPEG(crop)))
                     }
                     if FaceAlign.enabled {
                         JSONLog.shared.info(ev: "face_align_applied",
@@ -1899,6 +1875,7 @@ public enum FaceClustering {
                                                     "aligned": AnyCodable(aligned),
                                                     "bbox_fallback": AnyCodable(rows.count - aligned)])
                     }
+                    guard rows.allSatisfy({ $0.currentIdentity() == identity }) else { return [] }
                     return out
                 }
                 cont.resume(returning: result)
@@ -1907,8 +1884,9 @@ public enum FaceClustering {
     }
 
     fileprivate struct PendingExtract: Sendable {
-        let id: Int64
+        let input: PendingRow
         let arcFace: Data
+        let jpeg: Data?
     }
 
     /// Crop the bbox region (with padding) out of the source CGImage and
@@ -1999,20 +1977,18 @@ public enum FaceClustering {
 
     /// Save a pre-cropped face CGImage as a JPEG to face_crops/<id>.jpg.
     /// Idempotent — overwrites if the file already exists.
-    private static func saveFaceCrop(faceID: Int64, croppedCGImage cropped: CGImage) {
+    private static func faceCropJPEG(_ crop: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, crop, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    private static func saveFaceCrop(faceID: Int64, jpeg: Data) {
         let url = faceCropURL(faceID: faceID)
         guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, "public.jpeg" as CFString, 1, nil
-        ) else { return }
-        // 0.85 quality — good enough for VLM face matching, ~5-15 KB/face.
-        let options: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
-        CGImageDestinationAddImage(dest, cropped, options as CFDictionary)
-        CGImageDestinationFinalize(dest)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? jpeg.write(to: url, options: .atomic)
     }
 
     /// Path on disk for a given face_prints row's crop JPEG.

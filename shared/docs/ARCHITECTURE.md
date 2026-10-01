@@ -21,13 +21,13 @@ FileID is split across three platform implementations that share a contract, a d
                                               fileid.sqlite
 ```
 
-Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and the engine event stream (macOS fd 2/stderr; Rust stdout). The app reads the DB via a read-only connection; the engine is the sole writer. SQLite WAL allows concurrent readers without blocking the writer.
+Two binaries per platform. The app spawns the engine as a child process. They talk newline-delimited JSON over stdin (app → engine) and the engine event stream (macOS fd 2/stderr; Rust stdout). New catalog/tools/chat writes go through the engine. Legacy macOS ReadStore correction and mutation paths still write directly; the application-wide sole-writer boundary remains a migration target. SQLite WAL allows concurrent readers without blocking the writer.
 
 When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16 s within a 60 s window). Three failures in a row puts the app in `.crashed` state; user dismisses or retries.
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned through v21 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v22 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`
@@ -161,3 +161,7 @@ Face backfill matches Vision landmarks by overlapping normalized bbox with an am
 ChatService/commands::chat own local catalog_chat history. Retrieval reuses persistent FTS and returns evidence independently of inference. macOS queues bounded summaries on its existing loaded MLX container, with interactive priority and request-owned cancellation; it does not load models. Runtime remains serial for heavy work and is not yet a memory-budgeted multi-model scheduler. Rust exposes keyword/history parity and explicitly lacks generation. Native port panels, hybrid retrieval, and typed operation execution remain pending. See CHAT.md for exact limits. Legacy macOS ReadStore mutations for cleanup, People, naming, and organization remain exceptions to the intended sole-writer boundary and must move to engine operations before full acceptance.
 
 Initial model admission and native residency leases are documented in SCHEDULER.md. Available memory no longer double-counts speculative pages. Native inference/load/unload ownership is exclusive and cancellable; this remains one heavy model lane, not parallel task-model routing. Rust startup admission is conservative host-memory sizing, not free-VRAM certification.
+
+## Versioned face evidence (v22)
+
+Canonical shared/catalog/v22.sql adds nullable weight, processing, and source-revision metadata without relabeling legacy vectors. New native refreshes and Rust scan results create model-separated 128-d catalog vectors and uncalibrated observations, synchronize person assignment and exclusion, and invalidate changed boxes. Native processing refreshes bounded batches with source and database revision checks; JPEG encoding happens outside the transaction and publication follows committed rows. Legacy clustering still consumes its older embedding table: full space isolation, durable rebuild/backlog scheduling, incremental identity assignment and held-out calibration remain required.

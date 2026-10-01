@@ -6,6 +6,17 @@ import Foundation
 @testable import FileIDShared
 
 @Suite struct FaceBBoxTests {
+    @Test func explicitSourceGeometrySurvivesThumbnailResize() {
+        let bbox = #"{"x":400,"y":200,"w":800,"h":400,"coordinateSpace":"pixel-top-left","sourceWidth":4000,"sourceHeight":2000}"#
+        let full = FaceBBox.parseNormalized(bbox, imageWidth: 4000, imageHeight: 2000)
+        let thumbnail = FaceBBox.parseNormalized(bbox, imageWidth: 1000, imageHeight: 500)
+        #expect(full?.x == thumbnail?.x)
+        #expect(full?.y == thumbnail?.y)
+        #expect(thumbnail?.x == 0.1)
+        #expect(thumbnail?.w == 0.2)
+        #expect(FaceBBox.parseNormalized(#"{"x":1,"y":1,"w":2,"h":2,"sourceWidth":0,"sourceHeight":20}"#, imageWidth: 100, imageHeight: 100) == nil)
+    }
+
     @Test("macOS CSV is parsed unchanged (dims ignored)")
     func csvPassthrough() throws {
         let b = try #require(FaceBBox.parseNormalized("0.1,0.2,0.3,0.4", imageWidth: 1000, imageHeight: 800))

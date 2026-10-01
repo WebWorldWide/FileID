@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-01 — Continue after versioned face metadata
+
+v22 and FACE_CACHE.md define new verified face-cache provenance and bounded refresh. Continue complete clustering-space isolation, durable refresh/backlog and incremental assignment; resolve ambiguous CLIP producer/query model namespaces before persistent hybrid indexing. Complete resource routing, typed chat execution, timeline shots/ASR/tracks/dense outcomes, best takes, media/broad tools and native port UI. Strict runtime egress remains blocked by the existing GitHub/NVIDIA runtime artifact download paths; replace them with vetted packaged runtime provisioning before release. Keep all accepted gates in NEXT_VERSION.md active, preserve owner edits, and keep Adlon read-only.
+
 ## 2026-10-01 — Continue from initial model admission
 
 Initial physical/available-memory checks and native residency leases now protect model switches; SCHEDULER.md defines exact limits. Continue persistent hybrid indexes and processing-version caches, durable CPU/I/O/GPU/NPU reservations, multi-model/task routing, fairness and general restart recovery. Then complete typed chat operations, timeline speech/shots/tracks/dense outcomes, automatic chapters, best takes, video/broad tools and native port UI. Preserve owner work and strictly read-only Adlon; push coherent verified milestones to PR #186.

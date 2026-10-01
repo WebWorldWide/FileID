@@ -8,6 +8,12 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Versioned face caches and source geometry
+
+Canonical v22 adds nullable actual-weight/processing/source metadata while preserving legacy People and corrections. Native extraction refreshes bounded outdated-cache batches, rejects source/database/bbox changes and invalid vectors, and publishes refreshed JPEGs only after committed embeddings. Rust tags new SFace results with the selected weight hash and processing version. SQL synchronizes observation membership, invalidates changed boxes and stale sources, and preserves manually edited observations. New portable bboxes include source dimensions so native thumbnail scaling cannot distort crops. FACE_CACHE.md records exact limits and remaining legacy clustering-space isolation/backlog/calibration work.
+
+Verification: 425 native tests, native app build, 382 Rust library/383 executable tests plus two integrations, pinned Rust 1.90 Clippy, schema/current-doc checks, actual cross-engine face/catalog/chat round trips, 23 runtime-egress policy tests and two clean binary privacy scans. Previous model-admission commit has all 18 hosted checks green. Strict runtime egress still rejects the pre-existing GitHub/NVIDIA runtime-download baseline; only the reviewed no-new-egress audit passes. This remains a release blocker, not a privacy acceptance result. Adlon and the installed release remain untouched; owner release/signing work stays unstaged.
+
 ## 2026-10-01 — Model headroom, cancellable residency, and independent decoder deadlines
 
 Initial shared memory admission reserves system/app headroom and rejects missing probes, oversized models, and current pressure before loading. Native model load/unload/inference now share a cancellable exclusive gate; cancelled handoffs do not release resources still owned by active work. Rust checks GGUF/projection sizes before server/per-file startup. Corrected speculative-page double counting against Apple’s kernel header. Full native testing exposed cooperative-executor watchdog delay; a dispatch timer now preserves the original one-second timeout/five-second assertion under the full suite. See SCHEDULER.md for conservative budgets and remaining parallel/resource controls.
