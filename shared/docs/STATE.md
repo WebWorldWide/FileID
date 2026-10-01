@@ -8,6 +8,14 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+## 2026-10-01 — Cleanup verification and Store blockers
+
+- Finished pending cleanup patch: bounded duplicate query with keeper ranking, hash-plus-size group identities, empty-hash exclusion before the cap, current-generation failure clearing, context menus bound to their placement target, and rejection of similar groups by exact-trash authorization.
+- 18 cleanup/proof and 47 IPC tests passed. Runtime egress gate plus 24 tests and changed app C# formatting passed. Diagnostic app subset compiled after explicitly justifying the test-state module initializer analyzer exception.
+- Full app tests remain blocked by 44 missing API diagnostics in lifecycle, health waiters, restructure undo, and final close. A temporary run excluding only those four files exposed 27 failures among 360 tests (333 passed). The real test project retains every test. Detailed scope/evidence/resume order: [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md).
+- Downloaded and independently inspected hosted x64 upload for `2fd1f21`, including reserved identity and native payload. It includes explicit runtime downloads but predates this cleanup patch. Installation/UI smoke remain unverified. Partner Center and PR #183 remain drafts.
+- Reran required local Store script after cleanup edits. Engine Release and app x64 Release build/publish passed; VS 2026 WAP failed again with `APPX0002` / `MSB4018`, `GenerateAppxPackageRecipe` null reference. No new local upload. Detailed log: `platforms/windows/dist/store-packages/local-build-cleanup.log`.
+
 ## 2026-09-28 — Store preflight and post release roadmap
 
 - Pushed the shared post release brief for best takes, batch conversion/compression/upscaling, and improved folder organization (`6e63683`). The first Store release remains the priority.

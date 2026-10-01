@@ -27,7 +27,7 @@
             <StackPanel Grid.Column="0" Spacing="4">
                 <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}"
                            AutomationProperties.HeadingLevel="Level1"/>
-                <TextBlock Text="Visually-similar files grouped by perceptual hash. Trashed items stay recoverable."
+                <TextBlock Text="Review duplicate groups. FileID verifies complete file bytes before trashing; trashed items stay recoverable."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
@@ -95,15 +95,9 @@
                               Padding="16"
                               Tag="{x:Bind ContentHash}"
                               AutomationProperties.Name="{x:Bind Caption, Mode=OneWay}"
-                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions."
-                              RightTapped="OnGroupRightTapped">
-                            <!-- Per-group right-click action menu.
-                                 RightTapped seeds the current-group cache so
-                                 MenuFlyoutItem clicks (which don't inherit
-                                 DataContext on WinUI 3) can resolve to the
-                                 correct DuplicateGroup. -->
+                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions.">
                             <Grid.ContextFlyout>
-                                <MenuFlyout>
+                                <MenuFlyout Opening="OnGroupFlyoutOpening">
                                     <MenuFlyoutItem Text="Keep first"
                                                     Click="OnGroupKeepFirst"
                                                     ToolTipService.ToolTip="Mark only the first member as keeper.">

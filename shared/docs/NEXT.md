@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## 2026-10-01 — Store test checkpoint
+
+- Continue on `codex/store-msix`, draft PR #183. Partner Center `9PC8HSD86887` remains draft: no upload, submission, or publication.
+- Read [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md) for test scope, failures, logs, package evidence, and resume order. Cleanup/proof: 18 passed; IPC: 47 passed; runtime egress gate and 24 tests passed; changed app C# formatting passed.
+- Full app test project still cannot compile: 44 missing API diagnostics in four files. A temporary diagnostic subset ran 360 tests: 333 passed, 27 failed. Resolve both sets before claiming release readiness.
+- Hosted packaging passed on `2fd1f21`; independently inspected upload path/hash are in the checkpoint. It includes the startup-download fix but predates this cleanup patch. Inspect a new exact-head upload and perform an actual package install/launch and scan/cleanup/undo smoke.
+- Cleanup now ranks keepers in one query, separates same-hash/different-size groups, excludes empty hashes before the 200-group cap, clears stale results only for the current failed refresh, and resolves menus from their current target. Similar selection policy is groundwork only; no Similar UI/load feature is implemented.
+- Future feature requirements are already pushed in [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for macOS/Linux; they follow the first Store release.
+- Required local Store command rerun: patched engine/app Release build and publish succeeded, but VS 2026 packaging again failed `APPX0002` / `MSB4018` in `GenerateAppxPackageRecipe`. No new local upload; log is `platforms/windows/dist/store-packages/local-build-cleanup.log`. Use hosted VS 2022 packaging and inspect the new commit's result.
+
 ## 2026-09-28 — Pickup after Store preflight
 
 - The Store branch is `codex/store-msix`; PR #183 and Partner Center product `9PC8HSD86887` remain drafts. Do not upload, submit, or publish while the release gates below fail.

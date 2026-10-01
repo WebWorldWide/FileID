@@ -3394,3 +3394,7 @@ The Cleanup UI previously sent only file IDs after a duplicate-group preview, wh
 ## 2026-09-28 — Optional runtime downloads require an explicit install action
 
 Approval to use official GitHub and NVIDIA download hosts covers where optional packs come from, not silent installation on startup. A fresh Windows launch exposed the Vulkan llama.cpp runtime downloading as soon as the engine became ready, and Intel hardware also had a silent OpenVINO path. Remove those startup installers. The Deep Analyze model Install action now requests its local runtime alongside the selected model; Settings retains explicit GPU pack Install buttons. This preserves on-device processing and the user-initiated download policy without leaving Deep Analyze unable to obtain a runtime.
+
+## 2026-10-01 — Cleanup group identities and bounded query
+
+Hash equality is a preview candidate, not deletion authorization. Group by both hash and size, exclude empty hashes before the 200-group limit, and load every member of selected groups so a keeper is never hidden by a row cap. SQL keeper ranking is aesthetic score, creation time, then path; existing keeper choices survive unchanged membership. Context actions resolve the current placement target and live group. Similar-selection policy remains groundwork and cannot enter exact-trash authorization; no Similar UI/load is claimed.

@@ -91,6 +91,67 @@ public class CleanupModeSwitchTests
     }
 
     [Fact]
+    public void ExactDuplicateCapExcludesEmptyHashesAndKeepsWholeSizeSeparatedGroups()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"fileid-cleanup-{Guid.NewGuid():N}.sqlite");
+        try
+        {
+            using (var connection = new SqliteConnection($"Data Source={dbPath}"))
+            {
+                connection.Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    CREATE TABLE files (
+                        id INTEGER PRIMARY KEY, path_text TEXT NOT NULL,
+                        size_bytes INTEGER NOT NULL, modified_at REAL,
+                        aesthetic REAL, created_at REAL, content_hash BLOB,
+                        failed INTEGER NOT NULL DEFAULT 0
+                    );
+                    WITH RECURSIVE sizes(n) AS (
+                        SELECT 1 UNION ALL SELECT n + 1 FROM sizes WHERE n < 205
+                    ), copies(c) AS (SELECT 0 UNION ALL SELECT 1)
+                    INSERT INTO files (id, path_text, size_bytes, content_hash)
+                    SELECT n * 2 + c, 'C:/lib/' || n || '-' || c, n, x'AA'
+                    FROM sizes CROSS JOIN copies;
+                    WITH RECURSIVE empty_hashes(n) AS (
+                        SELECT 1 UNION ALL SELECT n + 1 FROM empty_hashes WHERE n < 500
+                    )
+                    INSERT INTO files (path_text, size_bytes, content_hash)
+                    SELECT 'C:/empty/' || n, 0, x'' FROM empty_hashes;
+                    INSERT INTO files (path_text, size_bytes, content_hash, failed)
+                    VALUES ('C:/failed/1', 206, x'AA', 0),
+                           ('C:/failed/2', 206, x'AA', 1);
+                    """;
+                command.ExecuteNonQuery();
+            }
+            var groups = CleanupViewModel.LoadExactFromPath(dbPath, CancellationToken.None);
+            Assert.Equal(200, groups.Count);
+            Assert.Equal(200, groups.Select(group => group.ContentHash).Distinct().Count());
+            Assert.Equal(200, groups.Select(group => group.Members[0].GroupKey).Distinct().Count());
+            Assert.All(groups, group =>
+            {
+                Assert.Equal(2, group.TotalMemberCount);
+                Assert.Single(group.Members, member => member.IsKeeper);
+                Assert.All(group.Members, member => Assert.InRange(member.SizeBytes, 1, 200));
+            });
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            File.Delete(dbPath);
+        }
+    }
+
+    [Fact]
+    public void CancelledExactLoadDoesNotReturnMissingDatabaseAsSuccess()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => CleanupViewModel.LoadExactFromPath(
+            Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), cancellation.Token));
+    }
+
+    [Fact]
     public void MergeWithEmptyRows_ClearsStaleGroups()
     {
         var groups = new ObservableCollection<DuplicateGroup>

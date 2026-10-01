@@ -8,6 +8,7 @@ using Xunit;
 internal static class TestEnvironment
 {
     [ModuleInitializer]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Usage", "CA2255", Justification = "Isolate test state before any application static initializer runs.")]
     internal static void Initialize()
     {
         var root = Path.Combine(

@@ -30,6 +30,8 @@ public sealed class ExactCleanupProofBuilderTests : IDisposable
         Assert.Equal(1, request.Keeper.FileId);
         Assert.Equal(2, Assert.Single(request.Victims).FileId);
         Assert.Throws<InvalidOperationException>(() => CleanupView.SnapshotExactGroups(
+            [new DuplicateGroup { ContentHash = "similar", Members = group.Members, IsSimilar = true }]));
+        Assert.Throws<InvalidOperationException>(() => CleanupView.SnapshotExactGroups(
             [new DuplicateGroup { ContentHash = "invalid", Members = group.Members.Select(member =>
                 new DuplicateMember { Id = member.Id, Path = member.Path, FileName = member.FileName, SizeBytes = member.SizeBytes, GroupKey = "invalid" }).ToArray() }]));
     }

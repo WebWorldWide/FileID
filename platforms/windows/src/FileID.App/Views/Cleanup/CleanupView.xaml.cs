@@ -456,12 +456,13 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var requests = new List<ExactCleanupGroupRequest>();
         foreach (var group in groups)
         {
-            var victims = group.Members.Where(member => !member.IsKeeper).ToArray();
+            if (group.IsSimilar)
+                throw new InvalidOperationException("Similar groups cannot authorize exact duplicate cleanup.");
+            var victims = CleanupSelectionPolicy.SelectedVictims(group);
             if (victims.Length == 0) continue;
-            var keepers = group.Members.Where(member => member.IsKeeper).ToArray();
-            if (keepers.Length != 1)
+            var keeper = CleanupSelectionPolicy.RetainedCopy(group);
+            if (keeper is null)
                 throw new InvalidOperationException("Choose exactly one keeper in each duplicate group.");
-            var keeper = keepers[0];
             requests.Add(new ExactCleanupGroupRequest(
                 new ExactCleanupFile(keeper.Id, keeper.Path, keeper.SizeBytes),
                 victims.Select(member => new ExactCleanupFile(
@@ -478,37 +479,20 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
     }
 
-    // ─── FEAT-CRIT-2: Per-group action menu handlers ─────────────────
-
-    // WinUI 3 MenuFlyoutItem inside a Grid.ContextFlyout does NOT
-    // inherit the parent Grid's DataContext, so the prior version's
-    // `item.DataContext as DuplicateGroup` always returned null and every
-    // per-group action silently no-op'd. Fix: cache the right-tapped group's
-    // ContentHash (the group's stable identity) at the moment the context menu
-    // is invoked, then re-resolve the live instance at action time. Caching the
-    // instance itself goes stale: a background scan refresh (MergeByContentHash)
-    // replaces a group's instance whenever its member set changes, detaching the
-    // cached copy from ViewModel.Groups while the flyout is still open — the
-    // MenuFlyout doesn't block the dispatcher — so the action would mutate a
-    // discarded instance and silently no-op again.
-    private string? _lastRightTappedHash;
-
-    private void OnGroupRightTapped(object sender, Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs e)
+    private void OnGroupFlyoutOpening(object sender, object e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is DuplicateGroup g)
-        {
-            _lastRightTappedHash = g.ContentHash;
-        }
+        if (sender is not MenuFlyout flyout) return;
+        var target = flyout.Target as FrameworkElement;
+        var key = target?.Tag as string ?? (target?.DataContext as DuplicateGroup)?.ContentHash;
+        foreach (var item in flyout.Items.OfType<FrameworkElement>())
+            item.Tag = key;
     }
 
-    // Resolve the live group by the cached ContentHash so every per-group action
-    // hits the instance currently in ViewModel.Groups, not a snapshot a mid-flyout
-    // refresh may have replaced; no-op safely if the group is gone.
-    private DuplicateGroup? GroupFromFlyoutItem(object sender) =>
-        _lastRightTappedHash is null
-            ? null
-            : ViewModel.Groups.FirstOrDefault(g => g.ContentHash == _lastRightTappedHash);
-
+    private DuplicateGroup? GroupFromFlyoutItem(object sender)
+    {
+        if (sender is not FrameworkElement { Tag: string key }) return null;
+        return ViewModel.Groups.FirstOrDefault(group => group.ContentHash == key);
+    }
     private void OnGroupKeepFirst(object sender, RoutedEventArgs e)
     {
         var grp = GroupFromFlyoutItem(sender);
