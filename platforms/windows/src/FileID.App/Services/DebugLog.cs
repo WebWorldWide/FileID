@@ -24,6 +24,20 @@ internal static class DebugLog
     // off-thread sink MUST preserve per-line durability (e.g. a persistent
     // flushed StreamWriter), verified on hardware. Do not re-batch naively.
 
+    private static volatile bool s_traceEnabled =
+        Environment.GetEnvironmentVariable("FILEID_LOG_TRACE") == "1";
+
+    public static bool TraceEnabled
+    {
+        get => s_traceEnabled;
+        set => s_traceEnabled = value;
+    }
+
+    public static void Trace(string message)
+    {
+        if (s_traceEnabled) Write("TRACE", message);
+    }
+
     public static void Info(string message) => Write("INFO ", message);
     public static void Warn(string message) => Write("WARN ", message);
     public static void Error(string message) => Write("ERROR", message);

@@ -14,6 +14,8 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using WinRT;
 
@@ -31,6 +33,23 @@ internal static class Program
     /// reuse it for anything else.
     /// </summary>
     private const string SingleInstanceMutexName = "Local\\FileID-Singleton-{8C9D7C2E-3B87-4F19-8F3F-5A1A1B5E8A8E}";
+
+    internal static string ResolveInstanceMutexName(string? testInstance, string? dbPath, string? localAppData)
+    {
+        if (string.IsNullOrWhiteSpace(testInstance))
+        {
+            return SingleInstanceMutexName;
+        }
+
+        if (string.IsNullOrWhiteSpace(dbPath) || string.IsNullOrWhiteSpace(localAppData))
+        {
+            throw new InvalidOperationException("A test instance requires isolated database and app data paths.");
+        }
+
+        var identity = Encoding.UTF8.GetBytes($"{testInstance}\0{dbPath}\0{localAppData}");
+        var hash = Convert.ToHexString(SHA256.HashData(identity));
+        return "Local\\FileID-Test-" + hash[..24];
+    }
 
     /// <summary>harness hook. When the app is launched with
     /// <c>--auto-scan-folder &lt;path&gt;</c>, App.OnLaunched dispatches a
@@ -64,7 +83,13 @@ internal static class Program
 
         // Single-instance gate. Hold the mutex for the lifetime of the
         // process — `using` ensures it releases on any exit path.
-        using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
+        using var instanceMutex = new Mutex(
+            initiallyOwned: true,
+            name: ResolveInstanceMutexName(
+                Environment.GetEnvironmentVariable("FILEID_TEST_INSTANCE"),
+                Environment.GetEnvironmentVariable("FILEID_DB"),
+                Environment.GetEnvironmentVariable("LOCALAPPDATA")),
+            out bool createdNew);
         if (!createdNew)
         {
             // Another FileID is already running. Bring its window to the front and exit.
@@ -102,9 +127,7 @@ internal static class Program
         // Startup-trace: every step of the launch path writes to a small
         // file so when the app "opens then closes" we can diagnose without
         // a debugger attached. Cleared at the start of each launch.
-        var traceLogPath = System.IO.Path.Combine(
-            System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
-            "FileID", "logs", "startup-trace.txt");
+        var traceLogPath = System.IO.Path.Combine(Services.AppPaths.LogsDir, "startup-trace.txt");
         try
         {
             System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(traceLogPath)!);
