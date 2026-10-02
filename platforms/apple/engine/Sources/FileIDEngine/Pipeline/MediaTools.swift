@@ -69,7 +69,15 @@ public actor MediaTools {
     static var capabilities: [ToolCapability] {
         [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded downsize. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
          ToolCapability(id: "chapters", available: true, inputFormats: ["catalog chapters"], outputFormats: ["json", "vtt"], detail: "Export non-stale chapter markers. WebVTT is a chapter cue list, not a speech transcript."),
+         ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280 or 1920 pixels. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
          ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Stabilization, AI upscaling, and tracked reframing are not installed yet.")]
+    }
+
+    static func supports(_ recipe: ToolRecipe) -> Bool {
+        (1...8192).contains(recipe.maxDimension) &&
+        ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(recipe.format)) ||
+         (recipe.kind == "chapters" && ["json", "vtt"].contains(recipe.format)) ||
+         (recipe.kind == "video" && recipe.format == "mp4" && [1280,1920].contains(recipe.maxDimension)))
     }
 
     public func recover(database: Database) async {
@@ -98,8 +106,7 @@ public actor MediaTools {
     private func preview(_ request: ToolRequest, database: Database) async throws -> ToolResponse {
         guard let ids = request.fileIDs, !ids.isEmpty, ids.count <= 100, Set(ids).count == ids.count,
               let destination = request.destination, destination.hasPrefix("/"),
-              let recipe = request.recipe, (1...8192).contains(recipe.maxDimension),
-              (recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(recipe.format)) || (recipe.kind == "chapters" && ["json", "vtt"].contains(recipe.format)) else { throw Failure(text: "Choose files, an output folder, and a supported recipe.") }
+              let recipe = request.recipe, Self.supports(recipe) else { throw Failure(text: "Choose files, an output folder, and a supported recipe.") }
         let directory = URL(fileURLWithPath: destination).standardizedFileURL
         try ReadOnlyLocations.requireSourceMutation(directory)
         var isDirectory: ObjCBool = false
@@ -114,6 +121,7 @@ public actor MediaTools {
             let chapters = try await database.pool.read { db in try CatalogStore.chapters(db, fileID: fileID).filter { !$0.stale } }
             if recipe.kind == "chapters", chapters.isEmpty { throw Failure(text: "A selected file has no current chapter markers.") }
             if recipe.kind == "photo" { try Self.validateImage(sourceURL) }
+            if recipe.kind == "video" { _ = try await VideoConversionWorker.request(source: sourceURL, recipe: recipe) }
             let sourceHash = try Self.hash(sourceURL)
             let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export")
             let ext = recipe.format == "jpeg" ? "jpg" : recipe.format
@@ -150,6 +158,7 @@ public actor MediaTools {
         var plan = loaded.0
         let previous = loaded.1
         let state = loaded.2
+        guard Self.supports(plan.recipe) else { throw Failure(text: "This export recipe is unavailable on this platform.") }
         guard state == "preview", previous.isEmpty else { throw Failure(text: "This plan was already executed. Preview a fresh plan.") }
         for item in plan.items {
             try ReadOnlyLocations.requireSourceMutation(URL(fileURLWithPath: item.output.outputPath))
@@ -174,6 +183,7 @@ public actor MediaTools {
                 try await database.pool.write { db in try db.execute(sql: "UPDATE catalog_operations SET plan_json=? WHERE id=?", arguments: [checkpoint, id]) }
                 defer { try? FileManager.default.removeItem(at: stage) }
                 if plan.recipe.kind == "photo" { try await VideoFrameWorker.exportPhoto(source: source, output: stage, recipe: plan.recipe) }
+                else if plan.recipe.kind == "video" { _ = try await VideoConversionWorker.request(source: source, output: stage, recipe: plan.recipe) }
                 else { try Self.exportChapters(item.chapters, format: plan.recipe.format).write(to: stage, options: .withoutOverwriting) }
                 try Task.checkCancellation()
                 guard try Self.hash(source) == item.sourceHash else { throw Failure(text: "A source changed during export. No output was published for that file.") }
@@ -190,7 +200,7 @@ public actor MediaTools {
                 let modified = (try destination.resourceValues(forKeys: [.contentModificationDateKey])).contentModificationDate?.timeIntervalSince1970
                 let recipeJSON = String(decoding: try JSONEncoder().encode(plan.recipe), as: UTF8.self)
                 let published = receipts
-                let outputKind = plan.recipe.kind == "photo" ? "image" : "doc"
+                let outputKind = plan.recipe.kind == "photo" ? "image" : (plan.recipe.kind == "video" ? "video" : "doc")
                 let derived: Int64 = try await database.pool.write { db in
                     try db.execute(sql: "INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?,?,?,0,?,?,?)", arguments: [destination.path, StablePathHash.hash(destination.path), outputSize, modified, outputKind, destination.pathExtension])
                     let derived = db.lastInsertedRowID

@@ -1,5 +1,10 @@
 # NEXT — resume here
 
+
+## 2026-10-01 — Continue from bounded native video export
+
+IPC v1.4 and TOOLS.md describe native SDR H.264/AAC exports with actual worker/output/Undo tests. Port the worker and native Tools UI; do not let unsupported persisted recipes execute through a fallback adapter. Complete resource-safe portable execution/cancellation, trim/audio/remux/proxies, stabilization/enhancement/tracked reframing and broad adapters. Persistent hybrid retrieval, full People space isolation/backlog/calibration, typed chat execution, dense timeline/ASR/tracks, automatic chapters/best takes and all release gates remain active. Keep implementing and pushing verified milestones, preserve owner work and never modify Adlon.
+
 ## 2026-10-01 — Continue after versioned face metadata
 
 v22 and FACE_CACHE.md define new verified face-cache provenance and bounded refresh. Continue complete clustering-space isolation, durable refresh/backlog and incremental assignment; resolve ambiguous CLIP producer/query model namespaces before persistent hybrid indexing. Complete resource routing, typed chat execution, timeline shots/ASR/tracks/dense outcomes, best takes, media/broad tools and native port UI. Strict runtime egress remains blocked by the existing GitHub/NVIDIA runtime artifact download paths; replace them with vetted packaged runtime provisioning before release. Keep all accepted gates in NEXT_VERSION.md active, preserve owner edits, and keep Adlon read-only.

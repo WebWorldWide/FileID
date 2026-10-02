@@ -208,3 +208,5 @@ Native macOS photo/chapter exports and Rust adapter contracts now exist; TOOLS.m
 Initial memory headroom checks, native residency cancellation, and decoder-watchdog coverage are implemented. Parallel model/resource admission, inference worker isolation, and model/hardware measurements remain release gates; refer to SCHEDULER.md.
 
 Face-cache acceptance additionally requires legacy clustering-space isolation, complete resumable refresh/backlog handling, same-size/same-mtime replacement detection, held-out identity precision/recall and actual model inference checks. v22 provenance and synthetic geometry/migration tests establish none of those accuracy targets.
+
+Native H.264/AAC SDR export has generated portrait/audio/metadata/Undo tests. It still requires portable worker/UI parity and the full real-world timing/color/fidelity matrix before release; its bounded presets do not establish stabilization, AI enhancement or tracked reframing.

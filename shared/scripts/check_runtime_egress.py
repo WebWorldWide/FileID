@@ -77,6 +77,7 @@ EXCLUDED_SOURCE_PARTS = {
     "target", "obj", ".build", "deriveddata", "tests", "test", "benches", "examples", "scripts"
 }
 RAW_NETWORK_FILES = {
+    "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift",
     "platforms/windows/src/engine/src/downloader.rs",
     "platforms/windows/src/engine/src/models/vlm_server.rs",
@@ -134,6 +135,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "cd782e591ca9b87c2581ad8144b06a39ed420a1e8df05cd460c8771bea184fce",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "399b46043287e9c449758677a3342aaf38811cc37c10c178f122b98c039f2764",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "d4fc8afb58350108a600a0287d5c332d2f90b6d018e4257ed0c0dc0775cd6af2",

@@ -8,6 +8,13 @@
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+
+## 2026-10-01 — Native video conversion through the export journal
+
+IPC v1.4 adds a video recipe. Native Tools exports self-contained SDR MP4/MOV/M4V to H.264/AAC MP4 using Apple's 1280/1920 presets, preserving originals and using existing preview/fingerprint/staging/derivative/history/Undo receipts. A cancellable parent-monitored worker probes inputs and reopens outputs before publication, checking duration, streams, codecs and orientation. HDR, alpha, protected and auxiliary-track inputs fail explicitly. All external asset references are forbidden. Explicit MP4 MIME hints fixed real .part-stage validation failure. Rust revalidates saved recipes and rejects unavailable video operations before mutation. File Tools now opens in a separate native window; its app-owned session retains pending requests and recipe state across closing/reopening. Engine lifetime follows app termination rather than main-window disappearance. The app honors the engine database override for isolated UI fixtures. Native port video workers remain pending.
+
+Native full suite passed 428 tests; generated portrait/tone inputs cover actual export, audio timing, private metadata removal and Undo. Rust passed 383 library/384 executable tests plus two integrations and pinned 1.90 Clippy; C# conformance passed 46. The previous face-cache commit has all 18 hosted checks green. All 23 egress policy tests, the reviewed no-new-egress audit and final native app build pass. Actual isolated on-hardware UI checks confirm retained query/video settings, a live engine after closing the main window, and engine shutdown on app quit. Focused app reader tests pass. Inspect hosted CI on the latest push. Strict runtime egress's existing GitHub/NVIDIA baseline remains a release blocker. No dependency, weight, Adlon write or installed-release change is introduced.
+
 ## 2026-10-01 — Versioned face caches and source geometry
 
 Canonical v22 adds nullable actual-weight/processing/source metadata while preserving legacy People and corrections. Native extraction refreshes bounded outdated-cache batches, rejects source/database/bbox changes and invalid vectors, and publishes refreshed JPEGs only after committed embeddings. Rust tags new SFace results with the selected weight hash and processing version. SQL synchronizes observation membership, invalidates changed boxes and stale sources, and preserves manually edited observations. New portable bboxes include source dimensions so native thumbnail scaling cannot distort crops. FACE_CACHE.md records exact limits and remaining legacy clustering-space isolation/backlog/calibration work.

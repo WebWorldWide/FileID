@@ -4,7 +4,7 @@ import FileIDShared
 
 struct MainWindow: View {
     @State private var catalogPresented = false
-    @State private var toolsPresented = false
+    @Environment(\.openWindow) private var openWindow
     @State private var chatPresented = false
     let engine: EngineClient
     @State private var store = ReadStore()
@@ -82,13 +82,12 @@ struct MainWindow: View {
             .accentColor(Theme.gold)
         .toolbar {
             Button { chatPresented = true } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }.keyboardShortcut("k", modifiers: .command)
-            Button { toolsPresented = true } label: { Label("File Tools", systemImage: "wand.and.stars") }
+            Button { openWindow(id: "file-tools") } label: { Label("File Tools", systemImage: "wand.and.stars") }
             Button { catalogPresented = true } label: { Label("Search & Moments", systemImage: "sparkle.magnifyingglass") }
                 .keyboardShortcut("j", modifiers: .command)
         }
         .sheet(isPresented: $catalogPresented) { CatalogWorkbench(engine: engine) }
         .sheet(isPresented: $chatPresented) { ChatWorkbench(engine: engine) }
-        .sheet(isPresented: $toolsPresented) { ToolsWorkbench(engine: engine) }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()

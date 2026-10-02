@@ -9,6 +9,8 @@ import FileIDShared
 struct FileIDApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var engine = EngineClient()
+    @State private var toolsSession = ToolsSession()
+    @State private var engineStarted = false
     @State private var showWelcome = false
     @AppStorage("welcomeSheetSeen") private var welcomeSheetSeen: Bool = false
 
@@ -25,7 +27,7 @@ struct FileIDApp: App {
                 // traffic-light overlay.
                 .ignoresSafeArea()
                 .onAppear {
-                    engine.start()
+                    startEngineIfNeeded()
                     // Search falls back to keyword matching if CLIP
                     // isn't installed yet.
                     Task.detached {
@@ -38,7 +40,6 @@ struct FileIDApp: App {
                     ArcFaceModelInstaller.shared.refreshStatus()
                     if shouldShowWelcome() { showWelcome = true }
                 }
-                .onDisappear { engine.shutdown() }
                 .sheet(isPresented: $showWelcome) {
                     WelcomeSheet(engine: engine)
                         .onDisappear { welcomeSheetSeen = true }
@@ -62,6 +63,20 @@ struct FileIDApp: App {
                 }
             }
         }
+        Window("File Tools", id: "file-tools") {
+            ToolsWorkbench(engine: engine, session: toolsSession)
+                .background { LavaLampBackground().ignoresSafeArea() }
+                .preferredColorScheme(.dark)
+                .onAppear { startEngineIfNeeded() }
+        }
+        .defaultSize(width: 940, height: 720)
+    }
+
+    private func startEngineIfNeeded() {
+        appDelegate.engine = engine
+        guard !engineStarted else { return }
+        engineStarted = true
+        engine.start()
     }
 
     /// First launch, or any subsequent launch where a core sub-1 GB model
@@ -85,7 +100,12 @@ struct FileIDApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var engine: EngineClient?
+
+    func applicationWillTerminate(_ notification: Notification) { engine?.shutdown() }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         if let window = NSApplication.shared.windows.first {

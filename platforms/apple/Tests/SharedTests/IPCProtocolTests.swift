@@ -13,6 +13,7 @@ struct IPCProtocolTests {
         let commands: [IPCCommand.Payload] = [
             .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos",
                        rescan: false, excludedPaths: ["/Users/adam/photos/.cache"]),
+            .toolRequest(request: ToolRequest(requestID: "video", action: "preview", fileIDs: [1], destination: "/internal", recipe: ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920))),
             .pauseScan,
             .resumeScan,
             .cancelScan,

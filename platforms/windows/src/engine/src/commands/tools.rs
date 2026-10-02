@@ -49,7 +49,13 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
 fn capabilities() -> Vec<ToolCapability> {
     vec![ToolCapability{id:"photo".into(),available:true,input_formats:vec!["png".into(),"jpeg".into()],output_formats:vec!["png".into(),"jpeg".into(),"tiff".into()],detail:"Single-image conversion and bounded downsize. EXIF orientation is applied. Camera/location metadata is stripped; inputs with embedded ICC profiles are rejected until color-managed conversion is available. Output is 8-bit SDR. JPEG transparency is flattened onto white. HEIC/TIFF inputs are not yet supported on this adapter.".into()},
     ToolCapability{id:"chapters".into(),available:true,input_formats:vec!["catalog chapters".into()],output_formats:vec!["json".into(),"vtt".into()],detail:"Export current chapter markers. WebVTT is a chapter cue list, not speech subtitles.".into()},
+    ToolCapability{id:"video".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Native video export is currently macOS-only; the portable worker is not available.".into()},
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
+}
+fn supports(recipe: &ToolRecipe) -> bool {
+    (1..=8192).contains(&recipe.max_dimension) &&
+    ((recipe.kind=="photo" && ["png","jpeg","tiff"].contains(&recipe.format.as_str())) ||
+     (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str())))
 }
 fn hash(path: &Path) -> Result<String> {
     let metadata=fs::symlink_metadata(path)?;
@@ -81,7 +87,7 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
         "preview"=> {
             let ids=request.file_ids.as_ref().context("Choose files")?;
             let recipe=request.recipe.as_ref().context("Choose a recipe")?;
-            if ids.is_empty() || ids.len()>100 || ids.iter().collect::<HashSet<_>>().len()!=ids.len() || !(1..=8192).contains(&recipe.max_dimension) || !((recipe.kind=="photo" && ["png","jpeg","tiff"].contains(&recipe.format.as_str())) || (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str()))) {bail!("Unsupported export recipe")}
+            if ids.is_empty() || ids.len()>100 || ids.iter().collect::<HashSet<_>>().len()!=ids.len() || !supports(recipe) {bail!("Unsupported export recipe")}
             let destination=Path::new(request.destination.as_deref().context("Choose an output folder")?);
             read_only::require_source_mutation(destination)?;
             if !destination.is_absolute() || !destination.is_dir() {bail!("The output folder must already exist")}
@@ -116,6 +122,7 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
         "execute"=> {
             let id=request.operation_id.as_deref().context("Preview an export first")?;
             let (mut plan,previous,state)=load(conn,id)?;
+            if !supports(&plan.recipe) {bail!("This export recipe is unavailable on this platform")}
             if state!="preview" || !previous.is_empty() {bail!("This plan was already executed. Preview a fresh plan")}
             for item in &plan.items {
                 if plan.recipe.kind=="chapters" {
@@ -278,6 +285,19 @@ mod tests {
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
     fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None}}
+    #[test]
+    fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
+        let mut fixture=Fixture::new();
+        let request=fixture.request("png");
+        let preview=execute(&mut fixture.conn,&request).unwrap();
+        let id=preview.operation_id.clone().unwrap();
+        fixture.conn.execute("UPDATE catalog_operations SET plan_json=json_set(plan_json,'$.recipe.kind','video','$.recipe.format','mp4','$.recipe.maxDimension',1280) WHERE id=?1",[&id]).unwrap();
+        let error=execute(&mut fixture.conn,&action(Some(id.clone()),"execute")).unwrap_err();
+        assert!(error.to_string().contains("unavailable on this platform"));
+        assert_eq!(fixture.conn.query_row("SELECT state FROM catalog_operations WHERE id=?1",[&id],|r|r.get::<_,String>(0)).unwrap(),"preview");
+        assert!(!Path::new(&preview.outputs[0].output_path).exists());
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
     #[test]
     fn conversion_validates_outputs_links_derivatives_and_undo_is_recoverable() {
         let mut fixture=Fixture::new();let request=fixture.request("jpeg");let original=hash(&fixture.source).unwrap();

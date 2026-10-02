@@ -56,7 +56,10 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public static var defaultDBURL: URL {
-        AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
+        if let path = ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
     }
 
     private static let suppressedDisplayTags: Set<String> = [

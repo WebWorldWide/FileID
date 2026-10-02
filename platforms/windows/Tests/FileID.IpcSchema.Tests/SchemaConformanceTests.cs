@@ -138,7 +138,7 @@ public class SchemaConformanceTests
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
         new ChatRequestCommand(new ChatRequest("chat", "c", "send", "birthday", true)),
-        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("photo", "png", 4096), "plan")),
+        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("video", "mp4", 1920), "plan")),
         new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
         new PauseScanCommand(),

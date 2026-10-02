@@ -165,3 +165,7 @@ Initial model admission and native residency leases are documented in SCHEDULER.
 ## Versioned face evidence (v22)
 
 Canonical shared/catalog/v22.sql adds nullable weight, processing, and source-revision metadata without relabeling legacy vectors. New native refreshes and Rust scan results create model-separated 128-d catalog vectors and uncalibrated observations, synchronize person assignment and exclusion, and invalidate changed boxes. Native processing refreshes bounded batches with source and database revision checks; JPEG encoding happens outside the transaction and publication follows committed rows. Legacy clustering still consumes its older embedding table: full space isolation, durable rebuild/backlog scheduling, incremental identity assignment and held-out calibration remain required.
+
+## Native video tools (IPC v1.4)
+
+The existing export journal now admits a video/mp4 recipe at 1280 or 1920 pixels on macOS. Probing, decoding, export and output verification run in a cancellable engine subprocess. Inputs are restricted to single-video SDR containers with at most one audio track; unsupported tracks/HDR/alpha/protected content are rejected. External asset references are forbidden. Output validation runs before the original/derived transaction and collision-safe publication. The portable adapter advertises this capability as unavailable and revalidates saved recipes before touching outputs. See TOOLS.md for exact limits; broad media operations and port parity remain pending.

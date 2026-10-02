@@ -212,3 +212,5 @@ Initial runtime memory admission now checks physical/system reserves and availab
 ## Face weight provenance (2026-10-01)
 
 Loaded SFace sessions now record an actual SHA-256 fingerprint of their selected ONNX file, including portable execution-provider variants. v22 stores that hash separately from the platform processing version and source revision; unknown legacy vectors are not stamped as verified current weights. This is cache provenance, not model promotion or identity-confidence calibration. New catalog face observations use confidence zero until held-out calibration exists. The legacy mobileclip_s2 storage label remains ambiguous for older/native CLIP vectors and must be resolved through verified producers and model-aware retrieval; do not relabel existing vectors by dimensionality.
+
+Native MP4 transcodes use AVFoundation operating-system codecs and no AI model. Conversion is not enhancement or best-take understanding; no model comparison/promotion follows from generated video fixtures.
