@@ -21,6 +21,9 @@ def next_reply(engine):
             continue
         if "log" in payload:
             continue
+        # Swift can publish model availability after ready; this probe tests only the command channel.
+        if payload.get("error", {}).get("_0", {}).get("kind") == "deep_analyze_unavailable":
+            continue
         assert len(payload) == 1, payload
         return payload
     raise TimeoutError("Engine did not acknowledge the health probe")

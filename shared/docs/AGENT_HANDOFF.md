@@ -12,6 +12,8 @@ The current health-contract branch adds canonical IPC v1.5, Rust/C# health mirro
 
 Next restore generation-bound Windows waiters and lifecycle integration using this canonical operation. Register before write, resolve on the stdout reader before UI dispatch, and retire old-generation waiters before cleanup publishes a replacement generation. Preserve the broader safety groups below and inspect the archived checkpoint narrowly.
 
+The isolated Windows safety restoration is now preserved in remote annotated tag `archive/2026-10-02/windows-safety-restore-stage1`, peeled commit `2d8798c6066e1f4a0fe8341f5c94f897cfbcb44f`. Its thirteen restored files have not been built or validated. Continue in `/Users/adamnolle/.codex/worktrees/windows-safety-restore/FileID`; do not merge the entire checkpoint.
+
 ## First priority: Windows safety and real test execution
 
 Recovery tag: archive/2026-10-02/windows-test-parity-wip at 5d06976c7aa8171a201dbe183f941d6dab896ff9. This is an unfinished, unvalidated recovery checkpoint; do not merge it wholesale.
