@@ -3,7 +3,7 @@
 // Phase 1 — extract ArcFace embeddings lazily for any face_prints rows
 //           that only have a bbox + crop. Bounded concurrency avoids
 //           ANE thrash.
-// Phase 2 — load every embedded, non-excluded row.
+// Phase 2 — require compatible, current embeddings before loading.
 // Phase 3 — IdentityClustering: two-pass density + Pass 3 quality
 //           validation. Replaces Chinese Whispers.
 // Phase 4 — persist persons + face_prints.person_id assignments.
@@ -35,6 +35,7 @@ public enum FaceClustering {
         case invalidPartition(String)
         case protectedClusterCap
         case verdictCap
+        case incompatibleFaceCache
     }
 
     static func currentPersonCount(database: Database) async -> Int {
@@ -48,18 +49,52 @@ public enum FaceClustering {
         }
     }
 
-    struct ClusteringFaceRow: Sendable {
+    struct ClusteringFaceRow: Equatable, Sendable {
         let id: Int64
         let arcFace: Data
         let quality: Double
+    }
+
+    struct EmbeddingSpace: Equatable, Sendable {
+        let model: String
+        let processing: String
+    }
+
+    static func compatibleEmbeddingSpace(from db: GRDB.Database, expected: EmbeddingSpace? = nil) throws -> EmbeddingSpace? {
+        let cursor = try GRDB.Row.fetchCursor(db, sql: """
+            SELECT fp.arcface_embedding,fp.embedding_model,fp.processing_version,fp.source_revision,r.revision
+            FROM face_prints fp
+            LEFT JOIN persons p ON p.id=fp.person_id
+            LEFT JOIN catalog_revisions r ON r.file_id=fp.file_id
+            WHERE fp.excluded=0 AND COALESCE(p.is_unknown,0)=0 AND LENGTH(fp.arcface_embedding)>0
+            """)
+        var selected = expected
+        var count = 0
+        while let row = try cursor.next() {
+            count += 1
+            guard count <= maxFacesPerRun else { throw FaceProtectionError.incompatibleFaceCache }
+            guard let model: String = row["embedding_model"], !model.isEmpty,
+                  let processing: String = row["processing_version"], !processing.isEmpty,
+                  let revision: String = row["source_revision"], !revision.isEmpty,
+                  let current: String = row["revision"], revision == current,
+                  let blob: Data = row["arcface_embedding"], FaceAnalysisCache.normalized(blob) else {
+                throw FaceProtectionError.incompatibleFaceCache
+            }
+            let space = EmbeddingSpace(model: model, processing: processing)
+            if let selected, selected != space { throw FaceProtectionError.incompatibleFaceCache }
+            selected = space
+        }
+        return selected
     }
 
     static func loadClusteringFaceRows(
         from db: GRDB.Database,
         phaseZeroUnknownFaceIDs: Set<Int64>,
         minQuality: Double,
-        limit: Int
+        limit: Int,
+        expectedSpace: EmbeddingSpace? = nil
     ) throws -> (rows: [ClusteringFaceRow], overflowed: Bool) {
+        _ = try compatibleEmbeddingSpace(from: db, expected: expectedSpace)
         let cursor = try GRDB.Row.fetchCursor(db, sql: """
             SELECT face_prints.id, face_prints.arcface_embedding, face_prints.face_quality
             FROM face_prints
@@ -537,7 +572,8 @@ public enum FaceClustering {
                     from: db,
                     phaseZeroUnknownFaceIDs: unknownFaceIDs,
                     minQuality: clusterMinQuality,
-                    limit: maxFacesPerRun
+                    limit: maxFacesPerRun,
+                    expectedSpace: ArcFaceService.shared.modelVersion.map { EmbeddingSpace(model: $0, processing: FaceAnalysisCache.processingVersion) }
                 )
             }
         } catch {
@@ -548,7 +584,7 @@ public enum FaceClustering {
                 // release keys on the `face_cluster` prefix, so this still
                 // releases it. (audit F-C2-003)
                 kind: "face_clustering_failed",
-                message: "Could not load face prints: \(error)"
+                message: "Face caches need a compatible refresh before clustering. Existing People and assignments were preserved. Continue face processing; stale, legacy or mixed model vectors cannot be compared."
             )))
             let personCount = await currentPersonCount(database: database)
             return FaceClusteringResult(personCount: personCount, faceCount: 0,
@@ -729,7 +765,7 @@ public enum FaceClustering {
             // the outer `var` bindings from concurrently-executing code. Both
             // are read-only here and arrays are copy-on-write, so this is a
             // reference bump, not a deep copy.
-            stats = try await database.pool.write { [denseToFaceID, vecsByDense] db -> PersistStats in
+            stats = try await database.pool.write { [denseToFaceID, vecsByDense, rows] db -> PersistStats in
                 // RE-READ the identity snapshot HERE — under the persist lock,
                 // inside the transaction, BEFORE the DELETE below — not from the
                 // PHASE-0 capture. Re-clustering drops + re-creates persons on
@@ -739,6 +775,8 @@ public enum FaceClustering {
                 // clobbered by a stale snapshot. The PHASE-0 read still drives the
                 // extraction/clustering pool filtering; only the name carry-forward
                 // moves under the lock. (audit F-C3-002 / Windows S0)
+                let currentRows = try Self.loadClusteringFaceRows(from: db, phaseZeroUnknownFaceIDs: unknownFaceIDs, minQuality: clusterMinQuality, limit: maxFacesPerRun, expectedSpace: ArcFaceService.shared.modelVersion.map { EmbeddingSpace(model: $0, processing: FaceAnalysisCache.processingVersion) })
+                guard !currentRows.overflowed, currentRows.rows == rows else { throw FaceProtectionError.incompatibleFaceCache }
                 let freshPriors = try Self.priorAnchors(from: db)
                 let differentPairs = try Self.differentFacePairs(from: db)
                 var ownerByFaceID: [Int64: Int64] = [:]
@@ -1043,6 +1081,7 @@ public enum FaceClustering {
             let named: Bool
         }
         struct ReadData: Sendable {
+            let space: EmbeddingSpace?
             let rows: [CentroidRow]
             // "Different people" verdicts projected onto the persons that own
             // the anchor faces RIGHT NOW (after the phase-4 persist).
@@ -1055,6 +1094,7 @@ public enum FaceClustering {
         let data: ReadData
         do {
             data = try await database.pool.read { db -> ReadData in
+                let space = try compatibleEmbeddingSpace(from: db)
                 let input = try GRDB.Row.fetchOne(db, sql: """
                     SELECT COUNT(DISTINCT fp.person_id) AS persons,
                            COUNT(*) AS embeddings,
@@ -1063,6 +1103,7 @@ public enum FaceClustering {
                     FROM face_prints fp
                     INNER JOIN persons p ON p.id = fp.person_id
                     WHERE fp.person_id IS NOT NULL
+                      AND fp.excluded=0
                       AND LENGTH(fp.arcface_embedding) > 0
                       AND COALESCE(p.is_unknown, 0) = 0
                     """)
@@ -1075,7 +1116,7 @@ public enum FaceClustering {
                     embeddingCount: embeddingCount,
                     embeddingBytes: embeddingBytes,
                     maxEmbeddingBytes: maxEmbeddingBytes) else {
-                    return ReadData(rows: [], verdictPersonPairs: [],
+                    return ReadData(space: space, rows: [], verdictPersonPairs: [],
                                     eligiblePersonCount: eligiblePersonCount,
                                     embeddingCount: embeddingCount,
                                     embeddingBytes: embeddingBytes,
@@ -1096,6 +1137,7 @@ public enum FaceClustering {
                     FROM face_prints fp
                     INNER JOIN persons p ON p.id = fp.person_id
                     WHERE fp.person_id IS NOT NULL
+                      AND fp.excluded=0
                       AND LENGTH(fp.arcface_embedding) > 0
                       AND COALESCE(p.is_unknown, 0) = 0
                     """)
@@ -1149,7 +1191,7 @@ public enum FaceClustering {
                         pairs.append((personA, personB))
                     }
                 }
-                return ReadData(rows: rows, verdictPersonPairs: pairs,
+                return ReadData(space: space, rows: rows, verdictPersonPairs: pairs,
                                 eligiblePersonCount: eligiblePersonCount,
                                 embeddingCount: embeddingCount,
                                 embeddingBytes: embeddingBytes,
@@ -1325,6 +1367,7 @@ public enum FaceClustering {
         let merged: Int
         do {
             merged = try await database.pool.write { db -> Int in
+                _ = try Self.compatibleEmbeddingSpace(from: db, expected: data.space)
                 // R3-11: re-read identity UNDER the writer lock before deleting. A
                 // rename / mark-unknown the user committed during the lock-free
                 // compute window (on macOS the app writes the persons table on its
@@ -1560,10 +1603,8 @@ public enum FaceClustering {
         }
         return personRows.map { r -> PriorAnchor in
             let pid: Int64 = r["id"] ?? 0
-            let centroid: [Float]? = (r["centroid"] as Data?).flatMap { blob in
-                let v = ArcFaceService.blobToEmbedding(blob)
-                return v.isEmpty ? nil : v
-            }
+            // Legacy person centroids have no model namespace; inherit by face IDs.
+            let centroid: [Float]? = nil
             let radius: Float? = (r["anchor_radius"] as Double?).map { Float($0) }
             let isUnknownInt: Int = r["is_unknown"] ?? 0
             return PriorAnchor(

@@ -1,6 +1,11 @@
 # NEXT — resume here
 
 
+
+## 2026-10-01 — Continue from compatible face-space guards
+
+FACE_CACHE.md records the conservative whole-pass guard. Do not relabel legacy vectors, accept mixed processing namespaces or use unversioned person centroids to bypass it. Complete durable bounded refresh and explicit failure/offline coverage, namespace-aware incremental assignment and stable user-managed IDs, then held-out calibration. The current guard can defer clustering until a legacy cache refresh finishes. Native suite is 430; Rust is 385 library/386 executable plus two integrations. The full accepted ledger remains active. Continue verified pushes and keep owner edits and Adlon untouched.
+
 ## 2026-10-01 — Continue from bounded native video export
 
 IPC v1.4 and TOOLS.md describe native SDR H.264/AAC exports with actual worker/output/Undo tests. Port the worker and native Tools UI; do not let unsupported persisted recipes execute through a fallback adapter. Complete resource-safe portable execution/cancellation, trim/audio/remux/proxies, stabilization/enhancement/tracked reframing and broad adapters. Persistent hybrid retrieval, full People space isolation/backlog/calibration, typed chat execution, dense timeline/ASR/tracks, automatic chapters/best takes and all release gates remain active. Keep implementing and pushing verified milestones, preserve owner work and never modify Adlon.

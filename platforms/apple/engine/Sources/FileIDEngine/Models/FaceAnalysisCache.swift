@@ -54,7 +54,7 @@ enum FaceAnalysisCache {
         return db.changesCount == 1
     }
 
-    private static func normalized(_ data: Data) -> Bool {
+    static func normalized(_ data: Data) -> Bool {
         guard data.count == 128 * 4 else { return false }
         var sum = 0.0
         for offset in stride(from: 0, to: data.count, by: 4) {

@@ -9,6 +9,13 @@
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
 
+
+## 2026-10-01 — Reject incompatible face spaces before clustering
+
+Both engines require coherent model/processing provenance, current catalog source revisions and normalized finite 128-d vectors before comparing faces. Native verifies the selected runtime space and rereads its input before persist; auto-merge ignores excluded faces and rechecks its space. Rust verifies its snapshot and returns current People unchanged for empty input. Unversioned stored person centroids no longer drive identity inheritance; face-ID overlap remains. Oversized batches reject instead of wiping an unexamined tail.
+
+Native full suite passed 430 tests; Rust passed 385 library/386 executable tests plus two integrations. Focused deadline tests and the fresh native full run pass with original assertions after an earlier host-contention failure. No model promotion, dependency, threshold calibration or Adlon write is introduced. Durable incremental clustering, stable identity IDs and complete refresh/coverage remain required; legacy/offline caches may defer a whole pass. Native app build, actual pinned Rust 1.90 Clippy, cross-engine catalog/face/tool/chat round trips, schema/current-doc checks, three clean binary privacy scans and the no-new-egress audit pass. The strict runtime egress baseline still blocks release. Video commit 40db581 has all 18 hosted checks green; inspect newer commits independently.
+
 ## 2026-10-01 — Native video conversion through the export journal
 
 IPC v1.4 adds a video recipe. Native Tools exports self-contained SDR MP4/MOV/M4V to H.264/AAC MP4 using Apple's 1280/1920 presets, preserving originals and using existing preview/fingerprint/staging/derivative/history/Undo receipts. A cancellable parent-monitored worker probes inputs and reopens outputs before publication, checking duration, streams, codecs and orientation. HDR, alpha, protected and auxiliary-track inputs fail explicitly. All external asset references are forbidden. Explicit MP4 MIME hints fixed real .part-stage validation failure. Rust revalidates saved recipes and rejects unavailable video operations before mutation. File Tools now opens in a separate native window; its app-owned session retains pending requests and recipe state across closing/reopening. Engine lifetime follows app termination rather than main-window disappearance. The app honors the engine database override for isolated UI fixtures. Native port video workers remain pending.
