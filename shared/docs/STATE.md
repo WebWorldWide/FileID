@@ -1,6 +1,15 @@
 # FileID — State
 
-## 2026-10-02 — Canonical health probes and genuine IPC test gate (under review)
+## 2026-10-02 — macOS verified CLIP embedding compatibility
+
+Mac search and restructure now use a shared CLIP space identity derived from the pinned image encoder, text encoder, tokenizer artifacts and preprocessing version. Local model loading verifies those artifact hashes. Newly inferred vectors must be finite, 512-dimensional and normalized; legacy `mobileclip_s2`, malformed and failed-file candidates are excluded rather than relabeled. Rescans refresh legacy image/video caches without replacing accepted names, user tags or face assignments. An unrenderable legacy OBJ clears only its incompatible derived embedding and records the completed attempt.
+
+Native engine build and all 445 Swift tests across 91 suites pass with the actual worker binary. Native app build and actual-process health IPC checks also pass. The cross-engine catalog fixture was not rerun locally for this milestone because the prior Rust binary was unavailable; unchanged Rust behavior remains covered by CI. The reviewed egress-baseline check passes; six existing strict release blockers remain. No model weights were downloaded and no accuracy or retrieval-latency gain is claimed. Persistent nearest-neighbor indexes and hybrid engine search remain next work.
+
+Owner priority is now macOS first; new Windows/Linux implementation and physical acceptance wait for the owner's PC. PR #194 merged after all 18 exact-head checks passed. Its fresh merged-main checks are still running. The unvalidated thirteen-file Windows restoration is preserved at `archive/2026-10-02/windows-safety-restore-rebased` (`e5f51dbe621a285327b15a07e984e36125ca6b22`); do not merge the older broad WIP wholesale.
+
+
+## 2026-10-02 — Canonical health probes and genuine IPC test gate (merged in PR #194)
 
 IPC v1.5 promotes the existing native health probe into the canonical contract and Rust/C# mirrors. Valid replies echo a bounded ASCII nonce and the actual process ID; invalid probes fail without echoing the input, and no probe re-emits ready or starts analysis. A shared actual-process fixture covers batched correlation, boundary/invalid nonces and recovery after rejection. The catalog fixture harness now explicitly decodes the UTF-8 wire protocol on Windows.
 

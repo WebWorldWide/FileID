@@ -2,19 +2,25 @@
 
 The accepted next-version goal remains active after the owner resumed sustained work. Preserve the requested recovery checkpoint, validated main integrations, GitHub branch cleanup and Adlon CI evidence while continuing the full plan. A milestone does not complete the release or authorize pausing the resumed goal. Continue from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
 
+## Current owner priority
+
+The owner has a Windows/Linux PC and deferred new port implementation and hardware validation until working there. Continue the full macOS plan first; retain the port backlog below for that machine. Health PR #194 passed all eighteen checks at 455f3f0e55eda40f654ee476e510138f5c3e9de8 and merged at db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf. Fresh merged-main CI is running and still requires inspection.
+
+The rebased, unvalidated thirteen-file Windows restoration is preserved at remote annotated tag archive/2026-10-02/windows-safety-restore-rebased, commit e5f51dbe621a285327b15a07e984e36125ca6b22. Inspect its final commit narrowly from a new branch based on latest main when resuming on the PC. The earlier stage-one worktree is archived; its tag and broader WIP remain available.
+
 ## Integrated work
 
 Foundation PR #186, runner bootstrap #188, stable People identities #189, and transactional People merges #190 are merged. PR #190 passed all sixteen checks at 02c6ff9da97e8b1125f8eb78e36956e09baade14 before merge. Swift passes 437 tests / 89 suites; Rust passes 393 library and 394 executable tests plus two registry integrations, with two preexisting ignored corpus cases. Actual-process merge fixtures cover six cases per engine, including stale selections and forced SQLite rollback. Explicit user merges still delete source person rows; aliases/history remain unfinished.
 
-## Health contract follow-up (under review)
+## macOS continuation
 
-The current health-contract branch adds canonical IPC v1.5, Rust/C# health mirrors, bounded nonce validation in both engines and shared real-process fixtures. C# passes 48 tests, format verification and nine TRX guard cases on the Adlon Windows VM. Fresh Rust 1.90/Swift and exact-head hosted/main CI acceptance are still pending. Windows now has a dedicated non-skippable IPC suite/report/format gate; the legacy app-service test block remains incorrect. Do not claim full Windows app-suite acceptance.
+The verified CLIP-space change is the active milestone. Run native Swift tests with `FILEID_TEST_ENGINE_PATH` pointing at the freshly built worker, and serialize native builds on this 16 GB Mac. New cache rows use the pinned artifact/preprocessing identity; old rows are refreshed through inference during rescans, never relabeled by dimension. Persistent indexing, engine-owned hybrid retrieval, the scheduler and the rest of `NEXT_VERSION.md` remain unfinished. Do not equate passing synthetic fixtures with model accuracy or hardware acceptance.
 
-Next restore generation-bound Windows waiters and lifecycle integration using this canonical operation. Register before write, resolve on the stdout reader before UI dispatch, and retire old-generation waiters before cleanup publishes a replacement generation. Preserve the broader safety groups below and inspect the archived checkpoint narrowly.
+## Health contract follow-up (merged)
 
-The isolated Windows safety restoration is now preserved in remote annotated tag `archive/2026-10-02/windows-safety-restore-stage1`, peeled commit `2d8798c6066e1f4a0fe8341f5c94f897cfbcb44f`. Its thirteen restored files have not been built or validated. Continue in `/Users/adamnolle/.codex/worktrees/windows-safety-restore/FileID`; do not merge the entire checkpoint.
+PR #194 passed all eighteen checks at `455f3f0e55eda40f654ee476e510138f5c3e9de8` and merged to `db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf`. Rust 1.90 and all 438 then-current Swift tests passed; actual-process health probes passed for both engines. The dedicated Windows IPC gate executes all 48 tests, TRX validation and formatting. Inspect fresh merged-main CI; legacy full app service-test discovery still skips. On the PC, wire generation-bound health waiters into the UI lifecycle and retire old-generation waiters before publishing a replacement generation.
 
-## First priority: Windows safety and real test execution
+## Deferred PC priority: Windows safety and real test execution
 
 Recovery tag: archive/2026-10-02/windows-test-parity-wip at 5d06976c7aa8171a201dbe183f941d6dab896ff9. This is an unfinished, unvalidated recovery checkpoint; do not merge it wholesale.
 

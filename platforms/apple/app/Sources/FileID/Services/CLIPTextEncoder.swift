@@ -66,6 +66,12 @@ public final class CLIPTextEncoder: @unchecked Sendable {
 
         let dir = Self.defaultDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return false }
+        guard CLIPEmbeddingSpace.verifyArtifact(at: Self.defaultModelURL, id: "clip_vitb32_text"),
+              CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("vocab.json"), id: "clip_bpe_vocab"),
+              CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("merges.txt"), id: "clip_bpe_merges") else {
+            NSLog("FileID CLIP text: artifact verification failed; semantic search unavailable")
+            return false
+        }
         guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
             NSLog("FileID CLIP text: vocab.json or merges.txt not found in %@", redactPathForLog(dir.path))
             return false

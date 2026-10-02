@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Current owner priority and retrieval gate (2026-10-02)
+
+Complete the Mac next-version implementation first; new Windows/Linux implementation and physical acceptance are deferred until the owner works on the PC. Verified CLIP cache identity is a prerequisite, not completion of the persistent search-index gate. Native accuracy, broad best-take evaluation, conversion fidelity, physical hardware, strict offline egress, signing and all remaining `NEXT_VERSION.md` acceptance gates remain open.
+
 ## 2026-10-02 — CI infrastructure checkpoint, release still blocked
 
 Reviewed main Linux and Windows builds route to repository-scoped Adlon runners on separate existing CI guest disks; PRs, macOS and native Windows ARM64 remain hosted. See CI_RUNNERS.md for exact service accounts, completed results and the capacity/compiler fixes. Corpus /srv/data remains unmounted and untouched. No release was published for this runner setup.

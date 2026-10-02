@@ -1,5 +1,9 @@
 # Architecture — cross-platform overview
 
+## macOS semantic-cache compatibility (2026-10-02)
+
+The engine writes CLIP embeddings with the shared pinned artifact/preprocessing identity. Native semantic search and restructure accept only compatible finite normalized 512-dimensional vectors. Rescans refresh legacy image/video embeddings through fresh inference without rebuilding user evidence. SQLite remains authoritative and the native retrieval loop is still a flat scan; persistent incremental indexes and engine-owned hybrid search remain outstanding.
+
 FileID is split across three platform implementations that share a contract, a database schema, and a visual language. This document describes the parts that are common; per-platform `CLAUDE.md` files describe what's specific.
 
 ## Process model
