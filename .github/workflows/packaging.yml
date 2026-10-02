@@ -2,7 +2,7 @@ name: Packaging (Linux — Flatpak)
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/store-msix]
     paths:
       - 'packaging/**'
       - 'platforms/linux/**'
@@ -30,11 +30,16 @@ concurrency:
 jobs:
   flatpak:
     name: Flatpak (GNOME 49) — x64
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","fileid-adlon"]') }}
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
 
       - name: Verify generated offline Cargo sources
         run: |

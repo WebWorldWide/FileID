@@ -2,7 +2,7 @@ name: Native tools (engine + CLI + TUI)
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/store-msix]
     paths:
       - 'platforms/cli/**'
       - 'platforms/tui/**'
@@ -44,27 +44,38 @@ jobs:
         include:
           - label: Windows x64
             artifact: windows-x64
-            runner: windows-latest
+            runner: [self-hosted, Windows, X64, fileid-adlon]
+            hosted_runner: windows-2022
           - label: Windows arm64
             artifact: windows-arm64
             runner: windows-11-arm
+            hosted_runner: windows-11-arm
           - label: macOS arm64
             artifact: macos-arm64
             runner: macos-15
+            hosted_runner: macos-15
           - label: macOS x64
             artifact: macos-x64
             runner: macos-15-intel
+            hosted_runner: macos-15-intel
           - label: Linux x64
             artifact: linux-x64
-            runner: ubuntu-24.04
+            runner: [self-hosted, Linux, X64, fileid-adlon]
+            hosted_runner: ubuntu-24.04
           - label: Linux arm64
             artifact: linux-arm64
             runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+            hosted_runner: ubuntu-24.04-arm
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && matrix.hosted_runner || matrix.runner }}
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
 
       - name: Install Rust 1.90
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable

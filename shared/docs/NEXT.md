@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## 2026-10-02 — Adlon CI/CD (current)
+
+- Validate the new pipeline on the existing online Adlon Windows/Linux FileID runners. Windows VM has VS 2022 packaging/PriGen, VSTest and x64 MakeAppx. [CI.md](CI.md) records labels, routing, manual dispatch, native-platform coverage and operations.
+- Inspect exact-head Store/app/policy jobs and runner names; dispatch manually if no push run appears. Keep Partner Center draft. Store artifacts stay on GitHub until release readiness and listing review are complete.
+- Continue the 23 app test compile diagnostics and 27 failing contracts. The current stop method hides timeouts, restart can proceed after an unconfirmed stop, fallback wipe can delete a live DB, and window close currently fires shutdown after closing. Fix actual lifecycle/close behavior before treating the compile-only final-close predicate as complete. Persisted undo discovery must match the engine's journal format; existing engine journals are headerless and shortcuts currently lack a persisted undo manifest. Do not add parser APIs solely to satisfy tests.
+
 ## 2026-10-01 — Health channel checkpoint (current)
 
 - Health IPC/startup verification is implemented. All 10 health tests, 54 IPC tests, full Rust tests/clippy, changed C# formatting, runtime egress gate and 24 gate tests passed. A live isolated engine answered three nonce/PID probes, rejected malformed input, recovered with another valid probe, then shut down cleanly.

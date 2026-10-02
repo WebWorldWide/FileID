@@ -1,3 +1,10 @@
+## 2026-10-02 — Adlon CI/CD runner routing
+
+- Owner requested Adlon as the CI/CD executor. Verified registered `adlon-fileid-linux` and `adlon-fileid-windows` runners are online. Adlon's running Windows VM has VS 2022 Build Tools 17.14, packaging/PriGen tasks, VSTest and Windows SDK x64 MakeAppx; no VM/service was restarted.
+- Windows/x64 and Linux/x64 validation, packaging and deployment jobs now select FileID's Adlon runners. Native macOS/native ARM64 jobs retain native hosted coverage; fork PRs use hosted runners. Existing publishing controls and least-privilege permissions are preserved, and Store packaging still creates only a GitHub artifact.
+- Added explicit pinned Python setup and VS 2022 selection, a Windows CI toolchain preflight, Store-branch push triggers, Windows test/schema path triggers, and per-ref Windows run cancellation. Workflow YAML, matrix/fork routing checks, PowerShell parsing, 9 action-pin tests, 5 workflow-permission tests, bootstrap policy and current-doc contracts passed locally. Actual Adlon jobs must now be dispatched/observed before claiming a remote build pass.
+- Configuration and operations are in [CI.md](CI.md). Application behavior has not changed in this checkpoint: 23 test compile diagnostics and 27 observed contract failures still block Store readiness. Resume lifecycle/persisted-undo fixes after the runner migration. Partner Center remains draft.
+
 ## 2026-10-01 — Verified engine startup health checkpoint
 
 - Added canonical health nonce/PID IPC matching the Swift reference and mirrored it in Windows Rust/C#. Startup stays Starting until the captured process answers; stdout resolves matching waiters before UI dispatch. Cleanup retires the old generation, and late registration/duplicate nonce/timeout/cancellation cases are covered. Unexpected transport failure uses bounded recovery of the captured engine; expected shutdown is exempt and no idle heartbeat runs.
