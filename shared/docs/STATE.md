@@ -11,8 +11,9 @@
 - Signed-in Microsoft account verified as `adammnolle@gmail.com`; two-step verification is ON. Gmail and Google Authenticator are up to date. No security methods changed. Partner Center app `9PC8HSD86887` shows FileID's application overview with “Start submission”; it remains a draft. No Partner Center upload, submission, or publication occurred.
 - Fixed the Suggested Merges sheet's missing feedback during its potentially long engine query: added an indeterminate busy indicator, clear it on success, timeout, error, and terminal render, and keep it active while no result has arrived.
 - Focused Suggested Merges tests passed 3/3. Analyzer-enabled Release app build now succeeds. Full Release app suite reports 395 passed, 38 failed, 433 total; the 38 remaining failures still block Store readiness.
-- Adlon Store package workflow `37005249596` passed on `cf5a540`; the inspected artifact and hashes are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). This is not a Partner Center upload and is not a validation of newer app code. Policy run `37006848045` passed on `5d5effd`; app run `37005249671` was queued, and engine run `37005249594` was still in progress at last check.
-- Changes are not yet pushed. Resume by fixing the remaining app failures, run the full IPC suite, then obtain green exact-head Adlon app, engine, policy, and Store package workflows. Keep the Partner Center product in draft.
+- Fixes and handoff docs are pushed on `codex/store-msix` at `d186218`; worktree is clean. Exact-head Adlon runs created: policy `37008367364` in progress, Store `37008367424` queued, engine `37008367442` pending, app `37008367444` queued. Poll these before more code changes.
+- The last passing Store artifact workflow `37005249596` is from `cf5a540`; its inspected path and hashes are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). It is not a Partner Center upload and does not validate `d186218`.
+- Resume by resolving the remaining app failures, run the full IPC suite, then obtain green exact-head Adlon app, engine, policy, and Store package workflows. Keep the Partner Center product in draft.
 
 ## 2026-10-02 — Microsoft account and Windows Store preflight continuation
 

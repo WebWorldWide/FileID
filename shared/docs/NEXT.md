@@ -8,7 +8,7 @@
 
 ## 2026-10-02 — Resume Windows Store preflight
 
-1. Resolve the 38 remaining Windows app test failures across lifecycle/generation ownership, persisted undo, installer/signing policy, preview teardown, close and keyboard safety, event-handler isolation, and other UI contracts. Do not weaken meaningful safety coverage.
+1. Check exact-head Adlon runs on `d186218`: policy `37008367364`, Store `37008367424`, engine `37008367442`, app `37008367444`. Resolve the 38 remaining Windows app test failures across lifecycle/generation ownership, persisted undo, installer/signing policy, preview teardown, close and keyboard safety, event-handler isolation, and other UI contracts. Do not weaken meaningful safety coverage.
 2. Run the full IPC suite and changed-file formatting checks.
 3. Validate exact-head Adlon app, engine, repository-policy, and Store-package workflows. Rebuild and inspect the `.msixupload` from the validated source head; the current inspected package is from `cf5a540`.
 4. Keep Partner Center product `9PC8HSD86887` as a draft. Do not upload a package, start submission, or publish.
