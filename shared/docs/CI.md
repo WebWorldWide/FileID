@@ -17,7 +17,7 @@ Native macOS and native ARM64 jobs retain their platform-specific hosted runners
 
 Windows app, engine, Store, Linux, tools, Flatpak and policy workflows accept `main` and `codex/store-msix` pushes, existing path filters, pull requests and manual dispatch. Windows app triggers include its tests and the canonical IPC schema. Website deployment retains the `main` trigger. Release publishing retains its existing tag/dry-run controls.
 
-Actions remain pinned to immutable commits. Python 3.12 is provisioned explicitly because self-hosted runners cannot rely on the hosted image's preinstalled Python. Workflow permissions retain read-only defaults; write permissions are isolated to the existing website/release publishing jobs. Superseded Windows validation runs are cancelled per workflow/ref.
+Actions remain pinned to immutable commits. Python 3.12 is provisioned explicitly because self-hosted runners cannot rely on the hosted image's preinstalled Python. Its pinned setup action receives a Windows process-only execution-policy setting; no VM machine/user policy is changed. Workflow permissions retain read-only defaults; write permissions are isolated to the existing website/release publishing jobs. Superseded Windows validation runs are cancelled per workflow/ref.
 
 Run the Store preparation pipeline from the authorized branch:
 
