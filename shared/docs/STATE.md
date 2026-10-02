@@ -2229,3 +2229,10 @@ the user's model-role ask.
   `dotnet format` clean + UTF-8 BOM intact; full WinUI compile is the user's VS build (the
   dotnet CLI here lacks `Microsoft.Build.Packaging.Pri.Tasks.dll`).
 - Verify on hardware per NEXT.md V16.13.
+## 2026-10-02 — Signed-in browser and CI resume
+
+- Microsoft security page was checked in the signed-in Codex browser. Account is `adammnolle@gmail.com`; two-step verification is ON. Gmail and Google Authenticator were previously confirmed up to date; no security methods were changed.
+- Partner Center application `9PC8HSD86887` opens as FileID's application overview and offers “Start submission,” confirming it remains a draft. No package was uploaded there, no submission started, and nothing published.
+- Branch `codex/store-msix` is pushed and clean at `5d5effd`. The Windows app test run on code commit `cf5a540` reproduced 40 failures (393 passed / 40 failed / 433 total Release; 396 passed / 40 failed / 436 total CI-shaped Debug). Treat this as the release blocker; do not claim the app is bug-free.
+- Adlon Store package workflow `37005249596` passed on `cf5a540`; artifact and hashes are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). It is not a Partner Center upload. Policy run `37006848045` passed on `5d5effd`. At the latest check, Adlon app run `37005249671` was still queued; engine run `37005249594` had x64 in progress, ARM64-native passed, and ARM64-cross queued.
+- Resume by resolving the failing app contracts/behavior, then run the full Windows test suite and obtain green Adlon app, engine, policy, and exact-head Store-package checks. Rebuild and inspect the package for the validated code head. Keep Partner Center in draft.

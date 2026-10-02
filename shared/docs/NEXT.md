@@ -1544,3 +1544,10 @@ ReadStore, so nothing else changes.
 ## Older follow-ups (archived)
 
 Verification queues for V16.5c and earlier (all marked landed), plus the V15.3 N1-N10 backlog and the Phase 9-11 robustness/a11y/release-engineering scope, were trimmed to keep this file to the active priorities. The full text lives in `git log shared/docs/NEXT.md`.
+## 2026-10-02 — Resume after signed-in check
+
+1. Resolve the 40 failing Windows app tests. Current named failure groups include engine/deep-analyze lifecycle and generation ownership, persisted undo, preview teardown, installer policy, close/accelerator safety, event-handler isolation, missing-file summaries, suggested-merge busy state, and keyboard interactions. Check real behavior; don't weaken contract tests just to make them pass.
+2. Rerun the complete Windows app and IPC suites plus Release build and formatting checks. The existing green Store artifact is from `cf5a540`; it does not clear the app failures and does not validate newer code.
+3. Verify green exact-head Adlon app, engine, repository-policy, and Store MSIX workflows. Record artifact path/hash and inspect package identity and payload from the validated code head. Local `publish-store-msix.ps1` previously failed under VS 18 with APPX0002/MSB4018 in `GenerateAppxPackageRecipe`; Adlon is currently the package-build path.
+4. Preserve the Microsoft account security settings as-is and keep Partner Center product `9PC8HSD86887` a draft. Never upload, start a submission, or publish without a new explicit user instruction.
+5. Keep [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for after the first Store release: best-takes media search, batch file conversion/upscaling/compression, and better folder organization.
