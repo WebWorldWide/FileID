@@ -60,7 +60,7 @@ public sealed class BulkActionJournalingTests
     [Fact]
     public void RenameInverseContainsOnlyTerminalConfirmedSuccesses()
     {
-        BulkRenameSheet.RenamePlan[] plans =
+        RenamePlan[] plans =
         [
             new()
             {

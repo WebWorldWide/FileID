@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading.Tasks;
 using FileID.Services;
 using Xunit;
@@ -63,11 +63,11 @@ public class UndoStackTests
     }
 
     [Fact]
-    public async Task Capacity_DropsOldestEntriesPast16()
+    public async Task Capacity_Retains500ReversibleEntries()
     {
         await DrainAsync();
-        // Push 20; only the most recent 16 should remain.
-        for (int i = 0; i < 20; i++)
+        // ChangeLog retains 500 reverse closures while keeping older history.
+        for (int i = 0; i < 520; i++)
         {
             int captured = i;
             UndoStack.Instance.Push($"op-{captured}", () => Task.FromResult(true));
@@ -78,6 +78,6 @@ public class UndoStackTests
             await UndoStack.Instance.UndoAsync();
             count++;
         }
-        Assert.Equal(16, count);
+        Assert.Equal(500, count);
     }
 }
