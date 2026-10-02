@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-02 — Windows app test parity work in progress
+
+PR #189 merged as ff6eda2 after all sixteen fresh checks passed. PR #190 carries atomic People merges; its first policy failure was the expected reviewed-source digest change, corrected after reviewing the merge-only diff. Fresh checks remain required.
+
+The archived strict Windows gate exposed 154 unique compiler/analyzer errors: an earlier broad source change removed production safety APIs while leaving their tests. Work on codex/windows-test-parity restores environment-first state paths, isolated instance mutexes, picker cancellation, confirmed rename/tag Undo, ChangeLog-backed Undo, bounded thumbnail fallback and completion of dropped thumbnail requests. The draft workflow requires nonempty successful TRX reports and retains failure artifacts. This is unfinished work, not passing app test acceptance. Continue repairing remaining lifecycle/cleanup/restructure/People APIs and run every suite without exclusions. Adlon main engine compilation/tests passed; its cache upload and remaining serial jobs still need final inspection.
+
 ## 2026-10-02 — Atomic explicit People merges
 
 A forced SQLite DELETE failure reproduced a Rust merge that reported success after committing partial assignments. Both engines now validate fresh selections and commit assignments, structured name transfer, counts and representatives in one transaction. Empty destinations inherit one complete source name; named destinations retain their identity. Rust SQL and worker failures emit a failed completion. Explicit merges still delete selected source rows; retained aliases/history remain pending.

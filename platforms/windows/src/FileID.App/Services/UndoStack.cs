@@ -1,20 +1,22 @@
-﻿// UndoStack — bounded LIFO of reversible destructive actions.
+﻿// UndoStack — the Ctrl+Z facade over ChangeLog.
 //
-// Records the last 16 destructive ops (rename / trash / restructure /
-// merge-clusters) with a reverse-op closure. Ctrl+Z on MainWindow pops
-// the top entry + invokes its reverse. Best-effort: an entry is silently
-// dropped if its reverse fails (e.g., the file was deleted from the
-// Recycle Bin between trash + undo).
+// Historically a bounded 16-entry LIFO of reverse-op closures; the storage
+// moved to ChangeLog (the session change log with per-entry undo + the
+// close-time review sheet) so the Library undo pill, Ctrl+Z, and the
+// changes sheet all see the same record. The public surface here is
+// unchanged — call sites and semantics (undo the most recent still-undoable
+// action) are preserved. One deliberate improvement: a failed reverse no
+// longer silently drops the entry; it stays visible in the changes sheet
+// as "undo failed" with a retry.
 //
-// Per-entry state is kept compact (a label + a reverse-action async
-// delegate). The LIFO is process-local — restart loses the history,
-// matching the macOS app's session-only Undo behavior.
+// Threading unchanged (APP-1): Push arrives from EngineClient
+// PropertyChanged handlers; ChangeLog gates all list access and runs
+// reverse closures outside its lock.
 
 using System;
-using System.Collections.Generic;
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
+using FileID.IpcSchema;
 
 namespace FileID.Services;
 
@@ -22,74 +24,51 @@ internal sealed class UndoStack : INotifyPropertyChanged
 {
     public static UndoStack Instance { get; } = new();
 
-    private const int Capacity = 16;
-    private readonly LinkedList<UndoEntry> _entries = new();
-    // APP-1: `Push` is invoked from EngineClient PropertyChanged handlers (the
-    // "untrusted" engine-event path) while `UndoAsync`/`Clear`/`CanUndo`/
-    // `TopLabel` run on the UI thread. A LinkedList is not thread-safe, so the
-    // unsynchronized mix could corrupt list pointers (NRE / InvalidOperation)
-    // and fast-fail the process. All `_entries` access is now under `_gate`;
-    // the async reverse closure runs OUTSIDE the lock.
-    private readonly object _gate = new();
-
-    public bool CanUndo { get { lock (_gate) { return _entries.Count > 0; } } }
-    public string TopLabel
+    private UndoStack()
     {
-        get { lock (_gate) { return _entries.Count == 0 ? string.Empty : _entries.First!.Value.Label; } }
+        ChangeLog.Instance.Changed += (_, _) => OnChanged();
     }
+
+    public bool CanUndo => ChangeLog.Instance.MostRecentUndoable is not null;
+    public string TopLabel => ChangeLog.Instance.MostRecentUndoable?.Label ?? string.Empty;
 
     public void Push(string label, Func<Task<bool>> reverse)
-    {
-        lock (_gate)
-        {
-            _entries.AddFirst(new UndoEntry(label, reverse));
-            while (_entries.Count > Capacity) _entries.RemoveLast();
-        }
-        OnChanged();
-    }
+        => Push(label, ChangeKind.Other, reverse);
 
-    /// <summary>Pop + invoke. Returns the label that was undone, or null on failure / empty.</summary>
+    public void Push(string label, ChangeKind kind, Func<Task<bool>> reverse)
+        => ChangeLog.Instance.Push(label, kind, reverse);
+
+    /// <summary>Undo the most recent still-undoable action. Returns the label
+    /// that was undone, or null on failure / empty.</summary>
     public async Task<string?> UndoAsync()
     {
-        UndoEntry entry;
-        lock (_gate)
-        {
-            if (_entries.Count == 0) return null;
-            entry = _entries.First!.Value;
-            _entries.RemoveFirst();
-        }
-        OnChanged();
-        try
-        {
-            var ok = await entry.Reverse();
-            return ok ? entry.Label : null;
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn($"Undo of '{entry.Label}' threw: {ex.Message}");
-            return null;
-        }
+        var entry = ChangeLog.Instance.MostRecentUndoable;
+        if (entry is null) return null;
+        var ok = await ChangeLog.Instance.UndoAsync(entry).ConfigureAwait(false);
+        return ok ? entry.Label : null;
     }
 
-    public void Clear()
-    {
-        lock (_gate)
-        {
-            if (_entries.Count == 0) return;
-            _entries.Clear();
-        }
-        OnChanged();
-    }
+    public void Clear() => ChangeLog.Instance.Clear();
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void OnChanged()
     {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanUndo)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TopLabel)));
+        RaisePropertyChanged(nameof(CanUndo));
+        RaisePropertyChanged(nameof(TopLabel));
     }
 
-    private sealed record UndoEntry(string Label, Func<Task<bool>> Reverse);
+    private void RaisePropertyChanged(string propertyName)
+    {
+        var subscribers = PropertyChanged;
+        if (subscribers is null) return;
+        var args = new PropertyChangedEventArgs(propertyName);
+        foreach (PropertyChangedEventHandler subscriber in subscribers.GetInvocationList())
+        {
+            try { subscriber(this, args); }
+            catch (Exception ex) { DebugLog.Warn($"Undo-stack subscriber failed for {propertyName}: {ex.Message}"); }
+        }
+    }
 
     /// <summary>
     /// Helper: subscribe to the next `BulkActionResult` whose action
@@ -97,8 +76,12 @@ internal sealed class UndoStack : INotifyPropertyChanged
     /// undo entry that calls `reverse(batchId)`. Used by Library +
     /// Cleanup trash buttons + the People merge flows.
     /// </summary>
-    public static void CaptureNextBulkResult(string actionPrefix, string undoLabel,
-        Func<string, Task<bool>> reverse)
+    public static IDisposable CaptureNextBulkResult(
+        string actionPrefix,
+        string undoLabel,
+        Func<string, Task<bool>> reverse,
+        ChangeKind kind = ChangeKind.Other,
+        TimeSpan? timeout = null)
     {
         var ec = ViewModels.EngineClient.Instance;
 
@@ -110,7 +93,7 @@ internal sealed class UndoStack : INotifyPropertyChanged
         // and the loser is a no-op.
         int consumed = 0; // 0 = pending, 1 = consumed
         System.ComponentModel.PropertyChangedEventHandler? once = null;
-        once = (_, ev) =>
+        once = (_, ev) => DebugLog.SafeRun("UndoStack.CaptureNextBulkResult", () =>
         {
             if (ev.PropertyName != nameof(ViewModels.EngineClient.LastBulkAction)) return;
             var bar = ec.LastBulkAction;
@@ -119,25 +102,38 @@ internal sealed class UndoStack : INotifyPropertyChanged
 
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
 
-            // Action is "trashFiles:<uuid>". A missing/empty suffix (no colon,
-            // or a trailing ':' with nothing after it) yields no batch id; skip
-            // rather than push an undo entry whose reverse can never resolve.
-            // IndexOf+Substring is bounds-safe — never throws on a malformed suffix.
-            var colonIdx = bar.Action.IndexOf(':');
-            var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
             ec.PropertyChanged -= once;
-            if (batchId.Length == 0) return;
-            Instance.Push(undoLabel, () => reverse(batchId));
-        };
+            var batchId = GetUndoableBatchId(bar);
+            if (batchId is null) return;
+            var historyLabel = bar.Failed == 0
+                ? undoLabel
+                : $"{undoLabel} — {bar.Succeeded:N0} changed";
+            Instance.Push(historyLabel, kind, () => reverse(batchId));
+        });
         ec.PropertyChanged += once;
 
-        _ = Task.Delay(TimeSpan.FromSeconds(30)).ContinueWith(_ =>
+        void Cancel()
         {
-            // Only detach if we haven't already consumed a reply. This
-            // prevents the timeout from racing the reply handler and
-            // erroneously detaching after a successful Push.
             if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
             try { ec.PropertyChanged -= once; } catch { /* swallow */ }
-        });
+        }
+        _ = Task.Delay(timeout ?? TimeSpan.FromSeconds(30)).ContinueWith(_ => Cancel());
+        return new CallbackRegistration(Cancel);
+    }
+
+    internal static string? GetUndoableBatchId(BulkActionResult result)
+    {
+        if (result.Succeeded == 0 || string.IsNullOrWhiteSpace(result.Action)) return null;
+        var colonIdx = result.Action.IndexOf(':');
+        if (colonIdx < 0) return null;
+        var batchId = result.Action[(colonIdx + 1)..].Trim();
+        return batchId.Length == 0 ? null : batchId;
+    }
+
+    private sealed class CallbackRegistration(Action cancel) : IDisposable
+    {
+        private Action? _cancel = cancel;
+
+        public void Dispose() => System.Threading.Interlocked.Exchange(ref _cancel, null)?.Invoke();
     }
 }

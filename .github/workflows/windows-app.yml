@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths:
+      - 'platforms/windows/Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
@@ -16,6 +19,9 @@ on:
       - '.github/workflows/windows-app.yml'
   pull_request:
     paths:
+      - 'platforms/windows/Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
@@ -131,24 +137,39 @@ jobs:
           -m
         shell: pwsh
 
-      - name: Run all test projects
-        # V15.3: was IpcSchema-only with continue-on-error. Now runs every
-        # discoverable test project in Tests/, fails on red. Tests run on
-        # x64 only — ARM64 cross-building tests is rarely useful here.
-        # `dotnet test` triggers its own restore for the Tests/ projects;
-        # safe to run here because the x64 build is already complete.
+      - name: Test report gate regression checks (x64 only)
         if: matrix.arch == 'x64'
         shell: pwsh
-        run: |
-          if (Test-Path Tests) {
-            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No Tests/ directory; skipping."
-          }
+        run: ./build/test-assert-test-report.ps1
+
+      - name: Test — IPC schema (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
         working-directory: platforms/windows/Tests
+        timeout-minutes: 10
+        run: |
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger "trx;LogFileName=ipc-schema.trx" --results-directory TestResults
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ../build/assert-test-report.ps1 -Path TestResults/ipc-schema.trx
+
+      - name: Test — app services (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: platforms/windows/Tests
+        timeout-minutes: 20
+        run: |
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --no-build --no-restore --verbosity minimal --logger "trx;LogFileName=app-services.trx" --results-directory TestResults --blame-hang-timeout 5m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ../build/assert-test-report.ps1 -Path TestResults/app-services.trx
+
+      - name: Upload test results (x64 only)
+        if: always() && matrix.arch == 'x64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-test-results-x64
+          path: platforms/windows/Tests/TestResults
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
       # caused `dotnet format FileID.sln`'s solution-level restore to

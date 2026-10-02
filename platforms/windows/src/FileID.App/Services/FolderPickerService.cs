@@ -23,6 +23,11 @@ internal static class FolderPickerService
 
     public static async Task<PickResult> PickFolderAsync(IntPtr hwnd)
     {
+        if (hwnd == IntPtr.Zero)
+        {
+            return new PickResult(null, "Could not attach the folder picker to the app window.");
+        }
+
         var picker = new FolderPicker
         {
             SuggestedStartLocation = PickerLocationId.PicturesLibrary,
@@ -40,6 +45,11 @@ internal static class FolderPickerService
         }
         catch (Exception ex)
         {
+            if (IsCancellationHResult(ex.HResult))
+            {
+                return new PickResult(null, null);
+            }
+
             DebugLog.Warn("FolderPicker.PickSingleFolderAsync threw: " + ex.Message);
             return new PickResult(null, "The folder picker failed to open. Try again.");
         }
@@ -50,14 +60,20 @@ internal static class FolderPickerService
             return new PickResult(null, null);
         }
 
-        var path = folder.Path;
-        if (!IsReadable(path, out string? reason))
+        var result = ValidateSelectedPath(folder.Path);
+        if (result.FailureReason is not null)
         {
-            DebugLog.Warn($"FolderPicker rejected (not readable): {PathRedactor.Redact(path)} — {reason}");
-            return new PickResult(null, reason ?? "FileID couldn't read the selected folder.");
+            DebugLog.Warn($"FolderPicker rejected (not readable): {PathRedactor.Redact(folder.Path)} — {result.FailureReason}");
         }
-        return new PickResult(path, null);
+        return result;
     }
+
+    internal static bool IsCancellationHResult(int hresult) => hresult == unchecked((int)0x800704C7);
+
+    internal static PickResult ValidateSelectedPath(string path) =>
+        IsReadable(path, out string? reason)
+            ? new PickResult(path, null)
+            : new PickResult(null, reason ?? "FileID couldn't read the selected folder.");
 
     private static bool IsReadable(string path, out string? reason)
     {

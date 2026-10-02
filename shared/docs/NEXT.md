@@ -1,5 +1,7 @@
 # NEXT — resume here
 
+Windows test-parity draft restores the first safety API groups and enables strict TRX proof. Do not merge until all app tests, formatting and native builds pass without exclusions. Archived failure log is /Users/adamnolle/.codex/fileid-builds/windows-app-archived-failure.log; a1d7108^ contains the removed safety implementations for reference. Restore behavior narrowly, preserving current native XAML/People interactions, IPC-first rules and Adlon safeguards. Remaining groups include engine lifecycle/health/undo journals, cleanup SHA proof/selection, restructure guards and People tags.
+
 ## Immediate continuation — 2026-10-02
 
 The atomic-person-merges follow-up passes local full suites, actual-engine merge fixtures and policy checks. Inspect its fresh hosted results before main integration. Preserve failed completion assertions, structured-name transfer and rollback checks. Source identity aliases/history still need design and migration; explicit merges currently delete the source identity. Inspect every serial Adlon Windows main matrix job, then fix the skipped WinUI test gate without weakening assertions.
