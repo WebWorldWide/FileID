@@ -211,4 +211,4 @@ Face-cache acceptance additionally requires legacy clustering-space isolation, c
 
 Native H.264/AAC SDR export has generated portrait/audio/metadata/Undo tests. It still requires portable worker/UI parity and the full real-world timing/color/fidelity matrix before release; its bounded presets do not establish stabilization, AI enhancement or tracked reframing.
 
-Face comparison now rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations and remaining incremental/stable-ID/calibration gates.
+Face comparison rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Stable reclustering identity persistence and atomic explicit-merge regression fixtures pass locally. Explicit source aliases/history, incremental refresh/assignment and held-out accuracy calibration remain release gates. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations.

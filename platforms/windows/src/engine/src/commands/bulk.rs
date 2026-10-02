@@ -565,34 +565,19 @@ pub(crate) async fn handle_merge_clusters(
         }
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
+        anyhow::ensure!(src > 0 && dst > 0, "Select existing people before merging.");
+        let selected: i64 = tx.query_row("SELECT COUNT(*) FROM persons WHERE id IN (?1,?2)",rusqlite::params![src,dst],|r|r.get(0))?;
+        anyhow::ensure!(selected == 2, "A selected person no longer exists. Refresh People before merging.");
         let moved = tx.execute(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
         )? as u32;
-        // R4-07: carry the source's user-assigned identity onto the destination
-        // when the destination has NONE, BEFORE deleting src (the subqueries must
-        // still see src). Merge direction is arbitrary (suggestions order by id;
-        // drag/bulk by user choice), so a named cluster can be the source —
-        // without this its name/title/first/middle/last/suffix is silently lost.
-        // The WHERE gate fires only when EVERY name-bearing column on the
-        // destination is NULL, so merging two differently-named people never
-        // grafts the source's sub-fields onto an already-named destination
-        // (R4-07 delta). is_unknown clears once the carried name lands.
-        let _ = tx.execute(
-            "UPDATE persons SET
-                 name        = COALESCE(name,        (SELECT name        FROM persons WHERE id = ?2)),
-                 title       = COALESCE(title,       (SELECT title       FROM persons WHERE id = ?2)),
-                 first_name  = COALESCE(first_name,  (SELECT first_name  FROM persons WHERE id = ?2)),
-                 middle_name = COALESCE(middle_name, (SELECT middle_name FROM persons WHERE id = ?2)),
-                 last_name   = COALESCE(last_name,   (SELECT last_name   FROM persons WHERE id = ?2)),
-                 suffix      = COALESCE(suffix,      (SELECT suffix      FROM persons WHERE id = ?2)),
-                 is_unknown  = CASE WHEN COALESCE(name, (SELECT name FROM persons WHERE id = ?2)) IS NOT NULL THEN 0 ELSE is_unknown END
-             WHERE id = ?1
-               AND name IS NULL AND title IS NULL AND first_name IS NULL
-               AND middle_name IS NULL AND last_name IS NULL AND suffix IS NULL",
-            rusqlite::params![dst, src],
-        );
-        let _ = tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src]);
+        // Transfer one complete identity only into an unnamed destination.
+        tx.execute(
+            "UPDATE persons SET name=(SELECT name FROM persons WHERE id=?2), title=(SELECT title FROM persons WHERE id=?2), first_name=(SELECT first_name FROM persons WHERE id=?2), middle_name=(SELECT middle_name FROM persons WHERE id=?2), last_name=(SELECT last_name FROM persons WHERE id=?2), suffix=(SELECT suffix FROM persons WHERE id=?2), is_unknown=0 WHERE id=?1 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))=0 AND EXISTS(SELECT 1 FROM persons WHERE id=?2 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))>0)",
+            rusqlite::params![dst,src],
+        )?;
+        tx.execute("DELETE FROM persons WHERE id = ?1", rusqlite::params![src])?;
         // Clean up face-verification verdicts referencing the merged-away source
         // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
         // row and surfaces stale suggestions (orphan rows that never GC). The
@@ -604,28 +589,25 @@ pub(crate) async fn handle_merge_clusters(
         // user-confirmed-different people re-merge. A row whose faces now land in
         // one cluster is auto-inert (find_merge_suggestions `pa != pb`, consolidate
         // `ca != cb`).
-        let _ = tx.execute(
+        tx.execute(
             "DELETE FROM face_verifications WHERE (person_a = ?1 OR person_b = ?1) \
              AND (face_a IS NULL OR face_b IS NULL)",
             rusqlite::params![src],
-        );
+        )?;
         // Recompute the destination's file_count AND representative_face_id
         // (highest-quality embedded face now in the cluster) so the People
         // card + suggestion anchor reflect the combined membership rather than
-        // a stale rep. COALESCE keeps the old rep if no embedded face survives.
-        let _ = tx.execute(
+        // a stale rep. Fall back to unembedded faces when necessary.
+        tx.execute(
             "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
             rusqlite::params![dst],
-        );
-        let _ = tx.execute(
-            "UPDATE persons SET representative_face_id = COALESCE(
-                 (SELECT fp.id FROM face_prints fp
-                  WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
-                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
-                 representative_face_id)
-             WHERE id = ?1",
+        )?;
+        tx.execute(
+            "UPDATE persons SET representative_face_id = COALESCE( \
+                (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 AND fp.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp.face_quality,0) DESC,fp.id LIMIT 1), \
+                (SELECT fp.id FROM face_prints fp WHERE fp.person_id=?1 ORDER BY COALESCE(fp.face_quality,0) DESC,fp.id LIMIT 1),representative_face_id) WHERE id=?1",
             rusqlite::params![dst],
-        );
+        )?;
         tx.commit()?;
         Ok(BulkActionResult {
             action: "mergeClusters".into(),
@@ -659,7 +641,7 @@ pub(crate) async fn emit_bulk_result(
                 BulkActionResult {
                     action: action.into(),
                     succeeded: 0,
-                    failed: 0,
+                    failed: 1,
                     messages: vec![BulkActionItem {
                         file_id: None,
                         ok: false,
@@ -671,6 +653,13 @@ pub(crate) async fn emit_bulk_result(
         }
         Err(err) => {
             tracing::warn!(?err, action, "bulk action spawn_blocking failed");
+            sink.send(IpcEvent::now(EventPayload::BulkActionResult(Wrap::new(
+                BulkActionResult {
+                    action: action.into(), succeeded: 0, failed: 1,
+                    messages: vec![BulkActionItem { file_id: None, ok: false,
+                        message: Some(format!("Operation did not complete: {err}")) }],
+                },
+            )))).await;
         }
     }
 }
@@ -1120,6 +1109,44 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-bulk-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn merge_delete_failure_keeps_names_and_assignments() -> anyhow::Result<()> {
+        let root = unique_temp_dir("merge-rollback");
+        let conn = crate::db::open_writer(&root.join("catalog.sqlite"))?;
+        conn.execute_batch("INSERT INTO persons(id,created_at,is_unknown) VALUES(1,123,1); INSERT INTO persons(id,first_name,created_at) VALUES(2,'Alex',123); INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/offline/photo.jpg',1,1,0,'image','jpg'); INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,2,X'00','[0,0,1,1]'); CREATE TRIGGER fixture_merge_failure BEFORE DELETE ON persons WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")?;
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink,mut rx) = Sink::channel_for_test(4);
+        handle_merge_clusters(sink,db.clone(),ipc::MergeClustersPayload { source_person_id:2,destination_person_id:1 }).await;
+        let event = rx.recv().await.ok_or_else(||anyhow::anyhow!("missing merge result"))?;
+        if let ipc::EventPayload::BulkActionResult(result) = event.payload {
+            assert_eq!(result.inner.failed,1);
+            assert_eq!(result.inner.succeeded,0);
+        } else { anyhow::bail!("wrong merge event"); }
+        {
+            let conn = db.lock();
+            assert_eq!(conn.query_row("SELECT person_id FROM face_prints WHERE id=1",[],|r|r.get::<_,i64>(0))?,2);
+            assert_eq!(conn.query_row("SELECT first_name,is_unknown FROM persons WHERE id=1",[],|r|Ok((r.get::<_,Option<String>>(0)?,r.get::<_,i64>(1)?)))?,(None,1));
+            assert_eq!(conn.query_row("SELECT first_name FROM persons WHERE id=2",[],|r|r.get::<_,String>(0))?,"Alex");
+        }
+        drop(db);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worker_failure_emits_a_failed_completion() -> anyhow::Result<()> {
+        let (sink,mut rx) = Sink::channel_for_test(4);
+        let result = tokio::task::spawn_blocking(|| -> anyhow::Result<BulkActionResult> { panic!("fixture worker failure") }).await;
+        emit_bulk_result(&sink,"mergeClusters",result).await;
+        let event = rx.recv().await.ok_or_else(||anyhow::anyhow!("missing worker failure result"))?;
+        if let ipc::EventPayload::BulkActionResult(result) = event.payload {
+            assert_eq!(result.inner.failed,1);
+            assert_eq!(result.inner.succeeded,0);
+            assert!(result.inner.messages.iter().any(|m|!m.ok));
+        } else { anyhow::bail!("wrong worker failure event"); }
+        Ok(())
     }
 
     // C1-012: the recovery line carries the file_id + src + dst so disk vs DB

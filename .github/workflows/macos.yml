@@ -8,6 +8,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_people_merge_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/macos.yml'
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_people_merge_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
 
@@ -111,6 +115,12 @@ jobs:
             ps ax -o pid,ppid,etime,command | grep -E "FileID|swiftpm" | grep -v grep || true
             exit "$status"
           fi
+
+      - name: Verify explicit People merges across engines
+        working-directory: platforms/windows/src/engine
+        run: |
+          cargo build --locked --jobs 4 --target-dir "$RUNNER_TEMP/fileid-merge-engine"
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_people_merge_roundtrip.py" --swift-engine "$GITHUB_WORKSPACE/platforms/apple/.build/release/FileIDEngine" --rust-engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
 
       - name: Verify binaries exist
         run: |

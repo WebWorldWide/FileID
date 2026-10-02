@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-02 — Atomic explicit People merges
+
+A forced SQLite DELETE failure reproduced a Rust merge that reported success after committing partial assignments. Both engines now validate fresh selections and commit assignments, structured name transfer, counts and representatives in one transaction. Empty destinations inherit one complete source name; named destinations retain their identity. Rust SQL and worker failures emit a failed completion. Explicit merges still delete selected source rows; retained aliases/history remain pending.
+
+Real-process fixtures pass six merge cases on each engine, including stale selections and forced rollback. Rust 1.90 Clippy passes; 393 library / 394 executable tests and two registry integrations pass (two preexisting ignored corpus tests). Swift passes 437 tests / 89 suites. Workflow pins/permissions, runner routing, catalog schema and three binary privacy scans pass. The macOS workflow now runs the cross-engine regression. Hosted review and actual Adlon matrix results remain required; this is not release acceptance.
+
 ## 2026-10-02 — Stable People integration after platform validation
 
 Reclustering now updates retained identity rows instead of deleting and recreating them. Shared fixtures cover deterministic ID reuse and protected partitions; Rust real-catalog tests cover structured names, offline/unknown records, correction references, same-image exclusions and rollback after a forced insertion failure. Native consolidation retains absorbed identity records and hides empty unnamed records from People cards. Rust 1.90 Clippy passes with warnings denied; 391 library / 392 executable tests and the two registry integration checks pass. The native Swift suite passes 437 tests / 89 suites. Actual-engine catalog, Tools and Chat round trips and binary privacy checks pass. All sixteen GitHub checks passed at 7f03fff. Only documentation conflicts with bootstrap main were resolved; fresh merge-head checks remain required. This is not full release acceptance.

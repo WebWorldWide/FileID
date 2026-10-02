@@ -206,7 +206,7 @@
             "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
 
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
-          "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,
+          "properties": { "mergeClusters": { "type": "object", "additionalProperties": false, "description": "Explicit merge validates both identities and commits all assignments, name transfer and counts atomically. An unnamed destination inherits one source identity; a named destination keeps its name. SQL failure leaves the catalog unchanged.",
             "required": ["sourcePersonID", "destinationPersonID"],
             "properties": {
               "sourcePersonID": { "type": "integer" },
