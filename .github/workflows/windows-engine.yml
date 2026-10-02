@@ -8,6 +8,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/windows-engine.yml'
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/windows-engine.yml'
   workflow_dispatch:
 
@@ -280,6 +284,12 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Engine binary missing: $exe" }
           $size = (Get-Item $exe).Length / 1MB
           Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $size)
+
+      - name: Verify command-channel health probes
+        if: matrix.cross == false
+        shell: pwsh
+        timeout-minutes: 2
+        run: python "${{ github.workspace }}/shared/scripts/check_health_roundtrip.py" --engine "target/${{ matrix.target }}/release/FileIDEngine.exe"
 
       # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
       # (carrying HardwareInfo + the chosen executionProvider), then send EOF

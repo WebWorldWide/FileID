@@ -7,6 +7,10 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
+      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
@@ -19,6 +23,10 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
+      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
@@ -130,6 +138,18 @@ jobs:
           -restore
           -m
         shell: pwsh
+
+      - name: Run IPC schema tests with report verification
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./build/test-assert-test-report.ps1
+          dotnet test Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger 'trx;LogFileName=ipc-schema.trx' --results-directory Tests/TestResults
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./build/assert-test-report.ps1 -Path Tests/TestResults/ipc-schema.trx
+          dotnet format Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run all test projects
         # V15.3: was IpcSchema-only with continue-on-error. Now runs every

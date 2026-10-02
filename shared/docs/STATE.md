@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-02 — Canonical health probes and genuine IPC test gate (under review)
+
+IPC v1.5 promotes the existing native health probe into the canonical contract and Rust/C# mirrors. Valid replies echo a bounded ASCII nonce and the actual process ID; invalid probes fail without echoing the input, and no probe re-emits ready or starts analysis. A shared actual-process fixture covers batched correlation, boundary/invalid nonces and recovery after rejection. The catalog fixture harness now explicitly decodes the UTF-8 wire protocol on Windows.
+
+The Adlon Windows VM passed all 48 IPC tests, format verification and the nine TRX-guard cases in isolated C:\personal-ci\checks storage. Formatter-only repairs fix the existing IPC test project's encoding/whitespace. The Windows app workflow now has an unconditional IPC suite/report/format gate; its legacy app service-test discovery still skips and remains a release blocker. Rust 1.90, Swift and fresh hosted/main CI acceptance remain pending while this change is reviewed. The accidentally started Homebrew Rust 1.98 build was interrupted and is not acceptance evidence. No corpus data or model weights changed.
+
 ## 2026-10-02 — Day-end recovery and Adlon capacity repair
 
 Atomic People merges PR #190 passed all sixteen exact-head checks and merged at 3d46a969. Clang 19.1.5 installed successfully in the existing Windows CI VM. Compiler-path PR #192 passed all four checks and merged at dddc365; fresh main run 37033359014 passed x64 and ARM64 cross-builds on Adlon and native ARM64 on hosted hardware. Linux CI setup failed because the guest disk was full; expanded only its existing internal-storage virtual disk to 128 GB and grew ext4 online, leaving about 47 GB free. All four Linux jobs subsequently passed on adlon-fileid-linux at main 3d46a969 (run 37028488104). The example-data corpus remains unmounted and untouched.

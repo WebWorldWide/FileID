@@ -37,6 +37,16 @@ struct IPCProtocolTests {
         }
     }
 
+    @Test("Health correlation nonce is bounded ASCII")
+    func healthRequestIDValidation() {
+        for nonce in ["probe-1", "GEN_4-probe_2", String(repeating: "a", count: 128)] {
+            #expect(HealthCheckResult.isValidRequestID(nonce))
+        }
+        for nonce in ["", " ", "../file", "line\nfeed", "é", "a\0b", String(repeating: "a", count: 129)] {
+            #expect(!HealthCheckResult.isValidRequestID(nonce))
+        }
+    }
+
     @Test("Health check result preserves request correlation and process ID")
     func healthCheckResultRoundTrip() throws {
         let event = IPCEvent(payload: .healthCheckResult(HealthCheckResult(

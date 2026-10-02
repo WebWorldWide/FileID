@@ -171,3 +171,10 @@ Canonical shared/catalog/v22.sql adds nullable weight, processing, and source-re
 The existing export journal now admits a video/mp4 recipe at 1280 or 1920 pixels on macOS. Probing, decoding, export and output verification run in a cancellable engine subprocess. Inputs are restricted to single-video SDR containers with at most one audio track; unsupported tracks/HDR/alpha/protected content are rejected. External asset references are forbidden. Output validation runs before the original/derived transaction and collision-safe publication. The portable adapter advertises this capability as unavailable and revalidates saved recipes before touching outputs. See TOOLS.md for exact limits; broad media operations and port parity remain pending.
 
 Face comparison rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Legacy person centroids lack provenance and cannot drive inheritance. Reclustering reuses stable identities transactionally and preserves named/unknown/offline rows and correction references. Explicit merges validate selections, transfer one complete name into an empty destination and roll back every SQL failure; they still delete source identities, so aliases/history remain pending. See FACE_CACHE.md for whole-pass refresh limitations and remaining incremental/calibration gates.
+
+
+## Command-channel health (IPC v1.5)
+
+`healthCheck(requestID:)` replies as `healthCheckResult._0` with the unchanged nonce and actual engine PID. It acknowledges command-loop responsiveness only, with no catalog access, queue admission, model loading or ready-state refresh. Request IDs contain 1–128 ASCII letters/digits/underscores/hyphens; invalid values produce `invalid_health_request` without a success reply or input echo.
+
+Clients must install a waiter before flushing the command, then correlate nonce/PID against the captured process generation and retire old waiters on cleanup. Canonical DTOs and both engines now support the wire operation; the Windows lifecycle integration remains unfinished. A health reply does not prove storage, model readiness or full engine health.

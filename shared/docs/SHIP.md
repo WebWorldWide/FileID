@@ -218,3 +218,8 @@ Face-cache acceptance additionally requires legacy clustering-space isolation, c
 Native H.264/AAC SDR export has generated portrait/audio/metadata/Undo tests. It still requires portable worker/UI parity and the full real-world timing/color/fidelity matrix before release; its bounded presets do not establish stabilization, AI enhancement or tracked reframing.
 
 Face comparison rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Stable reclustering identity persistence and atomic explicit-merge regression fixtures pass locally. Explicit source aliases/history, incremental refresh/assignment and held-out accuracy calibration remain release gates. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations.
+
+
+### Health-contract follow-up (under review, 2026-10-02)
+
+A dedicated Windows IPC schema suite/report/format gate replaces the prior absence of IPC test execution. The isolated Adlon Windows VM passes 48 IPC tests and nine report-guard fixtures; new exact-head CI is still pending. The legacy app-service test discovery is still broken, so the full Windows safety/test repair and app-suite release gate remain open. Actual-process nonce/PID and invalid-probe checks are now required in macOS, Linux and native Windows engine CI. No server runner or corpus configuration changed in this follow-up.

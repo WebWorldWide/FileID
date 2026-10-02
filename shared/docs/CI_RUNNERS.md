@@ -87,3 +87,8 @@ The post-expansion main People/merge commit `3d46a969e8da97f4b04e840abcfc2d0a930
 PR #192 passed all four review checks at `20679d5f542c72466f18dad7249791c0bbf17661` and merged at `dddc365007a84a98fa8adf1704cced71ac2254a6`. Fresh main Windows engine run [37033359014](https://github.com/WebWorldWide/FileID/actions/runs/37033359014) completed with all three jobs successful: x64 and ARM64 cross-builds on `adlon-fileid-windows`, native ARM64 on hosted hardware. Both per-job path prerequisites passed under the actual service account. Build, Clippy, applicable tests, binary verification, smoke and privacy steps remained enforced. Historical failed/superseded runs are not counted as acceptance.
 
 Together with main Linux run 37028488104 and Windows app packaging run 37016958500, this validates the configured runner build gates. It does not fix the skipped Windows app suites, the GTK shell's missing feature wiring, or the broader release blockers. Do not present those gates as completed.
+
+
+### Health-contract follow-up (under review, 2026-10-02)
+
+A dedicated Windows IPC schema suite/report/format gate replaces the prior absence of IPC test execution. The isolated Adlon Windows VM passes 48 IPC tests and nine report-guard fixtures; new exact-head CI is still pending. The legacy app-service test discovery is still broken, so the full Windows safety/test repair and app-suite release gate remain open. Actual-process nonce/PID and invalid-probe checks are now required in macOS, Linux and native Windows engine CI. No server runner or corpus configuration changed in this follow-up.

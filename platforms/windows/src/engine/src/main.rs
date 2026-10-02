@@ -729,6 +729,22 @@ async fn handle_line(
             let database = db.cloned();
             tokio::spawn(async move { commands::catalog::handle(sink, database, payload.request).await; });
         }
+        CommandPayload::HealthCheck(payload) => {
+            let response = if payload.is_valid() {
+                EventPayload::HealthCheckResult(Wrap::new(ipc::HealthCheckResult {
+                    request_id: payload.request_id,
+                    pid: std::process::id() as i32,
+                }))
+            } else {
+                EventPayload::Error(Wrap::new(EngineError {
+                    kind: "invalid_health_request".into(),
+                    message: "Health request ID must contain 1–128 ASCII letters, digits, underscores or hyphens.".into(),
+                    path: None,
+                    model_kind: None,
+                }))
+            };
+            sink.send(IpcEvent::now(response)).await;
+        }
         CommandPayload::RequestStatus(_) => {
             // Re-emit ready so the app can rebuild its EngineInfo snapshot.
             commands::hardware::emit_ready(sink).await;
@@ -1173,6 +1189,5 @@ mod tests {
         assert_eq!(t1, t2, "creation time pins a stable identity for a given PID");
     }
 }
-
 
 

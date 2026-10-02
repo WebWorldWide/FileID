@@ -1,4 +1,4 @@
-// Round-trip tests for IpcCommand. Asserts:
+﻿// Round-trip tests for IpcCommand. Asserts:
 //   1. Each variant survives encode → decode → encode without semantic loss
 //      (the resulting payload's structure matches).
 //   2. The wire bytes for empty-payload variants are `{"variantName": {}}`,
@@ -49,14 +49,14 @@ public class IpcCommandTests
     }
 
     [Theory]
-    [InlineData(typeof(PauseScanCommand),         "pauseScan")]
-    [InlineData(typeof(ResumeScanCommand),        "resumeScan")]
-    [InlineData(typeof(CancelScanCommand),        "cancelScan")]
-    [InlineData(typeof(RequestStatusCommand),     "requestStatus")]
-    [InlineData(typeof(ShutdownCommand),          "shutdown")]
+    [InlineData(typeof(PauseScanCommand), "pauseScan")]
+    [InlineData(typeof(ResumeScanCommand), "resumeScan")]
+    [InlineData(typeof(CancelScanCommand), "cancelScan")]
+    [InlineData(typeof(RequestStatusCommand), "requestStatus")]
+    [InlineData(typeof(ShutdownCommand), "shutdown")]
     [InlineData(typeof(RunFaceClusteringCommand), "runFaceClustering")]
     [InlineData(typeof(DeepAnalyzeCancelCommand), "deepAnalyzeCancel")]
-    [InlineData(typeof(VerifyCudaPackCommand),    "verifyCudaPack")]
+    [InlineData(typeof(VerifyCudaPackCommand), "verifyCudaPack")]
     public void EmptyPayloadVariants_EncodeAsObjectNotString(Type t, string expectedKey)
     {
         var payload = (CommandPayload)Activator.CreateInstance(t)!;

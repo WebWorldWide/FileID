@@ -1,4 +1,4 @@
-// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
+﻿// Round-trip tests for IpcEvent. Asserts the `_0` wrapper is correctly
 // produced for single-positional cases AND that `discoveryComplete` (the
 // only named-parameter case) is NOT `_0`-wrapped.
 
