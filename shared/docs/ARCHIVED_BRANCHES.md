@@ -100,3 +100,5 @@ Additional recovery checkpoints:
 - `archive/2026-10-02/store-local-worktree` at `9d1a0936eaf9079b84c36b89020b2f75c1c9a85e` preserves the separate local Store checkout independently of its advanced remote branch. The checkout was not switched or removed.
 
 To resume, fetch the appropriate archive tag, create a new `codex/` branch from current main, and port/review its changes. Archive tags do not trigger the `v*` release workflow. Do not force-push main or infer model/license/Store acceptance from a backup tag.
+
+Validated checkpoint branches also retain recovery tags before removal: `archive/2026-10-02/codex/adlon-clang-bootstrap` points to reviewed head `20679d5f542c72466f18dad7249791c0bbf17661`; `archive/2026-10-02/codex/day-end-handoff` preserves the final documentation review head. These integrations are separate from the unvalidated proposal backups above.

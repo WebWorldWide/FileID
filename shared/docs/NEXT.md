@@ -4,7 +4,7 @@
 
 The full accepted goal remains active after the owner resumed sustained work; this is a recovery checkpoint, not a pause or release completion. Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.
 
-Verify the compiler-path fix on the actual Adlon service account and all retried Linux jobs after the disk expansion. Corpus /srv/data remains strictly read-only and unmounted in CI guests. Continue the complete NEXT_VERSION.md ledger after these safeguards; no release or full feature/accuracy acceptance has been established.
+The compiler-path fix passed all three fresh main Windows engine jobs in run 37033359014 (x64/cross on Adlon, native ARM hosted); all four Linux jobs passed after disk expansion in run 37028488104. Preserve this routing and its assertions. Corpus /srv/data remains strictly read-only and unmounted in CI guests. Continue the complete NEXT_VERSION.md ledger after these safeguards; no release or full feature/accuracy acceptance has been established.
 
 ## Historical checkpoints — superseded by the priorities above
 

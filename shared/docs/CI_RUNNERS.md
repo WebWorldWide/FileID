@@ -81,3 +81,9 @@ Use `setup.exe modify` with `--quiet --norestart --noUpdateInstaller` for this e
 The current main Windows app workflow skips its test suites because of an incorrect doubled relative Tests path. Its passing packaging jobs therefore are not full app-test acceptance. Archived Windows repair PR #191 restores strict TRX execution, but exposes unresolved production/test API drift. Resume the repair from `archive/2026-10-02/windows-test-parity-wip`, without weakening test, analyzer, or format gates.
 
 The post-expansion main People/merge commit `3d46a969e8da97f4b04e840abcfc2d0a930ad679` passed all four Linux jobs on `adlon-fileid-linux` in run 37028488104 (retry after capacity repair). This proves the runner repair for that source revision; GTK feature parity remains unfinished despite the shell build passing.
+
+## Completed compiler-path acceptance
+
+PR #192 passed all four review checks at `20679d5f542c72466f18dad7249791c0bbf17661` and merged at `dddc365007a84a98fa8adf1704cced71ac2254a6`. Fresh main Windows engine run [37033359014](https://github.com/WebWorldWide/FileID/actions/runs/37033359014) completed with all three jobs successful: x64 and ARM64 cross-builds on `adlon-fileid-windows`, native ARM64 on hosted hardware. Both per-job path prerequisites passed under the actual service account. Build, Clippy, applicable tests, binary verification, smoke and privacy steps remained enforced. Historical failed/superseded runs are not counted as acceptance.
+
+Together with main Linux run 37028488104 and Windows app packaging run 37016958500, this validates the configured runner build gates. It does not fix the skipped Windows app suites, the GTK shell's missing feature wiring, or the broader release blockers. Do not present those gates as completed.
