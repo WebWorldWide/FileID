@@ -35,7 +35,7 @@ Linux guest root filled during CI. Its existing qcow2 on the host internal /var/
 
 Windows runner service is Network Service; administrator SSH success is not service-account acceptance. SDKs use the runner-owned tool cache; Bash/Python/Clang need per-job GITHUB_PATH. The official Visual Studio Clang component installed successfully (exit 0), and clang 19.1.5 starts. Do not use bootstrapper-only --wait with setup.exe, force process closure, or reboot other jobs. Inspect a fresh main ARM64 cross-build result after the compiler-path workflow fix.
 
-Main bb33211 engine x64 and both app packaging matrices passed on adlon-fileid-windows. Its ARM64 engine cross-build failed before Clang installation. Linux no-space failures are infrastructure failures requiring fresh results, not passing acceptance.
+Main bb33211 engine x64 and both app packaging matrices passed on adlon-fileid-windows. Its ARM64 engine cross-build failed before Clang installation. Linux no-space failures were infrastructure failures. After expansion, all four Linux jobs passed on adlon-fileid-linux at main 3d46a969 in run 37028488104. GTK UI parity is still unfinished.
 
 ## Recovery and cleanup
 

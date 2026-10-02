@@ -79,3 +79,5 @@ Main `bb33211` Windows x64 engine and both x64/ARM64 app packaging jobs passed o
 Use `setup.exe modify` with `--quiet --norestart --noUpdateInstaller` for this existing Visual Studio instance. `--wait` is a bootstrapper-only option, not supported by setup.exe. Do not use `--force`, reboot, or close other builds. In PowerShell, `Start-Process -Wait -PassThru` can collect the actual exit code. Check the component and executable afterward.
 
 The current main Windows app workflow skips its test suites because of an incorrect doubled relative Tests path. Its passing packaging jobs therefore are not full app-test acceptance. Archived Windows repair PR #191 restores strict TRX execution, but exposes unresolved production/test API drift. Resume the repair from `archive/2026-10-02/windows-test-parity-wip`, without weakening test, analyzer, or format gates.
+
+The post-expansion main People/merge commit `3d46a969e8da97f4b04e840abcfc2d0a930ad679` passed all four Linux jobs on `adlon-fileid-linux` in run 37028488104 (retry after capacity repair). This proves the runner repair for that source revision; GTK feature parity remains unfinished despite the shell build passing.
