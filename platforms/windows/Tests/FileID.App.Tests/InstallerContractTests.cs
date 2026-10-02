@@ -215,20 +215,28 @@ public sealed class InstallerContractTests
         var workflow = File.ReadAllText(PathInRepo(".github", "workflows", "windows-app.yml"));
 
         Assert.Contains(
-            "msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build",
+            "msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
             "msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build",
             workflow,
             StringComparison.Ordinal);
-        Assert.Contains("vstest.console.exe", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("vstest.console.exe", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
         Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
-        Assert.Contains("-p:RuntimeIdentifier=win-x64", workflow, StringComparison.Ordinal);
-        Assert.Contains("$formatExit -eq 4", workflow, StringComparison.Ordinal);
-        Assert.Contains("*Unable to locate dotnet CLI*", workflow, StringComparison.Ordinal);
-        Assert.Contains("exit $formatExit", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:RuntimeIdentifier=win-${{ matrix.arch }}", workflow, StringComparison.Ordinal);
+        Assert.Contains("name: Format check (x64 only)", workflow, StringComparison.Ordinal);
+        Assert.Contains("run: dotnet format FileID.sln --verify-no-changes", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("continue-on-error: true", workflow, StringComparison.Ordinal);
     }
 
     private static (int Width, int Height) ReadPngDimensions(string path)
