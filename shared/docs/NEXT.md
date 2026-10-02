@@ -1,3 +1,11 @@
+## 2026-10-02 — Resume from Store and lifecycle checkpoint
+
+1. Worktree/branch: `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, `codex/store-msix`; head was `13f741a` before this checkpoint was committed.
+2. Resolve 16 failures in the 31-test focused lifecycle suite without weakening safety assertions. Re-run the full app suite and record exact totals.
+3. Validate persisted undo readers against the Rust engine’s on-disk journal/manifest formats and wire recovery into the app only after formats align.
+4. Run x64 Release build, changed-file format verification, Windows tests, then push and wait for exact-head Adlon CI/CD results.
+5. Inspect the new x64 Store package and report its `.msixupload` path. Keep Partner Center `9PC8HSD86887` draft; never upload, start a submission, or publish.
+
 # NEXT — resume here
 
 ## 2026-10-02 — Adlon CI/CD (current)

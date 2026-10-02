@@ -1,3 +1,12 @@
+## 2026-10-02 — Persisted undo reader test isolation checkpoint
+
+- Added bounded, fail-closed persisted restructure/shortcut undo readers in `EngineClient.PersistedUndo.cs` and moved pure parsing/policy checks out of the UI-affined `EngineClient` singleton so tests can execute without WinUI initialization. Parser-focused cases now pass; production integration with engine journal output is still incomplete and must be checked before release.
+- x64 Release app build passed using VS 2026 Appx task path; one existing Win2D AnyCPU warning. Changed-file `dotnet format whitespace --verify-no-changes` passed.
+- Focused `EngineLifecycleSafetyContractTests`: 15 passed, 16 failed of 31. Remaining failures cover lifecycle behavior/source contracts including restart and fallback wipe sequencing, close/start/UI dispatch, process-generation event ownership, scan-start rollback, GPU removal, restructure retry/undo state, and generation-owned waiters. Do not describe the app as bug-free or Store ready.
+- Local `.NET` tests require `-p:AppxMSBuildToolsPath="C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VisualStudio\v18.0\AppxPackage\"`; without it the .NET SDK looks for a missing WinUI PRI task. Adlon remains the release CI authority.
+- Previous inspected Store artifact at `d5389c8` is stale. Partner Center `9PC8HSD86887` remains draft; no package was uploaded to Partner Center, no submission was started, and nothing was published.
+- Resume: resolve the 16 focused failures, integrate and validate undo readers against actual Rust journal/manifest formats, run the full Windows suite, push, inspect exact-head Adlon app/engine/Store results and new `.msixupload`, then update this record. Current preflight has no new package for the changed source.
+
 ## 2026-10-02 — Adlon Windows tool provisioning
 
 - Observed app run `36996100014` and Store run `36996099826` on `adlon-fileid-windows`. Process-scoped execution policy fixed the first failure; Python's all-users installation then failed under the runner's Network Service account. Provisioned the official, validly signed Python 3.12.10 installer into the runner tool cache through the existing VM management channel. Installer exited 0; Python 3.12.10 and pip 25.0.1 validated. No VM/service restart, service-account change, or machine/user execution-policy change.

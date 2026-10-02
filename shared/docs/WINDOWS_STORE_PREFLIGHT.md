@@ -1,3 +1,11 @@
+## Latest lifecycle checkpoint — 2026-10-02
+
+- x64 Release app build: passed (one Win2D AnyCPU warning). Changed-file whitespace verification: passed.
+- Focused `EngineLifecycleSafetyContractTests`: 15 passed, 16 failed, 31 total. This is a release blocker; see the latest `STATE.md` entry and `NEXT.md` for failure areas and resume order. No full-suite pass is claimed.
+- Persisted undo parsing now lives outside `EngineClient` so the filesystem readers can be tested without initializing a WinUI dispatcher. The reader is not yet proven compatible with engine-produced persisted data and is not fully wired into recovery.
+- The previously inspected `.msixupload` was built from `d5389c8`, before the current lifecycle changes; it is not suitable for submission. Build/inspect a new artifact from the final validated head.
+- Keep the Partner Center product as a draft. No upload, submission, or publication is authorized.
+
 # Windows Store preflight — October 1, 2026
 
 Use `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, draft PR #183. Partner Center product `9PC8HSD86887` stays draft: no upload, submission, or publication. Future features are specified in [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for all desktop platforms and follow the current release.
