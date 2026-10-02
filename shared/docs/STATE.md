@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-02 — Day-end recovery and Adlon capacity repair
+
+Atomic People merges PR #190 passed all sixteen exact-head checks and merged at 3d46a969. Clang 19.1.5 installed successfully in the existing Windows CI VM. Compiler-path PR #192 passed all four checks and merged at dddc365; fresh main run 37033359014 passed x64 and ARM64 cross-builds on Adlon and native ARM64 on hosted hardware. Linux CI setup failed because the guest disk was full; expanded only its existing internal-storage virtual disk to 128 GB and grew ext4 online, leaving about 47 GB free. All four Linux jobs subsequently passed on adlon-fileid-linux at main 3d46a969 (run 37028488104). The example-data corpus remains unmounted and untouched.
+
+Verified and pushed annotated recovery tags for all 27 proposal heads, including advanced Store work, then removed those GitHub branches with exact leases and closed their proposals. Local Store work remains intact with an independent remote backup tag. Unfinished Windows safety/test parity is preserved at archive/2026-10-02/windows-test-parity-wip (5d06976c), not merged. Its genuine test gate exposes missing lifecycle, exact-trash and restructure safety APIs. The ordinary main app workflow currently skips tests; green packaging does not establish full app acceptance. AGENT_HANDOFF.md contains the continuation steps and exact failure/recovery references. The full next-version implementation and release gates remain unfinished.
+
 ## 2026-10-02 — Adlon x64 engine passed; cross-build needs Clang
 
 Stable People PR #189 merged at ff6eda2 after all sixteen checks passed. Actual main bb33211 Windows x64 engine passed on adlon-fileid-windows. Its ARM64 cross-build failed in ring because clang was absent. Add the official Visual Studio LLVM component and per-job Clang path; do not weaken Clippy/build gates, stop other jobs or touch the corpus. Native ARM passed on hosted hardware. Actual Windows app jobs are still running. Atomic merge PR #190 and unfinished Windows safety/test-parity draft #191 have their own fresh checks; the full next-version goal remains active. The strict TRX report guard passed all nine fixtures on the Windows VM.

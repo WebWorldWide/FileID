@@ -14,7 +14,7 @@ Both runners use the custom `fileid-adlon` label plus GitHub's OS/architecture l
 - Linux x64: `70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613`.
 - Windows x64: `1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc`.
 
-Automatic runner updates remain enabled. These are CI dependencies, not FileID runtime downloads. Services start with their VMs. The VMs themselves already existed and were not reconfigured or restarted.
+Automatic runner updates remain enabled. These are CI dependencies, not FileID runtime downloads. Services start with their VMs. The VMs already existed. The Linux guest disk was subsequently expanded as documented below; no corpus disk was attached.
 
 ## Routing and trust boundary
 
@@ -69,3 +69,21 @@ The component IDs and paths are documented by [Microsoft's Build Tools component
 ### GitHub expression scope
 
 `runner.tool_cache` is available in a step environment, not a job environment. Keep `DOTNET_INSTALL_DIR` on the setup-dotnet step; GitHub rejects the workflow before scheduling jobs if that expression moves to `jobs.build.env`. The bootstrap PR is #188; validate its exact main commit on both Adlon Windows matrices after merge.
+
+## 2026-10-02 disk capacity and actual results
+
+The Linux guest filled its 80 GB virtual disk during CI. Setup failed with `No space left on device` while writing the FileID worker log. Its existing `/var/lib/libvirt/images/adlon-ci-linux.qcow2` resides on the host internal root disk, which had about 651 GB free; the corpus is a different disk. Expanded the guest live to 128 GB with `virsh blockresize adlon-ci-linux vda 128G`, then ran `growpart /dev/vda 1` and `resize2fs /dev/vda1` inside the guest. The resulting ext4 root has about 123 GB usable, with 47 GB free immediately after expansion. No reboot, other repository process termination, or corpus access was needed. Retry the failed main jobs and verify every result; expansion alone does not prove CI passed.
+
+Main `bb33211` Windows x64 engine and both x64/ARM64 app packaging jobs passed on `adlon-fileid-windows` (runs 37016957661 and 37016958500). The ARM64 engine cross-build failed because Clang was absent. The official `Microsoft.VisualStudio.Component.VC.Llvm.Clang` component subsequently installed with exit 0; `vswhere` reports the installation complete, and Clang 19.1.5 starts from `VC\Tools\Llvm\x64\bin`. The workflow must supply that directory to the service account. Native ARM execution remains hosted.
+
+Use `setup.exe modify` with `--quiet --norestart --noUpdateInstaller` for this existing Visual Studio instance. `--wait` is a bootstrapper-only option, not supported by setup.exe. Do not use `--force`, reboot, or close other builds. In PowerShell, `Start-Process -Wait -PassThru` can collect the actual exit code. Check the component and executable afterward.
+
+The current main Windows app workflow skips its test suites because of an incorrect doubled relative Tests path. Its passing packaging jobs therefore are not full app-test acceptance. Archived Windows repair PR #191 restores strict TRX execution, but exposes unresolved production/test API drift. Resume the repair from `archive/2026-10-02/windows-test-parity-wip`, without weakening test, analyzer, or format gates.
+
+The post-expansion main People/merge commit `3d46a969e8da97f4b04e840abcfc2d0a930ad679` passed all four Linux jobs on `adlon-fileid-linux` in run 37028488104 (retry after capacity repair). This proves the runner repair for that source revision; GTK feature parity remains unfinished despite the shell build passing.
+
+## Completed compiler-path acceptance
+
+PR #192 passed all four review checks at `20679d5f542c72466f18dad7249791c0bbf17661` and merged at `dddc365007a84a98fa8adf1704cced71ac2254a6`. Fresh main Windows engine run [37033359014](https://github.com/WebWorldWide/FileID/actions/runs/37033359014) completed with all three jobs successful: x64 and ARM64 cross-builds on `adlon-fileid-windows`, native ARM64 on hosted hardware. Both per-job path prerequisites passed under the actual service account. Build, Clippy, applicable tests, binary verification, smoke and privacy steps remained enforced. Historical failed/superseded runs are not counted as acceptance.
+
+Together with main Linux run 37028488104 and Windows app packaging run 37016958500, this validates the configured runner build gates. It does not fix the skipped Windows app suites, the GTK shell's missing feature wiring, or the broader release blockers. Do not present those gates as completed.

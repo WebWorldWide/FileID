@@ -1,5 +1,11 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-02 — CI infrastructure checkpoint, release still blocked
+
+Reviewed main Linux and Windows builds route to repository-scoped Adlon runners on separate existing CI guest disks; PRs, macOS and native Windows ARM64 remain hosted. See CI_RUNNERS.md for exact service accounts, completed results and the capacity/compiler fixes. Corpus /srv/data remains unmounted and untouched. No release was published for this runner setup.
+
+The Windows app workflow's passing packaging jobs currently skip both suites because of a doubled relative Tests path. Full app-test acceptance is therefore still blocked. An archived repair restores strict TRX execution but exposes missing safety APIs; complete it and require every suite, analyzer/format and native gate before release. The broader feature, model/hardware, held-out accuracy, fidelity, privacy and signing gates in NEXT_VERSION.md remain open. Recovery tags are backups, not release approval.
+
 > The v1.0 release-readiness inventory. Tracks what's done, what's left, and the
 > bar each piece is held to. Not a session log — for *what happened* see
 > [`STATE.md`](STATE.md); for *what's next* see [`NEXT.md`](NEXT.md); for *why*
