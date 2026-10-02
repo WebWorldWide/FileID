@@ -70,7 +70,7 @@ jobs:
         env:
           PSExecutionPolicyPreference: ${{ runner.os == 'Windows' && 'Bypass' || '' }}
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable

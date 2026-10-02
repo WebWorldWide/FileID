@@ -1,3 +1,9 @@
+## 2026-10-02 — Adlon Windows tool provisioning
+
+- Observed app run `36996100014` and Store run `36996099826` on `adlon-fileid-windows`. Process-scoped execution policy fixed the first failure; Python's all-users installation then failed under the runner's Network Service account. Provisioned the official, validly signed Python 3.12.10 installer into the runner tool cache through the existing VM management channel. Installer exited 0; Python 3.12.10 and pip 25.0.1 validated. No VM/service restart, service-account change, or machine/user execution-policy change.
+- Failed jobs were rerun. Both app architectures passed Python setup and exposed the next provisioning failure: .NET setup cannot write `C:\Program Files\dotnet` as Network Service. Windows app, Store, and release workflows now use a writable runner tool-cache directory for .NET. Windows Python versions are pinned to the provisioned version; test execution selects VS 2022 consistently with builds.
+- App safety blockers remain: 23 compile diagnostics and 27 observed failing contracts. No current package has been validated after these changes; Partner Center remains draft. See [CI.md](CI.md) for provisioning and [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md) for the application resume order.
+
 ## 2026-10-02 — Adlon CI/CD runner routing
 
 - Owner requested Adlon as the CI/CD executor. Verified registered `adlon-fileid-linux` and `adlon-fileid-windows` runners are online. Adlon's running Windows VM has VS 2022 Build Tools 17.14, packaging/PriGen tasks, VSTest and Windows SDK x64 MakeAppx; no VM/service was restarted.

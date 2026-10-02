@@ -17,7 +17,7 @@ Native macOS and native ARM64 jobs retain their platform-specific hosted runners
 
 Windows app, engine, Store, Linux, tools, Flatpak and policy workflows accept `main` and `codex/store-msix` pushes, existing path filters, pull requests and manual dispatch. Windows app triggers include its tests and the canonical IPC schema. Website deployment retains the `main` trigger. Release publishing retains its existing tag/dry-run controls.
 
-Actions remain pinned to immutable commits. Python 3.12 is provisioned explicitly because self-hosted runners cannot rely on the hosted image's preinstalled Python. Its pinned setup action receives a Windows process-only execution-policy setting; no VM machine/user policy is changed. Workflow permissions retain read-only defaults; write permissions are isolated to the existing website/release publishing jobs. Superseded Windows validation runs are cancelled per workflow/ref.
+Actions remain pinned to immutable commits. Windows jobs use Python 3.12.10 from the runner tool cache. Its pinned setup action receives a Windows process-only execution-policy setting; no VM machine/user policy is changed. .NET setup installs into `${{ runner.tool_cache }}/dotnet`, which the service account can write. Workflow permissions retain read-only defaults; write permissions are isolated to the existing website/release publishing jobs. Superseded Windows validation runs are cancelled per workflow/ref.
 
 Run the Store preparation pipeline from the authorized branch:
 
@@ -31,5 +31,8 @@ gh run list --branch codex/store-msix
 Verify the job's actual runner name and head SHA, not just the runner label in YAML. Download `FileID-Store-x64` only from the final code commit, inspect its manifest/payload and retain its SHA-256. A successful package build does not replace the full app/engine tests or the installed package runtime checks in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md).
 
 ## Operations
+
+The Windows runner service uses `NT AUTHORITY\NETWORK SERVICE`. Python's all-users installer requires administrator rights, so provision a new Python version before changing the workflow pin. The October 2 cache is `C:\personal-ci\runners\FileID\_work\_tool\Python\3.12.10\x64`, populated from the official `actions/python-versions` release `3.12.10-14343898437`. The installer signature was valid and signed by the Python Software Foundation. An administrator ran the installer with `/quiet /norestart DefaultAllUsersTargetDir=<cache path> InstallAllUsers=1`, verified Python and pip, created the `python3.exe` symlink, and only then created the sibling `x64.complete` marker. Do not mark an incomplete installation as complete or elevate the runner service to work around installation failures. Provisioning did not restart Windows, change the service account, or alter machine/user execution policy.
+
 
 The existing Adlon SSH alias reaches the VM host. Runner services execute inside the Windows and Linux CI VMs; they must be online before dispatching. Inspect GitHub's repository runner status and the exact queued job before restarting anything. Do not restart a VM or service while it has a live job. Runner credentials, signing material and account passwords are not stored in this repository or logs.

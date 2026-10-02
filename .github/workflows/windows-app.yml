@@ -69,10 +69,12 @@ jobs:
         env:
           PSExecutionPolicyPreference: ${{ runner.os == 'Windows' && 'Bypass' || '' }}
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
           dotnet-version: '8.0.x'
 
@@ -151,7 +153,7 @@ jobs:
           msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vsInstall = & $vswhere -latest -products * -property installationPath
+          $vsInstall = & $vswhere -latest -version '[17.0,18.0)' -products * -property installationPath
           $vstest = Join-Path $vsInstall 'Common7/IDE/Extensions/TestPlatform/vstest.console.exe'
           & $vstest FileID.IpcSchema.Tests/bin/Debug/net8.0/FileID.IpcSchema.Tests.dll '/Platform:x64' '/Logger:console;verbosity=minimal'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
