@@ -46,6 +46,10 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v16_path_search",              V16_PATH_SEARCH),
         ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
         ("v18_restructure_feedback",     V18_RESTRUCTURE_FEEDBACK),
+        ("v19_files_text_stage_done", "ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;"),
+        ("v20_vlm_full_model", "ALTER TABLE files ADD COLUMN vlm_full_model TEXT;"),
+        ("v21_catalog", include_str!("../../../../../../shared/catalog/v21.sql")),
+        ("v22_face_cache_provenance", include_str!("../../../../../../shared/catalog/v22.sql")),
     ]
 }
 
@@ -475,7 +479,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 18, "expected 18 applied migrations");
+        assert_eq!(n, 22, "expected 22 applied migrations");
 
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
@@ -544,7 +548,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 18);
+        assert_eq!(n, 22);
     }
 
     /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
@@ -637,7 +641,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 18] = [
+        const CANONICAL: [&str; 22] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -656,6 +660,10 @@ mod tests {
             "v16_path_search",
             "v17_face_verification_stable_keys",
             "v18_restructure_feedback",
+            "v19_files_text_stage_done",
+            "v20_vlm_full_model",
+            "v21_catalog",
+            "v22_face_cache_provenance",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

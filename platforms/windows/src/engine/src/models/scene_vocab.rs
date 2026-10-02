@@ -340,7 +340,7 @@ fn try_load_scene_cache(key: u64) -> Option<SceneLabeler> {
         return None;
     }
     let floats: Vec<f32> = body
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let matrix: Vec<Vec<f32>> = floats.chunks_exact(dim).map(|r| r.to_vec()).collect();

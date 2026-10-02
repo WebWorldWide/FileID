@@ -19,6 +19,15 @@ struct FileIDEngineMain {
     static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
 
     static func main() async {
+        if CommandLine.arguments.dropFirst().first == "--sample-video" {
+            exit(await VideoFrameWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
+        if CommandLine.arguments.dropFirst().first == "--convert-video" {
+            exit(await VideoConversionWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
+        if CommandLine.arguments.dropFirst().first == "--export-photo" {
+            exit(await VideoFrameWorker.runPhoto(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         // U4: must run before ANY library can write to fd 2 (and before
         // the IPCSink singleton captures its wire handle).
         IPCTransport.bootstrap()
@@ -87,6 +96,8 @@ struct FileIDEngineMain {
         // we just surface the recovery cleanly so the user knows what happened.
         if let database {
             await detectCrashedSessions(database: database)
+            await TimelineAnalysis.shared.recover(database: database)
+            await MediaTools.shared.recover(database: database)
         }
 
         // Engine ready handshake. App waits for this before sending the first
@@ -204,6 +215,32 @@ struct FileIDEngineMain {
     static func dispatch(_ cmd: IPCCommand, coordinator: ScanCoordinator,
                           sink: IPCSink, database: Database?) async {
         switch cmd.payload {
+        case .chatRequest(let request):
+            guard let database else {
+                await sink.emit(.chatResponse(ChatResponse(requestID: request.requestID, conversationID: request.conversationID, status: "error", message: "The catalog database is unavailable.")))
+                return
+            }
+            Task { await ChatService.shared.handle(request, database: database, sink: sink) }
+        case .toolRequest(let request):
+            guard let database else {
+                await sink.emit(.toolResponse(ToolResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
+                return
+            }
+            Task { await sink.emit(.toolResponse(await MediaTools.shared.handle(request, database: database))) }
+        case .catalogRequest(let request):
+            guard let database else {
+                await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
+                return
+            }
+            let response: CatalogResponse
+            if request.action == "enqueueTimeline" {
+                response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)
+            } else if ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) {
+                response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+            } else {
+                response = await CatalogStore.handle(request, database: database)
+            }
+            await sink.emit(.catalogResponse(response))
         case .startScan(let rootPath, let rootDisplay, let rescan, let excludedPaths):
             guard let database else {
                 await sink.emit(.error(EngineError(
@@ -948,6 +985,8 @@ struct FileIDEngineMain {
                 continue
             }
             do {
+                try ReadOnlyLocations.requireSourceMutation(oldURL)
+                try ReadOnlyLocations.requireSourceMutation(newURL)
                 try FileManager.default.moveItem(at: oldURL, to: newURL)
                 let ext = newURL.pathExtension.lowercased()
                 try await database.pool.write { db in
@@ -1000,6 +1039,7 @@ struct FileIDEngineMain {
                 continue
             }
             do {
+                try ReadOnlyLocations.requireSourceMutation(url)
                 try FileManager.default.trashItem(at: url, resultingItemURL: nil)
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])

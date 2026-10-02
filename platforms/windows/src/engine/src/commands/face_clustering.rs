@@ -12,6 +12,39 @@ use crate::ipc::{
 };
 use crate::pipeline::face_clustering::{cluster, FaceRow};
 
+fn load_compatible_faces(conn: &rusqlite::Connection) -> anyhow::Result<Vec<FaceRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT fp.id,fp.file_id,fp.arcface_embedding,COALESCE(fp.face_quality,0.0), \
+         fp.embedding_model,fp.processing_version,fp.source_revision,r.revision \
+         FROM face_prints fp LEFT JOIN catalog_revisions r ON r.file_id=fp.file_id \
+         WHERE fp.arcface_embedding IS NOT NULL AND COALESCE(fp.excluded,0)=0 ORDER BY fp.id",
+    )?;
+    let mut cursor = stmt.query([])?;
+    let mut space: Option<(String, String)> = None;
+    let mut faces = Vec::new();
+    while let Some(row) = cursor.next()? {
+        let model: Option<String> = row.get(4)?;
+        let processing: Option<String> = row.get(5)?;
+        let revision: Option<String> = row.get(6)?;
+        let current: Option<String> = row.get(7)?;
+        let blob: Vec<u8> = row.get(2)?;
+        let compatible = model.as_ref().is_some_and(|v| !v.is_empty())
+            && processing.as_ref().is_some_and(|v| !v.is_empty())
+            && revision.as_ref().is_some_and(|v| !v.is_empty())
+            && revision == current && blob.len() == 512;
+        anyhow::ensure!(compatible, "Face caches need a compatible refresh before clustering; existing People were preserved.");
+        let key = (model.unwrap_or_default(), processing.unwrap_or_default());
+        anyhow::ensure!(space.as_ref().is_none_or(|s| *s == key), "Mixed face-model or processing spaces cannot be compared; existing People were preserved.");
+        space = Some(key);
+        let embedding: Vec<f32> = blob.as_chunks::<4>().0.iter().map(|v| f32::from_le_bytes(*v)).collect();
+        let norm: f64 = embedding.iter().map(|v| f64::from(*v).powi(2)).sum();
+        anyhow::ensure!(embedding.iter().all(|v| v.is_finite()) && (0.95..=1.05).contains(&norm), "Invalid face vector; existing People were preserved.");
+        anyhow::ensure!(faces.len() < 200_000, "Face clustering exceeds the safe batch size; existing People were preserved.");
+        faces.push(FaceRow { face_id: row.get(0)?, file_id: row.get(1)?, embedding, quality: row.get::<_,f64>(3)? as f32 });
+    }
+    Ok(faces)
+}
+
 pub(crate) async fn handle_run_face_clustering(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -39,7 +72,7 @@ pub(crate) async fn handle_run_face_clustering(
             created_at: f64,
         }
 
-        let mut faces: Vec<FaceRow> = Vec::new();
+        let faces: Vec<FaceRow>;
         // (b) raw "different people" verdict pairs, loaded here so phase 2 can
         // build that part of the blocked set without touching the DB. The NAME
         // guard is NOT loaded here — it's re-derived in PHASE 3 from the
@@ -50,37 +83,14 @@ pub(crate) async fn handle_run_face_clustering(
         {
             let conn = db.lock();
 
-            // (a) Load every face that has an ArcFace embedding.
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT id, file_id, arcface_embedding, COALESCE(face_quality, 0.0) \
-                     FROM face_prints \
-                     WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded, 0) = 0",
-                )?;
-                let rows = stmt.query_map([], |r| {
-                    let id: i64 = r.get(0)?;
-                    let file_id: i64 = r.get(1)?;
-                    let blob: Vec<u8> = r.get(2)?;
-                    let quality: f64 = r.get(3)?;
-                    Ok((id, file_id, blob, quality))
-                })?;
-                for row in rows {
-                    let (id, file_id, blob, quality) = row?;
-                    if blob.len() % 4 != 0 || blob.is_empty() {
-                        continue;
-                    }
-                    let mut embedding = Vec::with_capacity(blob.len() / 4);
-                    for chunk in blob.chunks_exact(4) {
-                        embedding
-                            .push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                    }
-                    faces.push(FaceRow {
-                        face_id: id,
-                        file_id,
-                        embedding,
-                        quality: quality as f32,
-                    });
-                }
+            faces = load_compatible_faces(&conn)?;
+            if faces.is_empty() {
+                return Ok(FaceClusteringResult {
+                    person_count: conn.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))?,
+                    face_count: 0,
+                    unmatched_faces: 0,
+                    duration_seconds: started.elapsed().as_secs_f64(),
+                });
             }
 
             // (b) Raw "different people" verdict pairs. Re-projected onto the faces'
@@ -153,32 +163,6 @@ pub(crate) async fn handle_run_face_clustering(
         }
 
         // PHASE 2 — no lock held, zero DB access. Pure in-memory clustering.
-        // All face embeddings must share one dimensionality (SFace = 128). A
-        // mixed/corrupt set — e.g. legacy 512-d ArcFace rows left over from
-        // before the commercial-clean swap, or a truncated blob — would make
-        // the clusterer index out of bounds and panic, aborting the whole run
-        // (and, pre-B7, the engine). Keep only the dominant dimension so one
-        // stray row can neither crash clustering nor hijack the dim by loading
-        // first.
-        {
-            let mut dim_counts: HashMap<usize, usize> = HashMap::new();
-            for f in &faces {
-                *dim_counts.entry(f.embedding.len()).or_insert(0) += 1;
-            }
-            if let Some((&modal_dim, _)) = dim_counts.iter().max_by_key(|&(_, c)| *c) {
-                let before = faces.len();
-                faces.retain(|f| f.embedding.len() == modal_dim);
-                let dropped = before - faces.len();
-                if dropped > 0 {
-                    tracing::warn!(
-                        modal_dim,
-                        dropped,
-                        "[CLUSTER] dropped faces with off-dimension embeddings"
-                    );
-                }
-            }
-        }
-
         let face_count = faces.len() as u64;
         // Raw clustering only. Auto-consolidation (which applies the name-based
         // auto-merge guard) is deferred to PHASE 3 so the name guard can be built
@@ -190,6 +174,9 @@ pub(crate) async fn handle_run_face_clustering(
         // PHASE 3 — re-acquire the writer lock for the persist transaction.
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
+        let current = load_compatible_faces(&tx)?;
+        anyhow::ensure!(current.len() == faces.len() && current.iter().zip(&faces).all(|(a,b)| a.face_id == b.face_id && a.file_id == b.file_id && a.embedding == b.embedding), "Face caches changed during clustering; existing People were preserved.");
+
 
         // Read the user-identity snapshot HERE — under the persist lock, inside
         // the transaction, BEFORE the DELETE below — rather than in phase 1.
@@ -448,4 +435,60 @@ pub(crate) async fn handle_run_face_clustering(
             .await;
         }
     }
+}
+
+#[cfg(test)]
+mod cache_space_tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_spaces_are_rejected_before_persistence() -> anyhow::Result<()> {
+        for fault in ["model", "processing", "legacy", "revision", "nan", "dimension"] {
+            let conn = rusqlite::Connection::open_in_memory()?;
+            conn.execute_batch("CREATE TABLE face_prints(id INTEGER,file_id INTEGER,arcface_embedding BLOB,face_quality REAL,excluded INTEGER,embedding_model TEXT,processing_version TEXT,source_revision TEXT); CREATE TABLE catalog_revisions(file_id INTEGER,revision TEXT);")?;
+            let mut vector = vec![0.0f32;128]; vector[0]=1.0;
+            let blob: Vec<u8> = vector.iter().flat_map(|v| v.to_le_bytes()).collect();
+            for id in 1..=2 {
+                conn.execute("INSERT INTO catalog_revisions VALUES(?1,'current')", [id])?;
+                conn.execute("INSERT INTO face_prints VALUES(?1,?1,?2,1,0,'weights','aligned','current')", rusqlite::params![id,blob])?;
+            }
+            assert_eq!(load_compatible_faces(&conn)?.len(),2);
+            match fault {
+                "model" => {conn.execute("UPDATE face_prints SET embedding_model='other' WHERE id=2", [])?;}
+                "processing" => {conn.execute("UPDATE face_prints SET processing_version='other' WHERE id=2", [])?;}
+                "legacy" => {conn.execute("UPDATE face_prints SET embedding_model=NULL WHERE id=2", [])?;}
+                "revision" => {conn.execute("UPDATE face_prints SET source_revision='old' WHERE id=2", [])?;}
+                "nan" => {conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=2", [vec![f32::NAN.to_le_bytes();128].concat()])?;}
+                _ => {conn.execute("UPDATE face_prints SET arcface_embedding=X'00' WHERE id=2", [])?;}
+            }
+            assert!(load_compatible_faces(&conn).is_err(), "{fault}");
+            assert_eq!(conn.query_row("SELECT count(*) FROM face_prints",[], |r|r.get::<_,i64>(0))?,2);
+        }
+        Ok(())
+    }
+    #[tokio::test]
+    async fn handler_preserves_people_on_incompatible_or_empty_caches() -> anyhow::Result<()> {
+        for empty in [false,true] {
+            let conn = rusqlite::Connection::open_in_memory()?;
+            conn.execute_batch("CREATE TABLE persons(id INTEGER,name TEXT); INSERT INTO persons VALUES(8,'Confirmed'); CREATE TABLE face_prints(id INTEGER,file_id INTEGER,person_id INTEGER,arcface_embedding BLOB,face_quality REAL,excluded INTEGER,embedding_model TEXT,processing_version TEXT,source_revision TEXT); CREATE TABLE catalog_revisions(file_id INTEGER,revision TEXT);")?;
+            if !empty {
+                let mut vector = vec![0.0f32;128]; vector[0]=1.0;
+                let blob: Vec<u8> = vector.iter().flat_map(|v|v.to_le_bytes()).collect();
+                for id in 1..=2 {
+                    conn.execute("INSERT INTO catalog_revisions VALUES(?1,'current')", [id])?;
+                    conn.execute("INSERT INTO face_prints VALUES(?1,?1,8,?2,1,0,?3,'aligned','current')", rusqlite::params![id,blob,format!("different-weights-{id}")])?;
+                }
+            }
+            let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+            let (sink,mut rx) = Sink::channel_for_test(4);
+            handle_run_face_clustering(sink,db.clone()).await;
+            let event = rx.recv().await.ok_or_else(||anyhow::anyhow!("missing terminal event"))?;
+            if empty { assert!(matches!(event.payload,EventPayload::FaceClusteringComplete(_))); }
+            else { assert!(matches!(event.payload,EventPayload::Error(_))); }
+            assert_eq!(db.lock().query_row("SELECT name FROM persons WHERE id=8",[],|r|r.get::<_,String>(0))?,"Confirmed");
+            if !empty { assert_eq!(db.lock().query_row("SELECT COUNT(*) FROM face_prints WHERE person_id=8",[],|r|r.get::<_,i64>(0))?,2); }
+        }
+        Ok(())
+    }
+
 }

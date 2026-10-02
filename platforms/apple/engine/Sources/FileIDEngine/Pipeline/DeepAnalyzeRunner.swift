@@ -331,6 +331,7 @@ public enum DeepAnalyzeRunner {
             // Audio uses on-device metadata/speech/sound analysis. Other supported files
             // use a bounded raster and, for documents, bounded extracted text.
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
+            var faceNames: [String] = []
             var result: DeepAnalyze.AnalysisResult
             var requiresGeneratedFilenameMinimum = false
             if kind == .audio {
@@ -354,13 +355,14 @@ public enum DeepAnalyzeRunner {
                     documentText = nil
                 }
                 // Pull face cluster names (if any) to inject into the prompt.
-                let faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
+                faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
+                let modelFaceNames = faceNames
                 result = await DeepAnalyze.shared.runCancellableAnalysis {
                     await DeepAnalyze.shared.analyze(
                         imageURL: url,
                         mediaKind: kind,
                         documentText: documentText,
-                        faceNames: faceNames,
+                        faceNames: modelFaceNames,
                         onToken: onToken
                     )
                 }
@@ -392,7 +394,13 @@ public enum DeepAnalyzeRunner {
                     )
                     let meetsMinimum = !requiresGeneratedFilenameMinimum
                         || DeepAnalyze.hasMinimumGeneratedFilenameWords(groundedName)
-                    let acceptedName = meetsMinimum ? groundedName : nil
+                    let originalStem = URL(fileURLWithPath: target.path).deletingPathExtension().lastPathComponent
+                    let acceptedName: String?
+                    if requiresGeneratedFilenameMinimum {
+                        acceptedName = meetsMinimum ? groundedName.flatMap { SmartFileName.stem($0, confirmedSubjects: faceNames, originalStem: originalStem) } : nil
+                    } else {
+                        acceptedName = groundedName.map { FilesystemNameSafe.componentSafe($0, maxLength: 60) }
+                    }
                     proposedName = Self.reserveProposedName(
                         acceptedName,
                         sourcePath: target.path,
@@ -464,19 +472,16 @@ public enum DeepAnalyzeRunner {
         reserved: inout Set<String>
     ) -> String? {
         guard let base = proposedName, !base.isEmpty else { return nil }
-        if reserved.insert(base.lowercased()).inserted { return base }
-        let stem = ((sourcePath as NSString).lastPathComponent as NSString)
-            .deletingPathExtension
-        let sourceStem = DeepAnalyze.sanitize(filename: stem) ?? "source"
-        var ordinal = 1
+        let folder = ReadOnlyLocations.resolved(URL(fileURLWithPath: sourcePath).deletingLastPathComponent()).path.lowercased()
+        func key(_ name: String) -> String { folder + "\0" + name.lowercased() }
+        if reserved.insert(key(base)).inserted { return base }
+        var ordinal = 2
         while true {
-            let suffix = ordinal == 1 ? sourceStem : "\(sourceStem)-\(ordinal)"
-            let suffixCount = suffix.utf8.count
-            let budget = max(0, 80 - suffixCount - 1)
-            var prefix = String(base.prefix(budget))
-            while prefix.last == "-" || prefix.last == "_" { prefix.removeLast() }
-            let candidate = prefix.isEmpty ? suffix : "\(prefix)-\(suffix)"
-            if reserved.insert(candidate.lowercased()).inserted { return candidate }
+            let suffix = " (\(ordinal))"
+            let budget = max(0, 60 - suffix.count)
+            let prefix = String(base.prefix(budget)).trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = prefix + suffix
+            if reserved.insert(key(candidate)).inserted { return candidate }
             ordinal += 1
         }
     }

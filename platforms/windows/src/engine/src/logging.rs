@@ -16,6 +16,7 @@ pub(crate) fn init() -> Result<()> {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     let logs_dir = paths::logs_dir().context("resolving logs dir")?;
+    crate::util::read_only::require_writable(&logs_dir)?;
     std::fs::create_dir_all(&logs_dir).context("creating logs dir")?;
 
     let file_appender = tracing_appender::rolling::daily(&logs_dir, "engine.jsonl");

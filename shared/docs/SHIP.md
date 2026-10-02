@@ -5,6 +5,13 @@
 > [`STATE.md`](STATE.md); for *what's next* see [`NEXT.md`](NEXT.md); for *why*
 > see [`DECISIONS.md`](DECISIONS.md).
 
+
+## Next-version release status (2026-10-01)
+
+The next-version branch is not release-ready. Its implemented foundation and unfinished features are tracked in [NEXT_VERSION.md](NEXT_VERSION.md). Native macOS catalog/manual-marker UI and sampled timeline jobs and initial local chat/photo/chapter exports do not establish automatic chapters, best takes, full conversion/enhancement, hybrid conversational search, or port parity. The existing notarized v0.1.0 release remains separate from this work.
+
+Block release until all accepted feature milestones, held-out accuracy tests, 100,000-file search/interactive-contention benchmarks, original/derived output fidelity, protected-source write tracing, offline network capture, exact dependency/model distribution review, native platform builds, hardware acceptance, signing, and hosted CI pass. Record measured results; do not present proposed targets as achieved.
+
 ## What FileID is
 
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename
@@ -193,3 +200,15 @@ Windows v1.0 ships when at least 4 of the rows are green — CPU plus at least o
 each from NVIDIA / AMD / Intel. All rows is the goal; Snapdragon may launch in a
 follow-on if hardware availability blocks. macOS ships once WS-MAC lockstep lands
 and its existing CI + on-device checks pass.
+
+## Initial tools milestone
+
+Native macOS photo/chapter exports and Rust adapter contracts now exist; TOOLS.md lists exact supported pairs and fidelity/recovery limits. These do not satisfy the full conversion, enhancement, reframing, broad toolbox, port UI, or hardware gates. Keep the draft PR open until the accepted feature scope and release checks are actually complete.
+
+Initial memory headroom checks, native residency cancellation, and decoder-watchdog coverage are implemented. Parallel model/resource admission, inference worker isolation, and model/hardware measurements remain release gates; refer to SCHEDULER.md.
+
+Face-cache acceptance additionally requires legacy clustering-space isolation, complete resumable refresh/backlog handling, same-size/same-mtime replacement detection, held-out identity precision/recall and actual model inference checks. v22 provenance and synthetic geometry/migration tests establish none of those accuracy targets.
+
+Native H.264/AAC SDR export has generated portrait/audio/metadata/Undo tests. It still requires portable worker/UI parity and the full real-world timing/color/fidelity matrix before release; its bounded presets do not establish stabilization, AI enhancement or tracked reframing.
+
+Face comparison now rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations and remaining incremental/stable-ID/calibration gates.

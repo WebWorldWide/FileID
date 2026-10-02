@@ -73,7 +73,7 @@ fn load_capped_embeddings(
         let (id, blob) = r?;
         if !blob.is_empty() && blob.len() % 4 == 0 {
             let v = blob
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             embeddings.insert(id, v);

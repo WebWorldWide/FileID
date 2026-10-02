@@ -106,6 +106,7 @@ crossbeam-channel = "0.5"
 # becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
 instant-distance = "0.6"
+rayon = "1.12"
 
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,
 # AND Phase 4 OOXML document text extraction (.docx/.pptx/.xlsx are zip+xml).
@@ -329,7 +330,6 @@ cast_possible_wrap      = "allow"  # u32→i32 conversions for SQLite parameter 
 map_unwrap_or           = "allow"  # `map().unwrap_or()` is at least as readable as `map_or()`
 manual_midpoint         = "allow"  # `(a + b) / 2` is fine where overflow is impossible
 manual_is_multiple_of   = "allow"  # `x % n == 0` is idiomatic Rust
-unchecked_duration_subtraction = "allow"  # call sites are within elapsed-time logic where subtrahend < minuend by construction (lint was renamed from unchecked_time_subtraction)
 redundant_closure       = "allow"  # readability sometimes wins over conciseness
 needless_continue       = "allow"  # explicit continue in long loops aids readability
 needless_range_loop     = "allow"  # range-loop with index is sometimes clearer than iter

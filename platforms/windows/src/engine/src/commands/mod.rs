@@ -14,3 +14,9 @@ pub(crate) mod thumbnail;
 pub(crate) mod trash;
 pub(crate) mod trash_log;
 pub(crate) mod wipe;
+
+pub mod catalog;
+
+pub mod chat;
+mod chat_search;
+pub mod tools;

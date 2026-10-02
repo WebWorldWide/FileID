@@ -16,21 +16,25 @@ public actor JobQueue {
     public static let shared = JobQueue()
 
     public struct Job: Sendable {
+        public enum Priority: Int, Sendable { case background = 0, interactive = 1 }
         public let id: String
         public let category: JobCategory
         public let title: String
         public let etaSeconds: Double?
+        public let priority: Priority
         public let run: @Sendable () async -> Void
 
         public init(id: String = UUID().uuidString,
                     category: JobCategory,
                     title: String,
                     etaSeconds: Double?,
+                    priority: Priority = .background,
                     run: @escaping @Sendable () async -> Void) {
             self.id = id
             self.category = category
             self.title = title
             self.etaSeconds = etaSeconds
+            self.priority = priority
             self.run = run
         }
     }
@@ -39,23 +43,17 @@ public actor JobQueue {
     private var running: Job?
     private var drainerStarted = false
     private weak var sink: IPCSink?
-    /// Drainer parks here when the queue is empty; enqueue resumes it.
-    private var drainerWaiter: CheckedContinuation<Void, Never>?
-
-    private init() {}
+    init() {}
 
     public func attachSink(_ s: IPCSink) {
         self.sink = s
     }
 
     public func enqueue(_ job: Job) async {
-        pending.append(job)
+        let position = pending.firstIndex { $0.priority.rawValue < job.priority.rawValue } ?? pending.endIndex
+        pending.insert(job, at: position)
         await emitState()
         startDrainerIfNeeded()
-        if let waiter = drainerWaiter {
-            drainerWaiter = nil
-            waiter.resume()
-        }
     }
 
     /// Cancel a queued (not-yet-running) job. The currently-running job
@@ -104,14 +102,8 @@ public actor JobQueue {
                 return j
             }()
             guard let job = next else {
-                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                    if pending.isEmpty {
-                        drainerWaiter = cont
-                    } else {
-                        cont.resume()
-                    }
-                }
-                continue
+                drainerStarted = false
+                return
             }
             await emitState()
             JSONLog.shared.info(ev: "job_start",

@@ -56,7 +56,10 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public static var defaultDBURL: URL {
-        AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
+        if let path = ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
     }
 
     private static let suppressedDisplayTags: Set<String> = [
@@ -78,7 +81,8 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 var config = Configuration()
                 config.readonly = true
-                self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+                try ReadOnlyLocations.requireWritable(dbURL)
+            self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
             } catch {
                 reportError("Could not open DB: \(error)")
                 return
@@ -1657,6 +1661,8 @@ public final class ReadStore: @unchecked Sendable {
                 skipped += 1; continue
             }
             do {
+                try ReadOnlyLocations.requireSourceMutation(newURL)
+                try ReadOnlyLocations.requireSourceMutation(oldURL)
                 try fm.moveItem(at: newURL, to: oldURL)
                 // Only count as undone once the DB agrees. The DB restore used
                 // to be a `try?`-swallow, leaving the row pointing at a
@@ -1706,6 +1712,7 @@ public final class ReadStore: @unchecked Sendable {
     // throw — silently no-opping the edit, or stranding a trashed file as
     // a ghost DB row. The timeout makes the contended write retry instead.
     private func writeQueue() throws -> DatabaseQueue {
+        try ReadOnlyLocations.requireWritable(dbURL)
         var config = Configuration()
         config.busyMode = .timeout(5)
         return try DatabaseQueue(path: dbURL.path, configuration: config)
@@ -1749,6 +1756,8 @@ public final class ReadStore: @unchecked Sendable {
         }
         guard target != oldURL else { return oldURL }
         do {
+            try ReadOnlyLocations.requireSourceMutation(oldURL)
+            try ReadOnlyLocations.requireSourceMutation(target)
             try FileManager.default.moveItem(at: oldURL, to: target)
         } catch {
             reportError("Rename failed: \(error.localizedDescription)")

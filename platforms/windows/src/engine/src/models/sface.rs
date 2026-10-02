@@ -26,6 +26,7 @@ pub struct SFace {
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
+    model_version: String,
 }
 
 impl SFace {
@@ -34,6 +35,11 @@ impl SFace {
         if !path.exists() {
             anyhow::bail!("SFace weights missing at {}", path.display());
         }
+        let before = std::fs::metadata(path)?;
+        let size = before.len();
+        anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
+        let digest = crate::util::content_hash::exact_file_sha256(path, size)?;
+        let model_version = format!("sface128-sha256:{}", hex::encode(digest));
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -50,6 +56,8 @@ impl SFace {
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SFace)")?;
+        let after = std::fs::metadata(path)?;
+        anyhow::ensure!(before.len() == after.len() && before.modified()? == after.modified()?, "SFace weights changed during load");
         let input_name = session
             .inputs
             .first()
@@ -57,7 +65,7 @@ impl SFace {
             .name
             .clone();
 
-        let mut model = Self { session, input_name };
+        let mut model = Self { session, input_name, model_version };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 112 * 112])?;
         tracing::info!(
@@ -66,6 +74,10 @@ impl SFace {
             "warmup complete"
         );
         Ok(model)
+    }
+
+    pub fn model_version(&self) -> &str {
+        &self.model_version
     }
 
     /// Embed an aligned 112×112 RGB8 face crop (3 * 112 * 112 = 37632 bytes).

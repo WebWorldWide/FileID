@@ -24,6 +24,13 @@ public final class EngineClient {
     /// `.onChange` on this monotonic counter rather than `lastError?.message`
     /// — two consecutive identical failures must still re-fire the handler.
     public private(set) var lastErrorSignal: Int = 0
+    public private(set) var latestChatResponse: ChatResponse?
+    public private(set) var toolResponses: [String: ToolResponse] = [:]
+    private var toolResponseOrder: [String] = []
+    private var catalogResponseOrder: [String] = []
+    public private(set) var catalogResponses: [String: CatalogResponse] = [:]
+    public private(set) var catalogJobs: [CatalogJob] = []
+    func applyCatalogJobsSnapshot(_ jobs: [CatalogJob]) { catalogJobs = jobs }
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
     public private(set) var faceClusteringInFlight: Bool = false
@@ -482,6 +489,7 @@ public final class EngineClient {
     /// Debug log at ~/Library/Application Support/FileID/logs/app.log.
     nonisolated public static func debug(_ msg: String) {
         let url = AppSupportPath.fileID.appendingPathComponent("logs/app.log")
+        guard (try? ReadOnlyLocations.requireWritable(url)) != nil else { return }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                   withIntermediateDirectories: true)
         let stamp = ISO8601DateFormatter().string(from: Date())
@@ -503,6 +511,23 @@ public final class EngineClient {
 
     private func handleEvent(_ event: IPCEvent) {
         switch event.payload {
+        case .chatResponse(let response):
+            latestChatResponse = response
+        case .toolResponse(let response):
+            if toolResponses[response.requestID] == nil {
+                if toolResponseOrder.count >= 64 { toolResponses.removeValue(forKey: toolResponseOrder.removeFirst()) }
+                toolResponseOrder.append(response.requestID)
+            }
+            toolResponses[response.requestID] = response
+        case .catalogResponse(let response):
+            if catalogResponses[response.requestID] == nil {
+                if catalogResponseOrder.count >= 64 {
+                    catalogResponses.removeValue(forKey: catalogResponseOrder.removeFirst())
+                }
+                catalogResponseOrder.append(response.requestID)
+            }
+            catalogResponses[response.requestID] = response
+            if !response.jobs.isEmpty { catalogJobs = response.jobs }
         case .ready(let info):
             state = .ready(info)
             // R5-07: do NOT clear the respawn budget merely on reaching Ready — a
@@ -995,7 +1020,9 @@ public final class EngineClient {
     public func factoryResetAndQuit() {
         terminateRunningEngine()
         let fm = FileManager.default
-        try? fm.removeItem(at: AppSupportPath.fileID)
+        if (try? ReadOnlyLocations.requireWritable(AppSupportPath.fileID)) != nil {
+            try? fm.removeItem(at: AppSupportPath.fileID)
+        }
         if let bundleID = Bundle.main.bundleIdentifier {
             UserDefaults.standard.removePersistentDomain(forName: bundleID)
             UserDefaults.standard.synchronize()
@@ -1057,7 +1084,9 @@ public final class EngineClient {
         ]
         for name in candidates {
             let url = root.appendingPathComponent(name)
-            try? fm.removeItem(at: url)
+            if (try? ReadOnlyLocations.requireWritable(url)) != nil {
+                try? fm.removeItem(at: url)
+            }
         }
         // The Spotlight items mirror the rows just wiped — without
         // this, captions/tags/paths of wiped files stay queryable in

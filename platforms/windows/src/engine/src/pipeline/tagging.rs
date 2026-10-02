@@ -242,6 +242,7 @@ pub struct DetectedFace {
     pub bbox: [f32; 4],          // x, y, w, h in image pixels
     pub landmarks: [[f32; 2]; 5],
     pub embedding: Vec<f32>,
+    pub embedding_model: Option<String>,
     pub roll: f32,
     pub yaw: f32,
     pub pitch: f32,
@@ -1536,10 +1537,10 @@ async fn process_file_predecoded(
                                     if let Some(crop) = crop {
                                         let embed_result = {
                                             let mut a = arcface_mu.lock();
-                                            a.embed(&crop)
+                                            a.embed(&crop).map(|embedding| (embedding, a.model_version().to_owned()))
                                         };
                                         match embed_result {
-                                            Ok(emb) => {
+                                            Ok((emb, embedding_model)) => {
                                                 let pose = scrfd::estimate_pose(&det.landmarks);
                                                 let img_area = (w as f32) * (h as f32);
                                                 let area_fraction = if img_area > 0.0 {
@@ -1551,6 +1552,7 @@ async fn process_file_predecoded(
                                                     bbox: bbox_xywh,
                                                     landmarks: det.landmarks,
                                                     embedding: emb,
+                                                    embedding_model: Some(embedding_model),
                                                     roll: pose.roll,
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
@@ -2294,6 +2296,7 @@ mod tests {
             bbox: [0.0; 4],
             landmarks: [[0.0; 2]; 5],
             embedding: vec![0.0; 512],
+            embedding_model: None,
             roll: 0.0,
             yaw: 0.0,
             pitch: 0.0,

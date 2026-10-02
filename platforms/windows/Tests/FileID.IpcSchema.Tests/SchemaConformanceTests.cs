@@ -1,4 +1,4 @@
-// Schema-conformance suite — C# twin of the Rust engine's variant coverage
+﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
 // tests, checked against the canonical contract itself. For every
 // CommandPayload / EventPayload variant we keep an exemplar instance,
 // serialize it through IpcCoder (the exact wire path), and assert against
@@ -133,8 +133,13 @@ public class SchemaConformanceTests
     // app constructs them. Optional fields are set so the serialized keys
     // exercise the variant's full schema property surface.
 
+    private static CatalogChapter ExampleChapter() => new("chapter-1", 42, 12.5, 20, "Gift Opening", "Grandma opens a gift", "100:123", "user", 1, true, false);
+
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
+        new ChatRequestCommand(new ChatRequest("chat", "c", "send", "birthday", true)),
+        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("video", "mp4", 1920), "plan")),
+        new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
         new PauseScanCommand(),
         new ResumeScanCommand(),
@@ -173,6 +178,9 @@ public class SchemaConformanceTests
 
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
+        new ChatResponseEvent(new ChatResponse("chat", "c", "completed", "Found", new[] { new ChatMessage("m", "user", "birthday", 1) }, Array.Empty<CatalogHit>())),
+        new ToolResponseEvent(new ToolResponse("tool", "ok", "Exported", new[] { new ToolOutput(1, "/internal/a.png", "/internal/b.png", "completed", "Original preserved") }, new[] { new ToolCapability("photo", true, _exampleTags, _exampleTags, "Conversion") }, "plan")),
+        new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),

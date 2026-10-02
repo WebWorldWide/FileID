@@ -9,6 +9,7 @@
 // added in a later migration so existing M2 DBs upgrade cleanly.
 import Foundation
 import GRDB
+import FileIDShared
 
 /// A DB touched by a NEWER engine carries migration identifiers this
 /// build doesn't know; writing to it could silently break the newer
@@ -33,6 +34,7 @@ public final class Database: @unchecked Sendable {
     public let pool: DatabasePool
 
     public init(at url: URL) throws {
+        try ReadOnlyLocations.requireWritable(url)
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -513,6 +515,12 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "ALTER TABLE files ADD COLUMN vlm_full_model TEXT;")
         }
 
+        m.registerMigration("v21_catalog") { db in
+            try db.execute(sql: CatalogSchema.v21)
+        }
+        m.registerMigration("v22_face_cache_provenance") { db in
+            try db.execute(sql: CatalogSchema.v22)
+        }
         return m
     }
 

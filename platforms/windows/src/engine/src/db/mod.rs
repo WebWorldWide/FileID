@@ -33,6 +33,7 @@ pub const SETUP_PRAGMAS: &[&str] = &[
 /// Open the engine's writer connection. Creates the file + schema if absent.
 /// Applies every migration up to v7 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
+    crate::util::read_only::require_writable(db_path)?;
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating db parent dir {}", parent.display()))?;
@@ -60,6 +61,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         [],
     );
 
+    crate::commands::tools::recover(&conn)?;
     Ok(conn)
 }
 

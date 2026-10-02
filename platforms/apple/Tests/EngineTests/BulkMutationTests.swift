@@ -46,16 +46,14 @@ struct BulkMutationTests {
         let renamed = root.appendingPathComponent("renamed.md")
         #expect(FileManager.default.fileExists(atPath: renamed.path))
         #expect(FileManager.default.fileExists(atPath: second.path))
-        let fetched: Row? = try await db.pool.read { sql in
+        let fetched: (path: String, hash: Int64, ext: String)? = try await db.pool.read { sql in
             try Row.fetchOne(sql, sql: "SELECT path_text, path_hash, extension FROM files WHERE id = 1")
+                .map { row in (row["path_text"], row["path_hash"], row["extension"]) }
         }
         let row = try #require(fetched)
-        let path: String = row["path_text"]
-        let pathHash: Int64 = row["path_hash"]
-        let ext: String = row["extension"]
-        #expect(path == renamed.path)
-        #expect(pathHash == StablePathHash.hash(renamed.path))
-        #expect(ext == "md")
+        #expect(row.path == renamed.path)
+        #expect(row.hash == StablePathHash.hash(renamed.path))
+        #expect(row.ext == "md")
     }
 
     @Test("Bulk rename rejects a same-path replacement by file identity")
@@ -123,19 +121,23 @@ struct BulkMutationTests {
             destinationAnchorFaceID: 101
         )
         #expect(result.succeeded == 1)
-        let row: Row? = try await db.pool.read { sql in
+        let row: (personA: Int64?, personB: Int64?, faceA: Int64?, faceB: Int64?, fileA: Int64?, bboxB: String?)? = try await db.pool.read { sql in
             try Row.fetchOne(sql, sql: """
                 SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b
                 FROM face_verifications
                 """)
+                .map { row in
+                    (row["person_a"], row["person_b"], row["face_a"],
+                     row["face_b"], row["file_a"], row["bbox_b"])
+                }
         }
         let verdict = try #require(row)
-        #expect((verdict["person_a"] as Int64?) == 10)
-        #expect((verdict["person_b"] as Int64?) == 20)
-        #expect((verdict["face_a"] as Int64?) == 101)
-        #expect((verdict["face_b"] as Int64?) == 202)
-        #expect((verdict["file_a"] as Int64?) == 1)
-        #expect((verdict["bbox_b"] as String?) == "0.5,0.5,0.2,0.2")
+        #expect(verdict.personA == 10)
+        #expect(verdict.personB == 20)
+        #expect(verdict.faceA == 101)
+        #expect(verdict.faceB == 202)
+        #expect(verdict.fileA == 1)
+        #expect(verdict.bboxB == "0.5,0.5,0.2,0.2")
     }
 
     @Test("Path prefetch crosses SQLite parameter chunks without omissions")

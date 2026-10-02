@@ -5,13 +5,14 @@
 //!
 //! Vectors are expected to be **L2-normalized** before indexing; the squared
 //! Euclidean distance instant-distance computes is then monotonic in
-//! `(1 − cosine_similarity)`, so the nearest-neighbor ordering matches a
-//! true cosine-similarity ranking exactly.
+//! `(1 − cosine_similarity)`. Distance ordering of returned candidates matches
+//! cosine similarity; approximate retrieval can still miss true neighbors.
 // Wired into `pipeline::face_clustering` above ~5 k faces. Below threshold
 // the brute-force cosine path wins because HNSW build overhead exceeds the
 // O(n²) saving at small N.
 
 use instant_distance::{Builder, HnswMap, Point, Search};
+use std::sync::OnceLock;
 
 /// Owned f32 embedding; `Point` implements squared-L2 over the vector.
 #[derive(Clone, Debug, Default)]
@@ -31,7 +32,7 @@ impl Point for Embedding {
 
 /// Build an HNSW index from `(embedding, value)` pairs. `value` is whatever
 /// the caller wants to recover at search time (e.g. a `file_id` or `face_id`).
-pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
+pub(crate) fn build<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) =
         points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
     // Fixed seed: instant-distance's Builder::default() seeds its layer-shuffle
@@ -39,7 +40,12 @@ pub(crate) fn build<V: Clone>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, 
     // kNN neighbour sets — would differ run-to-run. Face clustering derives
     // cluster IDs and inherited People names from those neighbours, so an
     // entropy seed makes identities hop on every re-cluster. Pin it. (audit E0)
-    Builder::default().seed(0xF11E_1D00).build(embeds, values)
+    // A fixed RNG seed does not order instant-distance's parallel insertions.
+    // Keep construction local to one worker; queries retain their caller's pool.
+    static BUILDER_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    let pool = BUILDER_POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1)
+        .build().expect("HNSW construction worker must be available"));
+    pool.install(|| Builder::default().seed(0xF11E_1D00).build(embeds, values))
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a
@@ -139,10 +145,19 @@ mod tests {
                 .collect()
         };
         let idx_a = build(mk());
-        let idx_b = build(mk());
         let q = norm(vec![1.0, 0.05, 0.9, 0.1]);
         let ha: Vec<usize> = Searcher::default().top_k(&idx_a, &q, 16).into_iter().map(|h| h.0).collect();
-        let hb: Vec<usize> = Searcher::default().top_k(&idx_b, &q, 16).into_iter().map(|h| h.0).collect();
-        assert_eq!(ha, hb, "HNSW kNN ordering must be deterministic across builds");
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let mk = &mk;
+                let q = &q;
+                let ha = &ha;
+                scope.spawn(move || {
+                    let idx_b = build(mk());
+                    let hb: Vec<usize> = Searcher::default().top_k(&idx_b, q, 16).into_iter().map(|h| h.0).collect();
+                    assert_eq!(*ha, hb, "HNSW kNN ordering must be deterministic across builds");
+                });
+            }
+        });
     }
 }

@@ -102,7 +102,7 @@ jobs:
           # and fast; serial adds only seconds. (The blocking-read pattern is
           # also being removed in the tests themselves.)
           set +e
-          perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
+          FILEID_TEST_ENGINE_PATH="$PWD/.build/release/FileIDEngine" perl -e 'alarm 720; exec @ARGV or die "exec: $!"' swift test --no-parallel
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then

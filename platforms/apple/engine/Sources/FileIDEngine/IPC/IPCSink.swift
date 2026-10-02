@@ -281,7 +281,7 @@ public actor IPCSink {
         // (its error twin, plan_restructure_failed, is .error and already pinned);
         // omitting it let a successful plan be evicted while a failed one always
         // landed — the asymmetry the re-audit flagged (R-15).
-        case .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
+        case .toolResponse, .catalogResponse, .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
              .restructurePlan, .restructureApplyResult, .error,
         // Non-terminal but still must never be coalesced away.
              .ready, .discoveryComplete, .phaseChanged:

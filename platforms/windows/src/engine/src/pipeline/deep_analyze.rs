@@ -185,6 +185,7 @@ pub async fn analyze_file(
 
     // Persist caption + proposed name (v3 `files` columns) + VLM tags.
     {
+        proposed_name = proposed_name.and_then(|name| crate::util::smart_name::readable_stem(&name, face_names));
         let conn = db.lock();
         persist_vlm_results(
             &conn,
@@ -460,6 +461,7 @@ pub(crate) async fn analyze_file_via_server(
     }
 
     {
+        proposed_name = proposed_name.and_then(|name| crate::util::smart_name::readable_stem(&name, face_names));
         let conn = db.lock();
         persist_vlm_results(
             &conn,

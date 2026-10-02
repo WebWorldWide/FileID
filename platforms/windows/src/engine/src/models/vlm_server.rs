@@ -67,6 +67,8 @@ impl VlmServer {
     /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
     /// never blocks the working Vulkan one.
     pub async fn start(gguf: &Path, mmproj: &Path, cancel: &AtomicBool) -> Result<Self> {
+        if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
+        crate::util::model_memory::require_model_headroom(gguf,mmproj).await?;
         crate::models::runtime::ensure_gpu_inference_alive()?;
         let bins = Self::server_binaries();
         if bins.is_empty() {
