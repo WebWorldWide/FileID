@@ -31,6 +31,8 @@ public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
+public sealed record HealthCheckCommand(
+    [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
@@ -210,6 +212,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
+            "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
@@ -241,6 +244,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
+            case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
             case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;

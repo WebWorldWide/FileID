@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## Current continuation — health and Windows safety
+
+The health-contract follow-up is under review. IPC v1.5 supplies bounded nonce/PID replies in both engines and portable DTOs; C# IPC tests/format/report fixtures pass on the isolated Adlon VM. Finish Rust 1.90/Swift and fresh hosted/main CI acceptance, then continue the archived Windows lifecycle, exact-cleanup, Undo and restructure repairs. A dedicated IPC suite gate now runs; the legacy app-service test block is still skipped. Preserve all service tests and analyzer gates. No next-version completion or release acceptance is implied.
+
 ## Day-end continuation — 2026-10-02
 
 The full accepted goal remains active after the owner resumed sustained work; this is a recovery checkpoint, not a pause or release completion. Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.

@@ -11,6 +11,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/linux.yml'
   pull_request:
     paths:
@@ -21,6 +23,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/linux.yml'
   workflow_dispatch:
 
@@ -94,6 +98,10 @@ jobs:
         # system libpdfium): the pdf paths call Pdfium::bind_to_system_library()
         # and map an absent lib to an Err rather than aborting the test run.
         run: cargo test --lib
+
+      - name: Verify command-channel health probes
+        timeout-minutes: 2
+        run: python3 "${{ github.workspace }}/shared/scripts/check_health_roundtrip.py" --engine target/release/FileIDEngine
 
       - name: Verify binary exists
         run: |

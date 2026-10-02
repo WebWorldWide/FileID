@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.4.0",
+  "version": "1.5.0",
 
   "$defs": {
     "IPCCommand": {
@@ -70,6 +70,11 @@
         { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["healthCheck"], "additionalProperties": false,
+          "properties": { "healthCheck": { "type": "object", "additionalProperties": false,
+            "description": "Lightweight command-channel probe. Echoes the opaque nonce and actual engine PID without starting work, touching the catalog or re-emitting ready. Clients correlate replies with their captured process generation; this does not establish model or storage health.",
+            "required": ["requestID"], "properties": { "requestID": { "$ref": "#/$defs/HealthRequestID" } }
+          } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false, "description": "Recluster compatible face evidence while retaining identity IDs and user corrections. Failed validation must not publish partial assignments." } } },
@@ -352,6 +357,10 @@
             }
           }
         },
+        { "type": "object", "required": ["healthCheckResult"], "additionalProperties": false,
+          "properties": { "healthCheckResult": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/HealthCheckResult" } }
+          } } },
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
@@ -455,6 +464,17 @@
       ]
     },
 
+    "HealthRequestID": {
+      "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "description": "Client-generated correlation nonce, never a file path, document text or secret. Invalid nonces receive invalid_health_request and no success reply. Use a fresh nonce for each probe."
+    },
+    "HealthCheckResult": {
+      "type": "object", "additionalProperties": false, "required": ["requestID", "pid"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    },
     "SinglePositional": {
       "description": "Helpers for Swift's Codable auto-synthesis: a case with a single unnamed associated value encodes as {\"_0\": <encoded value>}. Each generator unwraps appropriately.",
 

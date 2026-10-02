@@ -244,6 +244,14 @@ public struct HealthCheckResult: Codable, Sendable {
         self.requestID = requestID
         self.pid = pid
     }
+
+    public static func isValidRequestID(_ requestID: String) -> Bool {
+        let bytes = requestID.utf8
+        return (1...128).contains(bytes.count) && bytes.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0)
+                || $0 == 95 || $0 == 45
+        }
+    }
 }
 
 public struct EngineInfo: Codable, Sendable {

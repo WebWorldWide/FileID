@@ -306,6 +306,13 @@ struct FileIDEngineMain {
             await coordinator.requestRestructureCancel()
             JSONLog.shared.info(ev: "restructure_cancel_requested")
         case .healthCheck(let requestID):
+            guard HealthCheckResult.isValidRequestID(requestID) else {
+                await sink.emit(.error(EngineError(
+                    kind: "invalid_health_request",
+                    message: "Health request ID must contain 1–128 ASCII letters, digits, underscores or hyphens."
+                )))
+                return
+            }
             await sink.emit(.healthCheckResult(HealthCheckResult(
                 requestID: requestID,
                 pid: ProcessInfo.processInfo.processIdentifier

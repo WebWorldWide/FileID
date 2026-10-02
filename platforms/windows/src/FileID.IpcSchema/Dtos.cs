@@ -11,6 +11,10 @@ using System.Text.Json.Serialization;
 
 namespace FileID.IpcSchema;
 
+public sealed record HealthCheckResult(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    int Pid);
+
 public sealed record EngineInfo(
     string Version,
     int Pid,

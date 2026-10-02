@@ -23,7 +23,7 @@ class Engine:
         })
         self.process = subprocess.Popen(
             [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=environment, text=True, bufsize=1,
+            stderr=subprocess.PIPE, env=environment, text=True, encoding="utf-8", bufsize=1,
         )
         self.events = queue.Queue()
         stream = self.process.stderr if swift else self.process.stdout

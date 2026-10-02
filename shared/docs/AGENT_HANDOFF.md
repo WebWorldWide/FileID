@@ -6,6 +6,14 @@ The accepted next-version goal remains active after the owner resumed sustained 
 
 Foundation PR #186, runner bootstrap #188, stable People identities #189, and transactional People merges #190 are merged. PR #190 passed all sixteen checks at 02c6ff9da97e8b1125f8eb78e36956e09baade14 before merge. Swift passes 437 tests / 89 suites; Rust passes 393 library and 394 executable tests plus two registry integrations, with two preexisting ignored corpus cases. Actual-process merge fixtures cover six cases per engine, including stale selections and forced SQLite rollback. Explicit user merges still delete source person rows; aliases/history remain unfinished.
 
+## Health contract follow-up (under review)
+
+The current health-contract branch adds canonical IPC v1.5, Rust/C# health mirrors, bounded nonce validation in both engines and shared real-process fixtures. C# passes 48 tests, format verification and nine TRX guard cases on the Adlon Windows VM. Fresh Rust 1.90/Swift and exact-head hosted/main CI acceptance are still pending. Windows now has a dedicated non-skippable IPC suite/report/format gate; the legacy app-service test block remains incorrect. Do not claim full Windows app-suite acceptance.
+
+Next restore generation-bound Windows waiters and lifecycle integration using this canonical operation. Register before write, resolve on the stdout reader before UI dispatch, and retire old-generation waiters before cleanup publishes a replacement generation. Preserve the broader safety groups below and inspect the archived checkpoint narrowly.
+
+The isolated Windows safety restoration is now preserved in remote annotated tag `archive/2026-10-02/windows-safety-restore-stage1`, peeled commit `2d8798c6066e1f4a0fe8341f5c94f897cfbcb44f`. Its thirteen restored files have not been built or validated. Continue in `/Users/adamnolle/.codex/worktrees/windows-safety-restore/FileID`; do not merge the entire checkpoint.
+
 ## First priority: Windows safety and real test execution
 
 Recovery tag: archive/2026-10-02/windows-test-parity-wip at 5d06976c7aa8171a201dbe183f941d6dab896ff9. This is an unfinished, unvalidated recovery checkpoint; do not merge it wholesale.

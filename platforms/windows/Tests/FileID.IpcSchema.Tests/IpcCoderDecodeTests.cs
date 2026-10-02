@@ -1,4 +1,4 @@
-// Decode tests for IpcCoder — guards the span-based Decode<T> overload that
+﻿// Decode tests for IpcCoder — guards the span-based Decode<T> overload that
 // dropped the per-frame .ToString() copy. Behavior must stay identical: a frame
 // with or without a trailing newline decodes to the same value, and the
 // trailing-newline tolerance is preserved.
