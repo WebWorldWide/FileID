@@ -3,6 +3,7 @@
 ## 2026-10-02 — Adlon CI/CD (current)
 
 - Python 3.12.10 has been provisioned into Adlon's Windows tool cache and the rerun passed Python setup. The rerun then failed .NET setup because Network Service cannot write Program Files. Windows .NET setup now uses the runner tool cache. Validate the next pushed head's app/Store jobs before returning to application fixes; prior runs `36996100014` / `36996099826` record the provisioning failures, not application build results.
+- Source `d5389c8`: Adlon x64 app job `110805708304` in run `36996942164` passed provisioning, restore, Debug/Release builds and publish, then failed with the same 23 test compile diagnostics. Inspect Store run `36996942177` / job `110805708446` and engine run `36996942151`. Linux run `36995950734` at `f3132b0` passed engine, CLI, TUI and GTK on Adlon. Local app log: `platforms/windows/dist/store-packages/adlon-d5389c8-app-x64.log`.
 
 - Validate the new pipeline on the existing online Adlon Windows/Linux FileID runners. Windows VM has VS 2022 packaging/PriGen, VSTest and x64 MakeAppx. [CI.md](CI.md) records labels, routing, manual dispatch, native-platform coverage and operations.
 - Inspect exact-head Store/app/policy jobs and runner names; dispatch manually if no push run appears. Keep Partner Center draft. Store artifacts stay on GitHub until release readiness and listing review are complete.

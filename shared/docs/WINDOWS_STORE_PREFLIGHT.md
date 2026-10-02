@@ -4,6 +4,8 @@ Use `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, d
 
 ## Verification
 
+Adlon checkpoint, October 2: source `d5389c8`, app run `36996942164`, x64 job `110805708304`. Python/.NET/MSBuild/toolchain provisioning, restore, Debug/Release builds and self-contained publish passed. The complete app test project reproduced 23 diagnostics: 22 in `EngineLifecycleSafetyContractTests.cs`, one in `AdversarialLifecycleAndUiContractTests.cs`. Log: `platforms/windows/dist/store-packages/adlon-d5389c8-app-x64.log`. Store run `36996942177` / job `110805708446` runs the required script on `adlon-fileid-windows`; retain its terminal result and package before making any Store readiness claim.
+
 | Check | Result |
 | --- | --- |
 | x64 Release app build | Passed after health channel changes |
