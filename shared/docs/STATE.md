@@ -1,4 +1,11 @@
-﻿# FileID — session log
+﻿## 2026-10-02 — Adlon checkpoint on `cf5a540`
+
+- Store run `37005249596` passed; its x64 package was downloaded and independently inspected. Path and SHA-256 are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md).
+- The app run on `cf5a540` had not started at last check; the prior app run failed before tests because VS VSTest could not locate `testhost`. The test-host workflow correction is pushed. Local CI-shaped Debug run now executes tests but reports 396 passed, 40 failed, 436 total.
+- Policy run `37005249602` found stale SHA-256 entries for the reviewed Windows engine-client sources. The lifecycle diff adds no network transport or URL; the three hashes are refreshed. Local egress suite passes all 24 tests and the production source-boundary gate passes. The refresh is pending commit/push and Adlon verification.
+- Current branch head is `cf5a540`; only `shared/scripts/check_runtime_egress.py` and this record are pending commit. The Store package does not make the release ready while Windows app tests fail.
+
+# FileID — session log
 
 ## 2026-10-02 — Microsoft account and Windows Store preflight continuation
 

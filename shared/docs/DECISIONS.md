@@ -3415,3 +3415,7 @@ Use the already registered repository-scoped Adlon Windows/x64 and Linux/x64 run
 ## 2026-10-02 — Keep Adlon build jobs under the existing service account
 
 Python's all-users installer and setup-dotnet's default Program Files location failed under Network Service. Provision the signed, pinned Python version into the runner cache as an administrative maintenance operation; install .NET into the runner-writable tool cache during CI. Keep the runner service identity and machine/user execution policy unchanged. Pin Python until a replacement cache has been provisioned and verified. Build and VSTest both select Visual Studio 2022.
+
+## 2026-10-02 — Refresh reviewed digests for Windows lifecycle changes
+
+Updated the runtime-egress gate digests for the Windows engine client and sidebar files after reviewing the lifecycle/IPC diff. The change adds no network transport, URL, or host. Keep the source gate hash-pinned and require its unit suite plus production boundary check to pass before release.

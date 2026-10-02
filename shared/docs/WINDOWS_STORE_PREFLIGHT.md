@@ -1,4 +1,10 @@
-﻿## Current validation checkpoint — October 2, 2026
+﻿## Exact-head Store artifact — `cf5a540`
+
+- Adlon Store run `37005249596` completed successfully and produced `platforms/windows/dist/store-packages/adlon-cf5a540/local-20261002-121437-9348/FileID.StorePackage_1.0.0.0_x64.msixupload` (127,428,745 bytes; SHA-256 `AEE0A7DCAEE538581605CE3E3A5B5D8EE9D609D79017A2319815208854C87160`). Nested MSIX SHA-256: `73E23E65DB7794A736D66575C7BA3D933D68A4CCF3941C293393C57DB7A64F71`.
+- Independently confirmed identity `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`, version `1.0.0.0`, architecture x64, executable `FileID.App\\FileID.exe`; required app executable, engine, ONNX Runtime, DirectML, PDFium, and both logos are present. It is a GitHub Actions artifact only; no Partner Center upload or submission occurred.
+- App workflow run `37005249671` and engine run `37005249594` were still queued/in progress at last check. Policy run `37005249602` failed on stale reviewed-source SHA-256 entries. Refreshed digests pass locally: runtime-egress unit suite 24/24 and production source-boundary gate. Push the correction and confirm fresh exact-head runs.
+
+## Current validation checkpoint — October 2, 2026
 
 - Signed-in Microsoft account: `adammnolle@gmail.com`; two-step verification ON; Gmail and authenticator both show “Up to date.” No security methods changed.
 - Pushed head `fa145357ef78af01c8af53747f8a4d23884a1599` on `codex/store-msix`; five local lifecycle changes remain uncommitted.
