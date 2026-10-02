@@ -53,3 +53,9 @@ sudo journalctl -u actions.runner.WebWorldWide-FileID.adlon-fileid-linux.service
 Windows service: `actions.runner.WebWorldWide-FileID.adlon-fileid-windows`. Use PowerShell inside the VM to inspect `Get-Service` and the runner's `_diag` logs. The Windows SSH default shell is `cmd`; use PowerShell `-EncodedCommand` for multiline scripts, never interpolate credentials into shell text.
 
 Before claiming a gate passed, inspect the exact commit's GitHub run and its runner name. An online registration is not proof a build passed. Do not weaken checks to make a self-hosted environment pass; install its required build tools or retain the appropriate hosted hardware gate.
+
+## Service-account prerequisites
+
+Adlon's Network Service account needs per-job Git Bash and Python directories in GITHUB_PATH. The Windows workflows resolve the installed Python through its launcher and explicitly add Git's bin directory before toolchain setup. Machine PATH updates alone do not prove an already running service inherited them. .NET installs into runner.tool_cache/dotnet, a FileID-owned writable cache, rather than changing permissions on Program Files. DOTNET_CLI_TELEMETRY_OPTOUT is set. The existing verified .NET 8.0.425 SDK was copied into that cache; setup-dotnet can maintain it under the service account.
+
+The initial main Windows runs failed before compiling FileID: Install Rust could not find Bash; Setup .NET 8 could not write to Program Files. Linux's four main jobs passed on adlon-fileid-linux. Host and guest root disks remain separate from the example-data volume. A host restart interrupted the administrative SSH session; runner services recovered and SDK, ARM64 compiler and WinUI packaging-task availability were rechecked. These failures require fresh Windows runs after the bootstrap fix; do not count the initial failed jobs as acceptance.

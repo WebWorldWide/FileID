@@ -9,6 +9,12 @@
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
 
+## 2026-10-02 — Full implementation resumed; resolve Adlon service bootstrap
+
+The owner explicitly resumed the complete next-version objective with no day-end stopping requirement. The goal remains active until every product and release requirement is proven. PR #186 is merged at c3044395; its eighteen pre-merge checks passed. On main, all four Linux jobs passed on Adlon; Windows jobs failed before compilation because the service could not find Bash or install .NET into Program Files. The follow-up adds explicit per-job Bash/Python paths and a writable SDK cache, preserving non-admin service execution and all build/test assertions. Fresh Windows results are still required.
+
+FileProvider created fifty-one duplicate/stale numbered copies and an invalid `refs/heads/main 2` file in the Desktop checkout. Thirty-seven copies were exact duplicates; the others represented older/intermediate snapshots, including omitted v22 migration and source-protection fixes. Copies and a hash inventory were preserved at /Users/adamnolle/.codex/fileid-handoffs/sync-duplicates-2026-10-02 before removing them from compiler/Git inputs. Canonical tracked sources were unchanged. Continue the full ledger after CI bootstrap, beginning with stable People IDs and transaction-safe correction preservation.
+
 ## 2026-10-01 — End-of-day integration and Adlon CI setup
 
 The user requested a natural stopping point, integration into main, branch cleanup and clear next-agent instructions. The completed next-version milestones are ready for integration; this is not completion of the full next-version plan. Both Adlon repository-scoped runners are online in existing Linux/Windows CI VMs, with separate guest-disk checkouts and no corpus mounts. Reviewed-main Linux and Windows jobs now route there; PRs, native ARM, macOS, packaging and release publication retain the documented hosted paths. See CI_RUNNERS.md for paths, services, capacity and trust boundaries. Nine routing policy tests reject removal of main/fork/native-ARM guards.

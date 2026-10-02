@@ -1,5 +1,10 @@
 # FileID next-version agent handoff
 
+## Current goal — resumed 2026-10-02
+
+The owner explicitly requested continued work until the complete plan is implemented and verified. The day-end stop below is historical. PR #186 is merged at c3044395. Linux main checks passed on Adlon; Windows bootstrap needs explicit Bash/Python GITHUB_PATH entries and a writable DOTNET_INSTALL_DIR. Continue from codex/adlon-runner-bootstrap, inspect its fresh CI, then implement the full NEXT_VERSION.md ledger. Keep the goal active; do not redefine completion as a passing milestone. FileProvider duplicate snapshots were preserved internally and removed from compiler/Git inputs; canonical source is unchanged.
+
+
 ## End-of-day checkpoint — 2026-10-01
 
 The owner changed the immediate goal to stop naturally, integrate completed changes into main, clean the implementation branches and use Adlon for CI. The complete product roadmap below remains outstanding. The latest validated feature milestone is `eb438d9`; the end-of-day integration adds owner release/config/test edits and guarded Adlon CI routing. Final main commit/run results are recorded here after integration. Both repository runners are online; use CI_RUNNERS.md, inspect exact-commit jobs, and keep the corpus unmounted/read-only.

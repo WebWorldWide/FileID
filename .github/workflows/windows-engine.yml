@@ -58,6 +58,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Prepare Adlon command paths
+        if: runner.name == 'adlon-fileid-windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = & C:\Windows\py.exe -3 -c "import sys; print(sys.executable)"
+          if ($LASTEXITCODE -ne 0) { throw "Python launcher failed" }
+          $paths = @('C:\Program Files\Git\bin', (Split-Path $python.Trim()))
+          foreach ($path in $paths) {
+            if (-not (Test-Path $path -PathType Container)) { throw "Missing tool directory: $path" }
+            $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:

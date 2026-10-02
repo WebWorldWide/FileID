@@ -1,6 +1,10 @@
 # NEXT — resume here
 
 
+## 2026-10-02 — Continue the entire accepted next-version plan
+
+The owner revoked the natural day-end stop and requested sustained work until everything is complete. Finish and verify Adlon Windows service bootstrap, merge the bounded fix into main, and keep the goal active. Then finish stable People IDs and cross-engine transactional persistence, durable refresh and incremental assignment, persistent model-separated hybrid search, resource-budgeted model routing, typed chat execution, full temporal analysis/chapters/best takes, enhancement/reframing and broad conversions, native port parity, real-data/hardware gates and release readiness. NEXT_VERSION.md is the scope ledger; passing existing checks alone is not completion. Keep Adlon example data strictly read-only and use separate CI guest disks.
+
 ## 2026-10-01 — Start the next session from the integrated milestone
 
 Read AGENT_HANDOFF.md, NEXT_VERSION.md and CI_RUNNERS.md before editing. Verify main and its exact CI runs; do not reconstruct the superseded branch history or reinstall runners. The full next-version plan remains unfinished. First finish stable person identities across reclustering on both engines: protect named/unknown/offline identities, partition protected/negative constraints before merging, update existing IDs transactionally rather than deleting People, preserve manual observations/corrections, and test rollback/empty/mixed-cache cases. A native/portable-helper prototype exists on the owner's internal Mac; its Rust database handler is not wired and it must not be treated as production code.
