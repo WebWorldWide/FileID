@@ -4,7 +4,17 @@ Use `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, d
 
 ## Verification
 
-Adlon checkpoint, October 2: source `d5389c8`, app run `36996942164`, x64 job `110805708304`. Python/.NET/MSBuild/toolchain provisioning, restore, Debug/Release builds and self-contained publish passed. The complete app test project reproduced 23 diagnostics: 22 in `EngineLifecycleSafetyContractTests.cs`, one in `AdversarialLifecycleAndUiContractTests.cs`. Log: `platforms/windows/dist/store-packages/adlon-d5389c8-app-x64.log`. Store run `36996942177` / job `110805708446` runs the required script on `adlon-fileid-windows`; retain its terminal result and package before making any Store readiness claim.
+Adlon checkpoint, October 2: source `d5389c8`, app run `36996942164`, x64 job `110805708304`. Python/.NET/MSBuild/toolchain provisioning, restore, Debug/Release builds and self-contained publish passed. The complete app test project reproduced 23 diagnostics: 22 in `EngineLifecycleSafetyContractTests.cs`, one in `AdversarialLifecycleAndUiContractTests.cs`. Log: `platforms/windows/dist/store-packages/adlon-d5389c8-app-x64.log`. Store run `36996942177` / job `110805708446` completed successfully, including the required script and GitHub artifact upload.
+
+Adlon Store job `110805708446` completed the required script and created GitHub artifact `FileID-Store-x64` (artifact ID `11222752291`) from source `d5389c8`. Downloaded and inspected upload:
+
+- Path: `platforms/windows/dist/store-packages/adlon-d5389c8/local-20261002-104716-9468/FileID.StorePackage_1.0.0.0_x64.msixupload`
+- Upload SHA-256: `90B80EDA1823E0164609F90F35F5707E549272A7221255B308961484458DB2D1`
+- Nested MSIX SHA-256: `5952945595BF8B87F498E36A3C318FCECA652651A9B5D0C5ABB1DE1F42FFDFCE`
+- Manifest identity: `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`, version `1.0.0.0`, architecture `x64`, executable `FileID.App/FileID.exe`.
+- Payload checks confirmed `FileID.exe`, `FileIDEngine.exe`, `onnxruntime.dll`, `onnxruntime_providers_shared.dll`, `DirectML.dll`, `pdfium.dll`, `Images/Square44x44Logo.png`, and `Images/Square150x150Logo.png`.
+
+This is GitHub artifact validation only. It has not been uploaded to Partner Center. The app test compilation failure and 27 previously observed failing contracts still block readiness.
 
 | Check | Result |
 | --- | --- |

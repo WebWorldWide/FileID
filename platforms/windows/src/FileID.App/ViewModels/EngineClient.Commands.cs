@@ -272,7 +272,7 @@ internal sealed partial class EngineClient
     /// caller decides whether to proceed or surface an error). Used by
     /// RestartAsync and by the in-app wipe flow, which both need the
     /// SQLite file handle released before continuing.</summary>
-    public async Task StopAndWaitForExitAsync(TimeSpan timeout, CancellationToken ct = default)
+    public async Task<bool> StopAndWaitForExitAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         try
         {
@@ -287,14 +287,25 @@ internal sealed partial class EngineClient
         var sw = System.Diagnostics.Stopwatch.StartNew();
         while (sw.Elapsed < timeout && !ct.IsCancellationRequested)
         {
-            if (_process is null || _process.HasExited)
+            if (Volatile.Read(ref _isStarting) == 0
+                && (_process is not { } process || ProcessHasExited(process)))
             {
                 DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited after {sw.ElapsedMilliseconds}ms.");
-                return;
+                return true;
             }
             await Task.Delay(100, ct).ConfigureAwait(false);
         }
+        ct.ThrowIfCancellationRequested();
+        var stopped = Volatile.Read(ref _isStarting) == 0
+            && (_process is not { } current || ProcessHasExited(current));
+        if (stopped)
+        {
+            DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited after {sw.ElapsedMilliseconds}ms.");
+            return true;
+        }
+        Interlocked.Exchange(ref _expectingExit, 0);
         DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process still alive.");
+        return false;
     }
 
     /// <summary>Cleanly stop the engine and respawn it. Used after a
@@ -308,7 +319,10 @@ internal sealed partial class EngineClient
     public async Task RestartAsync(CancellationToken ct = default)
     {
         DebugLog.Info("[ENGINE] RestartAsync requested.");
-        await StopAndWaitForExitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+        if (!await StopAndWaitForExitAsync(TimeSpan.FromSeconds(10), ct).ConfigureAwait(false))
+        {
+            throw new TimeoutException("Engine restart was aborted because the current process did not stop.");
+        }
 
         // Force a fresh spawn. StartAsync is idempotent if a process is
         // already running, but here we explicitly want a new one. If the
