@@ -1,5 +1,7 @@
 # NEXT — resume here
 
+Adlon x64 engine passed; ARM64 cross failed because clang was absent. Complete the signed Visual Studio LLVM component installation and verify the new cross-job PATH step on actual main before declaring server acceptance. Preserve all test/build gates and corpus isolation. PR #190 contains atomic merge fixes; #191 is an unfinished Windows safety/test-parity draft. Do not merge #191 until every app suite runs and passes without exclusions.
+
 ## Immediate continuation — 2026-10-02
 
 The atomic-person-merges follow-up passes local full suites, actual-engine merge fixtures and policy checks. Inspect its fresh hosted results before main integration. Preserve failed completion assertions, structured-name transfer and rollback checks. Source identity aliases/history still need design and migration; explicit merges currently delete the source identity. Inspect every serial Adlon Windows main matrix job, then fix the skipped WinUI test gate without weakening assertions.

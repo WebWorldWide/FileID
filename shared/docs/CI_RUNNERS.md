@@ -60,6 +60,12 @@ Adlon's Network Service account needs per-job Git Bash and Python directories in
 
 The initial main Windows runs failed before compiling FileID: Install Rust could not find Bash; Setup .NET 8 could not write to Program Files. Linux's four main jobs passed on adlon-fileid-linux. Host and guest root disks remain separate from the example-data volume. A host restart interrupted the administrative SSH session; runner services recovered and SDK, ARM64 compiler and WinUI packaging-task availability were rechecked. These failures require fresh Windows runs after the bootstrap fix; do not count the initial failed jobs as acceptance.
 
+### ARM64 cross-build compiler
+
+The actual main x64 engine job passed on adlon-fileid-windows at bb33211. Its ARM64 cross-build failed in ring's native build because clang was absent; the installed MSVC ARM64 compiler alone is insufficient. Install Microsoft.VisualStudio.Component.VC.Llvm.Clang into the existing Build Tools instance using Microsoft's installer, without forcing closed processes or rebooting the host. The engine workflow locates that component with vswhere, verifies clang starts and adds its directory through GITHUB_PATH only for the Adlon cross job. Hosted/native ARM checks and all Clippy/build assertions remain unchanged. Confirm a fresh actual service-account result after installation; the failed cross job is not acceptance.
+
+The component IDs and paths are documented by [Microsoft's Build Tools component directory](https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=visualstudio) and [Clang support guide](https://learn.microsoft.com/en-us/cpp/build/clang-support-msbuild?view=msvc-170). This is a CI build-tool prerequisite, not a new shipped app dependency. Corpus storage remains unmounted in the runner guests.
+
 ### GitHub expression scope
 
 `runner.tool_cache` is available in a step environment, not a job environment. Keep `DOTNET_INSTALL_DIR` on the setup-dotnet step; GitHub rejects the workflow before scheduling jobs if that expression moves to `jobs.build.env`. The bootstrap PR is #188; validate its exact main commit on both Adlon Windows matrices after merge.

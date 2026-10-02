@@ -10,6 +10,12 @@ Stable People clustering retains identity rows, names, creation times and refere
 
 Validation on this host: Swift 437 tests / 89 suites; Rust 393 library and 394 executable tests plus two registry integrations (two preexisting ignored corpus tests); actual Rust 1.90 Clippy with warnings denied; catalog schema and current-doc checks; actual Swift/Rust catalog, Tools and Chat round trips; privacy scan of native app and both engine binaries. All sixteen GitHub checks passed for original People head `7f03fff`; the documentation conflicts with bootstrap main have been resolved. Inspect the fresh merge head checks before integration. Native VLM/face accuracy, other GPU vendors and all release gates are not established by these tests.
 
+## Latest continuation
+
+People PR #189 merged at ff6eda2 after all sixteen fresh checks passed. Atomic merges are in PR #190 (latest head 02c6ff9); check its exact results before merging. The internal worktree now holds unfinished codex/windows-test-parity / draft PR #191, with additional ReadStore/CleanupViewModel work not yet pushed. Restore missing safety behavior from historical a1d7108^ narrowly; preserve current native XAML/People interactions. Do not merge until every app suite compiles/runs and format/native build checks pass without exclusions. The archived compiler log lives at /Users/adamnolle/.codex/fileid-builds/windows-app-archived-failure.log.
+
+Actual main bb33211 x64 engine passed on Adlon. Cross ARM64 failed because clang was absent; codex/adlon-clang-bootstrap adds a verified per-job compiler path and the official Visual Studio LLVM component installation is being checked. Windows app matrices still need inspection. The report guard passed nine Windows VM fixtures; this is not the full app suite.
+
 ## Adlon CI
 
 Both FileID runners are registered and online in existing VMs on separate guest disks. The Linux main jobs passed on adlon-fileid-linux. The main Windows jobs exposed Bash PATH and Program Files SDK permissions. Bootstrap PR #188 supplies Bash/Python via GITHUB_PATH and uses the runner-owned SDK cache. GitHub runner expressions belong in step env, not job env. All six hosted checks passed and #188 merged. Actual main x64 engine is running on adlon-fileid-windows and passed service-account setup, Clippy and release compilation; its test build is running. The remaining Windows matrix jobs queue behind that runner. Inspect every actual main result before claiming server acceptance. Do not report hosted PR checks as server execution.

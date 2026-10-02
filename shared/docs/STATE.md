@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-02 — Adlon x64 engine passed; cross-build needs Clang
+
+Stable People PR #189 merged at ff6eda2 after all sixteen checks passed. Actual main bb33211 Windows x64 engine passed on adlon-fileid-windows. Its ARM64 cross-build failed in ring because clang was absent. Add the official Visual Studio LLVM component and per-job Clang path; do not weaken Clippy/build gates, stop other jobs or touch the corpus. Native ARM passed on hosted hardware. Actual Windows app jobs are still running. Atomic merge PR #190 and unfinished Windows safety/test-parity draft #191 have their own fresh checks; the full next-version goal remains active. The strict TRX report guard passed all nine fixtures on the Windows VM.
+
 ## 2026-10-02 — Atomic explicit People merges
 
 A forced SQLite DELETE failure reproduced a Rust merge that reported success after committing partial assignments. Both engines now validate fresh selections and commit assignments, structured name transfer, counts and representatives in one transaction. Empty destinations inherit one complete source name; named destinations retain their identity. Rust SQL and worker failures emit a failed completion. Explicit merges still delete selected source rows; retained aliases/history remain pending.
