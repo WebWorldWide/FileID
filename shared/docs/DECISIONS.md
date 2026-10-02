@@ -3452,3 +3452,9 @@ GitHub does not expose runner context in job-level env. DOTNET_INSTALL_DIR belon
 ## 2026-10-02 — Supply the missing ARM64 cross-build compiler
 
 The first actual Adlon x64 engine job passed, but ring's aarch64 native compilation explicitly requested clang and failed before FileID compilation because it was missing. Install Microsoft's Visual Studio C++ Clang Compiler component in the existing guest Build Tools instance, without forcing process closure or rebooting. Locate and probe that compiler via vswhere and GITHUB_PATH only on the Adlon cross job. Retain hosted/native ARM routing and all assertions. This is a build-machine prerequisite rather than a shipped app dependency; corpus data remains unmounted. Nine strict TRX regression cases pass on the Windows VM, while full app test parity remains unfinished in draft #191.
+
+## 2026-10-02 — Propagate merge failures and transfer one complete identity
+
+Explicit People merges validate both selections inside the writer transaction. Every SQL error must unwind the transaction; ignored DELETE errors previously committed partial Rust assignments. Copy all name components from one source only when every destination component is empty, and clear its unknown flag only when a real name transfers. Do not combine components from different people. Emit terminal failure for SQL errors and crashed workers so clients do not remain busy. Actual-process SQLite failure fixtures are necessary because a successful helper unit test did not cover ignored handler errors. Retained source aliases/history are separate unfinished work; this patch preserves existing explicit-delete behavior.
+
+Reviewed bulk.rs digest changes add transaction error propagation, name transfer and terminal worker failure reporting. They add no transport, subprocess execution, runtime URL or download host; update the exact source-boundary digest without relaxing the strict egress gate or its known blockers.

@@ -578,29 +578,44 @@ public final class Database: @unchecked Sendable {
     // instead of round-tripping through the app, since the engine is
     // already iterating clusters.
 
+    enum PersonMergeFailure: LocalizedError {
+        case invalidSelection
+        var errorDescription: String? { "A selected person no longer exists or the selection is invalid. Refresh People before merging." }
+    }
+
     /// Reassign every face_print of `sources` to `target`, delete source
     /// persons, recount target's file_count. Returns the new file_count.
     public func mergePersons(target: Int64, sources: [Int64]) async throws -> Int {
-        let validSources = sources.filter { $0 != target }
+        guard target > 0, sources.allSatisfy({ $0 > 0 }), sources.count <= 8000 else { throw PersonMergeFailure.invalidSelection }
+        var seen = Set<Int64>()
+        let validSources = sources.filter { $0 != target && seen.insert($0).inserted }
         guard !validSources.isEmpty else {
             return try await pool.read { db in
-                try Int.fetchOne(db, sql:
+                guard let count = try Int.fetchOne(db, sql:
                     "SELECT file_count FROM persons WHERE id = ?",
-                    arguments: [target]) ?? 0
+                    arguments: [target]) else { throw PersonMergeFailure.invalidSelection }
+                return count
             }
         }
         return try await pool.write { db in
-            let placeholders = validSources.map { _ in "?" }.joined(separator: ",")
-            var args: [DatabaseValueConvertible] = [target]
-            args.append(contentsOf: validSources)
-            try db.execute(
-                sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
-                arguments: StatementArguments(args)
-            )
-            try db.execute(
-                sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                arguments: StatementArguments(validSources)
-            )
+            let selected = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM persons WHERE id=?", arguments: [target]) ?? 0
+            guard selected == 1 else { throw PersonMergeFailure.invalidSelection }
+            let sourceJSON = String(decoding: try JSONEncoder().encode(validSources), as: UTF8.self)
+            let sourceCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM persons WHERE id IN(SELECT value FROM json_each(?))", arguments: [sourceJSON]) ?? 0
+            guard sourceCount == validSources.count else { throw PersonMergeFailure.invalidSelection }
+            let named = "length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))>0"
+            let targetNamed = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM persons WHERE id=? AND \(named)", arguments: [target]) ?? 0
+            if targetNamed == 0, let source = try Row.fetchOne(db, sql: "SELECT name,title,first_name,middle_name,last_name,suffix FROM persons WHERE id IN(SELECT value FROM json_each(?)) AND \(named) ORDER BY (SELECT key FROM json_each(?) WHERE value=persons.id) LIMIT 1", arguments: [sourceJSON,sourceJSON]) {
+                let name: String? = source["name"]
+                let title: String? = source["title"]
+                let first: String? = source["first_name"]
+                let middle: String? = source["middle_name"]
+                let last: String? = source["last_name"]
+                let suffix: String? = source["suffix"]
+                try db.execute(sql: "UPDATE persons SET name=?,title=?,first_name=?,middle_name=?,last_name=?,suffix=?,is_unknown=0 WHERE id=?", arguments: [name,title,first,middle,last,suffix,target])
+            }
+            try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE person_id IN(SELECT value FROM json_each(?))", arguments: [target,sourceJSON])
+            try db.execute(sql: "DELETE FROM persons WHERE id IN(SELECT value FROM json_each(?))", arguments: [sourceJSON])
             try db.execute(sql: """
                 UPDATE persons SET file_count = (
                     SELECT COUNT(DISTINCT file_id)
