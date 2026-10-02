@@ -53,3 +53,7 @@ sudo journalctl -u actions.runner.WebWorldWide-FileID.adlon-fileid-linux.service
 Windows service: `actions.runner.WebWorldWide-FileID.adlon-fileid-windows`. Use PowerShell inside the VM to inspect `Get-Service` and the runner's `_diag` logs. The Windows SSH default shell is `cmd`; use PowerShell `-EncodedCommand` for multiline scripts, never interpolate credentials into shell text.
 
 Before claiming a gate passed, inspect the exact commit's GitHub run and its runner name. An online registration is not proof a build passed. Do not weaken checks to make a self-hosted environment pass; install its required build tools or retain the appropriate hosted hardware gate.
+
+### GitHub expression scope
+
+`runner.tool_cache` is available in a step environment, not a job environment. Keep `DOTNET_INSTALL_DIR` on the setup-dotnet step; GitHub rejects the workflow before scheduling jobs if that expression moves to `jobs.build.env`. The bootstrap PR is #188; validate its exact main commit on both Adlon Windows matrices after merge.

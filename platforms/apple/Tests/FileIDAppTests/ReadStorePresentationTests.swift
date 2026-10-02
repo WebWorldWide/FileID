@@ -162,6 +162,18 @@ struct ReadStorePresentationTests {
         #expect(fixture.store.persons(includeUnknown: true).map(\.id) == [1, 2, 3])
     }
 
+    @Test("retained empty identity records do not create unnamed People cards")
+    func retainedIdentityVisibility() throws {
+        let fixture = try makeStore { db in
+            try db.execute(sql: "INSERT INTO persons(id,first_name) VALUES(7,'Alex'),(8,NULL)")
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        #expect(fixture.store.persons().map(\.id) == [7])
+    }
+
     @Test("merge suggestions reject people who appear in the same file")
     func mergeSuggestionsRejectCooccurringPeople() throws {
         let blob = { (values: [Float]) in

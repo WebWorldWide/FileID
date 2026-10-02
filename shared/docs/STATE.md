@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-10-02 — Stable People persistence in validation
+
+Reclustering now updates retained identity rows instead of deleting and recreating them. Shared fixtures cover deterministic ID reuse and protected partitions; Rust real-catalog tests cover structured names, offline/unknown records, correction references, same-image exclusions and rollback after a forced insertion failure. Native consolidation retains absorbed identity records and hides empty unnamed records from People cards. Rust 1.90 Clippy passes with warnings denied; 391 library / 392 executable tests and the two registry integration checks pass. The native Swift suite passes 437 tests / 89 suites. Actual-engine catalog, Tools and Chat round trips and binary privacy checks pass. This is not full release acceptance.
+
+The Linux main CI jobs passed on Adlon. Windows bootstrap PR #188 moves the SDK install into the runner-owned cache and supplies Bash/Python paths; its initial runner-context expression was corrected to step scope. Both Windows app checks, native ARM64 engine and ARM64 cross engine checks passed; hosted x64 engine is still running. Rerun and inspect actual main Windows jobs on Adlon after merge. The known WinUI test-directory skip remains a separate release blocker.
+
+The full next-version goal remains active. Continue the NEXT_VERSION ledger after this milestone; preserve Adlon corpus read-only and use internal fixtures only.
+
+
 > Snapshot of what's working and where we left off. Update at the end of every working session.
 >
 > **How to read this file:** newest entry at the top. Each entry is a one-day-or-one-release summary of what landed. For *why* a decision was made, see [`DECISIONS.md`](DECISIONS.md). For *what's next*, see [`NEXT.md`](NEXT.md). For *user-visible release notes*, see [`/CHANGELOG.md`](../../CHANGELOG.md).

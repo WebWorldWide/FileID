@@ -278,7 +278,9 @@ struct FaceClusteringMergeTests {
         #expect(merged == 1, "the two unnamed persons collapse; the unknown stays out of it")
         let ids = try await personIDs(db)
         #expect(ids.contains(u), "the unknown person row survives untouched")
-        #expect(ids.count == 2, "unknown + one survivor of the two unnamed clusters")
+        #expect(ids.count == 3, "auto-merge retains identity records")
+        let active = try await db.pool.read { d in try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM persons WHERE file_count>0") }
+        #expect(active == 2, "unknown and one active unnamed identity")
         let stillUnknown = try await db.pool.read { d in
             try Int.fetchOne(d, sql: "SELECT is_unknown FROM persons WHERE id = ?", arguments: [u])
         }

@@ -1,5 +1,10 @@
 # NEXT — resume here
 
+## Immediate continuation — 2026-10-02
+
+Finish and inspect the exact-commit native validation for stable People IDs, then push the bounded milestone and merge only after its platform checks pass. Merge Adlon bootstrap PR #188 after all checks pass and confirm both Windows main matrices run on adlon-fileid-windows. Keep the full next-version goal active: persistent hybrid indexes, durable budgeted scheduling, typed chat operations, temporal analysis, best takes, enhancement/reframing, toolbox adapters and the release/hardware gates remain outstanding. Fix the known skipped WinUI test gate rather than reporting app-build green as full test proof.
+
+
 
 ## 2026-10-01 — Start the next session from the integrated milestone
 

@@ -1,0 +1,366 @@
+{
+  "cases": [
+    {
+      "name": "unchanged reordered",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        },
+        {
+          "id": 20,
+          "faceIDs": [
+            3,
+            4
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            3,
+            4
+          ],
+          "representative": 3
+        },
+        {
+          "faceIDs": [
+            1,
+            2
+          ],
+          "representative": 1
+        }
+      ],
+      "fixed": [
+        null,
+        null
+      ],
+      "preserved": [],
+      "expected": [
+        20,
+        10
+      ]
+    },
+    {
+      "name": "split retains one id",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1,
+            2
+          ],
+          "representative": 1
+        },
+        {
+          "faceIDs": [
+            3,
+            4
+          ],
+          "representative": 3
+        }
+      ],
+      "fixed": [
+        null,
+        null
+      ],
+      "preserved": [],
+      "expected": [
+        10,
+        null
+      ]
+    },
+    {
+      "name": "merge anchor breaks tie",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        },
+        {
+          "id": 20,
+          "faceIDs": [
+            3,
+            4
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "representative": 4
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [],
+      "expected": [
+        20
+      ]
+    },
+    {
+      "name": "confirmed identity wins",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1
+          ]
+        },
+        {
+          "id": 20,
+          "faceIDs": [
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1,
+            2,
+            3,
+            4
+          ],
+          "representative": 4
+        }
+      ],
+      "fixed": [
+        10
+      ],
+      "preserved": [],
+      "expected": [
+        10
+      ]
+    },
+    {
+      "name": "new observations get new id",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            8,
+            9
+          ],
+          "representative": 8
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [],
+      "expected": [
+        null
+      ]
+    },
+    {
+      "name": "insufficient overlap abstains",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2,
+            3,
+            4
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1,
+            8
+          ],
+          "representative": 8
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [],
+      "expected": [
+        null
+      ]
+    },
+    {
+      "name": "preserved identity remains outside pool",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            8
+          ],
+          "representative": 8
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [
+        10
+      ],
+      "expected": [
+        null
+      ]
+    },
+    {
+      "name": "preserved faces cannot be reassigned",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1,
+            2
+          ],
+          "representative": 1
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [
+        10
+      ],
+      "reject": true
+    },
+    {
+      "name": "duplicate cluster face fails",
+      "priors": [],
+      "clusters": [
+        {
+          "faceIDs": [
+            1
+          ],
+          "representative": 1
+        },
+        {
+          "faceIDs": [
+            1
+          ],
+          "representative": 1
+        }
+      ],
+      "fixed": [
+        null,
+        null
+      ],
+      "preserved": [],
+      "reject": true
+    },
+    {
+      "name": "duplicate fixed id fails",
+      "priors": [
+        {
+          "id": 10,
+          "faceIDs": [
+            1,
+            2
+          ]
+        }
+      ],
+      "clusters": [
+        {
+          "faceIDs": [
+            1
+          ],
+          "representative": 1
+        },
+        {
+          "faceIDs": [
+            2
+          ],
+          "representative": 2
+        }
+      ],
+      "fixed": [
+        10,
+        10
+      ],
+      "preserved": [],
+      "reject": true
+    },
+    {
+      "name": "invalid representative fails",
+      "priors": [],
+      "clusters": [
+        {
+          "faceIDs": [
+            1
+          ],
+          "representative": 9
+        }
+      ],
+      "fixed": [
+        null
+      ],
+      "preserved": [],
+      "reject": true
+    },
+    {
+      "name": "unknown fixed id fails",
+      "priors": [],
+      "clusters": [
+        {
+          "faceIDs": [
+            1
+          ],
+          "representative": 1
+        }
+      ],
+      "fixed": [
+        55
+      ],
+      "preserved": [],
+      "reject": true
+    }
+  ]
+}
