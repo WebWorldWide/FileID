@@ -144,7 +144,7 @@ jobs:
         # discoverable test project in Tests/, fails on red. Tests run on
         # x64 only — ARM64 cross-building tests is rarely useful here.
         # Build WinUI test references with Visual Studio MSBuild, then run the
-        # compiled assemblies with VSTest. The .NET SDK's MSBuild lacks PriGen.
+        # use the .NET SDK test host. VS VSTest can fail to locate testhost on Adlon.
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
@@ -152,12 +152,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vsInstall = & $vswhere -latest -version '[17.0,18.0)' -products * -property installationPath
-          $vstest = Join-Path $vsInstall 'Common7/IDE/Extensions/TestPlatform/vstest.console.exe'
-          & $vstest FileID.IpcSchema.Tests/bin/Debug/net8.0/FileID.IpcSchema.Tests.dll '/Platform:x64' '/Logger:console;verbosity=minimal'
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $vstest FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/FileID.App.Tests.dll '/Platform:x64' '/Logger:console;verbosity=minimal'
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 

@@ -1,3 +1,15 @@
+﻿# FileID — session log
+
+## 2026-10-02 — Microsoft account and Windows Store preflight continuation
+
+- Microsoft security page verified in the signed-in browser: `adammnolle@gmail.com`; two-step verification ON; Gmail code and authenticator app both marked “Up to date.” No security settings were changed.
+- Worktree: `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, branch `codex/store-msix`, pushed base `fa14535`. Five Windows lifecycle changes remain uncommitted.
+- Local Windows app tests: Release run 393 passed, 40 failed, 433 total in Release; the fresh CI-shaped Debug run had 396 passed, 40 failed, 436 total. IPC schema tests passed. Failures span lifecycle, preview, installer, UI safety, and event-handler contract suites; FileID is not verified bug-free or Store-ready.
+- Changed-file `dotnet format whitespace --verify-no-changes` passes. Solution-wide format check still reports line-ending differences in untouched files. Local engine `cargo test` and `cargo clippy --all-targets -- -D warnings` passed.
+- Required local `platforms\windows\build\publish-store-msix.ps1` failed at VS 18 MSIX recipe generation: `APPX0002` / `MSB4018`, `GenerateAppxPackageRecipe`, null reference in `MrmSupportLibrary.GetLocation`. An explicit SDK `mrmsupport.dll` path did not help. No new local upload was produced.
+- Adlon Store run `37001649369` passed on `fa14535`; exact artifact is inspected at the path/hash recorded in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). It predates the five uncommitted lifecycle changes. App run `37001649639` x64 tests aborted because VS VSTest could not find `testhost`; its workflow invocation has been changed locally to use `dotnet test --no-build --no-restore`.
+- Partner Center product `9PC8HSD86887` remains draft: no package upload, submission, or publication.
+- Resume: validate the corrected Adlon test invocation, triage remaining app-suite failures, verify persisted undo readers against actual Rust-produced data, then rerun and record exact-head app/engine/Store/policy workflows. Build the package from the final validated head. Do not claim FileID is bug-free or Store-ready while tests fail.
 ## 2026-10-02 — Persisted undo reader test isolation checkpoint
 
 - Added bounded, fail-closed persisted restructure/shortcut undo readers in `EngineClient.PersistedUndo.cs` and moved pure parsing/policy checks out of the UI-affined `EngineClient` singleton so tests can execute without WinUI initialization. Parser-focused cases now pass; production integration with engine journal output is still incomplete and must be checked before release.

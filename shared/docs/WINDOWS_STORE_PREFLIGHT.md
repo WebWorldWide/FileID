@@ -1,3 +1,12 @@
+﻿## Current validation checkpoint — October 2, 2026
+
+- Signed-in Microsoft account: `adammnolle@gmail.com`; two-step verification ON; Gmail and authenticator both show “Up to date.” No security methods changed.
+- Pushed head `fa145357ef78af01c8af53747f8a4d23884a1599` on `codex/store-msix`; five local lifecycle changes remain uncommitted.
+- Local Release app suite: 393 passed, 40 failed, 433 total. IPC schema tests, engine `cargo test`, engine clippy, and changed-file format verification passed. No bug-free or release-ready claim.
+- Local Store script reached MSIX recipe generation but failed under VS 18: `APPX0002`/`MSB4018`, `GenerateAppxPackageRecipe`, null reference in `MrmSupportLibrary.GetLocation`. Supplying the installed Windows SDK `mrmsupport.dll` path did not fix it; no new local upload.
+- Adlon policy run `37001649379` passed. App run `37001649639`: x64 Debug/Release build and self-contained publish passed, ARM64 app build/test passed, but x64 VS VSTest aborted with “Could not find testhost.” Workflow is locally updated to run the already-built test projects via `dotnet test --no-build --no-restore`; push and validate on Adlon.
+- Adlon Store run `37001649369` passed on `fa14535`. Artifact `platforms/windows/dist/store-packages/adlon-fa14535/local-20261002-115818-4916/FileID.StorePackage_1.0.0.0_x64.msixupload` (127,421,868 bytes; SHA-256 `BF0417F55EE35C5718401146F21B53FA6387BFEB14500BE118FDB5D4C21026BE`). Nested MSIX SHA-256 `9C849F5F76EF1A5D3280A98B62ABE1F544BCABADCD935BE51B94C41B306B831A`. Verified identity `AdamNolle.FileID`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`, version `1.0.0.0`, architecture x64, executable `FileID.App\FileID.exe`, plus required app, engine, inference/runtime DLLs, PDFium, and logos. This artifact predates the five uncommitted changes and is not the final candidate.
+- Partner Center product `9PC8HSD86887` remains draft. Nothing was uploaded to Partner Center, no submission was started, and nothing was published.
 ## Latest lifecycle checkpoint — 2026-10-02
 
 - x64 Release app build: passed (one Win2D AnyCPU warning). Changed-file whitespace verification: passed.

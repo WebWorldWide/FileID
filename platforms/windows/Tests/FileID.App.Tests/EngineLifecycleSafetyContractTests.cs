@@ -394,17 +394,20 @@ public sealed class EngineLifecycleSafetyContractTests
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.Commands.cs"));
 
         Assert.Contains("public async Task<bool> StopAndWaitForExitAsync", commands, StringComparison.Ordinal);
-        Assert.Contains("return false;", commands, StringComparison.Ordinal);
-        Assert.Contains("if (!await StopAndWaitForExitCoreAsync", commands, StringComparison.Ordinal);
-        Assert.Contains("restart was aborted", commands, StringComparison.Ordinal);
-        Assert.Contains("shouldRun: restartAfterLateExit", commands, StringComparison.Ordinal);
-        Assert.Contains("ArmExpectedExitRestart(intent.Revision)", commands, StringComparison.Ordinal);
-        Assert.Contains("Volatile.Read(ref _isStarting) == 0", commands, StringComparison.Ordinal);
+        var stop = commands.IndexOf("public async Task<bool> StopAndWaitForExitAsync", StringComparison.Ordinal);
+        var timeout = commands.IndexOf("return false;", stop, StringComparison.Ordinal);
+        var restart = commands.IndexOf("public async Task RestartAsync", timeout, StringComparison.Ordinal);
+        var failClosed = commands.IndexOf("if (!await StopAndWaitForExitAsync", restart, StringComparison.Ordinal);
+        var refusal = commands.IndexOf("throw new TimeoutException(\"Engine restart was aborted", failClosed, StringComparison.Ordinal);
+
+        Assert.True(stop >= 0 && timeout > stop && restart > timeout && failClosed > restart && refusal > failClosed,
+            "Restart must stop after an unconfirmed process exit.");
+        Assert.Contains("_expectedExitProcesses[expectedExitProcess]", commands, StringComparison.Ordinal);
 
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
-        Assert.Contains("ResolveCurrentExpectedExitRestartRevision()", client, StringComparison.Ordinal);
-        Assert.Contains("StartAfterLateExpectedExitAsync", client, StringComparison.Ordinal);
+        Assert.Contains("ConsumeExpectedExit(exited)", client, StringComparison.Ordinal);
+        Assert.Contains("private bool ConsumeExpectedExit(Process? exited)", client, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -438,12 +441,12 @@ public sealed class EngineLifecycleSafetyContractTests
     }
 
     [Fact]
-    public void EngineStartWaitsForTheUnsolicitedReadyEvent()
+    public void EngineStartupVerifierWaitsForTheUnsolicitedReadyEvent()
     {
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
         var start = client.IndexOf("private async Task StartCoreAsync(", StringComparison.Ordinal);
-        var end = client.IndexOf("private void TerminateSupersededStart", start, StringComparison.Ordinal);
+        var end = client.IndexOf("private async Task VerifyStartupChannelAsync", start, StringComparison.Ordinal);
 
         Assert.True(start >= 0 && end > start, "StartCoreAsync source region must remain discoverable.");
         Assert.DoesNotContain("new RequestStatusCommand()", client[start..end], StringComparison.Ordinal);
@@ -456,10 +459,10 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
 
-        Assert.Contains("startedProcess.StandardOutput", client, StringComparison.Ordinal);
+        Assert.Contains("StdoutLoopAsync(p.StandardOutput, p, generation,", client, StringComparison.Ordinal);
         Assert.Contains("generation,", client, StringComparison.Ordinal);
         var start = client.IndexOf("public async Task StartAsync()", StringComparison.Ordinal);
-        var exitedCleanup = client.IndexOf("if (_process is { HasExited: true })", start, StringComparison.Ordinal);
+        var exitedCleanup = client.IndexOf("if (_process is { HasExited: true }", start, StringComparison.Ordinal);
         var resetScanState = client.IndexOf("ResetProcessBoundScanState();", exitedCleanup, StringComparison.Ordinal);
         var startingState = client.IndexOf("State = LifecycleState.Starting;", start, StringComparison.Ordinal);
         Assert.True(exitedCleanup > start && resetScanState > exitedCleanup && startingState > resetScanState,
@@ -620,7 +623,10 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
         var errorCase = client.IndexOf("case ErrorEvent e:", StringComparison.Ordinal);
-        var undoKind = client.IndexOf("e.Error.Kind == \"undo_restructure\"", errorCase, StringComparison.Ordinal);
+        var undoKind = client.IndexOf(
+            "if (e.Error.Kind is \"apply_restructure\" or \"undo_restructure\")",
+            errorCase,
+            StringComparison.Ordinal);
         var clearUndo = client.IndexOf("UndoRestructureInFlight = false;", undoKind, StringComparison.Ordinal);
         var nextCase = client.IndexOf("case LogEvent:", errorCase, StringComparison.Ordinal);
         Assert.True(undoKind > errorCase && clearUndo > undoKind && clearUndo < nextCase,

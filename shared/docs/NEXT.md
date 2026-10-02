@@ -1,3 +1,13 @@
+﻿# NEXT — resume here
+
+## 2026-10-02 — Windows Store release blockers
+
+- The Microsoft account prerequisite is satisfied: `adammnolle@gmail.com`, two-step ON, Gmail and authenticator marked up to date. Security methods were left unchanged.
+- The `codex/store-msix` worktree has five uncommitted Windows lifecycle changes. Local Release app suite is red (393 passed, 40 failed, 433 total in Release; Debug had 396 passed, 40 failed, 436 total); IPC schema tests, engine tests, engine clippy, and changed-file formatting passed. Triage the app failures without weakening meaningful safety coverage.
+- Local Store packaging fails on VS 18 in `GenerateAppxPackageRecipe` (`APPX0002`/`MSB4018`, null reference from `MrmSupportLibrary.GetLocation`). No fresh local upload exists.
+- Adlon Store run `37001649369` succeeded for `fa14535`; the artifact is at the path/hash in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md), but predates the uncommitted changes. The app run `37001649639` x64 tests aborted because VS `vstest.console.exe` could not find `testhost`. The workflow now uses `dotnet test --no-build --no-restore`; validate this fix in the next Adlon run.
+- Verify persisted undo-reader compatibility against actual Rust journal/manifest formats. Run the full Windows app suite, IPC schema tests, Release build, changed-file `dotnet format whitespace --verify-no-changes`, and exact-head Adlon app/engine/Store/policy checks. Commit/push and regenerate the package after the release gates pass.
+- Keep Partner Center product `9PC8HSD86887` in draft. Do not upload, start a submission, or publish. The website now says the x64 package is in preflight and the Store listing is not available yet.
 ## 2026-10-02 — Resume from Store and lifecycle checkpoint
 
 1. Worktree/branch: `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, `codex/store-msix`; head was `13f741a` before this checkpoint was committed.

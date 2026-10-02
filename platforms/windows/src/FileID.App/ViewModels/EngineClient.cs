@@ -113,12 +113,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // ARM64 — bool reads can theoretically tear on weakly-ordered
     // architectures, and OnProcessExited fires on whichever thread
     // detects process exit (not always the UI thread).
-    private int _expectingExit; // 0 = false, 1 = true
-    // When _expectingExit was set (UTC ticks). A shutdown request that never
-    // produces an exit would otherwise latch the flag forever, so a real crash
-    // much later gets mis-read as user-initiated and never respawns. Only honor
-    // the flag if the exit follows the request within ExpectingExitWindow.
-    private long _expectingExitAtTicks;
+    private readonly ConcurrentDictionary<Process, long> _expectedExitProcesses = new();
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
@@ -426,6 +421,33 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task StartAsync()
     {
+        if (!_ui.HasThreadAccess)
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_ui.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await StartCoreAsync();
+                    completion.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }))
+            {
+                throw new InvalidOperationException("The UI dispatcher is unavailable; the engine cannot be started safely.");
+            }
+            await completion.Task.ConfigureAwait(false);
+            return;
+        }
+
+        await StartCoreAsync();
+    }
+
+    private async Task StartCoreAsync()
+    {
         if (_process is { HasExited: false })
         {
             // Engine is already running. Don't touch _isStarting — another
@@ -452,6 +474,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // body in try/finally so the release is unconditional.
         try
         {
+            if (_process is { HasExited: true } exitedProcess && ReferenceEquals(exitedProcess, _process))
+            {
+                ResetProcessBoundScanState();
+                Phase = ScanPhase.Idle;
+                LastError = null;
+                LastWarning = null;
+                Cleanup();
+            }
+
             // Notify singleton services that any cached engine state is now
             // stale and they should re-attach to PropertyChanged. Cheap +
             // idempotent.
@@ -459,7 +490,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             State = LifecycleState.Starting;
             CrashReason = null;
-            Interlocked.Exchange(ref _expectingExit, 0);
             _lastSpawnAttempt = DateTime.UtcNow;
 
             var enginePath = AppPaths.EngineExePath;
@@ -852,6 +882,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    private bool ConsumeExpectedExit(Process? exited)
+    {
+        if (exited is null || !_expectedExitProcesses.TryRemove(exited, out var requestedAtTicks))
+        {
+            return false;
+        }
+
+        var requestedAt = new DateTime(requestedAtTicks, DateTimeKind.Utc);
+        return DateTime.UtcNow - requestedAt <= ExpectingExitWindow;
+    }
+
     private void OnProcessExited(object? sender, EventArgs e)
     {
         // Capture the exit code from the process that ACTUALLY exited (sender),
@@ -863,6 +904,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
         _ui.TryEnqueue(() =>
         {
+            var expectedExit = ConsumeExpectedExit(exited);
+
             // Ignore a stale exit from a process we've already replaced. In the
             // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
             // process's Exited callback is queued to the UI thread and can run
@@ -883,6 +926,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
             DebugLog.Warn($"EngineClient: process exited (code={exitCode?.ToString() ?? "?"}).");
             Cleanup();
+            ResetProcessBoundScanState();
 
             // Notify install service immediately so any in-flight download
             // owned by the now-dead engine flips to Failed instead of
@@ -895,15 +939,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // or trigger the auto-respawn — that would drag the engine
             // back up after the user explicitly asked it to stop.
             // Interlocked.Exchange both reads + clears in one atomic op.
-            var expectedExit = false;
-            if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
-            {
-                var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
-                expectedExit = DateTime.UtcNow - setAt <= ExpectingExitWindow;
-            }
             if (expectedExit)
             {
-                ResetProcessBoundScanState();
                 CrashReason = StoppedReason;
                 State = LifecycleState.Crashed;
                 return;
@@ -965,6 +1002,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private void Cleanup()
     {
         _healthWaiters.FailGeneration(SpawnGeneration, new InvalidOperationException("The engine generation stopped."));
+        _scanStartSlot.ReleaseGeneration(SpawnGeneration);
+        Interlocked.Increment(ref _scanPresentationRevision);
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
         _readCts = null;
@@ -1090,7 +1129,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
         if (Interlocked.Exchange(ref _transportFailureGeneration, generation) == generation) return;
         _healthWaiters.FailGeneration(generation, failure ?? new IOException("The engine command channel closed."));
-        if (Volatile.Read(ref _expectingExit) != 0) return;
+        if (_expectedExitProcesses.ContainsKey(captured)) return;
         DebugLog.Warn($"Engine transport failure: {reason} ({failure?.GetType().Name ?? "closed"}).");
         try
         {
@@ -1175,6 +1214,37 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     // ─── Event router ──────────────────────────────────────────────────
 
+    private void ObserveAuthoritativeScanEvent(int generation)
+    {
+        var owner = _scanStartSlot.Current;
+        if (owner is null || owner.Generation != generation)
+        {
+            return;
+        }
+
+        if (_scanStartSlot.Release(owner))
+        {
+            Interlocked.Increment(ref _scanPresentationRevision);
+        }
+    }
+
+    private void RejectScanStartCommand(int generation)
+    {
+        var owner = _scanStartSlot.Current;
+        if (owner is null || owner.Generation != generation)
+        {
+            return;
+        }
+
+        if (_scanStartSlot.Release(owner)
+            && owner.Generation == SpawnGeneration
+            && owner.Revision == Volatile.Read(ref _scanPresentationRevision))
+        {
+            Phase = owner.Payload.PreviousPhase;
+            _scanStartedAt = null;
+        }
+    }
+
     private void Apply(IpcEvent ev, int generation)
     {
         if (generation != SpawnGeneration) return;
@@ -1218,6 +1288,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Info = r.Info;
                         break;
                     case ProgressEvent p:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Discovery + tagging emit ProgressEvents CONCURRENTLY
                         // during the pipeline overlap (discovery still walking
                         // while tagging workers consume). A late Discovering event
@@ -1250,6 +1321,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Phase = p.Progress.Phase;
                         break;
                     case PhaseChangedEvent pc:
+                        ObserveAuthoritativeScanEvent(generation);
                         Phase = pc.Phase;
                         // Authoritative phase boundary — sync the monotonic latch
                         // so a late interleaved ProgressEvent can't pull the
@@ -1293,6 +1365,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastBatch = b.Summary;
                         break;
                     case ScanCompleteEvent sce:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Authoritative final count for the completed-scan summary
                         // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;
@@ -1328,6 +1401,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
+                        if (e.Error.Kind == "scan_already_running")
+                        {
+                            RejectScanStartCommand(generation);
+                        }
+
                         if (e.Error.Kind is "apply_restructure" or "undo_restructure")
                         {
                             UndoRestructureInFlight = false;

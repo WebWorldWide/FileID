@@ -185,14 +185,6 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             try
             {
-                // Optimistic UI flip: switch into the scanning panel immediately
-                // so the user gets visible feedback on click. The engine's
-                // first PhaseChanged(Discovering) event echoes the same value
-                // (no-op); any later transition (Tagging, Failed, Completed)
-                // overwrites this. If StartScanAsync faults (engine not Ready),
-                // the catch block surfaces an alert and the failure pill takes
-                // over via the Sync() Failed branch.
-                EngineClient.Instance.SetOptimisticScanningPhase();
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
                 DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
             }

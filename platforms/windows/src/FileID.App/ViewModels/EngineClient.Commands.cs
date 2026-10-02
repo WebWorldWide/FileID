@@ -27,63 +27,81 @@ internal sealed partial class EngineClient
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
     // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
+    private sealed record ScanStartRequest(ScanPhase? PreviousPhase);
+    private readonly GenerationOwnedOperationSlot<ScanStartRequest> _scanStartSlot = new();
+    private long _scanPresentationRevision;
+    private Task _writeTail = Task.CompletedTask;
+
 
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
+        => SendCommandAsync(payload, null, ct);
+
+    private Task SendCommandAsync(
+        CommandPayload payload,
+        Action? onWriteStarted,
+        CancellationToken ct)
     {
         var commandKind = payload.GetType().Name.Replace("Command", "");
-
-        // F.2: precondition — engine must be Ready. Without this, callers
-        // get the generic "Engine not running" later and have no clue if
-        // the engine is starting (wait), crashed (give up), or already
-        // shut down (abandon). Throw early so the message is meaningful.
-        if (State != LifecycleState.Ready && !(payload is HealthCheckCommand && State == LifecycleState.Starting))
+        if (State != LifecycleState.Ready
+            && !(payload is HealthCheckCommand && State == LifecycleState.Starting))
         {
-            var msg = $"Engine not ready (state={State}). Wait for Ready or call WaitForReadyAsync first.";
-            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");
-            return Task.FromException(new InvalidOperationException(msg));
+            var message = $"Engine not ready (state={State}). Wait for Ready by calling WaitForReadyAsync first.";
+            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {message}");
+            return Task.FromException(new InvalidOperationException(message));
         }
 
-        // The engine's stdin reader handles concurrent writers because
-        // our writes are atomic per-line, but we still serialize through a
-        // lock to make the byte order deterministic for log correlation.
-        // Encode inside Task.Run so a large applyRestructure frame (multi-MB
-        // JSON serialize + array copy) runs on the thread pool, not the UI
-        // thread that called us.
-        return Task.Run(() =>
+        var generation = SpawnGeneration;
+        Task predecessor;
+        Task queued;
+        lock (_writeLock)
         {
-            ct.ThrowIfCancellationRequested();
-
-            var cmd = IpcCommand.New(payload);
-            var bytes = IpcCoder.EncodeLine(cmd);
-            DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
-
-            // F.3: refuse to write a frame that risks pipe-buffer deadlock.
-            if (bytes.Length > MaxIpcFrameBytes)
+            predecessor = _writeTail;
+            queued = Task.Run(async () =>
             {
-                var msg = $"IPC frame too large: {commandKind} is {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk the request into smaller batches.";
-                DebugLog.Warn("[IPC OUT] " + msg);
-                throw new InvalidOperationException(msg);
-            }
-            try
-            {
+                try
+                {
+                    await predecessor.ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A failed command must not poison the FIFO for later work.
+                }
+
+                ct.ThrowIfCancellationRequested();
+                var command = IpcCommand.New(payload);
+                var bytes = IpcCoder.EncodeLine(command);
+                DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
+                if (bytes.Length > MaxIpcFrameBytes)
+                {
+                    var message = $"IPC frame too large: {commandKind} {bytes.Length:N0} bytes (max {MaxIpcFrameBytes:N0}). Chunk request into smaller batches.";
+                    DebugLog.Warn("[IPC OUT] " + message);
+                    throw new InvalidOperationException(message);
+                }
+
+                ct.ThrowIfCancellationRequested();
                 lock (_writeLock)
                 {
+                    if (generation != SpawnGeneration)
+                    {
+                        throw new InvalidOperationException("Engine generation changed before the queued command could be written.");
+                    }
                     if (_stdin is null)
                     {
                         DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
                         throw new InvalidOperationException("Engine not running.");
                     }
+
+                    onWriteStarted?.Invoke();
                     _stdin.BaseStream.Write(bytes, 0, bytes.Length);
                     _stdin.BaseStream.Flush();
                 }
+
                 DebugLog.Info($"[IPC OUT] {commandKind} flushed to engine stdin.");
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn($"[IPC OUT] {commandKind} threw on send: {ex.Message}");
-                throw;
-            }
-        }, ct);
+            }, CancellationToken.None);
+            _writeTail = queued;
+        }
+
+        return queued;
     }
 
     // FEAT-2: track scan duration locally so the SidebarProcessingControl
@@ -101,8 +119,23 @@ internal sealed partial class EngineClient
     /// engine's final total). The completed-scan summary reads this instead of
     /// LastProgress.Processed, which can be throttle-stale by up to one batch.
     public ulong LastScanProcessedFiles { get; private set; }
-    public Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
+    public async Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
+        if (Phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan)
+        {
+            throw new InvalidOperationException("A scan is already in progress.");
+        }
+
+        var revision = Interlocked.Increment(ref _scanPresentationRevision);
+        if (!_scanStartSlot.TryReserve(
+            SpawnGeneration,
+            revision,
+            new ScanStartRequest(Phase),
+            out var owner))
+        {
+            throw new InvalidOperationException("A scan start is already being sent.");
+        }
+
         _scanStartedAt = DateTime.UtcNow;
         _shownPhaseRank = -1;
         // Clear stale Deep Analyze latches so the pipeline strip doesn't jump a
@@ -112,7 +145,25 @@ internal sealed partial class EngineClient
         DeepAnalyzeComplete = null;
         DeepAnalyzeProgress = null;
         DeepAnalyzeStarting = null;
-        return SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan));
+        _shownPhaseRank = -1;
+        Phase = ScanPhase.Discovering;
+        LastError = null;
+        LastWarning = null;
+        try
+        {
+            await SendCommandAsync(new StartScanCommand(rootPath, rootDisplay, rescan)).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (_scanStartSlot.Release(owner)
+                && owner.Generation == SpawnGeneration
+                && owner.Revision == Volatile.Read(ref _scanPresentationRevision))
+            {
+                Phase = owner.Payload.PreviousPhase;
+                _scanStartedAt = null;
+            }
+            throw;
+        }
     }
 
     /// <summary>Reset Phase + LastError before a fresh user action (e.g. retrying
@@ -178,6 +229,7 @@ internal sealed partial class EngineClient
         // #21: an incremental rescan found nothing new — informational, not an
         // error. #10: a second Deep Analyze bounced because one is already
         // running — a benign "already busy" notice, not a failure.
+        "scan_already_running" => true,
         "rescan_no_changes" => true,
         "deep_analyze_already_running" => true,
         // A concurrent RunFaceClustering bounced off the engine's single-flight
@@ -189,18 +241,6 @@ internal sealed partial class EngineClient
         "command_decode_failed" => true,
         _ => false,
     };
-
-    /// <summary>Pre-flip Phase to <see cref="ScanPhase.Discovering"/> as soon
-    /// as the user clicks Start Scan, so the sidebar transitions out of the
-    /// idle panel before the engine's first PhaseChanged event lands. The
-    /// engine's own Discovering event echoes the same value (no-op); any
-    /// real phase transition takes over immediately afterwards.</summary>
-    public void SetOptimisticScanningPhase()
-    {
-        _shownPhaseRank = -1;
-        Phase = ScanPhase.Discovering;
-        LastError = null;
-    }
 
     // FEAT-1: optimistic pause flag — flipped here on the IPC send so
     // the sidebar UI can bind to IsPaused without waiting for the next
@@ -241,27 +281,22 @@ internal sealed partial class EngineClient
     public Task RequestStatusAsync() => SendCommandAsync(new RequestStatusCommand());
     public async Task ShutdownAsync()
     {
-        // BUG-6: mark this exit as user-initiated so OnProcessExited
-        // doesn't count it as a crash + auto-respawn.
-        //
-        // the flag has to be paired with the IPC actually landing.
-        // The previous version set _expectingExit=1 unconditionally, then
-        // SendCommandAsync would abort if State != Ready (engine already
-        // gone), leaving the flag latched at 1. The NEXT time the engine
-        // spawned and then crashed for any real reason, OnProcessExited
-        // would see the leftover flag and treat the genuine crash as a
-        // user-initiated exit — no auto-respawn, engine stays dead. Now
-        // we set the flag only AFTER SendCommandAsync succeeds, and clear
-        // it if SendCommandAsync throws.
-        Interlocked.Exchange(ref _expectingExitAtTicks, DateTime.UtcNow.Ticks);
-        Interlocked.Exchange(ref _expectingExit, 1);
+        var expectedExitProcess = _process;
+        if (expectedExitProcess is not null)
+        {
+            _expectedExitProcesses[expectedExitProcess] = DateTime.UtcNow.Ticks;
+        }
+
         try
         {
             await SendCommandAsync(new ShutdownCommand()).ConfigureAwait(false);
         }
         catch
         {
-            Interlocked.Exchange(ref _expectingExit, 0);
+            if (expectedExitProcess is not null)
+            {
+                _expectedExitProcesses.TryRemove(expectedExitProcess, out _);
+            }
             throw;
         }
     }
@@ -303,7 +338,6 @@ internal sealed partial class EngineClient
             DebugLog.Info($"[ENGINE] StopAndWaitForExitAsync: process exited after {sw.ElapsedMilliseconds}ms.");
             return true;
         }
-        Interlocked.Exchange(ref _expectingExit, 0);
         DebugLog.Warn($"[ENGINE] StopAndWaitForExitAsync: timed out after {sw.ElapsedMilliseconds}ms; process still alive.");
         return false;
     }
@@ -726,8 +760,12 @@ internal sealed partial class EngineClient
     // case). Deep Analyze stays manual on both platforms (gated on the
     // user naming ≥1 person first).
 
-    public Task PlanRestructureAsync(string libraryRoot) =>
-        SendCommandAsync(new PlanRestructureCommand(libraryRoot));
+    public Task PlanRestructureAsync(string libraryRoot)
+    {
+        LastError = null;
+        LastWarning = null;
+        return SendCommandAsync(new PlanRestructureCommand(libraryRoot));
+    }
     private bool _restructureApplyUsesSymlinks;
     private int _restructureCommandInFlight;
     internal bool LastRestructureResultWasUndo { get; private set; }
@@ -738,6 +776,8 @@ internal sealed partial class EngineClient
     {
         if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
             throw new InvalidOperationException("A restructure operation is already running.");
+        LastError = null;
+        LastWarning = null;
         _restructureApplyUsesSymlinks = useSymlinks;
         RestructureOperationRoot = libraryRoot;
         try { await SendCommandAsync(new ApplyRestructureCommand(libraryRoot, moves, useSymlinks)).ConfigureAwait(false); }
@@ -756,6 +796,8 @@ internal sealed partial class EngineClient
     private async Task SendRestructureUndoCoreAsync(string libraryRoot)
     {
         RestructureOperationRoot = libraryRoot;
+        LastError = null;
+        LastWarning = null;
         // Clear the flag if the send faults (engine not Ready) — else it latches and
         // mis-attributes the next apply's result as the undo's. (audit R2-app)
         UndoRestructureInFlight = true;

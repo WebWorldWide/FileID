@@ -219,7 +219,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         DebugLog.Info("[WIPE] stage 2: shutdown engine");
         if (!await EngineClient.Instance.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10)))
         {
-            DebugLog.Error("[WIPE] stage 2 timed out; refusing to delete library files.");
+            DebugLog.Error("[WIPE] stage 2 timed out; refusing to delete a live engine's database.");
             await ShowAlertAsync(
                 "Wipe cancelled",
                 "FileID couldn't confirm that the engine stopped, so no library files were deleted. Restart the engine from Settings after it exits.");
