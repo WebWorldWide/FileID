@@ -18,6 +18,7 @@ Completed draft changes include AppPaths isolation, test-instance mutexes, Folde
 
 Remaining groups:
 
+- File-state paths: complete Adlon read-only enforcement for DB/model/log/output roots and platform-specific aliases, including Windows shares. The current guards are not yet a universal server/mount policy. Prove rejection with internal fixtures; never test writes on the corpus.
 - Engine lifecycle: wire EngineLifecycleCoordinator, generation-bound health waiters and a canonical health IPC command, safe persisted real/shortcut Undo readers, intentional-stop status, serialized restart/close guards, bounded framing test access.
 - Cleanup: wire Exact/Similar mode and explicit selections. Add exact-trash proofs to the canonical schema and all engines before using them; current Rust silently ignoring unknown proof fields would be unsafe. Preserve stable keeper/victim identities, mutation guards, staged claims and recovery. The restored WIP model is not yet wired into the view.
 - People: finish wiring/verify restored PersonFileIdsAsync and structured names against existing tests.
