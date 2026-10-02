@@ -36,7 +36,7 @@ internal sealed partial class EngineClient
         // get the generic "Engine not running" later and have no clue if
         // the engine is starting (wait), crashed (give up), or already
         // shut down (abandon). Throw early so the message is meaningful.
-        if (State != LifecycleState.Ready)
+        if (State != LifecycleState.Ready && !(payload is HealthCheckCommand && State == LifecycleState.Starting))
         {
             var msg = $"Engine not ready (state={State}). Wait for Ready or call WaitForReadyAsync first.";
             DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {msg}");

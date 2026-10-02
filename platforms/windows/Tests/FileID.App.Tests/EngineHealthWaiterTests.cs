@@ -123,16 +123,19 @@ public sealed class EngineHealthWaiterTests
             "EngineClient.cs"));
 
         var probe = client.IndexOf(
-            "private async Task ProbeCommandChannelAsync",
+            "public async Task ProbeCommandChannelAsync",
             StringComparison.Ordinal);
+        Assert.True(probe >= 0, "EngineClient must expose the command-channel probe.");
         var register = client.IndexOf(
-            "_healthWaiters.Register(requestId, generation, pid)",
+            "_healthWaiters.Register(requestId, generation, captured.Id)",
             probe,
             StringComparison.Ordinal);
+        Assert.True(register > probe, "Probe must register the captured process identity.");
         var send = client.IndexOf(
             "SendCommandAsync(new HealthCheckCommand(requestId), ct)",
             register,
             StringComparison.Ordinal);
+        Assert.True(send > register, "Probe must register before writing.");
         var awaitReply = client.IndexOf(
             "waiter.Task.WaitAsync(timeout, ct)",
             send,
@@ -173,6 +176,43 @@ public sealed class EngineHealthWaiterTests
             "Health replies must resolve on the stdout loop before UI dispatch.");
         Assert.Contains("HandleTransportFailureAsync(", client, StringComparison.Ordinal);
         Assert.Contains("\"stdout EOF\"", client, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RetiredGenerationCannotRegisterALateWaiter()
+    {
+        var waiters = new GenerationHealthWaiters();
+        waiters.FailGeneration(8, new InvalidOperationException("retired"));
+        var late = waiters.Register("late", 8, 101);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => late.Task);
+        Assert.Equal(0, waiters.Count);
+        Assert.False(waiters.TryResolve("late", 101, 8));
+    }
+
+    [Fact]
+    public async Task DuplicateNonceCannotReplaceTheOriginalWaiter()
+    {
+        var waiters = new GenerationHealthWaiters();
+        var original = waiters.Register("same", 8, 101);
+        Assert.Throws<InvalidOperationException>(() => waiters.Register("same", 9, 202));
+        Assert.False(waiters.TryResolve(null!, 101, 8));
+        Assert.True(waiters.TryResolve("same", 101, 8));
+        await original.Task;
+        Assert.Equal(0, waiters.Count);
+    }
+
+    [Fact]
+    public void StartupReadyStateRequiresVerifiedCommandChannel()
+    {
+        var source = File.ReadAllText(Path.Combine(FindRepoRoot(), "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs"));
+        var start = source.IndexOf("private async Task VerifyStartupChannelAsync", StringComparison.Ordinal);
+        var end = source.IndexOf("private async Task HandleTransportFailureAsync", start, StringComparison.Ordinal);
+        var verification = source[start..end];
+        Assert.True(verification.IndexOf("ProbeCommandChannelAsync", StringComparison.Ordinal)
+            < verification.IndexOf("State = LifecycleState.Ready", StringComparison.Ordinal));
+        var rawStart = source.IndexOf("case ReadyEvent r:", StringComparison.Ordinal);
+        var rawEnd = source.IndexOf("case ProgressEvent p:", rawStart, StringComparison.Ordinal);
+        Assert.DoesNotContain("State = LifecycleState.Ready", source[rawStart..rawEnd]);
     }
 
     private static string FindRepoRoot()

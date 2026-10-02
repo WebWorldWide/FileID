@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-10-01 — Health channel checkpoint (current)
+
+- Health IPC/startup verification is implemented. All 10 health tests, 54 IPC tests, full Rust tests/clippy, changed C# formatting, runtime egress gate and 24 gate tests passed. A live isolated engine answered three nonce/PID probes, rejected malformed input, recovered with another valid probe, then shut down cleanly.
+- Next: implement real persisted undo discovery/bounded parsing/identity validation/fallback ordering (22 missing API diagnostics in EngineLifecycleSafetyContractTests), then final close with no live process/pending start (1 diagnostic in AdversarialLifecycleAndUiContractTests). Full app suite still cannot compile. Run it without exclusions after fixing these APIs.
+- Diagnostic subset is 360 passed / 27 failed / 387 total; exact failure names are unchanged from the previous restructure subset. Triage and resolve the remaining contracts in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md), preserving safety assertions. Do not claim release readiness until all tests and actual packaged-app runtime checks pass.
+- Required local Store rerun passed engine/app Release build/publish, but VS 2026 WAP failed APPX0002/MSB4018 at GenerateAppxPackageRecipe. No new local msixupload; log: `platforms/windows/dist/store-packages/local-build-health.log`. Check this checkpoint commit's hosted VS 2022 Store and app CI. Download/inspect the final package, then perform authorized package install/launch and scan/cleanup/undo smoke checks. Current inspected upload predates cleanup/restructure/health changes.
+- Use `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`. PR #183 and Partner Center `9PC8HSD86887` remain drafts. Future best takes, conversion/upscale/compression, and folder organization requirements are in [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for all three desktop platforms after first release. Official vendor runtime-download exception remains approved for explicit install actions.
+
 ## 2026-10-01 — Restructure cancellation and undo checkpoint
 
 - Restructure result counts now reach Windows Rust/C# from the existing canonical schema; cancellation is no longer reported as success. Undo preserves cancelled/failed journals and retries skip already-restored files. The app serializes restructure commands, awaits terminal undo confirmation, and records confirmed real-move history.

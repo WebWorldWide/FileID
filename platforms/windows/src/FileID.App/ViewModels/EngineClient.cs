@@ -51,6 +51,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
+    private readonly GenerationHealthWaiters _healthWaiters = new();
+    private int _transportFailureGeneration = -1;
 
     // S4: bounded engine-stdout framing — a wedged/garbled engine that never
     // emits a newline can't grow an unbounded read buffer and OOM the UI process.
@@ -593,13 +595,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 var p = Process.Start(psi)
                         ?? throw new InvalidOperationException("Process.Start returned null");
                 _process = p;
-                Interlocked.Increment(ref _spawnGeneration);
+                var generation = Interlocked.Increment(ref _spawnGeneration);
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
                 _stdin = p.StandardInput;
 
                 _readCts = new CancellationTokenSource();
                 var ct = _readCts.Token;
-                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
+                var startupReady = new TaskCompletionSource<EngineInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, p, generation, startupReady, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
                 // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
@@ -608,6 +611,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 // handler is attached, and the crash respawn never fires.
                 p.Exited += OnProcessExited;
                 p.EnableRaisingEvents = true;
+                _ = VerifyStartupChannelAsync(p, generation, startupReady.Task, ct);
             }
             catch (Exception ex)
             {
@@ -617,16 +621,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // Send a status request — when the engine returns ready, we'll
-            // populate Info and flip State to Ready.
-            try
-            {
-                await SendCommandAsync(new RequestStatusCommand());
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
-            }
         }
         finally
         {
@@ -735,7 +729,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
+    private async Task StdoutLoopAsync(StreamReader reader, Process captured, int generation,
+        TaskCompletionSource<EngineInfo> startupReady, CancellationToken ct)
     {
         // Per-loop framing state — a respawn starts a fresh loop with its own
         // buffer, so stale bytes can never carry over or race (#22).
@@ -765,6 +760,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             catch (Exception ex)
             {
                 DebugLog.Warn("Engine stdout read error: " + ex.Message);
+                startupReady.TrySetException(ex);
+                await HandleTransportFailureAsync(captured, generation, "stdout read failure", ex).ConfigureAwait(false);
                 return;
             }
             if (framing.OversizeDropped)
@@ -779,12 +776,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
                     "try restructuring a subfolder.",
                     null)));
-                _ui.TryEnqueue(() => Apply(oversize));
+                _ui.TryEnqueue(() => Apply(oversize, generation));
             }
             if (line is null)
             {
-                // EOF — engine closed stdout (likely exiting). Process.Exited
-                // will pick up the cleanup.
+                startupReady.TrySetException(new IOException("Engine stdout closed before startup completed."));
+                if (!ct.IsCancellationRequested)
+                    await HandleTransportFailureAsync(captured, generation, "stdout EOF").ConfigureAwait(false);
                 return;
             }
             if (string.IsNullOrWhiteSpace(line))
@@ -803,8 +801,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 continue;
             }
 
-            // Marshal to UI thread before touching observable state.
-            _ui.TryEnqueue(() => Apply(ev));
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            if (ev.Payload is ReadyEvent ready && ready.Info.Pid == captured.Id)
+                startupReady.TrySetResult(ready.Info);
+            if (ev.Payload is HealthCheckResultEvent health)
+                _healthWaiters.TryResolve(health.Result.RequestId, health.Result.Pid, generation);
+            _ui.TryEnqueue(() => Apply(ev, generation));
         }
     }
 
@@ -962,6 +964,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private void Cleanup()
     {
+        _healthWaiters.FailGeneration(SpawnGeneration, new InvalidOperationException("The engine generation stopped."));
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
         _readCts = null;
@@ -1021,6 +1024,94 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// or surfaces a clean error — never silently throws "Engine not
     /// running."
     /// </summary>
+    internal static bool IsHealthTargetCurrent(int capturedGeneration, int currentGeneration,
+        Process? captured, Process? current, bool capturedHasExited)
+        => captured is not null && ReferenceEquals(captured, current)
+            && capturedGeneration == currentGeneration && !capturedHasExited;
+
+    private static bool ProcessHasExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (InvalidOperationException) { return true; }
+    }
+
+    public async Task ProbeCommandChannelAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ct.ThrowIfCancellationRequested();
+        var captured = _process ?? throw new InvalidOperationException("The engine is not running.");
+        var generation = SpawnGeneration;
+        if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+            throw new InvalidOperationException("The engine changed before its health check.");
+        var requestId = Guid.NewGuid().ToString("N");
+        var waiter = _healthWaiters.Register(requestId, generation, captured.Id);
+        try
+        {
+            if (waiter.Task.IsFaulted) await waiter.Task.ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+                throw new InvalidOperationException("The engine changed before its health check was sent.");
+            await SendCommandAsync(new HealthCheckCommand(requestId), ct).ConfigureAwait(false);
+            await waiter.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+                throw new InvalidOperationException("The engine changed during its health check.");
+        }
+        catch (Exception ex)
+        {
+            _healthWaiters.TryFail(requestId, ex);
+            try { await waiter.Task.ConfigureAwait(false); } catch { }
+            throw;
+        }
+    }
+
+    private async Task VerifyStartupChannelAsync(Process captured, int generation, Task<EngineInfo> ready, CancellationToken ct)
+    {
+        try
+        {
+            await ready.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            await ProbeCommandChannelAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+            _ui.TryEnqueue(() =>
+            {
+                if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+                _lastReadyAt = DateTime.UtcNow;
+                CrashReason = null;
+                State = LifecycleState.Ready;
+            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            await HandleTransportFailureAsync(captured, generation, "startup health check failed", ex).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleTransportFailureAsync(Process captured, int generation, string reason, Exception? failure = null)
+    {
+        if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+        if (Interlocked.Exchange(ref _transportFailureGeneration, generation) == generation) return;
+        _healthWaiters.FailGeneration(generation, failure ?? new IOException("The engine command channel closed."));
+        if (Volatile.Read(ref _expectingExit) != 0) return;
+        DebugLog.Warn($"Engine transport failure: {reason} ({failure?.GetType().Name ?? "closed"}).");
+        try
+        {
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            captured.Kill(entireProcessTree: true);
+            await captured.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine transport recovery failed: " + ex.GetType().Name);
+            _ui.TryEnqueue(() =>
+            {
+                if (generation != SpawnGeneration || !ReferenceEquals(captured, _process)) return;
+                CrashReason = "The engine command channel closed. Stop the engine or restart FileID before continuing.";
+                State = LifecycleState.Crashed;
+            });
+        }
+        if (generation == SpawnGeneration && ReferenceEquals(captured, _process) && ProcessHasExited(captured))
+            OnProcessExited(captured, EventArgs.Empty);
+    }
+
     public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         if (State == LifecycleState.Ready) return Task.CompletedTask;
@@ -1084,8 +1175,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     // ─── Event router ──────────────────────────────────────────────────
 
-    private void Apply(IpcEvent ev)
+    private void Apply(IpcEvent ev, int generation)
     {
+        if (generation != SpawnGeneration) return;
         // per-event diagnostic tracing. See _applySeq comment above
         // for why this exists. Only logs the event TYPE, never the payload
         // (payloads can contain user file paths — those route through
@@ -1124,20 +1216,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
-                        State = LifecycleState.Ready;
-                        CrashReason = null;
-                        // R5-07: record when the engine reached Ready, but do NOT
-                        // reset the strike counter here. An engine that reaches
-                        // Ready then deterministically crashes within seconds (a
-                        // re-armed auto-installer re-firing a fatal model load, or
-                        // the first command hitting a fatal native path) would
-                        // otherwise zero the counter on every respawn and flap ~1s
-                        // forever, never reaching terminal Crashed. OnProcessExited
-                        // treats a crash AFTER >= StabilitySettle of continuous
-                        // Ready as genuine recovery and only then clears the
-                        // counter — preserving the corrupt-.gguf "user removed the
-                        // bad file" recovery without the flap.
-                        _lastReadyAt = DateTime.UtcNow;
                         break;
                     case ProgressEvent p:
                         // Discovery + tagging emit ProgressEvents CONCURRENTLY
@@ -1342,6 +1420,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case RestructurePlanEvent rp:
                         LastRestructurePlan = rp.Plan;
+                        break;
+                    case HealthCheckResultEvent:
                         break;
                     case RestructureApplyResultEvent rar:
                         try

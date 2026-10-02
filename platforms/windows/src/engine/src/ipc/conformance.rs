@@ -191,6 +191,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::ResumeScan(_) => "resumeScan",
         CommandPayload::CancelScan(_) => "cancelScan",
         CommandPayload::RequestStatus(_) => "requestStatus",
+        CommandPayload::HealthCheck(_) => "healthCheck",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
         CommandPayload::DeepAnalyzeFile(_) => "deepAnalyzeFile",
@@ -225,6 +226,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Ready(_) => "ready",
+        EventPayload::HealthCheckResult(_) => "healthCheckResult",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -302,6 +304,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::ResumeScan(Empty {}),
         CommandPayload::CancelScan(Empty {}),
         CommandPayload::RequestStatus(Empty {}),
+        CommandPayload::HealthCheck(super::HealthCheckPayload { request_id: "probe-1".into() }),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
         CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
@@ -394,6 +397,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
 /// exercised against the schema's `properties`.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
+        EventPayload::HealthCheckResult(Wrap::new(super::HealthCheckResult { request_id: "probe-1".into(), pid: 42 })),
         EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),
             pid: 4242,

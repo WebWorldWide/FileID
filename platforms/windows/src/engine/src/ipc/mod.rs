@@ -60,6 +60,8 @@ pub enum CommandPayload {
     CancelScan(Empty),
     #[serde(rename = "requestStatus")]
     RequestStatus(Empty),
+    #[serde(rename = "healthCheck")]
+    HealthCheck(HealthCheckPayload),
     #[serde(rename = "shutdown")]
     Shutdown(Empty),
     #[serde(rename = "runFaceClustering")]
@@ -500,6 +502,8 @@ pub struct MergeSuggestions {
 pub enum EventPayload {
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
+    #[serde(rename = "healthCheckResult")]
+    HealthCheckResult(Wrap<HealthCheckResult>),
 
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),
@@ -591,6 +595,19 @@ impl<T> Wrap<T> {
     pub fn new(inner: T) -> Self {
         Self { inner }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckResult {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub pid: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

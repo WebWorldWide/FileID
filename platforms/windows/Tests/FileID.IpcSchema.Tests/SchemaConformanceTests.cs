@@ -1,4 +1,4 @@
-// Schema-conformance suite — C# twin of the Rust engine's variant coverage
+﻿// Schema-conformance suite — C# twin of the Rust engine's variant coverage
 // tests, checked against the canonical contract itself. For every
 // CommandPayload / EventPayload variant we keep an exemplar instance,
 // serialize it through IpcCoder (the exact wire path), and assert against
@@ -140,6 +140,7 @@ public class SchemaConformanceTests
         new ResumeScanCommand(),
         new CancelScanCommand(),
         new RequestStatusCommand(),
+        new HealthCheckCommand("probe-1"),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
         new VerifyCudaPackCommand(),
@@ -177,6 +178,7 @@ public class SchemaConformanceTests
     private static IReadOnlyList<EventPayload> EventExemplars() => new EventPayload[]
     {
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
+        new HealthCheckResultEvent(new HealthCheckResult("probe-1", 1234)),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),
         new DiscoveryCompleteEvent(50_000),

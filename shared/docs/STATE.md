@@ -1,3 +1,11 @@
+## 2026-10-01 — Verified engine startup health checkpoint
+
+- Added canonical health nonce/PID IPC matching the Swift reference and mirrored it in Windows Rust/C#. Startup stays Starting until the captured process answers; stdout resolves matching waiters before UI dispatch. Cleanup retires the old generation, and late registration/duplicate nonce/timeout/cancellation cases are covered. Unexpected transport failure uses bounded recovery of the captured engine; expected shutdown is exempt and no idle heartbeat runs.
+- All 10 health tests and 54 IPC tests passed. An isolated real engine process passed Ready PID validation, three distinct echoed nonces/PIDs, malformed-command rejection followed by a valid probe, and clean shutdown. Full Rust tests and clippy passed (pre-existing renamed-lint notice); changed C# whitespace/style verification and runtime egress gate plus all 24 tests passed.
+- Full app test compilation improved from 32 to 23 diagnostics: lifecycle persisted undo APIs (22) and final-close terminal stop contract (1). Temporary diagnostic subset: 360 passed / 27 failed / 387 total. The exact 27 failure names match the previous restructure subset. Every real test remains enabled; the temporary project is removed. This is not a full-suite pass or a claim of zero bugs.
+- Required `cd platforms\windows; .\build\publish-store-msix.ps1` rerun: engine/app Release build/publish passed; VS 2026 WAP again failed APPX0002/MSB4018 at GenerateAppxPackageRecipe. No new local upload. Log: `platforms/windows/dist/store-packages/local-build-health.log`. Previous head `9e93344` hosted Store packaging passed, but Windows app CI failed. Check the health commit's CI next.
+- [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md) records logs, package evidence, exact remaining failures, and resume order. Branch remains `codex/store-msix`, PR #183 and Partner Center product `9PC8HSD86887` remain drafts; nothing uploaded/submitted/published. Existing README/site accurately say Store release is being prepared. [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) remains committed for macOS/Linux work after the current release.
+
 # FileID — State
 
 > Snapshot of what's working and where we left off. Update at the end of every working session.

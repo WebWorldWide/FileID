@@ -6,19 +6,19 @@ Use `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, d
 
 | Check | Result |
 | --- | --- |
-| x64 Release app build | Passed after restructure cancellation/undo changes |
+| x64 Release app build | Passed after health channel changes |
 | Cleanup and exact-trash proof tests | 18 passed |
-| Compilable app subset | 350 passed, 27 failed, 377 total |
-| Complete app test project | Cannot compile: 32 missing API diagnostics across three files |
+| Compilable app subset | 360 passed, 27 failed, 387 total; same 27 failure names |
+| Complete app test project | Cannot compile: 23 missing API diagnostics across two files |
 | Restructure routing tests | All 17 passed as part of the subset |
 | Rust tests/clippy | Full tests and clippy with warnings denied passed; new cancelled/failed undo retry regression passed |
-| IPC tests | 49 passed, including cancellation counts and legacy defaults |
+| IPC tests | 54 passed, including health round trips/missing-field rejection, cancellation counts and legacy defaults |
 | Runtime egress gate and its tests | Gate passed; 24 tests passed |
 | Changed app C# formatting | Passed |
 | Hosted x64 Store package at `2fd1f21` | Passed; independently inspected locally |
 | Actual Store package installation and UI smoke | Unverified |
 
-The current diagnostic subset used a temporary copy of the test project with assembly name `FileID.App.Tests`, excluding only `EngineLifecycleSafetyContractTests.cs`, `EngineHealthWaiterTests.cs`, and `AdversarialLifecycleAndUiContractTests.cs`. This is not a full-suite pass. The temporary project is not committed; the real test project retains every test. The earlier 360-test run also excluded restructure routing; all 15 of those tests now compile and pass.
+The current diagnostic subset used a temporary copy of the test project with assembly name `FileID.App.Tests`, excluding only `EngineLifecycleSafetyContractTests.cs` and `AdversarialLifecycleAndUiContractTests.cs`. This is not a full-suite pass. The temporary project is not committed; the real test project retains every test. All 10 health tests and all 17 restructure routing tests now compile and pass. Failure names were compared with the previous restructure subset and are unchanged.
 
 Machine-local logs are under `platforms/windows/dist/store-packages/`: `app-tests-current.log`, `focused-app-tests-build.log`, `cleanup-focused-tests.log`, `compilable-app-subset.log`, `ipc-tests-current.log`, `cleanup-format.log`, and `test-results/*.trx`.
 
@@ -28,14 +28,23 @@ Newest evidence: `app-tests-restructure-current.log` (32 diagnostics), `restruct
 
 Windows Rust/C# now mirror the cancellation, planned, remaining, and optional shortcut-token fields already present in the canonical schema and Swift DTO. The engine counts only unprocessed rows as cancellation remainder, preserves failed/cancelled undo journals, skips previously restored rows on retry, and opens a new forward journal only after a successful move. A Windows filesystem regression exercises cancellation, a partial failure, and successful retry without duplicate restores. A second regression verifies that an already-placed file is not counted as a move or given a new undo journal.
 
-The app separates apply/undo and real-move/shortcut completion text, serializes restructure commands until their terminal result or error, registers a generation-bound undo waiter before sending, and records real-move history only after engine confirmation. Undo history stays retryable when confirmation fails or cancellation leaves remaining work. Persistent journal discovery, health waiters, final close, and the 27 other contract failures remain incomplete.
+The app separates apply/undo and real-move/shortcut completion text, serializes restructure commands until their terminal result or error, registers a generation-bound undo waiter before sending, and records real-move history only after engine confirmation. Undo history stays retryable when confirmation fails or cancellation leaves remaining work. Health waiters are implemented and verified. Persistent journal discovery, final close, and the 27 other contract failures remain incomplete.
+
+## Health channel verification
+
+Startup stays Starting until both raw Ready and a generation/PID/nonce-bound health reply arrive from the captured process. Replies resolve on the stdout reader before UI dispatch; cleanup retires waiters before incrementing generation. Unexpected stdout EOF/read failure or failed startup probe triggers bounded recovery of that captured process. Expected shutdown is exempt; no periodic idle heartbeat is added.
+
+All 10 app health tests passed. A live engine probe using isolated LOCALAPPDATA/database/model paths passed Ready PID validation, three distinct echoed nonce/PID replies, malformed-command rejection, a subsequent valid probe, and clean shutdown. No downloads were requested. Full Rust tests and clippy passed, with a pre-existing renamed-lint notice. Changed C# whitespace/style verification passed; runtime egress gate and all 24 gate tests passed.
+
+Local evidence under `platforms/windows/dist/store-packages/`: `health-app-focused-build-final.log`, `health-focused-final-tests.log`, `test-results/health-focused-final.trx`, `health-full-app-build.log` (23 diagnostics), `health-full-engine-tests.log`, `health-clippy-final.log`, `health-ipc-tests.log`, `test-results/health-ipc.trx`, `health-ipc-smoke.log`, `health-format-verify.log`, `health-style-verify.log`, `health-egress-tests.log`.
+
+Hosted VS 2022 Store packaging passed at `9e93344` (run `36860708963`), before health changes; Windows app CI failed at that same commit. The inspected local upload listed below predates cleanup, restructure, and health changes. Download and inspect the final commit's package before release work.
 
 ## Full-suite compile blockers
 
 | Test file | Diagnostics | Required behavior |
 | --- | --- | --- |
 | EngineLifecycleSafetyContractTests | 22 | Persisted journal discovery, bounded parsing, identity validation, fallback ordering |
-| EngineHealthWaiterTests | 9 | Schema-first health IPC, generation/PID/nonce-bound waiters, retirement before publishing new generation |
 | AdversarialLifecycleAndUiContractTests | 1 | Final close requires terminal stop with no live process or pending start |
 
 Implement real behavior while preserving safety assertions; no placeholder APIs solely to compile tests.
@@ -67,11 +76,11 @@ SHA-256: `5C9FE90F729611CAD500487239DDA8CB689195CF03CC9B6566468A853DC4CBFC`.
 
 Verified x64 identity `AdamNolle.FileID`, version `1.0.0.0`, publisher `CN=B6BC6354-0217-4C63-8B82-7040B465A25E`, launch path `FileID.App\FileID.exe`, and colocated app/engine/ORT/DirectML/pdfium payload. This includes the explicit-download fix but predates the cleanup patch. Inspect an exact-head package before release work.
 
-The required local `cd platforms\windows; .\build\publish-store-msix.ps1` was rerun after the restructure patch. Engine Release build and x64 app Release build/publish succeeded; packaging failed in VS 2026 at `GenerateAppxPackageRecipe` (`APPX0002` / `MSB4018`, null reference). No new local `.msixupload` resulted. Newest log: `local-build-restructure.log`; earlier cleanup rerun: `local-build-cleanup.log`. Hosted VS 2022 succeeds. Install remains unverified after reserved-publisher unsigned install failed (`0x80073D2C`) and loose registration required Developer Mode (`0x80073CFF`). No certificates or security policies changed.
+The required local `cd platforms\windows; .\build\publish-store-msix.ps1` was rerun after the health patch. Engine Release build and x64 app Release build/publish succeeded; packaging failed in VS 2026 at `GenerateAppxPackageRecipe` (`APPX0002` / `MSB4018`, null reference). No new local `.msixupload` resulted. Newest log: `local-build-health.log`; earlier cleanup rerun: `local-build-cleanup.log`. Hosted VS 2022 succeeds. Install remains unverified after reserved-publisher unsigned install failed (`0x80073D2C`) and loose registration required Developer Mode (`0x80073CFF`). No certificates or security policies changed.
 
 ## Resume order
 
 1. Inspect branch status and exact-head CI.
-2. Resolve 32 compile diagnostics and 27 observed failures; run all Windows tests with VS MSBuild/VSTest, formatting, Rust clippy/tests, and release policy gates.
+2. Resolve 23 compile diagnostics and 27 observed failures; run all Windows tests with VS MSBuild/VSTest, formatting, Rust clippy/tests, and release policy gates.
 3. Build/download and inspect final x64 upload. Perform actual package install/launch, isolated scan, model fallback, cleanup/undo smoke. WACK is optional.
 4. Prepare listing assets/certification while retaining Partner Center draft. Website must describe preparation until Store availability is real.

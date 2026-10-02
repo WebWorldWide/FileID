@@ -49,6 +49,7 @@
         { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["healthCheck"], "additionalProperties": false, "properties": { "healthCheck": { "type": "object", "additionalProperties": false, "required": ["requestID"], "properties": { "requestID": { "type": "string", "minLength": 1, "maxLength": 128, "description": "Unique caller nonce, echoed unchanged with the responding process ID." } } } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
@@ -282,6 +283,7 @@
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
+        { "type": "object", "required": ["healthCheckResult"], "additionalProperties": false, "properties": { "healthCheckResult": { "$ref": "#/$defs/SinglePositional/HealthCheckResult" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
         {
@@ -345,6 +347,16 @@
     "SinglePositional": {
       "description": "Helpers for Swift's Codable auto-synthesis: a case with a single unnamed associated value encodes as {\"_0\": <encoded value>}. Each generator unwraps appropriately.",
 
+      "HealthCheckResult": {
+        "type": "object", "additionalProperties": false, "required": ["_0"],
+        "properties": { "_0": {
+          "type": "object", "additionalProperties": false, "required": ["requestID", "pid"],
+          "properties": {
+            "requestID": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+          }
+        } }
+      },
       "EngineInfo": {
         "type": "object",
         "additionalProperties": false,

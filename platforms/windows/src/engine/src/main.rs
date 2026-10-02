@@ -720,6 +720,12 @@ async fn handle_line(
             // Re-emit ready so the app can rebuild its EngineInfo snapshot.
             commands::hardware::emit_ready(sink).await;
         }
+        CommandPayload::HealthCheck(payload) => {
+            sink.send(IpcEvent::now(EventPayload::HealthCheckResult(Wrap::new(ipc::HealthCheckResult {
+                request_id: payload.request_id,
+                pid: std::process::id() as i32,
+            })))).await;
+        }
         CommandPayload::VerifyCudaPack(_) => {
             commands::hardware::handle_verify_cuda_pack(sink).await;
         }
