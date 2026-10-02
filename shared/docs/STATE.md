@@ -6,6 +6,14 @@
 - Windows app tests remain a release blocker; do not call FileID bug-free or Store-ready. Partner Center product `9PC8HSD86887` remains draft; no upload, submission, or publication.
 # FileID — session log
 
+## 2026-10-02 — Windows preflight continuation
+
+- Signed-in Microsoft account verified as `adammnolle@gmail.com`; two-step verification is ON. Gmail and Google Authenticator are up to date. No security methods changed. Partner Center app `9PC8HSD86887` shows FileID's application overview with “Start submission”; it remains a draft. No Partner Center upload, submission, or publication occurred.
+- Fixed the Suggested Merges sheet's missing feedback during its potentially long engine query: added an indeterminate busy indicator, clear it on success, timeout, error, and terminal render, and keep it active while no result has arrived.
+- Focused Suggested Merges tests passed 3/3. Analyzer-enabled Release app build now succeeds. Full Release app suite reports 395 passed, 38 failed, 433 total; the 38 remaining failures still block Store readiness.
+- Adlon Store package workflow `37005249596` passed on `cf5a540`; the inspected artifact and hashes are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). This is not a Partner Center upload and is not a validation of newer app code. Policy run `37006848045` passed on `5d5effd`; app run `37005249671` was queued, and engine run `37005249594` was still in progress at last check.
+- Changes are not yet pushed. Resume by fixing the remaining app failures, run the full IPC suite, then obtain green exact-head Adlon app, engine, policy, and Store package workflows. Keep the Partner Center product in draft.
+
 ## 2026-10-02 — Microsoft account and Windows Store preflight continuation
 
 - Microsoft security page verified in the signed-in browser: `adammnolle@gmail.com`; two-step verification ON; Gmail code and authenticator app both marked “Up to date.” No security settings were changed.

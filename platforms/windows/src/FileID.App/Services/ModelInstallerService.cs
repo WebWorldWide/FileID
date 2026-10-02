@@ -611,7 +611,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         SeedSlot(DeepVlm, DeepVlmSentinelIds);
         if (DeepVlm.Status == ModelInstallStatus.Installed
             && !SentinelExistsForAnyOf(LlamaRuntimeSentinelIds))
+        {
             DeepVlm.Status = ModelInstallStatus.NotInstalled;
+        }
         // Accelerator slot — only flip to Installed if the
         // sentinel exists. Otherwise leave it as
         // UpdateAcceleratorForVendor decided (NotInstalled for NVIDIA,

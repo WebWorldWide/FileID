@@ -179,7 +179,10 @@ public class RestructureUndoRoutingTests
         while (directory is not null)
         {
             if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
-                && Directory.Exists(Path.Combine(directory.FullName, ".github"))) return directory.FullName;
+                && Directory.Exists(Path.Combine(directory.FullName, ".github")))
+            {
+                return directory.FullName;
+            }
             directory = directory.Parent;
         }
         throw new DirectoryNotFoundException("Could not find the FileID repository.");

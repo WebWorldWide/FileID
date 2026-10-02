@@ -306,12 +306,18 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
             if (!System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
-                || !System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"))) return false;
+                || !System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf")))
+            {
+                return false;
+            }
             foreach (var runtime in new[] { "llama.cpp-cuda", "llama.cpp" })
             {
                 var runtimeDir = System.IO.Path.Combine(AppPaths.ModelsDir, runtime);
                 if (System.IO.File.Exists(System.IO.Path.Combine(runtimeDir, "llama-mtmd-cli.exe"))
-                    || System.IO.File.Exists(System.IO.Path.Combine(runtimeDir, "bin", "llama-mtmd-cli.exe"))) return true;
+                    || System.IO.File.Exists(System.IO.Path.Combine(runtimeDir, "bin", "llama-mtmd-cli.exe")))
+                {
+                    return true;
+                }
             }
             return false;
         }

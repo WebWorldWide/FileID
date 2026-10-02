@@ -6,6 +6,14 @@
 - Keep Partner Center product `9PC8HSD86887` in draft. Do not upload, start a submission, or publish.
 # NEXT — resume here
 
+## 2026-10-02 — Resume Windows Store preflight
+
+1. Resolve the 38 remaining Windows app test failures across lifecycle/generation ownership, persisted undo, installer/signing policy, preview teardown, close and keyboard safety, event-handler isolation, and other UI contracts. Do not weaken meaningful safety coverage.
+2. Run the full IPC suite and changed-file formatting checks.
+3. Validate exact-head Adlon app, engine, repository-policy, and Store-package workflows. Rebuild and inspect the `.msixupload` from the validated source head; the current inspected package is from `cf5a540`.
+4. Keep Partner Center product `9PC8HSD86887` as a draft. Do not upload a package, start submission, or publish.
+5. Keep [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for after the first Store release: best-takes search across media, file conversion/upscaling/compression, and better folder organization.
+
 ## 2026-10-02 — Windows Store release blockers
 
 - The Microsoft account prerequisite is satisfied: `adammnolle@gmail.com`, two-step ON, Gmail and authenticator marked up to date. Security methods were left unchanged.
