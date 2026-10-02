@@ -3,7 +3,7 @@
 #
 # Usage:
 #   bash scripts/release.sh v1.0.0                  # full release (needs Developer ID + notary creds)
-#   bash scripts/release.sh v1.0.0-rc1 --skip-notarize   # local dry run (ad-hoc fallback OK)
+#   bash scripts/release.sh v1.0.0-rc1 --skip-notarize   # local dry run (Development/ad-hoc fallback)
 #
 # Works without Xcode: CommandLineTools ship codesign, notarytool, stapler,
 # and hdiutil. The only Xcode-dependent artifact is the cached mlx.metallib
@@ -48,6 +48,7 @@ ENGINE_ENTITLEMENTS="$PROJECT_DIR/Resources/FileIDEngine.entitlements"
 METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
 STAGE_DIR=""
 VERIFY_MOUNT=""
+SIGN_TMP=""
 
 cleanup() {
     if [ -n "$VERIFY_MOUNT" ] && mount | grep -Fq "on $VERIFY_MOUNT "; then
@@ -61,6 +62,9 @@ cleanup() {
     fi
     if [ -n "$STAGE_DIR" ]; then
         rm -rf "$STAGE_DIR" 2>/dev/null || true
+    fi
+    if [ -n "$SIGN_TMP" ]; then
+        rm -rf "$SIGN_TMP" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -77,9 +81,16 @@ IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
     | sed -E 's/^[^"]*"([^"]+)".*$/\1/' || true)"
 if [ -z "$IDENTITY" ]; then
     if [ "$SKIP_NOTARIZE" = "1" ]; then
-        echo "⚠️  No 'Developer ID Application' identity — falling back to AD-HOC signing."
+        IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+            | grep 'Apple Development:' | head -1 \
+            | sed -E 's/^[^"]*"([^"]+)".*$/\1/' || true)"
+        if [ -n "$IDENTITY" ]; then
+            echo "⚠️  No 'Developer ID Application' identity — using Apple Development for this local dry run."
+        else
+            echo "⚠️  No Apple signing identity — falling back to AD-HOC signing."
+            IDENTITY="-"
+        fi
         echo "   The DMG will NOT pass Gatekeeper on other Macs (dry-run only)."
-        IDENTITY="-"
     else
         echo "❌ No 'Developer ID Application' identity in the keychain."
         echo "   See the one-time setup steps at the top of this script,"
@@ -89,7 +100,7 @@ if [ -z "$IDENTITY" ]; then
 fi
 
 TIMESTAMP_FLAG="--timestamp"
-[ "$IDENTITY" = "-" ] && TIMESTAMP_FLAG="--timestamp=none"
+[[ "$IDENTITY" == Apple\ Development:* || "$IDENTITY" = "-" ]] && TIMESTAMP_FLAG="--timestamp=none"
 
 # ── Build + assemble ─────────────────────────────────────────────────────────
 echo "🔨 Building release binaries (v${VERSION}, build ${BUILD_NUM})…"
@@ -133,6 +144,7 @@ PY
 echo "🔐 Signing with: ${IDENTITY}"
 SIGN_TMP=$(mktemp -d /tmp/fileid-release.XXXXXX)
 mv "$APP" "$SIGN_TMP/$APP"
+SIGNED_APP="$SIGN_TMP/$APP"
 find "$SIGN_TMP/$APP" -exec xattr -c {} \; 2>/dev/null || true
 
 # Nested code first (inside-out, no --deep): the metallibs live in
@@ -173,16 +185,13 @@ python3 "$PROJECT_DIR/../../shared/scripts/check_binary_privacy.py" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileID" \
     "$SIGN_TMP/$APP/Contents/MacOS/FileIDEngine"
 
-mv "$SIGN_TMP/$APP" "$PROJECT_DIR/$APP"
-rm -rf "$SIGN_TMP"
-
 # ── Notarize the app ─────────────────────────────────────────────────────────
 if [ "$SKIP_NOTARIZE" = "0" ]; then
     echo "📤 Notarizing app (profile: $NOTARY_PROFILE)…"
     NOTARIZE_ZIP="$DIST_DIR/FileID-notarize.zip"
     mkdir -p "$DIST_DIR"
     rm -f "$NOTARIZE_ZIP"
-    ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+    ditto -c -k --keepParent "$SIGNED_APP" "$NOTARIZE_ZIP"
     if ! xcrun notarytool submit "$NOTARIZE_ZIP" \
         --keychain-profile "$NOTARY_PROFILE" --wait; then
         echo "❌ Notarization failed. Inspect with:"
@@ -191,7 +200,7 @@ if [ "$SKIP_NOTARIZE" = "0" ]; then
     fi
     rm -f "$NOTARIZE_ZIP"
     echo "📎 Stapling app…"
-    xcrun stapler staple "$APP"
+    xcrun stapler staple "$SIGNED_APP"
 else
     echo "⏭️  --skip-notarize: skipping app notarization."
 fi
@@ -201,13 +210,13 @@ echo "💿 Building DMG…"
 STAGE_DIR="$(mktemp -d /tmp/fileid-release-staging.XXXXXX)"
 mkdir -p "$DIST_DIR"
 rm -f "$DMG_OUT" "$DIST_DIR/FileID-rw.dmg"
-cp -R "$APP" "$STAGE_DIR/"
+cp -R "$SIGNED_APP" "$STAGE_DIR/"
 find "$STAGE_DIR/$APP" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
 find "$STAGE_DIR/$APP" -exec xattr -d com.apple.ResourceFork {} \; 2>/dev/null || true
 codesign --verify --deep --strict "$STAGE_DIR/$APP"
 ln -s /Applications "$STAGE_DIR/Applications"
 
-APP_KB=$(du -sk "$APP" | cut -f1)
+APP_KB=$(du -sk "$SIGNED_APP" | cut -f1)
 HEADROOM_KB=$((APP_KB + 51200))
 hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE_DIR" -fs HFS+ \
     -format UDRW -size "${HEADROOM_KB}k" -ov "$DIST_DIR/FileID-rw.dmg" >/dev/null
@@ -253,8 +262,8 @@ if [ "$SKIP_NOTARIZE" = "0" ]; then
     fi
 else
     echo "ℹ️  Dry run (--skip-notarize): Gatekeeper assessment skipped."
-    echo "   Launch test: open '$PROJECT_DIR/$APP' — verify the engine spawns"
-    echo "   (both sides ad-hoc passes the integrity gate) and Deep Analyze runs"
+    echo "   Launch test: mount '$DMG_OUT' and open $APP — verify the engine spawns"
+    echo "   (both sides share the signing team) and Deep Analyze runs"
     echo "   under the hardened runtime."
 fi
 echo "✅ $DMG_OUT"

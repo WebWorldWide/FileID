@@ -45,7 +45,7 @@ jobs:
             runner: windows-latest
             arch: arm64
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Windows","X64","fileid-adlon"]') || matrix.runner }}
 
     defaults:
       run:

@@ -1,6 +1,17 @@
 # FileID next-version agent handoff
 
-Work on `codex/fileid-next-version-current`. The owner requests continued implementation and incremental verified GitHub pushes. The accepted scope and honest completion ledger are in [NEXT_VERSION.md](NEXT_VERSION.md); update that ledger and STATE/NEXT/DECISIONS with each milestone. Do not declare the full release finished while its feature or hardware gates remain.
+## End-of-day checkpoint — 2026-10-01
+
+The owner changed the immediate goal to stop naturally, integrate completed changes into main, clean the implementation branches and use Adlon for CI. The complete product roadmap below remains outstanding. The latest validated feature milestone is `eb438d9`; the end-of-day integration adds owner release/config/test edits and guarded Adlon CI routing. Final main commit/run results are recorded here after integration. Both repository runners are online; use CI_RUNNERS.md, inspect exact-commit jobs, and keep the corpus unmounted/read-only.
+
+The stable-person-ID prototype was removed from shipping source before integration and saved at `/Users/adamnolle/.codex/fileid-handoffs/stable-person-ids-2026-10-01.patch`. `git apply --check` it on a new `codex/` branch before using it. It is a starting point, not a finished implementation: native assignment/persistence helpers and focused DB tests passed; Rust acronym serialization was corrected but not rerun, partition fixtures were newly added and untested, and the Rust database handler still deletes/recreates identities. Wire that path, preserve structured names/unknown/offline records and correction references, validate fresh negative constraints, add transactional rollback/shared fixtures, and run full native/Rust/C# checks. Do not apply the prototype directly to main or assume the full native suite covered it.
+
+The native final checkpoint passes **430 tests / 87 suites**. Rust feature checkpoint passes **385 library / 386 executable tests plus two integrations**, actual Rust 1.90 Clippy and binary privacy. The nine new CI routing mutation tests and eighteen bootstrap supply-chain tests pass. Signing scripts were syntax-checked and reviewed, not used to publish a new release today. The earlier video checkpoint had all eighteen hosted checks green; final integration/main results must be inspected separately.
+
+Only this implementation's completed branches may be deleted automatically. Separate Store and Windows-test-gate drafts, Qwen attestation and dependency proposals contain unrelated work; the Store branch is attached to another worktree. Their existence must be reported if the owner has not clarified global cleanup. Never switch or remove that worktree or lose its unpublished content.
+
+
+Start from verified remote `main` and create a new `codex/` branch for the next bounded milestone. The owner requests incremental verified GitHub pushes and end-of-day main integration. The accepted scope and honest completion ledger are in [NEXT_VERSION.md](NEXT_VERSION.md); update that ledger and STATE/NEXT/DECISIONS with each milestone. Do not declare the full release finished while its feature or hardware gates remain.
 
 ## Non-negotiable safeguards
 
@@ -8,7 +19,7 @@ Adlon is strictly read-only example data. Never create outputs, caches, database
 
 ## Implementation order and contracts
 
-The catalog/timeline/manual-chapter/concise-name foundation and initial safe photo/chapter export tools are implemented. Draft PR: https://github.com/WebWorldWide/FileID/pull/186. See TOOLS.md for exact formats and adapter limits. The remote history was rewritten; its baseline tree matched the original checkout, so the foundation was cherry-picked onto current main without overwriting owner changes. Continue with resource/capability reporting, persistent hybrid retrieval, People improvements, local chat and typed reversible operations, then temporal analysis, best takes and media tools. Land canonical IPC changes first in `shared/ipc-schema/ipc.schema.json`, mirror Swift/Rust/C# (GTK inherits Rust), and test conformance. New committed migrations are immutable: add v22 and later. Do not promote research models without license/hash/runtime verification and measured FileID quality/latency gates. Preserve the six tabs, native interfaces, palette, springs, and LavaLampBackground.
+The catalog/timeline/manual-chapter/concise-name foundation and initial safe photo/chapter export tools are implemented. Integration PR: https://github.com/WebWorldWide/FileID/pull/186 (inspect its final state). See TOOLS.md for exact formats and adapter limits. The remote history was rewritten; its baseline tree matched the original checkout, so the foundation was cherry-picked onto current main without overwriting owner changes. Continue with resource/capability reporting, persistent hybrid retrieval, People improvements, local chat and typed reversible operations, then temporal analysis, best takes and media tools. Land canonical IPC changes first in `shared/ipc-schema/ipc.schema.json`, mirror Swift/Rust/C# (GTK inherits Rust), and test conformance. New committed migrations are immutable: v22 is implemented; add v23 and later. Do not promote research models without license/hash/runtime verification and measured FileID quality/latency gates. Preserve the six tabs, native interfaces, palette, springs, and LavaLampBackground.
 
 ## Verification
 
@@ -20,7 +31,7 @@ Shared SQL parity: `python3 shared/scripts/check_catalog_schema.py`. Actual data
 
 ## Workspace preservation
 
-Uncommitted owner work predates this implementation in `.serena/project.yml`, Apple bulk-mutation tests, Apple release/metallib scripts, and September signing entries in STATE/NEXT/DECISIONS. Preserve it and stage implementation changes separately. Never revert or silently include that work in an unrelated feature commit. The owner now authorizes commits and pushes; push coherent validated milestones to this branch, inspect GitHub CI, and record failures honestly. Full model-based timeline quality, native port UI, hardware matrix, packaging, and release acceptance remain pending.
+The owner's preexisting `.serena/project.yml`, Apple bulk-mutation tests, Apple release/metallib scripts, and September signing entries were reviewed and included in the authorized end-of-day integration. Do not restore their older versions or repeat signing/release publication. Preserve any new owner work encountered next session. The owner now authorizes commits and pushes; push coherent validated milestones to this branch, inspect GitHub CI, and record failures honestly. Full model-based timeline quality, native port UI, hardware matrix, packaging, and release acceptance remain pending.
 
 The runtime-egress policy pins reviewed source digests, including the local decoder Process boundary. Review transport/local-loader changes before refreshing those hashes; do not weaken the gate. Tool export plans/journals are cross-engine compatible; `shared/scripts/check_tools_roundtrip.py` verifies both directions. macOS photo decoding is isolated/cancellable; Rust cancellation must remain unavailable until its worker implementation exists.
 

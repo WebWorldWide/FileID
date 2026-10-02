@@ -3352,6 +3352,21 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
   unverifiable changes that risk regressing shipped features.
 
+## 2026-09-24 — Prefer Apple Development to ad-hoc signing for local macOS release dry runs
+
+When `scripts/release.sh --skip-notarize` cannot find a Developer ID Application identity, it now uses an installed Apple Development identity before falling back to ad-hoc signing. This tests the same-team signature check between the app and engine with a real Apple certificate. The dry-run output still warns that Gatekeeper will reject it on other Macs; public distribution continues to require Developer ID signing and notarization. A missing `mlx.metallib` remains a hard packaging failure, because silently shipping a bundle without Deep Analyze would misrepresent the release.
+
+For local signing verification, keep the resulting app outside FileProvider-managed folders. Both the Desktop checkout and `~/Applications` acquired `com.apple.FinderInfo` after launch and invalidated the seal; `/Applications/FileID.app` remained valid after launch.
+
+The release script now retains the signed app in its temporary signing directory until notarization and DMG assembly finish. Moving it back into the Desktop checkout before those steps could silently break the code seal when FileProvider restored Finder metadata. The DMG is the release output; the checkout's assembled app is not relied on as a signed artifact.
+
+## 2026-09-25 — Compile pinned MLX Metal kernels in 3.2 mode with Xcode 27
+
+The pinned MLX 0.29.1 CMake target assumes Metal 3.2 semantics. Xcode 27's default mode rejects its GEMM templates, while `-std=metal3.2` compiles those kernels. The `fence.metal` fallback also needs to depend on the selected Metal language version because the newer compiler defines `__METAL_MEMORY_SCOPE_SYSTEM__` even in 3.2 mode without providing `metal::thread_scope_system`. The one-time metallib helper patches only those two lines in SwiftPM's generated checkout when Xcode major version is 27 or newer. This preserves the locked dependency revision and yields a reproducible full library without a second Xcode installation. The release script continues to block packaging when the library is absent.
+
+Xcode 27 also rejects passing GRDB's non-Sendable `Row` across the actor boundary in two existing bulk-mutation tests. Those reads now return Sendable scalar tuples before leaving the database closure. This preserves the assertions and production database behavior while letting the native suite compile under the release toolchain.
+
+
 ## 2026-10-01 — Shared evidence catalog, protected sources, and honest timeline coverage
 
 Use one canonical SQL migration for both engines and preserve older tables/corrections. Maintain persistent FTS through triggers; separate embedding models/dimensions in storage. A size/mtime change invalidates generated evidence/proposals while retaining user markers for reconfirmation. Same-size/same-mtime replacement detection and persistent ANN execution remain future work.
@@ -3415,3 +3430,9 @@ Keep export state at app scope in a single native Tools window. Closing the main
 ## 2026-10-01 — Treat face embedding provenance as a comparison prerequisite
 
 Dimensions do not establish compatible weights or crops. Reject unknown/mixed model and processing spaces, stale catalog revisions, invalid unit vectors and oversized batches before clustering persistence. Revalidate the snapshot under the writer lock. Unversioned person centroids cannot safely inherit identity across weight changes; retain face-ID inheritance until compatible exemplars/centroid provenance exist. Preserve People on empty portable input. This intentionally defers an incompatible legacy library rather than applying a wrong merge; durable refresh/coverage and incremental stable-ID assignment must remove that transitional limitation before release. No identity threshold is recalibrated from these synthetic checks.
+
+## 2026-10-01 — End the day on validated source and isolate Adlon runners
+
+The owner explicitly requested main integration and a natural stopping point. Preserve the unfinished stable-ID migration as an internal recoverable patch rather than land a native-only persistence rewrite and unused Rust module. Keep the last complete face-space checks and record the parity/transaction work for the next agent. Include preexisting owner release/test/config edits after review; update the bootstrap policy's exact digests and inventory tests for the Xcode 27 Metal fallback and temporary-directory signing changes without weakening download checks.
+
+Use the existing Adlon CI VMs, not the host corpus disk. Install separate FileID runners using official release assets verified against GitHub's release SHA-256; registration tokens are ephemeral and runner updates remain enabled. Route reviewed-main Linux and Windows builds there while retaining hosted PRs and native Apple/ARM checks. Persistent runners must not execute fork or non-main source. Keep a tested routing policy, one FileID runner per guest, and capacity/administration instructions. Existing signing/publication jobs remain hosted; runner registration does not establish full release acceptance.
