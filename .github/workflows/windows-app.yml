@@ -47,12 +47,29 @@ jobs:
 
     runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Windows","X64","fileid-adlon"]') || matrix.runner }}
 
+    env:
+      DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
     defaults:
       run:
         working-directory: platforms/windows
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Prepare Adlon command paths
+        if: runner.name == 'adlon-fileid-windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = & C:\Windows\py.exe -3 -c "import sys; print(sys.executable)"
+          if ($LASTEXITCODE -ne 0) { throw "Python launcher failed" }
+          $paths = @('C:\Program Files\Git\bin', (Split-Path $python.Trim()))
+          foreach ($path in $paths) {
+            if (-not (Test-Path $path -PathType Container)) { throw "Missing tool directory: $path" }
+            $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
