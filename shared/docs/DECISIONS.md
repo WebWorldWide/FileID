@@ -3458,3 +3458,10 @@ The first actual Adlon x64 engine job passed, but ring's aarch64 native compilat
 Explicit People merges validate both selections inside the writer transaction. Every SQL error must unwind the transaction; ignored DELETE errors previously committed partial Rust assignments. Copy all name components from one source only when every destination component is empty, and clear its unknown flag only when a real name transfers. Do not combine components from different people. Emit terminal failure for SQL errors and crashed workers so clients do not remain busy. Actual-process SQLite failure fixtures are necessary because a successful helper unit test did not cover ignored handler errors. Retained source aliases/history are separate unfinished work; this patch preserves existing explicit-delete behavior.
 
 Reviewed bulk.rs digest changes add transaction error propagation, name transfer and terminal worker failure reporting. They add no transport, subprocess execution, runtime URL or download host; update the exact source-boundary digest without relaxing the strict egress gate or its known blockers.
+
+
+## 2026-10-02 — Preserve unfinished work without bypassing acceptance
+
+At the owner's day-end request, retain validated integrations on main and archive failed/unreviewed proposal heads as annotated remote tags before exact-lease atomic branch deletion. The Windows safety/test repair has real compile failures; preserving it as a recovery checkpoint does not justify merging it or excluding its tests. Keep the separate owner Store checkout and its independent head. The handoff must state that the current app workflow skips suites rather than treating packaging success as full acceptance.
+
+Linux CI failed during runner setup with a full guest disk. The FileID workspace used only about 3 GB; deleting other repositories' files would be inappropriate and temporary cleanup would provide little headroom. Grow the existing CI guest disk on the spacious host internal filesystem and expand ext4 online. Keep the corpus disk unmounted, preserve other runners and avoid restarts or forced process closure.

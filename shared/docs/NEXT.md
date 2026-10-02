@@ -1,5 +1,15 @@
 # NEXT — resume here
 
+## Day-end continuation — 2026-10-02
+
+Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.
+
+Verify the compiler-path fix on the actual Adlon service account and all retried Linux jobs after the disk expansion. Corpus /srv/data remains strictly read-only and unmounted in CI guests. Continue the complete NEXT_VERSION.md ledger after these safeguards; no release or full feature/accuracy acceptance has been established.
+
+## Historical checkpoints — superseded by the priorities above
+
+The dated notes below retain prior work and release/signing history. Branch names, in-progress status and earlier owner instructions describe those checkpoints; they are not current continuation instructions. Use AGENT_HANDOFF.md and the day-end priorities above.
+
 Adlon x64 engine passed; ARM64 cross failed because clang was absent. Complete the signed Visual Studio LLVM component installation and verify the new cross-job PATH step on actual main before declaring server acceptance. Preserve all test/build gates and corpus isolation. PR #190 contains atomic merge fixes; #191 is an unfinished Windows safety/test-parity draft. Do not merge #191 until every app suite runs and passes without exclusions.
 
 ## Immediate continuation — 2026-10-02
