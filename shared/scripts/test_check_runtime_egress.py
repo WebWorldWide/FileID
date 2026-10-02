@@ -607,10 +607,12 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_rejects_conditional_or_filtered_policy_workflow(self) -> None:
         repository = Path(__file__).resolve().parents[2]
         original = (repository / ".github/workflows/policy.yml").read_text(encoding="utf-8")
+        runs_on = next(line for line in original.splitlines(keepends=True)
+                       if line.startswith("    runs-on:"))
         mutations = [
             original.replace("  pull_request:\n", "  pull_request:\n    branches-ignore: ['**']\n", 1),
-            original.replace("    runs-on: ubuntu-latest\n", "    if: false\n    runs-on: ubuntu-latest\n", 1),
-            original.replace("    runs-on: ubuntu-latest\n", "    continue-on-error: true\n    runs-on: ubuntu-latest\n", 1),
+            original.replace(runs_on, "    if: false\n" + runs_on, 1),
+            original.replace(runs_on, "    continue-on-error: true\n" + runs_on, 1),
             original.replace("jobs:\n", "defaults:\n  run:\n    shell: bash {0}\n\njobs:\n", 1),
         ]
         for mutation in mutations:

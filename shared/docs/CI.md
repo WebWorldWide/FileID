@@ -15,7 +15,7 @@ Native macOS and native ARM64 jobs retain their platform-specific hosted runners
 
 ## Triggers and validation
 
-Windows app, engine, Store, Linux, tools, Flatpak and policy workflows accept `main` and `codex/store-msix` pushes, existing path filters, pull requests and manual dispatch. Windows app triggers include its tests and the canonical IPC schema. Website deployment retains the `main` trigger. Release publishing retains its existing tag/dry-run controls.
+Windows app, engine, Store, Linux, tools and Flatpak workflows accept `main` and `codex/store-msix` pushes with their existing path filters, pull requests and manual dispatch. Repository policy runs unconditionally on every push and pull request, as its release-gate contract requires. Windows app triggers include its tests and the canonical IPC schema. Website deployment retains the `main` trigger. Release publishing retains its existing tag/dry-run controls.
 
 Actions remain pinned to immutable commits. Windows jobs use Python 3.12.10 from the runner tool cache. Its pinned setup action receives a Windows process-only execution-policy setting; no VM machine/user policy is changed. .NET setup installs into `${{ runner.tool_cache }}/dotnet`, which the service account can write. Workflow permissions retain read-only defaults; write permissions are isolated to the existing website/release publishing jobs. Superseded Windows validation runs are cancelled per workflow/ref.
 

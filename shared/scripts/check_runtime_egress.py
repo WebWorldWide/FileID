@@ -157,7 +157,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "ba8cbf1070795fb5fb4a2ea5fdaa3f7828c834e9b16783d6c864e70a915e8c79",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "717209d1c5e474c05d2980cc2fcdc50971692815fd357c98d88002e74a6396e5",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "5080fd773c682c0933cb97e4cc4b319125a2b40cbb66513a8a20bf32bb8234c7",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "e00bca07304711d9cd7a9850a7b72a88a8feb7b8f46fb456b76e48a493918cb8",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "eff940f2adf10d2d46e62aae003c17a5b7f2feea2e6e8bb0e495adb35be5d5d5",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "48df990f011d18e2f63b9008884ff30e2ebf8846c68eeb5a7be3e972fba5ba01",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "e6028cf4955464a0ec5bd9bbad5e6a63ecd83996e79d9dd9bc769c733b6758b6",
@@ -646,7 +646,6 @@ def policy_source_wiring_violations(policy_workflow: Path) -> list[str]:
     expected_trigger = (
         "on:\n"
         "  push:\n"
-        "    branches: [main]\n"
         "  pull_request:\n"
         "  workflow_dispatch:\n"
     )
