@@ -443,12 +443,8 @@ public enum FaceClustering {
     public static let maxPersons: Int = 8000
 
     /// Memory cap on faces clustered per run (~2 KB/embedding + HNSW). This is a
-    /// HARD bound, not a window: clustering wipes + recreates the persons table
-    /// every run, so a re-run cannot incrementally "pick up overflow" without
-    /// destroying the prior run's clusters. On a library with more than this many
-    /// embedded faces the lowest-id `maxFacesPerRun` are clustered and the tail is
-    /// left unassigned (a `face_cluster_overflow` warning is logged). True
-    /// >maxFacesPerRun support needs a window-aware persist (tracked separately).
+    /// HARD bound, not a window: incompatible or oversized input rejects the pass.
+    /// Larger libraries need incremental, resource-budgeted assignment.
     /// (audit F-C3-033)
     public static let maxFacesPerRun: Int = 200_000
 
@@ -744,11 +740,9 @@ public enum FaceClustering {
         struct ClusterPersist: Sendable {
             let repFaceID: Int64
             let faceIDs: [Int64]
-            let count: Int
-            let centroid: [Float]
+                let centroid: [Float]
             let anchorRadius: Float
-            let inherited: PriorAnchorMatch?
-        }
+            }
         struct PersistStats: Sendable {
             let inherited: Int
             let lostNames: Int
@@ -766,19 +760,20 @@ public enum FaceClustering {
             // are read-only here and arrays are copy-on-write, so this is a
             // reference bump, not a deep copy.
             stats = try await database.pool.write { [denseToFaceID, vecsByDense, rows] db -> PersistStats in
-                // RE-READ the identity snapshot HERE — under the persist lock,
-                // inside the transaction, BEFORE the DELETE below — not from the
-                // PHASE-0 capture. Re-clustering drops + re-creates persons on
-                // every run, so a rename / merge / mark-unknown the user committed
-                // during the lock-free clustering window (it had to take this same
-                // writer lock) is carried forward instead of being silently
-                // clobbered by a stale snapshot. The PHASE-0 read still drives the
-                // extraction/clustering pool filtering; only the name carry-forward
-                // moves under the lock. (audit F-C3-002 / Windows S0)
-                let currentRows = try Self.loadClusteringFaceRows(from: db, phaseZeroUnknownFaceIDs: unknownFaceIDs, minQuality: clusterMinQuality, limit: maxFacesPerRun, expectedSpace: ArcFaceService.shared.modelVersion.map { EmbeddingSpace(model: $0, processing: FaceAnalysisCache.processingVersion) })
+                // Re-read identity edits made during the lock-free phase.
+            let currentRows = try Self.loadClusteringFaceRows(from: db, phaseZeroUnknownFaceIDs: unknownFaceIDs, minQuality: clusterMinQuality, limit: maxFacesPerRun, expectedSpace: ArcFaceService.shared.modelVersion.map { EmbeddingSpace(model: $0, processing: FaceAnalysisCache.processingVersion) })
                 guard !currentRows.overflowed, currentRows.rows == rows else { throw FaceProtectionError.incompatibleFaceCache }
                 let freshPriors = try Self.priorAnchors(from: db)
-                let differentPairs = try Self.differentFacePairs(from: db)
+                var differentPairs = try Self.differentFacePairs(from: db)
+            let poolJSON = String(decoding: try JSONEncoder().encode(denseToFaceID), as: UTF8.self)
+            let cooccurring = try GRDB.Row.fetchAll(db, sql: "SELECT id,file_id FROM face_prints WHERE id IN(SELECT value FROM json_each(?)) ORDER BY id", arguments: [poolJSON])
+            var firstByFile: [Int64:Int64] = [:]
+            for face in cooccurring {
+                let file: Int64 = face["file_id"]
+                let id: Int64 = face["id"]
+                if let first = firstByFile[file] { differentPairs.insert(.init(first,id)) }
+                else { firstByFile[file] = id }
+            }
                 var ownerByFaceID: [Int64: Int64] = [:]
                 for prior in freshPriors {
                     for faceID in prior.faceIDs { ownerByFaceID[faceID] = prior.id }
@@ -869,16 +864,13 @@ public enum FaceClustering {
                 let priorsWithNames = inheritanceCandidates.filter { $0.hasName }.count
                 let claimedPriorIDs = Set(matches.compactMap { $0?.priorPersonID })
                 let lostAnchorCount = max(0, priorsWithNames - claimedPriorIDs.count)
-                let preserveList = Array(preserveIDs)
 
-                let personsList: [ClusterPersist] = nextClusters.enumerated().map { idx, cluster in
+                let personsList: [ClusterPersist] = nextClusters.map { cluster in
                     ClusterPersist(
                         repFaceID: cluster.repFaceID,
                         faceIDs: cluster.faceIDs,
-                        count: cluster.faceIDs.count,
-                        centroid: cluster.centroid,
-                        anchorRadius: cluster.radius,
-                        inherited: matches[idx]
+                            centroid: cluster.centroid,
+                    anchorRadius: cluster.radius
                     )
                 }
                 try validatePersistPlan(
@@ -887,85 +879,23 @@ public enum FaceClustering {
                     representativeFaceIDs: personsList.map(\.repFaceID)
                 )
 
-                // Preserve pool-excluded persons in place (fresh unknowns + anyone
-                // whose faces never entered this run's pool). Their face_ids stay
-                // bound to their existing row; only persons whose faces WERE
-                // clustered this run get wiped + recreated. (R3-02)
-                if preserveList.isEmpty {
-                    try db.execute(sql: "UPDATE face_prints SET person_id = NULL")
-                    try db.execute(sql: "DELETE FROM persons")
-                } else {
-                    let placeholders = preserveList.map { _ in "?" }.joined(separator: ",")
-                    let preserveArgs = StatementArguments(preserveList.map { Int($0) })
-                    try db.execute(
-                        sql: """
-                            UPDATE face_prints SET person_id = NULL
-                            WHERE person_id IS NULL OR person_id NOT IN (\(placeholders))
-                            """,
-                        arguments: preserveArgs
-                    )
-                    try db.execute(
-                        sql: "DELETE FROM persons WHERE id NOT IN (\(placeholders))",
-                        arguments: preserveArgs
-                    )
-                }
-
-                let now = Date().timeIntervalSince1970
-                for p in personsList {
-                    let blob = ArcFaceService.embeddingToBlob(p.centroid)
-                    let inherited = p.inherited
-                    try db.execute(sql: """
-                        INSERT INTO persons (
-                            name, representative_face_id, file_count, created_at,
-                            title, first_name, middle_name, last_name, suffix, is_unknown,
-                            centroid, anchor_radius, last_clustered_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, arguments: [
-                            inherited?.legacyName,
-                            p.repFaceID, p.count, now,
-                            inherited?.title,
-                            inherited?.firstName,
-                            inherited?.middleName,
-                            inherited?.lastName,
-                            inherited?.suffix,
-                            inherited?.isUnknown == true ? 1 : 0,
-                            blob,
-                            Double(p.anchorRadius),
-                            now
-                        ])
-                    let personID = db.lastInsertedRowID
-                    for chunk in stride(from: 0, to: p.faceIDs.count, by: 500).map({
-                        Array(p.faceIDs[$0..<min($0 + 500, p.faceIDs.count)])
-                    }) {
-                        let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
-                        var args: [DatabaseValueConvertible] = [personID]
-                        args.append(contentsOf: chunk.map { Int($0) })
-                        try db.execute(
-                            sql: "UPDATE face_prints SET person_id = ? WHERE id IN (\(placeholders))",
-                            arguments: StatementArguments(args)
-                        )
-                    }
-                }
-                try db.execute(sql: """
-                    UPDATE persons SET file_count = (
-                        SELECT COUNT(DISTINCT file_id)
-                        FROM face_prints
-                        WHERE face_prints.person_id = persons.id
-                    )
-                    """)
-
-                // If app-side Cleanup cascade-deleted member faces mid-pass, a
-                // freshly-inserted person's representative_face_id (= the cluster's
-                // first face) can now point at a deleted row. Repair the dangle in
-                // the same transaction so we never re-introduce the reference
-                // reconcilePersons exists to fix. (audit F-C3-041)
-                try repairDanglingRepresentativeFaces(db)
+                let stableIDs = try StablePersonAssignments.resolve(
+                    priors: freshPriors.map { .init(id: $0.id, faceIDs: Array($0.faceIDs)) },
+                    clusters: nextClusters.map { .init(faceIDs: $0.faceIDs, representative: $0.repFaceID) },
+                    fixed: matches.map { $0?.priorPersonID },
+                    preserved: preserveIDs
+                )
+                let personCount = try FaceClusterPersistence.apply(db,
+                    clusters: personsList.enumerated().map { index, cluster in
+                        .init(personID: stableIDs[index], faceIDs: cluster.faceIDs, representative: cluster.repFaceID,
+                              centroid: ArcFaceService.embeddingToBlob(cluster.centroid), radius: Double(cluster.anchorRadius))
+                    }, pool: poolFaceIDs, preserved: preserveIDs, now: Date().timeIntervalSince1970)
 
                 return PersistStats(
                     inherited: matches.compactMap { $0 }.count,
                     lostNames: lostAnchorCount,
                     priors: freshPriors.count,
-                    personCount: preservedPersonCount + finalClusters.count,
+                    personCount: personCount,
                     suppressedClusters: suppression.suppressedClusters,
                     suppressedFaces: suppression.suppressedFaces,
                     truncatedFaces: truncatedFaces
@@ -1018,7 +948,7 @@ public enum FaceClustering {
         // just below the kNN threshold). Cheap insurance.
         let autoMergedSources = await tightPairAutoMerge(database: database)
 
-        let finalPersonCount = max(0, prePolishPersonCount - autoMergedSources)
+        let finalPersonCount = prePolishPersonCount
         let dur = Date().timeIntervalSince(started)
         JSONLog.shared.info(ev: "face_cluster_done",
                             extra: ["persons": AnyCodable(finalPersonCount),
@@ -1402,7 +1332,7 @@ public enum FaceClustering {
                             arguments: StatementArguments(args)
                         )
                         try db.execute(
-                            sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
+                            sql: "UPDATE persons SET representative_face_id=NULL,centroid=NULL,anchor_radius=NULL,file_count=0 WHERE id IN (\(placeholders))",
                             arguments: StatementArguments(chunk.map { Int($0) })
                         )
                     }
@@ -1569,7 +1499,7 @@ public enum FaceClustering {
     }
 
     /// Read every existing persons row + its face_id set + any prior
-    /// anchor data. Called BEFORE we wipe the persons table.
+    /// anchor data retained across clustering passes.
     fileprivate static func snapshotPriorAnchors(database: Database) async -> [PriorAnchor] {
         do {
             return try await database.pool.read { db in try priorAnchors(from: db) }

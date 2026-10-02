@@ -20,3 +20,5 @@ pub mod catalog;
 pub mod chat;
 mod chat_search;
 pub mod tools;
+
+mod person_cluster_persistence;

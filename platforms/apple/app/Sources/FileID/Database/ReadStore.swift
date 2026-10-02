@@ -892,7 +892,8 @@ public final class ReadStore: @unchecked Sendable {
 
     public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
-        let where_ = includeUnknown ? "" : "WHERE IFNULL(p.is_unknown, 0) = 0"
+        let visible = "EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR COALESCE(p.is_unknown,0)=1 OR length(trim(COALESCE(p.name,'') || COALESCE(p.title,'') || COALESCE(p.first_name,'') || COALESCE(p.middle_name,'') || COALESCE(p.last_name,'') || COALESCE(p.suffix,'')))>0"
+        let where_ = "WHERE (\(visible))" + (includeUnknown ? "" : " AND IFNULL(p.is_unknown,0)=0")
         do {
             return try q.read { db in
                 let rows = try Row.fetchAll(db, sql: """

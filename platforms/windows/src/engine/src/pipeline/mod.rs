@@ -12,6 +12,7 @@ pub mod batch_clip;
 pub mod dbwriter;
 pub mod face_clustering;
 pub mod identity_clustering;
+pub(crate) mod stable_person_assignments;
 pub mod deep_analyze;
 pub mod restructure;
 pub mod restructure_apply;
