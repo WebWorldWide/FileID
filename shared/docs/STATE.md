@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-02 — Adlon x64 engine passed; cross-build needs Clang
+
+Stable People PR #189 merged at ff6eda2 after all sixteen checks passed. Actual main bb33211 Windows x64 engine passed on adlon-fileid-windows. Its ARM64 cross-build failed in ring because clang was absent. Add the official Visual Studio LLVM component and per-job Clang path; do not weaken Clippy/build gates, stop other jobs or touch the corpus. Native ARM passed on hosted hardware. Actual Windows app jobs are still running. Atomic merge PR #190 and unfinished Windows safety/test-parity draft #191 have their own fresh checks; the full next-version goal remains active. The strict TRX report guard passed all nine fixtures on the Windows VM.
+
 ## 2026-10-02 — Stable People integration after platform validation
 
 Reclustering now updates retained identity rows instead of deleting and recreating them. Shared fixtures cover deterministic ID reuse and protected partitions; Rust real-catalog tests cover structured names, offline/unknown records, correction references, same-image exclusions and rollback after a forced insertion failure. Native consolidation retains absorbed identity records and hides empty unnamed records from People cards. Rust 1.90 Clippy passes with warnings denied; 391 library / 392 executable tests and the two registry integration checks pass. The native Swift suite passes 437 tests / 89 suites. Actual-engine catalog, Tools and Chat round trips and binary privacy checks pass. All sixteen GitHub checks passed at 7f03fff. Only documentation conflicts with bootstrap main were resolved; fresh merge-head checks remain required. This is not full release acceptance.

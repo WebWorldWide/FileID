@@ -1,5 +1,7 @@
 # NEXT — resume here
 
+Adlon x64 engine passed; ARM64 cross failed because clang was absent. Complete the signed Visual Studio LLVM component installation and verify the new cross-job PATH step on actual main before declaring server acceptance. Preserve all test/build gates and corpus isolation. PR #190 contains atomic merge fixes; #191 is an unfinished Windows safety/test-parity draft. Do not merge #191 until every app suite runs and passes without exclusions.
+
 ## Immediate continuation — 2026-10-02
 
 Inspect the fresh People merge-head CI after resolving documentation conflicts with main, then integrate PR #189. All sixteen checks passed for its original 7f03fff head. Bootstrap #188 merged at bb33211 after all six checks passed; actual Adlon Windows main jobs still need final results. Continue validating the isolated atomic-person-merges draft, which reproduced swallowed SQL errors and lost structured names. The full next-version goal and NEXT_VERSION ledger remain active; passing these milestones is not release completion. Fix the skipped WinUI test gate and wire the GTK shell before claiming port acceptance.
