@@ -572,12 +572,6 @@ pub(crate) async fn handle_merge_clusters(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
         )? as u32;
-        // R4-07: carry the source's user-assigned identity onto the destination
-        // when the destination has NONE, BEFORE deleting src (the subqueries must
-        // still see src). Merge direction is arbitrary (suggestions order by id;
-        // drag/bulk by user choice), so a named cluster can be the source —
-        // without this its name/title/first/middle/last/suffix is silently lost.
-        // The WHERE gate fires only when EVERY name-bearing column on the
         // Transfer one complete identity only into an unnamed destination.
         tx.execute(
             "UPDATE persons SET name=(SELECT name FROM persons WHERE id=?2), title=(SELECT title FROM persons WHERE id=?2), first_name=(SELECT first_name FROM persons WHERE id=?2), middle_name=(SELECT middle_name FROM persons WHERE id=?2), last_name=(SELECT last_name FROM persons WHERE id=?2), suffix=(SELECT suffix FROM persons WHERE id=?2), is_unknown=0 WHERE id=?1 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))=0 AND EXISTS(SELECT 1 FROM persons WHERE id=?2 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))>0)",
