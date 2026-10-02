@@ -225,7 +225,7 @@ mod health_tests {
         for request_id in ["probe-1".into(), "GEN_4-probe_2".into(), "a".repeat(128)] {
             assert!(HealthCheckPayload { request_id }.is_valid());
         }
-        for request_id in ["".into(), " ".into(), "../file".into(), "line\nfeed".into(), "é".into(), "a\0b".into(), "a".repeat(129)] {
+        for request_id in [String::new(), " ".into(), "../file".into(), "line\nfeed".into(), "é".into(), "a\0b".into(), "a".repeat(129)] {
             assert!(!HealthCheckPayload { request_id }.is_valid());
         }
     }
