@@ -1,10 +1,9 @@
-﻿## 2026-10-02 — Adlon checkpoint on `cf5a540`
+﻿## 2026-10-02 - Adlon checkpoint on `0188da1`
 
-- Store run `37005249596` passed; its x64 package was downloaded and independently inspected. Path and SHA-256 are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md).
-- The app run on `cf5a540` had not started at last check; the prior app run failed before tests because VS VSTest could not locate `testhost`. The test-host workflow correction is pushed. Local CI-shaped Debug run now executes tests but reports 396 passed, 40 failed, 436 total.
-- Policy run `37005249602` found stale SHA-256 entries for the reviewed Windows engine-client sources. The lifecycle diff adds no network transport or URL; the three hashes are refreshed. Local egress suite passes all 24 tests and the production source-boundary gate passes. The refresh is pending commit/push and Adlon verification.
-- Current branch head is `cf5a540`; only `shared/scripts/check_runtime_egress.py` and this record are pending commit. The Store package does not make the release ready while Windows app tests fail.
-
+- Runtime-egress digest refresh is pushed. Adlon policy run `37006425289` passed; local runtime-egress suite passed 24/24 and the production source-boundary check passed.
+- Adlon Store run `37005249596` passed for `cf5a540`; the x64 `.msixupload` is downloaded and inspected at the path/hash in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). It predates only policy hashes and docs from `0188da1`; app source is unchanged.
+- App run `37005249671` remained queued at last check. Engine run `37005249594` had x64 in progress, ARM64-native passed, ARM64-cross queued. Earlier app run `37001649639` aborted because VS VSTest could not locate `testhost`; the new .NET SDK test-host invocation was locally verified, completing the full Debug suite with 396 passed and 40 failed (436 total).
+- Windows app tests remain a release blocker; do not call FileID bug-free or Store-ready. Partner Center product `9PC8HSD86887` remains draft; no upload, submission, or publication.
 # FileID — session log
 
 ## 2026-10-02 — Microsoft account and Windows Store preflight continuation

@@ -1,10 +1,9 @@
-﻿## 2026-10-02 — Resume after `cf5a540`
+﻿## 2026-10-02 - Resume after `0188da1`
 
-- Commit and push the reviewed runtime-egress digest refresh after `python shared/scripts/test_check_runtime_egress.py` (24/24 pass) and `python shared/scripts/check_runtime_egress.py` (pass). No new external hosts or network calls were added.
-- Inspect the new Adlon policy, app, engine, and Store runs. Store run `37005249596` passed from `cf5a540`; its artifact path/hash are in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). The app suite is still a release blocker (local Debug: 396 passed, 40 failed, 436 total).
-- Triage the 40 app failures as implementation gaps or stale contracts; preserve meaningful coverage. Verify persisted undo-reader formats against actual Rust output, then rerun all Windows tests and build the package from the final validated head.
-- Partner Center product `9PC8HSD86887` remains draft. Do not upload, start a submission, or publish.
-
+- Policy digest refresh is pushed; Adlon policy run `37006425289` passed.
+- Check Adlon app run `37005249671` and engine run `37005249594` for completion. Their code is from `cf5a540`; the only later changes were reviewed source digests and documentation. App Debug tests reproduce 40 failures and block readiness.
+- Triage all app-suite failures; verify persisted undo formats against Rust output. Run full Windows tests and rebuild/inspect the package from the final validated source.
+- Keep Partner Center product `9PC8HSD86887` in draft. Do not upload, start a submission, or publish.
 # NEXT — resume here
 
 ## 2026-10-02 — Windows Store release blockers
