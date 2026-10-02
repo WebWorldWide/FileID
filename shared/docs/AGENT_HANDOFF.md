@@ -1,6 +1,6 @@
 # FileID next-version handoff — 2026-10-02
 
-The owner requested a natural stopping point for the day, validated changes on main, recovery instructions, GitHub branch cleanup, and Adlon CI runners. The full next-version plan is not complete. Resume from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
+The accepted next-version goal remains active after the owner resumed sustained work. Preserve the requested recovery checkpoint, validated main integrations, GitHub branch cleanup and Adlon CI evidence while continuing the full plan. A milestone does not complete the release or authorize pausing the resumed goal. Continue from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
 
 ## Integrated work
 
