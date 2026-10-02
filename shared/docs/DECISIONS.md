@@ -3437,6 +3437,12 @@ The owner explicitly requested main integration and a natural stopping point. Pr
 
 Use the existing Adlon CI VMs, not the host corpus disk. Install separate FileID runners using official release assets verified against GitHub's release SHA-256; registration tokens are ephemeral and runner updates remain enabled. Route reviewed-main Linux and Windows builds there while retaining hosted PRs and native Apple/ARM checks. Persistent runners must not execute fork or non-main source. Keep a tested routing policy, one FileID runner per guest, and capacity/administration instructions. Existing signing/publication jobs remain hosted; runner registration does not establish full release acceptance.
 
+## 2026-10-02 — Keep runner bootstrap within the non-admin service's workspace
+
+Installed tools and machine PATH do not establish that a Windows service can invoke them. Add verified local Bash/Python directories through the job's GITHUB_PATH before Rust/.NET checks; give setup-dotnet a FileID-owned tool-cache installation directory rather than grant Network Service write access to Program Files. Preserve all compilation/test gates and verify actual service-account jobs. Linux main results already confirm all four jobs on Adlon. Treat the host restart as an infrastructure interruption, not an application failure.
+
+Preserve sync-created numbered source snapshots outside compiler discovery before removing them. Their stale migrations/source guards must not replace canonical tracked files; the invalid duplicated Git ref is not a legitimate branch. The owner resumed the full goal, so day-end milestone boundaries do not imply feature/release completion.
+
 ## 2026-10-02 — Retain identity rows across analysis
 
 Reclustering updates analysis fields and face ownership in one transaction while retaining person IDs, names, creation times, offline/unknown identities and foreign-key references. Reuse is deterministic and bijective; a split gives the retained ID to one partition and allocates new IDs for others. Protected names, fresh negative corrections and same-image observations partition raw clusters before assignment. Automatic native consolidation clears an absorbed unnamed row’s analysis instead of deleting it; empty unnamed records stay out of People cards. Explicit user merge aliases and correction UI remain future work. This trades some retained empty rows for durable references; the 8,000-person limit fails before changes rather than silently deleting history.

@@ -1,10 +1,10 @@
 # FileID — State
 
-## 2026-10-02 — Stable People persistence in validation
+## 2026-10-02 — Stable People integration after platform validation
 
-Reclustering now updates retained identity rows instead of deleting and recreating them. Shared fixtures cover deterministic ID reuse and protected partitions; Rust real-catalog tests cover structured names, offline/unknown records, correction references, same-image exclusions and rollback after a forced insertion failure. Native consolidation retains absorbed identity records and hides empty unnamed records from People cards. Rust 1.90 Clippy passes with warnings denied; 391 library / 392 executable tests and the two registry integration checks pass. The native Swift suite passes 437 tests / 89 suites. Actual-engine catalog, Tools and Chat round trips and binary privacy checks pass. This is not full release acceptance.
+Reclustering now updates retained identity rows instead of deleting and recreating them. Shared fixtures cover deterministic ID reuse and protected partitions; Rust real-catalog tests cover structured names, offline/unknown records, correction references, same-image exclusions and rollback after a forced insertion failure. Native consolidation retains absorbed identity records and hides empty unnamed records from People cards. Rust 1.90 Clippy passes with warnings denied; 391 library / 392 executable tests and the two registry integration checks pass. The native Swift suite passes 437 tests / 89 suites. Actual-engine catalog, Tools and Chat round trips and binary privacy checks pass. All sixteen GitHub checks passed at 7f03fff. Only documentation conflicts with bootstrap main were resolved; fresh merge-head checks remain required. This is not full release acceptance.
 
-The Linux main CI jobs passed on Adlon. Windows bootstrap PR #188 moves the SDK install into the runner-owned cache and supplies Bash/Python paths; its initial runner-context expression was corrected to step scope. Both Windows app checks, native ARM64 engine and ARM64 cross engine checks passed; hosted x64 engine is still running. Rerun and inspect actual main Windows jobs on Adlon after merge. The known WinUI test-directory skip remains a separate release blocker.
+The Linux main CI jobs passed on Adlon. Windows bootstrap PR #188 moves the SDK install into the runner-owned cache and supplies Bash/Python paths; its initial runner-context expression was corrected to step scope. Both Windows app checks, native ARM64 engine and ARM64 cross engine checks passed; all six hosted bootstrap checks passed and #188 merged at bb33211. Actual main x64 engine is running on Adlon and passed service-account setup, Clippy and release compilation; its test build and remaining queued jobs still need inspection. The known WinUI test-directory skip remains a separate release blocker.
 
 The full next-version goal remains active. Continue the NEXT_VERSION ledger after this milestone; preserve Adlon corpus read-only and use internal fixtures only.
 
@@ -17,6 +17,12 @@ The full next-version goal remains active. Continue the NEXT_VERSION ledger afte
 >
 > **Trimmed to a lean baseline (2026-05-21).** Only the most-recent entries are kept here; everything older lives in `git log`.
 
+
+## 2026-10-02 — Full implementation resumed; resolve Adlon service bootstrap
+
+The owner explicitly resumed the complete next-version objective with no day-end stopping requirement. The goal remains active until every product and release requirement is proven. PR #186 is merged at c3044395; its eighteen pre-merge checks passed. On main, all four Linux jobs passed on Adlon; Windows jobs failed before compilation because the service could not find Bash or install .NET into Program Files. The follow-up adds explicit per-job Bash/Python paths and a writable SDK cache, preserving non-admin service execution and all build/test assertions. Fresh Windows results are still required.
+
+FileProvider created fifty-one duplicate/stale numbered copies and an invalid `refs/heads/main 2` file in the Desktop checkout. Thirty-seven copies were exact duplicates; the others represented older/intermediate snapshots, including omitted v22 migration and source-protection fixes. Copies and a hash inventory were preserved at /Users/adamnolle/.codex/fileid-handoffs/sync-duplicates-2026-10-02 before removing them from compiler/Git inputs. Canonical tracked sources were unchanged. Continue the full ledger after CI bootstrap, beginning with stable People IDs and transaction-safe correction preservation.
 
 ## 2026-10-01 — End-of-day integration and Adlon CI setup
 

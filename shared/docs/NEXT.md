@@ -2,9 +2,13 @@
 
 ## Immediate continuation — 2026-10-02
 
-Finish and inspect the exact-commit native validation for stable People IDs, then push the bounded milestone and merge only after its platform checks pass. Merge Adlon bootstrap PR #188 after all checks pass and confirm both Windows main matrices run on adlon-fileid-windows. Keep the full next-version goal active: persistent hybrid indexes, durable budgeted scheduling, typed chat operations, temporal analysis, best takes, enhancement/reframing, toolbox adapters and the release/hardware gates remain outstanding. Fix the known skipped WinUI test gate rather than reporting app-build green as full test proof.
+Inspect the fresh People merge-head CI after resolving documentation conflicts with main, then integrate PR #189. All sixteen checks passed for its original 7f03fff head. Bootstrap #188 merged at bb33211 after all six checks passed; actual Adlon Windows main jobs still need final results. Continue validating the isolated atomic-person-merges draft, which reproduced swallowed SQL errors and lost structured names. The full next-version goal and NEXT_VERSION ledger remain active; passing these milestones is not release completion. Fix the skipped WinUI test gate and wire the GTK shell before claiming port acceptance.
 
 
+
+## 2026-10-02 — Continue the entire accepted next-version plan
+
+The owner revoked the natural day-end stop and requested sustained work until everything is complete. Finish and verify Adlon Windows service bootstrap, merge the bounded fix into main, and keep the goal active. Then finish stable People IDs and cross-engine transactional persistence, durable refresh and incremental assignment, persistent model-separated hybrid search, resource-budgeted model routing, typed chat execution, full temporal analysis/chapters/best takes, enhancement/reframing and broad conversions, native port parity, real-data/hardware gates and release readiness. NEXT_VERSION.md is the scope ledger; passing existing checks alone is not completion. Keep Adlon example data strictly read-only and use separate CI guest disks.
 
 ## 2026-10-01 — Start the next session from the integrated milestone
 
