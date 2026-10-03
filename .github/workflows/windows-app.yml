@@ -99,13 +99,13 @@ jobs:
       - name: Set NuGet package path
         shell: pwsh
         run: |
-          $nugetPackages = Join-Path $env:RUNNER_TEMP 'nuget/packages'
+          $nugetPackages = Join-Path $env:USERPROFILE '.nuget/packages'
           "NUGET_PACKAGES=$nugetPackages" >> $env:GITHUB_ENV
 
       - name: Cache NuGet
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ${{ runner.temp }}/nuget/packages
+          path: ~/.nuget/packages
           key: nuget-v2-${{ matrix.arch }}-${{ hashFiles('platforms/windows/Directory.Packages.props', 'platforms/windows/**/*.csproj') }}
           restore-keys: |
             nuget-v2-${{ matrix.arch }}-
