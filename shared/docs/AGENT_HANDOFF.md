@@ -1,10 +1,26 @@
 # FileID next-version handoff — 2026-10-03
 
-## Latest macOS feature increment — confirmed-person chat retrieval
+## Current checkpoint — PR #208 merged and main CI green
 
-Chat search resolves exact People labels and first-name aliases to existing face-print and non-stale video observations, constraining file and timestamp/page evidence before limits. It also returns timestamped person observations that open videos at the matching time and labels model-linked observations unverified. It preserves action terms and person filters across refinements; unknown clusters are excluded and ambiguous exact first names select all matching confirmed identities. Focused tests cover parsing, filtering and the engine response; the complete native suite passes 480 tests in 96 suites. Current-document, catalog-schema and runtime-egress checks also pass. Both Release products rebuild locally. The earlier instrumentation-only PR #208 head passed macOS Release/tests/privacy and action-policy checks; this updated head still needs its own PR checks before merging. No schema, IPC, dependency, model or network change. After merge, inspect every main workflow and runner result, record the merge SHA/run IDs in STATE.md, and remove the feature branch. The next Mac slice is event/temporal retrieval; maintain Adlon read-only policy and defer port implementation/physical acceptance until the owner is on the Windows/Linux PC.
+PR #208, “Improve Mac chat identity retrieval and scan diagnostics,” is merged to `main` as `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. Chat search resolves exact saved People labels and first-name aliases, filters by confirmed identities before result limits, and returns timestamped person-appearance evidence. Manually confirmed observations are labeled separately from unverified model-linked observations. Follow-up filters retain the selected identities. Scan JSONL diagnostics also report background-admission wait percentiles without adding paths or changing IPC, database schema, models, dependencies, or network behavior.
 
-The accepted next-version goal remains active after the owner resumed sustained work. Preserve the requested recovery checkpoint, validated main integrations, GitHub branch cleanup and Adlon CI evidence while continuing the full plan. A milestone does not complete the release or authorize pausing the resumed goal. Continue from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
+All five GitHub Actions workflows passed on that exact merge commit:
+
+- macOS app and engine: [run 37121130979](https://github.com/WebWorldWide/FileID/actions/runs/37121130979), GitHub-hosted Apple runner; 480 Swift tests in 96 suites plus release builds, recovery probes, and privacy checks.
+- Repository policy: [run 37121130970](https://github.com/WebWorldWide/FileID/actions/runs/37121130970).
+- Linux engine, CLI, TUI, and GTK app: [run 37121199441](https://github.com/WebWorldWide/FileID/actions/runs/37121199441), all jobs on `adlon-fileid-linux`.
+- Windows engine: [run 37121199224](https://github.com/WebWorldWide/FileID/actions/runs/37121199224); x64 and ARM64 cross-build on `adlon-fileid-windows`, native ARM64 on GitHub-hosted ARM hardware.
+- Windows app: [run 37121917095](https://github.com/WebWorldWide/FileID/actions/runs/37121917095), x64 and ARM64 cross-builds on `adlon-fileid-windows`.
+
+Adlon is example data only. The CI guests do not mount its data volume; no Adlon files were read, copied, indexed, or written. The feature branch was deleted after merge and `origin` currently has only `main`. An unrelated existing local `codex/store-msix` worktree is preserved; inspect its handoff before considering cleanup.
+
+## Next agent instructions
+
+Continue the active next-version goal on macOS. Mac is not complete or release-ready. Read `shared/docs/NEXT_VERSION.md`, `shared/docs/NEXT.md`, `shared/docs/ARCHITECTURE.md`, `shared/docs/CHAT.md`, and `shared/docs/SCHEDULER.md` before selecting the next slice. The next Mac increment should extend chat/catalog retrieval to event and temporal evidence already represented by chapters, observations, events, and takes; add focused engine tests and keep uncertainty/coverage explicit. Then continue the timeline, best-take, tools, people, and scheduler backlog in the implementation ledger.
+
+The owner explicitly deferred new Windows/Linux product work and physical acceptance until they are on their Windows/Linux PC. Keep shared contracts coherent, but do not start those platform feature ports yet. Adlon remains read-only example data; use internal-drive temporary fixtures for mutation tests. Keep the CI runners on their guest disks and serialize Windows engine/app workflows because they share one Windows VM. Start implementation on a fresh `codex/` branch, validate the exact head, merge through a PR, remove the feature branch, and update `STATE.md`, `NEXT.md`, and this handoff. Do not describe a green packaging workflow as full release acceptance.
+
+The accepted goal remains active; this checkpoint is not completion or a request to pause it.
 
 ## Accepted index-job integration
 
