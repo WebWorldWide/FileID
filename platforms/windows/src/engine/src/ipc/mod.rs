@@ -64,6 +64,8 @@ pub enum CommandPayload {
     CatalogRequest(Box<CatalogRequestPayload>),
     #[serde(rename = "startScan")]
     StartScan(StartScanPayload),
+    #[serde(rename = "grantFolderAccess")]
+    GrantFolderAccess(GrantFolderAccessPayload),
 
     #[serde(rename = "pauseScan")]
     PauseScan(Empty),
@@ -243,6 +245,9 @@ pub struct HealthCheckResult {
 pub struct StartScanPayload {
     /// Absolute filesystem path to the folder root to scan.
     pub root_path: String,
+    /// Optional base64 macOS app-scoped bookmark; ignored by Windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_bookmark: Option<String>,
     /// Optional human-readable label; if absent, callers default to root_path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_display: Option<String>,
@@ -253,6 +258,13 @@ pub struct StartScanPayload {
     pub rescan: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantFolderAccessPayload {
+    pub root_path: String,
+    pub root_bookmark: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1086,14 +1098,15 @@ mod tests {
         assert_eq!(inner.get("physicalMemoryGB").unwrap(), 16.0);
     }
 
-    /// startScan sent by the app must round-trip cleanly with the new
-    /// `rootPath` field (not the legacy `rootBookmark`).
+    /// startScan sent by the app must round-trip cleanly with the shared
+    /// path and optional bookmark fields.
     #[test]
     fn start_scan_command_roundtrip() {
         let cmd = IpcCommand {
             id: "test-1".into(),
             payload: CommandPayload::StartScan(StartScanPayload {
                 root_path: r"C:\Users\adam\Pictures".into(),
+                root_bookmark: None,
                 root_display: Some("Pictures".into()),
                 rescan: false,
                 excluded_paths: None,
@@ -1191,8 +1204,10 @@ mod tests {
     #[test]
     fn every_command_variant_round_trips() {
         let cases: Vec<CommandPayload> = vec![
+            CommandPayload::GrantFolderAccess(GrantFolderAccessPayload { root_path: r"C:\Photos".into(), root_bookmark: "AQID".into() }),
             CommandPayload::StartScan(StartScanPayload {
                 root_path: r"C:\Users\adam\Pictures".into(),
+                root_bookmark: None,
                 root_display: Some("Pictures".into()),
                 rescan: false,
                 excluded_paths: None,
@@ -1365,6 +1380,7 @@ mod tests {
                 id: "p-1".into(),
                 payload: CommandPayload::StartScan(StartScanPayload {
                     root_path: path.clone(),
+                    root_bookmark: None,
                     root_display: None,
                     rescan: false,
                     excluded_paths: None,

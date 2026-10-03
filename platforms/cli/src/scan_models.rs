@@ -325,6 +325,7 @@ fn drive_scan(
         id: "fileid-cli-scan".to_string(),
         payload: CommandPayload::StartScan(StartScanPayload {
             root_path: root.to_string_lossy().into_owned(),
+            root_bookmark: None,
             root_display: None,
             rescan,
             excluded_paths: None,

@@ -551,6 +551,7 @@ public final class EngineClient {
             if !response.jobs.isEmpty { catalogJobs = response.jobs }
         case .ready(let info):
             state = .ready(info)
+            restoreSavedFolderAccess()
             // R5-07: do NOT clear the respawn budget merely on reaching Ready — a
             // Ready→immediate-crash flap would reset it every cycle and never trip
             // the 3-in-60s cap (unbounded ~1s respawn loop). Just record when we
@@ -964,43 +965,64 @@ public final class EngineClient {
     /// so faceClusteringComplete kicks off Deep Analyze. Bookmark
     /// serialization is moved off the main thread; the engine
     /// receives the startScan command as soon as the bookmark resolves.
+    private func restoreSavedFolderAccess() {
+        guard let bookmark = UserDefaults.standard.data(
+            forKey: SecurityScopedBookmark.pickedFolderDefaultsKey
+        ) else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            guard let rootURL = SecurityScopedBookmark.retainAccess(for: bookmark) else { return }
+            guard let ipcBookmark = try? SecurityScopedBookmark.makeIPCBookmark(for: rootURL) else {
+                await self?.setSavedFolderBookmarkError()
+                return
+            }
+            await self?.grantSavedFolderAccess(path: rootURL.path, bookmark: ipcBookmark)
+        }
+    }
+
+    private func setSavedFolderBookmarkError() {
+        lastError = EngineError(
+            kind: "bookmark_unavailable",
+            message: "FileID couldn't grant the selected folder to its local engine. Choose the folder again."
+        )
+    }
+
+    private func grantSavedFolderAccess(path: String, bookmark: Data) {
+        _ = send(.grantFolderAccess(rootPath: path, rootBookmark: bookmark))
+    }
+
     public func startScan(rootURL: URL) {
         autoPilotActive = true
         autoPilotStage = .scanning
         isPaused = false
         let displayPath = rootURL.path
-        // Resolve the security-scoped bookmark to a filesystem path APP-SIDE
-        // and send the resolved `rootPath` (the wire contract carries a path,
-        // not a bookmark). Round-tripping through bookmarkData →
-        // resolvingBookmarkData yields the canonical scoped path the sandbox
-        // actually grants; outside a sandbox it's just rootURL.path.
+        // The persisted app-scoped bookmark stays in the app; the engine gets
+        // a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
         Task.detached(priority: .userInitiated) {
-            let resolvedPath: String
+            var resolvedPath = rootURL.standardizedFileURL.path
+            var rootBookmark: Data?
             do {
-                let bookmark = try rootURL.bookmarkData(
-                    options: [],
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                )
-                var stale = false
-                let resolved = try URL(
-                    resolvingBookmarkData: bookmark,
-                    options: [],
-                    relativeTo: nil,
-                    bookmarkDataIsStale: &stale
-                )
-                resolvedPath = resolved.path
+                rootBookmark = try SecurityScopedBookmark.makeIPCBookmark(for: rootURL)
             } catch {
-                // Bookmark round-trip failed (e.g. unsandboxed dev run where
-                // bookmarks aren't meaningful) — fall back to the raw path.
+                #if FILEID_APP_STORE
+                await MainActor.run {
+                    client.lastError = EngineError(
+                        kind: "bookmark_unavailable",
+                        message: "FileID couldn't retain access to that folder. Choose the folder again."
+                    )
+                    client.cancelAutoPilot()
+                }
+                return
+                #else
                 resolvedPath = displayPath
+                #endif
             }
             await MainActor.run {
                 // Begin the App-Nap token only if the command actually left the
                 // app; a dropped send (engine down) would otherwise leave the
                 // token held with no scan and no terminal event to release it.
-                if client.send(.startScan(rootPath: resolvedPath, rootDisplay: displayPath,
+                if client.send(.startScan(rootPath: resolvedPath, rootBookmark: rootBookmark,
+                                          rootDisplay: displayPath,
                                           rescan: false, excludedPaths: nil)) {
                     client.beginScanActivity()
                 }

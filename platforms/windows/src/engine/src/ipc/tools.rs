@@ -40,6 +40,8 @@ pub struct ToolRequest {
     pub recipe: Option<ToolRecipe>,
     #[serde(rename = "operationID", default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_bookmark: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

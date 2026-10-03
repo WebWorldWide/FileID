@@ -309,9 +309,7 @@ public actor DeepAnalyze {
             if kind == .qwen3VL4B || kind == .qwen3VL8B {
                 _ = Self.qwen3VLWeightAdapterInstalled
             }
-            let documentsHF = FileManager.default
-                .urls(for: .documentDirectory, in: .userDomainMask).first!
-                .appending(component: "huggingface")
+            let documentsHF = ModelCachePaths.huggingFaceRoot
 
             try ReadOnlyLocations.requireWritable(documentsHF)
         // 1. Pre-fetch every file in the repo via 12-way parallel
@@ -419,9 +417,7 @@ public actor DeepAnalyze {
     /// invalidate the install; first Deep Analyze use will retry the
     /// MLX load and surface the error in context.
     public func markInstalledSentinel(kind: AIModelKind) {
-        let documentsHF = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appending(component: "huggingface")
+        let documentsHF = ModelCachePaths.huggingFaceRoot
         Self.writeInstalledSentinel(kind: kind, documentsHF: documentsHF)
     }
 

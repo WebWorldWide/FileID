@@ -12,6 +12,14 @@ final class ToolsSession {
     var format = "png"
     var maxDimension = 4096
     var destination = ""
+    var destinationBookmark: Data?
+    var destinationAccessReady: Bool {
+        #if FILEID_APP_STORE
+        destinationBookmark != nil
+        #else
+        true
+        #endif
+    }
     var message = "Choose files and an internal output folder. Exports create new versions."
     var pending = ""
     var pendingAction = ""
@@ -53,20 +61,29 @@ struct ToolsWorkbench: View {
             HStack {
                 Text(session.destination.isEmpty ? "No output folder selected" : session.destination).lineLimit(1).truncationMode(.middle)
                 Spacer()
-                Button("Choose output folder") {
-                    let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = false
-                    if panel.runModal() == .OK, let url = panel.url { session.destination = url.path; invalidate() }
-                }
+                Button("Choose output folder", action: chooseDestination)
             }.disabled(!session.pending.isEmpty)
             Text(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "Loading local capabilities…").font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Last export") { send(ToolRequest(requestID: UUID().uuidString, action: "history")) }.disabled(!session.pending.isEmpty)
-                Button("Preview export") { send(ToolRequest(requestID: UUID().uuidString, action: "preview", fileIDs: session.selection.sorted(), destination: session.destination, recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension))) }
-                    .disabled(session.selection.isEmpty || session.destination.isEmpty || !session.pending.isEmpty || !(1...8192).contains(session.maxDimension))
-                Button("Export new versions") { send(ToolRequest(requestID: UUID().uuidString, action: "execute", operationID: session.operationID)) }
-                    .disabled(session.operationID == nil || session.executed || !session.pending.isEmpty)
-                Button("Undo export") { send(ToolRequest(requestID: UUID().uuidString, action: "undo", operationID: session.operationID)) }
-                    .disabled(session.operationID == nil || !session.executed || !session.pending.isEmpty)
+                Button("Preview export") {
+                    send(ToolRequest(requestID: UUID().uuidString, action: "preview",
+                                     fileIDs: session.selection.sorted(), destination: session.destination,
+                                     recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension),
+                                     destinationBookmark: session.destinationBookmark))
+                }
+                    .disabled(session.selection.isEmpty || session.destination.isEmpty || !session.destinationAccessReady
+                              || !session.pending.isEmpty || !(1...8192).contains(session.maxDimension))
+                Button("Export new versions") {
+                    send(ToolRequest(requestID: UUID().uuidString, action: "execute", destination: session.destination,
+                                     operationID: session.operationID, destinationBookmark: session.destinationBookmark))
+                }
+                    .disabled(session.operationID == nil || session.executed || !session.destinationAccessReady || !session.pending.isEmpty)
+                Button("Undo export") {
+                    send(ToolRequest(requestID: UUID().uuidString, action: "undo", destination: session.destination,
+                                     operationID: session.operationID, destinationBookmark: session.destinationBookmark))
+                }
+                    .disabled(session.operationID == nil || !session.executed || !session.destinationAccessReady || !session.pending.isEmpty)
                 if !session.pending.isEmpty { ProgressView().controlSize(.small) }
                 if session.pendingAction == "execute" {
                     Button("Cancel") { _ = engine.send(.toolRequest(request: ToolRequest(requestID: UUID().uuidString, action: "cancel", operationID: session.operationID))); session.message = "Stopping export…" }
@@ -104,6 +121,31 @@ struct ToolsWorkbench: View {
     }
 
     private func invalidate() { if session.pending.isEmpty { session.operationID = nil; session.outputs = []; session.executed = false } }
+    private func chooseDestination() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        session.destination = url.path
+        session.destinationBookmark = nil
+        invalidate()
+        let selectedURL = url
+        Task.detached(priority: .utility) {
+            let authorizedBookmark = try? SecurityScopedBookmark.makeIPCBookmark(for: selectedURL)
+            await MainActor.run {
+                guard session.destination == selectedURL.path else { return }
+                session.destinationBookmark = authorizedBookmark
+                #if FILEID_APP_STORE
+                if authorizedBookmark == nil {
+                    session.message = "FileID couldn't grant the output folder to its local engine. Choose it again."
+                }
+                #endif
+                invalidate()
+            }
+        }
+    }
+
     private func search() {
         guard session.pending.isEmpty else { return }
         session.searchID = UUID().uuidString

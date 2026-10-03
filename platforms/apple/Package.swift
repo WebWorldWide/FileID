@@ -48,7 +48,7 @@ let package = Package(
         // Engine CLI. Single binary, owns the scan pipeline + Deep Analyze
         // (VLM inference via MLX). MLXVLM brings the Qwen / Gemma /
         // PaliGemma model factory; downloaded weights are cached in
-        // `~/Documents/huggingface/models/<repo>/` by MLX itself.
+        // Developer builds use `~/Documents/huggingface/models/<repo>/`; the App Store build uses the app container.
         //
         // Production targets compile in Swift 6 mode; concurrency diagnostics
         // are release-blocking rather than deferred to code review.

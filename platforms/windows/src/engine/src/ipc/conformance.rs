@@ -22,13 +22,13 @@ use super::{
     PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
     RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
     RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
-    StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload, UndoRestructurePayload, Wrap,
+    GrantFolderAccessPayload, StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload,
+    UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
-/// `startScan` already carries the cross-platform `rootPath` shape (no
-/// macOS-only `rootBookmark` variant survives in `$defs.CommandPayload`),
-/// and every other schema tag is implemented here. Add a tag ONLY for a
+/// `startScan` carries the shared `rootPath` shape and optional bookmark;
+/// every other schema tag is implemented here. Add a tag ONLY for a
 /// platform divergence documented in the schema's description for it.
 const SCHEMA_ONLY_COMMAND_TAGS: &[&str] = &[];
 const SCHEMA_ONLY_EVENT_TAGS: &[&str] = &[];
@@ -191,6 +191,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::ToolRequest(_) => "toolRequest",
         CommandPayload::CatalogRequest(_) => "catalogRequest",
         CommandPayload::StartScan(_) => "startScan",
+        CommandPayload::GrantFolderAccess(_) => "grantFolderAccess",
         CommandPayload::PauseScan(_) => "pauseScan",
         CommandPayload::ResumeScan(_) => "resumeScan",
         CommandPayload::CancelScan(_) => "cancelScan",
@@ -302,13 +303,18 @@ fn restructure_move() -> RestructureMove {
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
         serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
-        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","recipe":{"kind":"video","format":"mp4","maxDimension":1920},"operationID":"plan"}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","destinationBookmark":"AQID","recipe":{"kind":"video","format":"mp4","maxDimension":1920},"operationID":"plan"}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
+        CommandPayload::GrantFolderAccess(GrantFolderAccessPayload {
+            root_path: r"C:\Photos".into(),
+            root_bookmark: "AQID".into(),
+        }),
         CommandPayload::StartScan(StartScanPayload {
             root_path: r"C:\Photos".to_string(),
+            root_bookmark: Some("AQID".to_string()),
             root_display: None,
             rescan: false,
-            excluded_paths: None,
+            excluded_paths: Some(vec![r"C:\Photos\.cache".to_string()]),
         }),
         CommandPayload::PauseScan(Empty {}),
         CommandPayload::ResumeScan(Empty {}),

@@ -76,6 +76,11 @@ jobs:
       - name: Build app (release)
         run: swift build -c release --product FileID
 
+      - name: Build App Store sandbox variant
+        run: |
+          swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileIDEngine
+          swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
+
       - name: Run tests
         # Swift Testing framework. SharedTests + EngineTests. Corpus tests
         # that need a populated Tests/Corpus/ tree skip themselves when the

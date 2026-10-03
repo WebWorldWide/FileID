@@ -123,9 +123,9 @@ if ! wait_for_event "ready" 15; then
 fi
 ok "engine ready"
 
-# IPCCommand.startScan(rootPath: String, rootDisplay: String?, rescan: Bool, excludedPaths: [String]?)
-# The app resolves the security-scoped bookmark to a path app-side; the engine
-# now takes the resolved rootPath directly.
+# IPCCommand.startScan(rootPath: String, rootBookmark: Data?, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
+# Direct engine runs use a path without a bookmark; sandboxed Store
+# builds include the selected-folder bookmark in this same command.
 ipc_send "{\"startScan\":{\"rootPath\":\"$CORPUS\",\"rootDisplay\":\"$CORPUS\",\"rescan\":false,\"excludedPaths\":null}}"
 ok "startScan sent"
 

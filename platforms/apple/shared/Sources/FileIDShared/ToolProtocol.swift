@@ -38,8 +38,23 @@ public struct ToolRequest: Codable, Sendable, Equatable {
     public var destination: String?
     public var recipe: ToolRecipe?
     public var operationID: String?
-    public init(requestID: String, action: String, fileIDs: [Int64]? = nil, destination: String? = nil, recipe: ToolRecipe? = nil, operationID: String? = nil) {
-        self.requestID = requestID; self.action = action; self.fileIDs = fileIDs; self.destination = destination; self.recipe = recipe; self.operationID = operationID
+    public var destinationBookmark: Data?
+    public init(
+        requestID: String,
+        action: String,
+        fileIDs: [Int64]? = nil,
+        destination: String? = nil,
+        recipe: ToolRecipe? = nil,
+        operationID: String? = nil,
+        destinationBookmark: Data? = nil
+    ) {
+        self.requestID = requestID
+        self.action = action
+        self.fileIDs = fileIDs
+        self.destination = destination
+        self.recipe = recipe
+        self.operationID = operationID
+        self.destinationBookmark = destinationBookmark
     }
 }
 
