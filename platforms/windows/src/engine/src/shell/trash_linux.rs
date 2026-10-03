@@ -62,12 +62,15 @@ fn trash_root(path: &Path, data: &Path) -> Result<(PathBuf, PathBuf)> {
 }
 
 fn escaped_path(path: &Path) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut escaped = String::new();
     for &byte in path.as_os_str().as_bytes() {
         if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
             escaped.push(byte as char);
         } else {
-            escaped.push_str(&format!("%{byte:02X}"));
+            escaped.push('%');
+            escaped.push(HEX[usize::from(byte >> 4)] as char);
+            escaped.push(HEX[usize::from(byte & 0x0F)] as char);
         }
     }
     escaped

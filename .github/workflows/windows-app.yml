@@ -162,11 +162,11 @@ jobs:
         run: |
           msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 
