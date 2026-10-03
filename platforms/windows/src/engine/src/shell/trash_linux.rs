@@ -87,6 +87,14 @@ pub fn trash_path_with_receipt(path: &Path) -> Result<PathBuf> {
     trash_path_at(path, &data_home()?)
 }
 
+pub fn trash_path(path: &Path) -> Result<()> {
+    trash_path_with_receipt(path).map(|_| ())
+}
+
+pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
+    paths.iter().map(|path| trash_path(path).is_ok()).collect()
+}
+
 fn trash_path_at(path: &Path, data: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         bail!("Only absolute file paths can be moved to Trash");

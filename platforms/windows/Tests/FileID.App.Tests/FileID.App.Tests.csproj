@@ -16,6 +16,7 @@
     <IsTestProject>true</IsTestProject>
     <UseWinUI>true</UseWinUI>
     <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <NoWarn>$(NoWarn);CA2255</NoWarn>
     <Platforms>x64</Platforms>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
