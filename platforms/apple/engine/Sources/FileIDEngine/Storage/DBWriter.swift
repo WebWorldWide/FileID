@@ -59,6 +59,7 @@ public struct TaggedFile: Sendable {
     public var failed: Bool
     public var errorMessage: String?
     public var perFileTotalMs: Double        // wall time inside the worker
+    var admissionWaitMs: Double = 0 // Resource admission only; excluded from perFileTotalMs.
     // Iteration 5 — per-stage breakdown so the batch profiler can show where
     // the per-file budget actually goes. All in ms; 0 if not measured.
     public var loadMs: Double = 0
@@ -368,6 +369,7 @@ public actor DBWriter {
         let perFileP50 = percentile(perFileTimes, 0.50)
         let perFileP95 = percentile(perFileTimes, 0.95)
         let perFileSum = perFileTimes.reduce(0, +)
+        let admissionWaitTimes = batchFiles.map(\.admissionWaitMs).sorted()
         // Per-stage P50s — only over images (non-zero entries). Tells us
         // where the per-file budget actually goes: load (NAS I/O), Vision
         // (ANE primary pass), CLIP (ANE embedder), OCR (text-only ANE).
@@ -400,6 +402,10 @@ public actor DBWriter {
                 "availableMB":   AnyCodable(Hardware.availableMemoryMB()),
                 "perFileP50Ms":  AnyCodable(perFileP50),
                 "perFileP95Ms":  AnyCodable(perFileP95),
+                "admissionWaitP50Ms": AnyCodable(percentile(admissionWaitTimes, 0.50)),
+                "admissionWaitP95Ms": AnyCodable(percentile(admissionWaitTimes, 0.95)),
+                "admissionWaitMaxMs": AnyCodable(admissionWaitTimes.last ?? 0),
+                "admissionDelayedFilesOver1ms": AnyCodable(admissionWaitTimes.filter { $0 >= 1 }.count),
                 "utilization":   AnyCodable(utilization),
                 "loadP50Ms":     AnyCodable(percentile(loadTimes, 0.50)),
                 "loadP95Ms":     AnyCodable(percentile(loadTimes, 0.95)),

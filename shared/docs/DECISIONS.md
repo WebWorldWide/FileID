@@ -3521,3 +3521,8 @@ The macOS engine now uses one process-wide actor for estimated memory, CPU concu
 ## 2026-10-03 — Reuse the verified Metal library builder
 
 The standard macOS launcher now delegates MLX kernel compilation to `scripts/ensure_mlx_metallib.sh`. That helper applies the pinned MLX/Xcode 27 compatibility adjustments to the generated SwiftPM checkout and builds the library in a temporary directory. Keep the reviewed bootstrap digest and its equality test synchronized whenever the launcher changes.
+
+
+## 2026-10-03 — Keep scan admission timing local and aggregate
+
+Scan queue delay is an ephemeral per-file value and is reported only as aggregate fields in the existing local JSONL `batch` event. Keep it out of the catalog and IPC because it is diagnostic timing, not user evidence or a client contract. Do not tune scan worker or scheduler limits from synthetic database-writer rates; require a model-backed internal-drive scan under foreground load and inspect stage times, admission wait, throughput, and memory first. No dependency or network behavior changes.

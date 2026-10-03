@@ -1443,17 +1443,16 @@ struct FileIDEngineMain {
         _ discovered: DiscoveredFile,
         pool: VisionWorkerPool
     ) async throws -> TaggedFile? {
-        try await ResourceScheduler.shared.withReservation(
-            ResourceScheduler.Demand(cpuUnits: 1),
-            priority: .background,
-            waitForCapacity: true,
+        try await ScanTaggingAdmission.withBackgroundCPU(
             isCancelled: {
                 ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync()
             }
-        ) {
-            await pool.with { worker in
+        ) { admissionWaitMs in
+            guard var tagged = await pool.with({ worker in
                 await Tagging.processFile(discovered: discovered, worker: worker)
-            }
+            }) else { return nil }
+            tagged.admissionWaitMs = admissionWaitMs
+            return tagged
         }
     }
 
