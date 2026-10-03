@@ -111,3 +111,13 @@ The Store branch reappeared during Mac validation. Its exact head was preserved 
 | Former branch | Commit | Recoverable tag |
 |---|---|---|
 | `codex/store-msix` | `07c0ad8e688e0293484ae628e9f3c7aeac862e90` | `archive/2026-10-02/store-msix-republished` |
+
+
+## 2026-10-02 — second Store republication
+
+Verified remote annotated tag `archive/2026-10-02/store-msix-republished-v2` peels to `bc2765dd6f3160dd047db59a9bafb93c7b687daf`, independently preserving the new Store head. Removed its remote branch with that exact lease. Cancelled legacy branch runs `37088953979` (engine) and `37089711380` (Store package) that occupied the persistent main-only Adlon Windows runner. This does not validate or integrate Store work. Its protected local checkout is unchanged.
+
+
+## 2026-10-02 — dependency proposal recovery
+
+PR #199 had fifteen passing hosted checks at `df4405c9f32cf4642dc34ef8a43d84704a174b5c`. Its exact head is preserved in verified remote annotated tag `archive/2026-10-02/dependabot-remediation`; closed the proposal and removed `codex/dependabot-remediation-20261002` with that lease for the requested main-only checkpoint. The proposed Rust OpenSSL/tar/quinn-proto lock updates and Python RAM++ pins are unmerged. Pip audit/resolution and Rust CI do not validate a real RAM++ export. Resume narrowly from current main, test actual import/build/export/reopen parity and document dependency rationale before integrating. Do not restore the full divergent history.

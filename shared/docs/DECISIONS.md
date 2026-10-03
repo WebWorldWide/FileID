@@ -3500,3 +3500,8 @@ The worker result carries an immutable revision receipt alongside its transferre
 
 
 Re-reviewed the EngineClient egress inventory after adding only local catalog IPC polling/cancellation. No URL, HTTP request, download path or transport behavior changed; update only its reviewed-source digest and retain all runtime-egress mutation tests and six existing Windows release blockers.
+
+
+## 2026-10-02 — main-only runner cleanup and proposal recovery
+
+The republished Store workflows occupied the persistent Adlon Windows runner from an extensively divergent unreviewed branch. Preserve the exact source in a verified annotated archive tag, cancel its obsolete engine/package runs through GitHub, and remove its remote head with a lease. Keep the protected local checkout unchanged. Persistent main-only policy and actual main-job results remain the acceptance boundary. Dependency PR #199 is also preserved before main-only cleanup; passing pip audit/resolution is not real RAM++ export compatibility. Review its pins and targeted security lock updates independently before integration.
