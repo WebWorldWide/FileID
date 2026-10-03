@@ -1,10 +1,12 @@
 # FileID — State
 
-## 2026-10-03 — Schedule per-file scan tagging
+## 2026-10-03 — Scan tagging scheduler accepted on main
 
 Each macOS scan worker now reserves one background CPU unit while `Tagging.processFile` runs. The permit yields to interactive inference, retries temporary capacity conflicts with cancellation checks, and releases after the file completes. `Hardware.workerCap` remains the outer worker bound. Per-file scan I/O and memory are not estimated yet; throughput under contention still needs measurement before changing either bound.
 
-The 10 scheduler tests and full native suite pass: 477 tests across 95 suites (162 Shared, 20 App, 295 Engine). The Release no-wipe launcher rebuilt and started FileID plus FileIDEngine without resetting the local library. This branch has not yet passed hosted or main-branch CI. No Adlon example-data paths were used for outputs.
+The 10 scheduler tests and full native suite pass: 477 tests across 95 suites (162 Shared, 20 App, 295 Engine). The Release no-wipe launcher rebuilt and started FileID plus FileIDEngine without resetting the local library. PR #206 passed exact-head macOS and policy runs `37113626893` and `37113626892` at `da98182442a02fe051d62e17878362d63b4102f8`, then squash-merged as `e0acedc50ceb1574cf1f150271d3243a532eedaa`.
+
+All five final-main workflows passed on `e0acedc50ceb1574cf1f150271d3243a532eedaa`: macOS `37114730291`, repository policy `37114730266`, Linux `37114739219`, Windows app `37114739168`, and Windows engine `37114739211`. All four Linux jobs ran on `adlon-fileid-linux`; Windows app x64/ARM64 and Windows engine x64/ARM64-cross ran on `adlon-fileid-windows`; Windows engine ARM64-native ran on a hosted ARM runner. GitHub has only `main`; PR #206's feature branch was deleted. The unrelated local `FileID-msix-store` worktree remains on `codex/store-msix` and must be preserved. No Adlon example-data paths were used as inputs or outputs.
 
 ## 2026-10-03 — Schedule face embedding work
 
