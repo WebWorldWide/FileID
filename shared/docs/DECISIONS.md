@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-10-03 — Chat event/time search stays grounded in edited catalog evidence
+
+Resolve event names only from user-edited event rows until generated event confidence and provenance are available. Accept explicit `MM:SS` and `HH:MM:SS`; chapter and passage intervals qualify only when they contain the requested time, while point observations can match within 15 seconds. Exclude stale evidence. This keeps retrieval deterministic and avoids treating missing timeline analysis as a negative event result; the change needs no IPC or catalog migration.
+
 ## 2026-06-17 — Deep-audit triage: fixed HEIC-COM + ArcFace-guard; DEFERRED the IPCSink drainer with rationale
 
 A 4-agent whole-codebase audit (every finding independently verified — this repo has a ~40% audit false-positive history, so verification is mandatory) surfaced, beyond the 6 restructure-lockstep fixes, three engine-robustness items. Two were fixed (clear bugs with an established sibling pattern): (1) `shell/heic.rs` did WinRT activations with no COM apartment on the apartment-less decoder-pool threads, so EVERY HEIC/HEIF — the default iPhone photo format — failed `CO_E_NOTINITIALIZED` and was mis-reported to the user as "HEIF codec not installed" (silently dropping those files from tagging/faces/CLIP/thumbnails); fixed by mirroring `shell::video::ComScope` (MTA RAII guard, the correct model for blocking WinRT `.get()` on pumpless worker threads). (2) `ArcFaceService.embed` force-unwrapped `withUnsafeBytes` `baseAddress!` with no `count > 0` guard, unlike its sibling `MobileCLIPService.embedImage` — a corrupt/empty SFace `.onnx` output would trap the engine; added the same guard.

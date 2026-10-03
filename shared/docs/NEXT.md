@@ -2,15 +2,15 @@
 
 ## Active priority — macOS first (2026-10-03)
 
-Continue the full next-version plan on Mac. The owner has deferred new Windows/Linux feature implementation and physical acceptance until they are on that PC. The Mac version is not complete or release-ready.
+Continue the full next-version plan on Mac. The owner has deferred new Windows/Linux feature implementation and physical acceptance until they are on that PC. The Mac app is not complete or release-ready.
 
-PR #208 is merged to `main` at `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. It improves confirmed-person chat retrieval and scan admission diagnostics. All five main workflows passed on that exact commit; exact run IDs and Adlon runner placement are recorded at the top of `shared/docs/STATE.md` and `shared/docs/AGENT_HANDOFF.md`. The feature branch is deleted; `origin` has only `main`.
+PR #208 improved confirmed-person retrieval and scan admission diagnostics. PR #210 added exact user-edited event-title filters and explicit time search over existing timestamped evidence. Both are merged; PR #210's main SHA is `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. All five main workflows passed on that exact commit. Run IDs and Adlon runner placement are recorded at the top of `shared/docs/STATE.md` and `shared/docs/AGENT_HANDOFF.md`. The feature branch was deleted; `origin` has only `main`.
 
-## Next Mac increment — event and temporal retrieval
+## Next Mac increment — populate timeline evidence
 
-Extend the just-landed person-filtered chat/catalog path to events and time-based evidence already represented by chapters, observations, events, and take groups. Return direct file/timestamp results, distinguish user-confirmed from model-generated evidence, honor staleness and coverage, and add focused engine tests. Keep this a retrieval milestone; do not claim complete timeline analysis, automatic best-take detection, or release readiness from catalog schema support alone.
+Build on the existing timeline/catalog foundation with bounded, cancellable production of timestamped speech, shots, tracks, and coverage. Preserve chapter ranges and person moments for direct playback. Treat uncovered intervals as unknown; sparse samples do not establish that an event was absent. Add fixtures for long recordings, overlaps, scene boundaries, and events crossing chunks.
 
-Then continue `shared/docs/NEXT_VERSION.md`: timeline population and chapters, scheduler pressure measurements, face accuracy/speed, best-take ranking, conversion/enhancement/reframing, and the remaining native tools. Preserve macOS-first validation, update the persistence docs with every merged increment, and keep all example data read-only. For Adlon CI, use the guest disks only and do not mount or access the example-data volume. Run Windows engine and app workflows serially on the single Windows VM.
+Then continue `shared/docs/NEXT_VERSION.md`: measure scheduler pressure, improve face accuracy/speed, implement broad best-take ranking, and finish conversion/enhancement/reframing tools. Keep macOS-first validation and update the persistence docs with each merged increment. For Adlon CI, use guest disks only and never mount or access its example-data volume. Run Windows engine and app workflows serially on the single Windows VM.
 
 ## Historical day-end continuation — superseded by Mac-first priority
 
