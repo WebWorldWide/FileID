@@ -2,11 +2,11 @@
 
 ## Current owner request — Windows Store readiness (2026-10-03)
 
-Continue on `codex/windows-store-readiness`, PR #213. Fetched and merged the newest `origin/main` commit `6cde4a81` during this session. New Windows IPC/schema changes from GitHub are included. Follow-up commits fix Linux Clippy dead-code warnings and Windows testhost SDK assembly resolution. Hosted CI must pass on the final merged head before merging.
+Continue on `codex/windows-store-readiness`, PR #213. Fetched and merged the newest `origin/main` commit `6cde4a81` during this session. New Windows IPC/schema changes from GitHub are included. Follow-up commits fix Linux Clippy dead-code warnings and Windows testhost SDK assembly resolution. Exact-head CI found a Linux `StartScanPayload.root_bookmark` compile regression; the client now sets it to `None`, and WSL `cargo check`, Clippy, and 26 tests pass. The Windows app workflow test-step indentation is corrected and its YAML parses. Push and rerun exact-head hosted CI before merging.
 
 Partner Center product `9PC8HSD86887` (`AdamNolle.FileID`) is signed in and open in Codex. Properties, Packages, and Pricing are Complete; free worldwide public pricing is saved. Listing text and publisher name are saved, but Listing still needs at least one real desktop screenshot (four recommended). The uploaded MSIX SHA-256 is `6bde5a99232f216ccc4b721711fdee3d427420e16aeac8acacf67476d896e11c`. The publisher confirmed legal age and authorized IARC terms; the generated IARC 12+ / ESRB Teen rating is saved. Current Rating ID displays Pending. The product remains an unsubmitted draft.
 
-Locally, Windows app tests passed 432/432, IPC tests passed, Rust format/Clippy/tests passed, .NET format passed, strict runtime-egress and known-blocker gates passed, and bootstrap supply-chain tests passed. Remaining gates are green exact-head hosted CI, screenshots, Windows App Certification Kit, fresh-profile MSIX install/launch/upgrade checks, and physical GPU/model validation.
+Locally, Windows app tests passed 432/432, IPC tests passed, Rust format/Clippy/tests passed, .NET format passed, strict runtime-egress and known-blocker gates passed, and bootstrap supply-chain tests passed. The rebuilt Store MSIX passed local verification (SHA-256 `6f9e52ab2377d9756629525a539389a5850053e2ddb58241b3f4a405d8f67673`), but Partner Center still has the prior package. Remaining gates are green exact-head hosted CI, uploading the verified MSIX to the draft, screenshots, Windows App Certification Kit, fresh-profile MSIX install/launch/upgrade checks, and physical GPU/model validation.
 
 ## Secondary priority — macOS first (2026-10-03)
 

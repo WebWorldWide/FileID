@@ -1,5 +1,11 @@
 # FileID — session log
 
+## 2026-10-03 — Rebuilt Store package; release gates still open
+
+- Rebuilt the x64 Store MSIX from branch head `9900e2ab`; `verify-store-package.ps1` passed. Local artifact SHA-256: `6f9e52ab2377d9756629525a539389a5850053e2ddb58241b3f4a405d8f67673`. The Partner Center draft still has the earlier package; the Codex in-app browser file chooser did not expose a usable upload flow.
+- Exact-head hosted CI exposed Linux GTK/Flatpak compile failures caused by the new `StartScanPayload.root_bookmark` contract. Added `root_bookmark: None` to the Linux client; WSL `cargo check`, Clippy with `-D warnings`, and all 26 Linux app tests now pass. The Linux workspace format check reports broad existing GTK-source formatting diffs, so no workspace-wide reformat was applied. Corrected malformed indentation in the Windows app workflow test step and parsed the YAML successfully. Hosted CI reruns are pending push.
+- Windows App Certification Kit is installed, but even its help invocation requires elevation; it was not run. Store screenshot capture and fresh-profile MSIX install/launch/upgrade checks still need a native Windows UI session; physical GPU/model verification remains hardware-gated. Partner Center submission is still a draft.
+
 ## 2026-10-03 — Latest GitHub sync and Store readiness
 
 - Fetched all remotes; `origin/main` advanced to `6cde4a81` and was merged into `codex/windows-store-readiness`. Latest GitHub Windows IPC/schema changes are included.

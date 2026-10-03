@@ -131,6 +131,7 @@ impl EngineClient {
     pub fn start_scan(&mut self, root_path: &str) -> Result<()> {
         self.send(CommandPayload::StartScan(StartScanPayload {
             root_path: root_path.to_owned(),
+            root_bookmark: None,
             root_display: None,
             rescan: false,
             excluded_paths: None,
