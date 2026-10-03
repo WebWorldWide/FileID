@@ -1,6 +1,10 @@
-# FileID next-version handoff — 2026-10-02
+# FileID next-version handoff — 2026-10-03
 
 The accepted next-version goal remains active after the owner resumed sustained work. Preserve the requested recovery checkpoint, validated main integrations, GitHub branch cleanup and Adlon CI evidence while continuing the full plan. A milestone does not complete the release or authorize pausing the resumed goal. Continue from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
+
+## Accepted index-job integration
+
+PR #201 passed all eleven checks at `e86f17c467916164c89af3dfc83069051c6d0654` and merged as `d1208df1967cc35d1aa27b5ec32ed8f0eb17b39c`; all eleven merged-main checks passed and its branch is removed. Hosted macOS ran all 466 tests and the actual catalog/index recovery fixtures. Adlon Linux/Windows jobs passed, including the genuine 48-test zero-skip IPC gate; native ARM64 remains hosted and the Adlon ARM64 cross-build proves compilation/lint. Local Release engine/app products and Release health/index process probes pass. Inspect STATE.md for exact run IDs. The first hosted release compile at `8f36caf4a3b8be397a28f09b771c79613a3ed361` failed the compiler type-check budget; it is superseded by the verified typed-helper fix.
 
 ## Active native index-job follow-up
 

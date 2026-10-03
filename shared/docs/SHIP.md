@@ -2,7 +2,7 @@
 
 ## Native persistent search checkpoint (2026-10-02)
 
-Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas are implemented with catalog v23 provenance and restart/divergence checks. Local 461-test Swift validation passed. This closes the previous unwired-index groundwork item only for the pinned native CLIP space; real 100,000-file end-to-end latency, durable cancellation/resource admission, text/catalog indexes, person/event filters and port behavior remain open. Exact-head/main CI, physical accuracy/hardware, offline capture, the existing six runtime-egress blockers and the skipped broader Windows app-service suites remain separate acceptance requirements.
+Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas are implemented with catalog v23 provenance and restart/divergence checks. PR #201 adds durable index-job progress, interruption recovery, pause/cancel/retry and conservative memory admission; all eleven exact-head checks passed, including 466 native tests and actual-process recovery fixtures. STATE.md records merged-main acceptance. This closes the previous unwired-index groundwork item only for the pinned native CLIP space; shared atomic resource reservations/fairness, real 100,000-file end-to-end latency, text/catalog indexes, person/event filters and port behavior remain open. Physical accuracy/hardware, offline capture, the existing six runtime-egress blockers and the skipped broader Windows app-service suites remain separate acceptance requirements.
 
 ## Latest Mac checkpoint and runner acceptance (2026-10-02)
 

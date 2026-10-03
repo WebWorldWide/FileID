@@ -1,6 +1,13 @@
 # FileID — State
 
 
+## 2026-10-03 — Index jobs merged and retrieval baseline accepted
+
+PR #201 passed all eleven checks at `e86f17c467916164c89af3dfc83069051c6d0654` and merged at `d1208df1967cc35d1aa27b5ec32ed8f0eb17b39c`. All eleven merged-main checks also passed. Hosted macOS run `37101046158` ran 466 tests and actual-process catalog/index recovery fixtures. Adlon Linux run `37101046113` passed all four jobs on `adlon-fileid-linux`; Windows engine run `37101046112` passed x64 and ARM64 cross-build jobs on `adlon-fileid-windows` plus hosted native ARM64. Windows app run `37101046114` passed both packaging jobs on `adlon-fileid-windows`; x64 job `111140478096` executed all 48 IPC tests with zero skips and verified its TRX. ARM64 cross-builds validate compilation/lint, not native execution. Local Release engine/app products, Release health/index process probes and the twenty focused post-extraction tests pass. Its source branch is removed. Evidence JSON and inspected runner logs are retained under the internal-drive `~/.codex/fileid-handoffs/` directory.
+
+All eighteen checks on retrieval baseline main `94c96d51caf43007c147b0bb584bfcec8124e3e7` passed. Adlon Linux run `37093055639`, Windows engine run `37093055626` and Windows app run `37093055618` succeeded. Actual Network Service x64 app job `111117286936` executed all 48 IPC tests with no skips and verified its TRX; broader legacy app-service discovery still skips and remains a release blocker. Runner names and logs were inspected. Privacy baseline still has six release blockers, model replacements remain research candidates, and full NEXT_VERSION.md scope remains active. New PC features and physical hardware acceptance stay deferred.
+
+
 ## 2026-10-02 — Durable native search index jobs
 
 Native index preparation now has persistent catalogIndex state/progress, explicit pause/cancel/retry, startup interruption recovery and conservative memory admission. Controls dispatch by worker kind and index retry needs no visual model. Tools displays search-index jobs and polls local snapshots while open. Cancellation checks cover row processing, compaction, snapshot loops and chunked cache reads. Retry uses verified snapshots and SQLite revision history, preserving the prior snapshot during a cancelled partial update. Admission counts historical disk caches as well as live/raw vectors. No dependency, model or migration was added; existing string-kind DTOs mirror the canonical description.
