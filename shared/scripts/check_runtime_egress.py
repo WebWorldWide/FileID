@@ -142,7 +142,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "4964efabe46667a3a4019020d8ca1a85b04d9a07975d19c975d656eb6c7cd8c6",
-  "platforms/linux/src/app/src/engine_client.rs": "bc1713c3610fac2c4a1d6d4c99cfcbdf7ca4ecbce549597143cdd5f8bcca64b6",
+  "platforms/linux/src/app/src/engine_client.rs": "f5c6b19024eb419b0299275dcd81f05143f12826535ac9cf061257498694d502",
   "platforms/linux/src/app/src/tabs/settings.rs": "afe0bcc010f14e85a4fa14f7c83de2da6fcc302552c7776341033bc995c747a7",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "d125e647269633def7438245657d0e4e447ba9e2d477aac72afda918b2330cf0",

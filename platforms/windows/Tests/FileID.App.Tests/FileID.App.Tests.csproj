@@ -44,5 +44,10 @@
     </PropertyGroup>
     <Error Condition="!Exists('$(WindowsSdkRuntimeAssembly)')" Text="Windows SDK runtime assembly is missing from app output: $(WindowsSdkRuntimeAssembly)" />
     <Copy SourceFiles="$(WindowsSdkRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <PropertyGroup>
+      <WinRtRuntimeAssembly>$(MSBuildProjectDirectory)\..\..\src\FileID.App\bin\$(Platform)\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\WinRT.Runtime.dll</WinRtRuntimeAssembly>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(WinRtRuntimeAssembly)')" Text="WinRT runtime assembly is missing from app output: $(WinRtRuntimeAssembly)" />
+    <Copy SourceFiles="$(WinRtRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>
