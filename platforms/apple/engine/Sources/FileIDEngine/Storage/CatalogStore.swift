@@ -82,47 +82,77 @@ public enum CatalogStore {
         }
     }
 
-    static func search(_ db: GRDB.Database, query: String, kinds: [String] = [], personIDs: [Int64] = []) throws -> [CatalogHit] {
+    static func search(
+        _ db: GRDB.Database,
+        query: String,
+        kinds: [String] = [],
+        personIDs: [Int64] = [],
+        eventIDs: [String] = [],
+        timeSeconds: Double? = nil
+    ) throws -> [CatalogHit] {
         guard kinds.allSatisfy({ ["image", "video", "pdf", "doc", "audio", "other", "model"].contains($0) }) else { throw InvalidRequest() }
         guard personIDs.allSatisfy({ $0 > 0 }) else { throw InvalidRequest() }
+        guard eventIDs.allSatisfy({ !$0.isEmpty && $0.count <= 200 }) else { throw InvalidRequest() }
+        guard timeSeconds.map({ $0.isFinite && $0 >= 0 }) ?? true else { throw InvalidRequest() }
+
         let filter = kinds.isEmpty ? nil : String(decoding: try JSONEncoder().encode(kinds), as: UTF8.self)
         let peopleFilter = personIDs.isEmpty ? nil : String(decoding: try JSONEncoder().encode(Array(Set(personIDs)).sorted()), as: UTF8.self)
-        let meaningful = query.split(whereSeparator: \.isWhitespace).filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }.joined(separator: " ")
+        let eventFilter = eventIDs.isEmpty ? nil : String(decoding: try JSONEncoder().encode(Array(Set(eventIDs)).sorted()), as: UTF8.self)
+        let meaningful = query.split(whereSeparator: \.isWhitespace)
+            .filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }
+            .joined(separator: " ")
+
         guard !meaningful.isEmpty else {
-            guard filter != nil || peopleFilter != nil else { return [] }
-            var hits = try Row.fetchAll(db, sql: """
-                SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
-                WHERE f.failed=0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+            guard filter != nil || peopleFilter != nil || eventFilter != nil || timeSeconds != nil else { return [] }
+            var hits: [CatalogHit]
+            if let timeSeconds {
+                hits = try temporalEvidenceHits(db, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds)
+            } else {
+                hits = try Row.fetchAll(db, sql: """
+                    SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
+                    WHERE f.failed=0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+                      AND (? IS NULL OR f.id IN (
+                        SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                        UNION SELECT file_id FROM catalog_observations
+                          WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+                      ))
+                      AND (? IS NULL OR f.id IN (
+                        SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+                      ))
+                    ORDER BY id DESC LIMIT 100
+                    """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter]).map { row in
+                    CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"])
+                }
+            }
+            hits.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds))
+            return hits
+        }
+
+        let match = FTSQuery.quoted(meaningful)
+        var results: [CatalogHit] = []
+        if timeSeconds == nil {
+            let files = try Row.fetchAll(db, sql: """
+                SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description
+                FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid
+                WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
                   AND (? IS NULL OR f.id IN (
                     SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
                     UNION SELECT file_id FROM catalog_observations
                       WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
                   ))
-                ORDER BY id DESC LIMIT 100
-                """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter]).map { row in
-                CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"])
+                  AND (? IS NULL OR f.id IN (
+                    SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+                  ))
+                ORDER BY bm25(catalog_file_fts) LIMIT 100
+                """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter])
+            for row in files {
+                results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
             }
-            hits.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter))
-            return hits
         }
-        let match = FTSQuery.quoted(meaningful)
-        var results: [CatalogHit] = []
-        let files = try Row.fetchAll(db, sql: """
-            SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description
-            FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid
-            WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
-              AND (? IS NULL OR f.id IN (
-                SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
-                UNION SELECT file_id FROM catalog_observations
-                  WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
-              ))
-            ORDER BY bm25(catalog_file_fts) LIMIT 100
-            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter])
-        for row in files {
-            results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
-        }
+
         let evidence = try Row.fetchAll(db, sql: """
-            SELECT e.evidence_id,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END AS kind,e.text,f.id,f.path_text,c.start_seconds AS chapter_time,p.start_seconds AS passage_time,p.page
+            SELECT e.evidence_id,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END AS kind,
+                   e.text,f.id,f.path_text,c.start_seconds AS chapter_time,p.start_seconds AS passage_time,p.page
             FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER)
             LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter'
             LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage'
@@ -132,36 +162,100 @@ public enum CatalogStore {
                 UNION SELECT file_id FROM catalog_observations
                   WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
               ))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+              ))
+              AND (? IS NULL OR (
+                (c.start_seconds <= ? AND c.end_seconds >= ?)
+                OR (c.start_seconds IS NOT NULL AND ABS(c.start_seconds - ?) <= 15)
+                OR (p.start_seconds <= ? AND COALESCE(p.end_seconds,p.start_seconds) >= ?)
+                OR (p.start_seconds IS NOT NULL AND ABS(p.start_seconds - ?) <= 15)
+              ))
               AND (c.stale=0 OR p.stale=0)
             ORDER BY bm25(catalog_evidence_fts) LIMIT 100
-            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter])
+            """, arguments: [
+                match, filter, filter, peopleFilter, peopleFilter, peopleFilter,
+                eventFilter, eventFilter,
+                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds
+            ])
         for row in evidence {
             let chapterTime: Double? = row["chapter_time"]
-            results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["text"], evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]))
+            results.append(CatalogHit(
+                fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["text"],
+                evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]
+            ))
         }
-        results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter))
+        results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds))
         return results
     }
 
-    private static func personObservationHits(_ db: GRDB.Database, peopleFilter: String?) throws -> [CatalogHit] {
-        guard let peopleFilter else { return [] }
+    private static func temporalEvidenceHits(
+        _ db: GRDB.Database,
+        filter: String?,
+        peopleFilter: String?,
+        eventFilter: String?,
+        timeSeconds: Double
+    ) throws -> [CatalogHit] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT e.evidence_id,
+                   CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END AS kind,
+                   e.text,f.id,f.path_text,c.start_seconds AS chapter_time,p.start_seconds AS passage_time,p.page
+            FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER)
+            LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter'
+            LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage'
+            WHERE f.failed=0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+              ))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM catalog_observations
+                WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0 AND start_seconds IS NOT NULL
+                  AND ((start_seconds <= ? AND COALESCE(end_seconds,start_seconds) >= ?) OR ABS(start_seconds - ?) <= 15)
+              ))
+              AND (
+                (e.kind='chapter' AND c.stale=0 AND ((c.start_seconds <= ? AND c.end_seconds >= ?) OR ABS(c.start_seconds - ?) <= 15))
+                OR (e.kind='passage' AND p.stale=0 AND p.start_seconds IS NOT NULL
+                    AND ((p.start_seconds <= ? AND COALESCE(p.end_seconds,p.start_seconds) >= ?) OR ABS(p.start_seconds - ?) <= 15))
+              )
+            ORDER BY COALESCE(c.start_seconds,p.start_seconds),e.evidence_id LIMIT 100
+            """, arguments: [
+                filter, filter, eventFilter, eventFilter,
+                peopleFilter, peopleFilter, timeSeconds, timeSeconds, timeSeconds,
+                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds
+            ])
+        return rows.map { row in
+            let chapterTime: Double? = row["chapter_time"]
+            return CatalogHit(
+                fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["text"],
+                evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]
+            )
+        }
+    }
+
+    private static func personObservationHits(
+        _ db: GRDB.Database,
+        peopleFilter: String?,
+        eventFilter: String? = nil,
+        timeSeconds: Double? = nil
+    ) throws -> [CatalogHit] {
+        guard peopleFilter != nil || timeSeconds != nil else { return [] }
         return try Row.fetchAll(db, sql: """
             SELECT o.id AS observation_id,o.start_seconds,o.user_edited,p.name,p.title,p.first_name,p.middle_name,p.last_name,p.suffix,
                    f.id,f.path_text,f.kind
-            FROM catalog_observations o
-            JOIN persons p ON p.id=o.person_id
+            FROM catalog_observations o JOIN persons p ON p.id=o.person_id
             JOIN files f ON f.id=o.file_id
-            WHERE o.person_id IN (SELECT value FROM json_each(?)) AND o.stale=0
+            WHERE (? IS NULL OR o.person_id IN (SELECT value FROM json_each(?))) AND o.stale=0
               AND o.start_seconds IS NOT NULL AND f.failed=0 AND f.kind='video'
+              AND (? IS NULL OR ((o.start_seconds <= ? AND COALESCE(o.end_seconds,o.start_seconds) >= ?) OR ABS(o.start_seconds - ?) <= 15))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+              ))
             ORDER BY f.id,o.start_seconds,o.id LIMIT 100
-            """, arguments: [peopleFilter]).map { row in
-            let structuredName = [
-                row["title"] as String?,
-                row["first_name"] as String?,
-                row["middle_name"] as String?,
-                row["last_name"] as String?,
-                row["suffix"] as String?
-            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            """, arguments: [
+                peopleFilter, peopleFilter, timeSeconds, timeSeconds, timeSeconds, timeSeconds, eventFilter, eventFilter
+            ]).map { row in
+            let structuredName = ["first_name", "middle_name", "last_name", "suffix"]
+                .compactMap { (row[$0] as String?)?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
                 .joined(separator: " ")
             let legacyName: String? = row["name"]
@@ -171,12 +265,9 @@ public enum CatalogStore {
             let observationID: String = row["observation_id"]
             let startSeconds: Double = row["start_seconds"]
             return CatalogHit(
-                fileID: row["id"],
-                path: row["path_text"],
-                kind: row["kind"],
+                fileID: row["id"], path: row["path_text"], kind: row["kind"],
                 text: "Person: \(personName) · \(source) appearance",
-                evidenceID: "person:" + observationID,
-                startSeconds: startSeconds
+                evidenceID: "person:" + observationID, startSeconds: startSeconds
             )
         }
     }

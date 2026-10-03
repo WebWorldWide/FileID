@@ -116,4 +116,85 @@ import FileIDShared
         #expect(response?.hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 } == true)
         #expect(response?.message.contains("people: Grandma") == true)
     }
+
+    @Test func eventAndTimeFiltersSurviveConversationalRefinement() {
+        let birthday = ChatSearchPlan.KnownEvent(id: "birthday-2025", names: ["Grandma Birthday"])
+        let initial = ChatSearchPlan.resolve(
+            "Show videos from Grandma's Birthday at 02:30 gift opening",
+            knownEvents: [birthday]
+        )
+
+        #expect(initial.query == "gift opening")
+        #expect(initial.kinds == ["video"])
+        #expect(initial.eventIDs == ["birthday-2025"])
+        #expect(initial.eventNames == ["Grandma Birthday"])
+        #expect(initial.timeSeconds == 150)
+
+        let refined = ChatSearchPlan.resolve("only photos", previous: initial, knownEvents: [birthday])
+        #expect(refined.query == "gift opening")
+        #expect(refined.kinds == ["image"])
+        #expect(refined.eventIDs == ["birthday-2025"])
+        #expect(refined.timeSeconds == 150)
+    }
+
+    @Test func invalidTimestampRemainsSearchText() {
+        let plan = ChatSearchPlan.resolve("find videos at 2:99")
+        #expect(plan.timeSeconds == nil)
+        #expect(plan.query == "2:99")
+
+        let longTimestamp = ChatSearchPlan.resolve("find videos at 01:02:03")
+        #expect(longTimestamp.timeSeconds == 3_723)
+    }
+
+    @Test func namedEventAndTimestampReturnMatchingChapterEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await db.pool.write { sql in
+            for id in 1...2 {
+                try sql.execute(
+                    sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?,?,?,100,0,'video','mov','Gift opening')",
+                    arguments: [id, "/offline/birthday-\(id).mov", id]
+                )
+            }
+            try sql.execute(sql: "INSERT INTO catalog_events(id,title,goal,user_edited) VALUES('birthday-2025','Grandma Birthday','gift opening',1)")
+            try sql.execute(sql: "INSERT INTO catalog_events(id,title,goal,user_edited) VALUES('other-event','Other Event','gift opening',1)")
+            try sql.execute(sql: "INSERT INTO catalog_event_files(event_id,file_id) VALUES('birthday-2025',1),('other-event',2)")
+            try sql.execute(
+                sql: "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES(?,1,145,165,'Gift opening','Grandma opens the present','1:1','user',1,1,0),(?,1,300,310,'Gift opening','A later gift','1:1','user',1,1,0),(?,1,148,151,'Gift opening','Stale revision','old','user',1,1,1)",
+                arguments: ["gift-at-time", "gift-later", "gift-stale"]
+            )
+        }
+
+        let timestampOnly = try await db.pool.read { sql in
+            try CatalogStore.search(sql, query: "", eventIDs: ["birthday-2025"], timeSeconds: 150)
+        }
+        #expect(timestampOnly.map(\.evidenceID) == ["gift-at-time"])
+
+        let capture = WireCapture()
+        await ChatService().handle(
+            ChatRequest(
+                requestID: "event-time-chat", conversationID: "event-time-chat", action: "send",
+                text: "Show videos from Grandma's Birthday at 02:30 gift opening", useModel: false
+            ),
+            database: db,
+            sink: capture.sink
+        )
+        await capture.finish()
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let response = try capture.bytes().split(separator: 10)
+            .map { try IPCCoder.decoder.decode(IPCEvent.self, from: Data($0)) }
+            .compactMap { event -> ChatResponse? in
+                if case .chatResponse(let value) = event.payload { return value }
+                return nil
+            }
+            .last
+
+        #expect(response?.hits.count == 1)
+        #expect(response?.hits.first?.fileID == 1)
+        #expect(response?.hits.first?.evidenceID == "gift-at-time")
+        #expect(response?.hits.first?.startSeconds == 145)
+        #expect(response?.message.contains("Grandma Birthday") == true)
+        #expect(response?.message.contains("2:30") == true)
+    }
 }
