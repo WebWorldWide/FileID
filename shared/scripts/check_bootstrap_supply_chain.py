@@ -30,7 +30,7 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "build.sh": "07f636a7a6a10a3d39ee636d4dc63dce1af9aa7c101221987b9e88539deaa68c",
     "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
     "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
-    "platforms/apple/run.sh": "09fbe948fd1488f5bca529bf97059df1be4da74b5227b5b1ac0fa787dabf4864",
+    "platforms/apple/run.sh": "8bcb4be432d5e3c1ad7adc1fb9474dee574e14bcaf8ddd5eede0ab51fac87455",
     "platforms/apple/scripts/assemble_app.sh": "56453e586cfd29169aecaa6333e48df4872ffc43a46e9cd4c9a478c42c672d1f",
     "platforms/apple/scripts/build_corpus.sh": "a5f53f4df77c07dc7aefd4e0c31dbbaa90dac92e68d3e614c789c36320cced87",
     "platforms/apple/scripts/build_dmg.sh": "11a656c6ed2345b2cf1da55acca3d29523b0b9bf0ba3b5096e9fc4b294bc477e",

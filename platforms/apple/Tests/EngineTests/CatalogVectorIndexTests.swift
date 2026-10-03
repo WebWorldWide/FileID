@@ -251,6 +251,27 @@ struct CatalogVectorIndexTests {
         #expect(results.count == 40)
         #expect(results.allSatisfy { $0.map(\.fileID) == [1] && $0.first?.cosine == 1 })
     }
+    @Test("background indexing defers to a resident model and resumes after it unloads")
+    func indexDefersToResidentModel() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) })
+        let model = try await scheduler.reserveMemory(12_250, priority: .interactive)
+        let index = CatalogVectorIndex(pool: database.pool, directory: root.appendingPathComponent("indexes"),
+                                       resourceScheduler: scheduler)
+
+        await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await index.synchronize() }
+        #expect(try await CatalogStore.jobs(database).first?.state == "paused")
+
+        await scheduler.release(model)
+        let resumed = await index.control(CatalogRequest(requestID: "resume", action: "resumeJob", jobID: CatalogIndexJob.id))
+        #expect(resumed.status == "ok")
+        _ = try await index.synchronize()
+        #expect(try await CatalogStore.jobs(database).first?.state == "completed")
+    }
+
     @Test("memory deferral and restart recovery keep an explicit resumable job")
     func jobRecoveryAndMemory() async throws {
         let root = try makeRoot()
@@ -258,7 +279,7 @@ struct CatalogVectorIndexTests {
         let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
         try await seed(database, id: 1, vector: blob(0))
         let directory = root.appendingPathComponent("indexes")
-        let constrained = CatalogVectorIndex(pool: database.pool, directory: directory, memoryInfo: { (16_384, 32) })
+        let constrained = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 32) }))
         await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await constrained.synchronize() }
         let deferred = try #require(try await CatalogStore.jobs(database).first)
         #expect(deferred.kind == "catalogIndex" && deferred.state == "paused" && deferred.progress == 0)
@@ -266,7 +287,7 @@ struct CatalogVectorIndexTests {
         try await database.pool.write { db in
             try db.execute(sql: "UPDATE catalog_jobs SET state='running',checkpoint_json='{}',progress=0.4 WHERE id=?", arguments: [CatalogIndexJob.id])
         }
-        let restarted = CatalogVectorIndex(pool: database.pool, directory: directory, memoryInfo: { (16_384, 8_192) })
+        let restarted = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
         try await restarted.recover()
         #expect(try await CatalogStore.jobs(database).first?.state == "paused")
         #expect(try await CatalogStore.jobs(database).first?.progress == 0.4)
@@ -289,7 +310,7 @@ struct CatalogVectorIndexTests {
         let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
         try await seed(database, id: 1, vector: blob(0))
         let directory = root.appendingPathComponent("indexes")
-        let index = CatalogVectorIndex(pool: database.pool, directory: directory, memoryInfo: { (16_384, 8_192) })
+        let index = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
         _ = try await index.synchronize()
         let paths = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         let snapshots = try paths.map { try Data(contentsOf: $0) }
@@ -329,7 +350,7 @@ struct CatalogVectorIndexTests {
         let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
         try await seed(database, id: 1, vector: blob(0))
         try await seed(database, id: 2, vector: blob(1))
-        let index = CatalogVectorIndex(pool: database.pool, directory: root.appendingPathComponent("limited"), maximumFiles: 1, memoryInfo: { (16_384, 8_192) })
+        let index = CatalogVectorIndex(pool: database.pool, directory: root.appendingPathComponent("limited"), maximumFiles: 1, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
         await #expect(throws: CatalogVectorIndex.IndexError.self) { try await index.synchronize() }
         #expect(try await CatalogStore.jobs(database).first?.state == "failed")
         let keywords = await CatalogStore.handle(CatalogRequest(requestID: "search", action: "search", query: "fixture"), database: database)
@@ -357,7 +378,7 @@ struct CatalogVectorIndexTests {
         let handle = try FileHandle(forWritingTo: path)
         try handle.truncate(atOffset: 64 * 1024 * 1024)
         try handle.close()
-        let index = CatalogVectorIndex(pool: database.pool, directory: directory, memoryInfo: { (16_384, 1_200) })
+        let index = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 1_200) }))
         await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await index.synchronize() }
         #expect(try await CatalogStore.jobs(database).first?.state == "paused")
         #expect(try path.resourceValues(forKeys: [.fileSizeKey]).fileSize == 64 * 1024 * 1024)

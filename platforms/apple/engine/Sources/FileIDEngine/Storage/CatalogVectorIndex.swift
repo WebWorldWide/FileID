@@ -64,20 +64,18 @@ actor CatalogVectorIndex {
     private let pool: DatabasePool
     private let directory: URL
     private let maximumFiles: Int
-    private let memoryInfo: @Sendable () -> (total: UInt64, available: UInt64)
+    private let resourceScheduler: ResourceScheduler
     private var cache: Cache?
     private var worker: Task<Prepared, Error>?
     private var workerID: UUID?
     private(set) var failed = false
 
     init(pool: DatabasePool, directory: URL, maximumFiles: Int = 200_000,
-         memoryInfo: @escaping @Sendable () -> (total: UInt64, available: UInt64) = {
-             (ProcessInfo.processInfo.physicalMemory / 1_048_576, UInt64(max(0, Hardware.availableMemoryMB())))
-         }) {
+         resourceScheduler: ResourceScheduler = .shared) {
         self.pool = pool
         self.directory = directory
         self.maximumFiles = maximumFiles
-        self.memoryInfo = memoryInfo
+        self.resourceScheduler = resourceScheduler
     }
 
     func synchronize() async throws -> Revision {
@@ -89,11 +87,12 @@ actor CatalogVectorIndex {
             let pool = self.pool
             let directory = self.directory
             let maximumFiles = self.maximumFiles
-            let memoryInfo = self.memoryInfo
+            let resourceScheduler = self.resourceScheduler
             let id = UUID()
             workerID = id
-            worker = Task.detached(priority: .utility) { () throws -> Prepared in
-                try Self.prepareWorker(previous, pool: pool, directory: directory, maximumFiles: maximumFiles, memoryInfo: memoryInfo)
+            worker = Task.detached(priority: .utility) { () async throws -> Prepared in
+                try await Self.prepareWorker(previous, pool: pool, directory: directory,
+                                             maximumFiles: maximumFiles, resourceScheduler: resourceScheduler)
             }
         }
         let id = workerID
@@ -174,19 +173,18 @@ actor CatalogVectorIndex {
     }
 
     private static func prepareWorker(_ previous: Cache?, pool: DatabasePool, directory: URL,
-                                      maximumFiles: Int, memoryInfo: @Sendable () -> (total: UInt64, available: UInt64)) throws -> Prepared {
+                                      maximumFiles: Int, resourceScheduler: ResourceScheduler) async throws -> Prepared {
         try Task.checkCancellation()
-        let latest = try pool.read { try Self.revision($0) }
+        let latest = try await pool.read { try Self.revision($0) }
         if let previous, previous.revision == latest {
             try CatalogIndexJob.finishCached(pool)
             return Prepared(cache: previous, revision: latest)
         }
         try CatalogIndexJob.begin(pool)
         do {
-            let count = try pool.read { db in
+            let count = try await pool.read { db in
                 try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0", arguments: [CLIPEmbeddingSpace.modelID]) ?? 0
             }
-            let memory = memoryInfo()
             let (graphURL, manifestURL) = Self.paths(directory)
             let graphBytes = max(0, (try? graphURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             let manifestBytes = max(0, (try? manifestURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
@@ -195,12 +193,24 @@ actor CatalogVectorIndex {
             let vectorMegabytes = min(250_000, rawCount) * 9 / 1024
             let diskMegabytes = (graphBytes * 3 + manifestBytes * 2) / 1_048_576
             let requested = UInt64(max(vectorMegabytes, diskMegabytes) + 64)
-            if ModelMemoryAdmission.rejection(totalMB: memory.total, availableMB: memory.available, requestedMB: requested) != nil {
-                throw CatalogIndexJob.AdmissionDeferred(message: "Search index preparation needs about \(requested) MB plus system headroom. Free memory and resume its job in Tools.")
+            let reservation: ResourceScheduler.MemoryLease
+            do {
+                reservation = try await resourceScheduler.reserve(
+                    ResourceScheduler.Demand(memoryMB: requested, cpuUnits: 1, ioUnits: 1),
+                    priority: .background
+                )
+            } catch let error as ResourceScheduler.AdmissionError {
+                throw CatalogIndexJob.AdmissionDeferred(message: error.localizedDescription)
             }
-            let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
-            try CatalogIndexJob.finish(pool)
-            return Prepared(cache: cache, revision: cache.revision)
+            do {
+                let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
+                try CatalogIndexJob.finish(pool)
+                await resourceScheduler.release(reservation)
+                return Prepared(cache: cache, revision: cache.revision)
+            } catch {
+                await resourceScheduler.release(reservation)
+                throw error
+            }
         } catch {
             try? CatalogIndexJob.finish(pool, error: error)
             throw error
