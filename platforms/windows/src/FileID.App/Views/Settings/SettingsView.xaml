@@ -452,9 +452,6 @@
                                         Content="Verify install"
                                         Click="OnVerifyCudnnClicked"
                                         ToolTipService.ToolTip="Re-probe cuDNN after manually installing it from NVIDIA's site." />
-                                <Button Content="Get cuDNN"
-                                        Click="OnOpenCudnnDownloadsClicked"
-                                        ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser. Use this if you want CUDA Toolkit + cuDNN system-wide." />
                             </StackPanel>
                         </Grid>
 

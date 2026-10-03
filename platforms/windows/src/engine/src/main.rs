@@ -132,7 +132,9 @@ async fn async_main() -> Result<()> {
     // subsequent app launches.
     if let Ok(models_dir) = paths::models_dir() {
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("cuda"));
-        let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("openvino"));
+        if let Some(openvino_dir) = models::runtime::pack_dir("openvino") {
+            let _ = platform::register_dll_dirs_under(&openvino_dir);
+        }
         let _ = platform::register_dll_dirs_under(&models_dir.join("packs").join("qnn"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp"));
         let _ = platform::register_dll_dirs_under(&models_dir.join("llama.cpp-cuda"));
@@ -140,6 +142,13 @@ async fn async_main() -> Result<()> {
         // The archive extracts a versioned dir containing bin/, so register the
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
+
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(application_dir) = executable.parent() {
+                let bundled_runtimes = application_dir.join("RuntimeBundles");
+                let _ = platform::register_dll_dirs_under(&bundled_runtimes.join("llama.cpp"));
+            }
+        }
 
         // Accelerator pack: pyke's `download-binaries` ships only the base
         // onnxruntime.dll + onnxruntime_providers_shared.dll (DirectML/CPU) —

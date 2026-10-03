@@ -1,4 +1,4 @@
-// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
+﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
 // Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
 // stdout loop, event router) stays separate from the per-command surface.
 
@@ -52,6 +52,7 @@ internal sealed partial class EngineClient
         }
 
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
         return owner;
     }
 
@@ -60,6 +61,7 @@ internal sealed partial class EngineClient
         if (_deepAnalyzeSlot.Release(owner))
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
         }
     }
 
@@ -71,6 +73,7 @@ internal sealed partial class EngineClient
 
         owner.Payload.Completion?.TrySetResult(result);
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
         return true;
     }
 
@@ -80,6 +83,7 @@ internal sealed partial class EngineClient
         owner.Payload.Completion?.TrySetException(
             new InvalidOperationException("The engine generation ended before Deep Analyze completed."));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
     }
 
 
@@ -170,6 +174,11 @@ internal sealed partial class EngineClient
     public ulong LastScanProcessedFiles { get; private set; }
     public async Task StartScanAsync(string rootPath, string? rootDisplay = null, bool rescan = false)
     {
+        if (GpuDeviceRemoved)
+        {
+            throw new InvalidOperationException(GpuRestartRequiredMessage);
+        }
+
         if (Phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan)
         {
             throw new InvalidOperationException("A scan is already in progress.");

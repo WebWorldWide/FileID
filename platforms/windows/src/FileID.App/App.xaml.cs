@@ -150,14 +150,6 @@ public partial class App : Application
             try { ScanCompleteToast.Start(); }
             catch (System.Exception ex) { Trace($"ScanCompleteToast.Start failed (non-fatal): {ex.Message}"); }
 
-            Trace("CudaAutoInstaller.Hook");
-            try { CudaAutoInstaller.Hook(); }
-            catch (System.Exception ex) { Trace($"CudaAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
-
-            Trace("LlamaRuntimeAutoInstaller.Hook");
-            try { LlamaRuntimeAutoInstaller.Hook(); }
-            catch (System.Exception ex) { Trace($"LlamaRuntimeAutoInstaller.Hook failed (non-fatal): {ex.Message}"); }
-
             // SmolVLM removed (V16.29): scan-time scene tags come from CLIP
             // zero-shot. The optional higher-quality VLM (Qwen / Gemma) is
             // installed manually from the Deep Analyze tab — no silent

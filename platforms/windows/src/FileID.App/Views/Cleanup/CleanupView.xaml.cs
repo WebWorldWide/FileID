@@ -412,7 +412,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try
                 {
-                return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
                 }
                 catch { return false; }
             });

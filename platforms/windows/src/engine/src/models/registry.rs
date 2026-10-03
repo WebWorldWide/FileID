@@ -336,202 +336,22 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── llama.cpp Windows runtime ZIP. Extracted in-place by
-        // `handle_prewarm_model`; the .zip suffix triggers extraction.
-        "llama_runtime_x64" => {
-            let dir = models_root.join("llama.cpp");
-            LookupResult::Found(Model {
-                id: "llama_runtime_x64",
-                display_name: "llama.cpp runtime",
-                files: vec![FileEntry {
-                    // Pinned to a specific release for reproducibility.
-                    // Bump intentionally and verify the zip still ships
-                    // `llama-mtmd-cli.exe` (Deep Analyze CLI) + `llama-server.exe`
-                    // (the persistent VlmServer) + `mtmd.dll`.
-                    //
-                    // b9254 (2026-05-20) verified to contain all three; the
-                    // prior pin b4404 (2024-12) predated the mtmd unification
-                    // (no llama-mtmd-cli.exe) and Qwen2.5-VL, which is why the
-                    // VLM path failed with "runtime not found". This is the
-                    // Vulkan build — works on NVIDIA/AMD/Intel/Adreno and is the
-                    // dir `VlmRunner`/`VlmServer` probe (`Models\llama.cpp\`).
-                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-vulkan-x64.zip"
-                        .to_string(),
-                    dest: dir.join("llama-runtime.zip"),
-                    sha256: Some("45d276bdf73c80c795860e8421fe27ee4b1aa0a4d0916fe60dfc90dca1d4117b".into()),
-                    approx_bytes: 32_681_387,
-                }],
-            })
-        }
-
-        // ── Whisper (audio transcription, Deep Analyze). MIT (OpenAI Whisper +
-        // whisper.cpp). One install fetches the CPU runtime pack (extracted in place
-        // by the .zip suffix; ships `Release\main.exe` + ggml dlls) + the multilingual
-        // ggml-base model. The engine's `WhisperRunner` probes `Models\whisper.cpp\`
-        // for the CLI and `Models\whisper\` for the .bin.
-        "whisper" => {
-            let pack_dir = models_root.join("whisper.cpp");
-            let model_dir = models_root.join("whisper");
-            LookupResult::Found(Model {
-                id: "whisper",
-                display_name: "Whisper (audio transcription)",
-                files: vec![
-                    FileEntry {
-                        // whisper.cpp v1.9.0 CPU x64 pack (universal — no GPU runtime).
-                        url: "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
-                            .to_string(),
-                        dest: pack_dir.join("whisper-runtime.zip"),
-                        sha256: Some(
-                            "00c4304b6be363a224a4b69829df49009f74131df8c3ce6a5878b89a11cd26ef".into(),
-                        ),
-                        approx_bytes: 5_410_599,
-                    },
-                    FileEntry {
-                        // ggml-base multilingual (so `-l auto` works for non-English).
-                        url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                            .to_string(),
-                        dest: model_dir.join("ggml-base.bin"),
-                        sha256: Some(
-                            "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into(),
-                        ),
-                        approx_bytes: 147_951_465,
-                    },
-                ],
-            })
-        }
-
-        // ── cuDNN for Windows (CUDA 12 line). Public NVIDIA-hosted CDN —
-        // same channel NVIDIA's own developer site points at and the
-        // redistributable URL the cuDNN docs publish. Installed ON DEMAND
-        // (user clicks the GPU acceleration pack / Install-all) alongside the
-        // ORT CUDA provider so the ORT CUDA EP has the cuDNN DLLs on its
-        // loader path. Engine startup calls
-        // `register_dll_dirs_under(&models_dir.join("cudnn"))` so the
-        // LoadLibrary policy can find the DLLs after extraction.
-        "cudnn_runtime_x64" => {
-            let dir = models_root.join("cudnn");
-            LookupResult::Found(Model {
-                id: "cudnn_runtime_x64",
-                display_name: "NVIDIA cuDNN runtime",
-                files: vec![FileEntry {
-                    // Pinned version. Bump intentionally and verify the
-                    // archive still extracts a `bin/` (or root) directory
-                    // containing `cudnn64_9.dll` + friends. NVIDIA hosts
-                    // each release under a stable filename pattern, so
-                    // URL drift is unlikely between point releases.
-                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip"
-                        .to_string(),
-                    dest: dir.join("cudnn-runtime.zip"),
-                    sha256: Some("3a4cecc8b6d6aa7f6777620e6f2c129b76be635357c4506f2c4ccdbe0e2a1641".into()),
-                    approx_bytes: 430_000_000,
-                }],
-            })
-        }
-
-        // ── ONNX Runtime CUDA Performance Pack. pyke's `download-binaries`
-        // ships only the base onnxruntime.dll + onnxruntime_providers_shared.dll
-        // (DirectML/CPU), NOT onnxruntime_providers_cuda.dll — so the CUDA EP
-        // can't bind and NVIDIA falls through to DirectML (~3-5x slower). This
-        // pack is Microsoft's official ORT GPU build, which bundles the matched
-        // onnxruntime.dll + onnxruntime_providers_cuda.dll + providers_shared.
-        // VERSION MUST MATCH the pyke ort-sys build (1.22.0 — read off the
-        // shipped onnxruntime.dll ProductVersion); a mismatch silently fails to
-        // bind. ORT is MIT and Microsoft hosts it on github.com (CI-allowlisted),
-        // so no HF hosting needed. cudart/cublas come from the llama.cpp-cuda
-        // pack (CUDA 12.4) or the system CUDA toolkit; cuDNN auto-installs.
-        // The zip extracts to packs/cuda/onnxruntime-win-x64-gpu-1.22.0/lib/*.dll;
-        // main.rs registers packs/cuda for DLL search AND pins ORT_DYLIB_PATH to
-        // the pack's onnxruntime.dll so the provider binds against the same build.
-        "ort_cuda_x64" => {
-            let dir = models_root.join("packs").join("cuda");
-            LookupResult::Found(Model {
-                id: "ort_cuda_x64",
-                display_name: "ONNX Runtime CUDA pack",
-                files: vec![FileEntry {
-                    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"
-                        .to_string(),
-                    dest: dir.join("ort-cuda.zip"),
-                    sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
-                    approx_bytes: 312_700_000,
-                }],
-            })
-        }
-
-        // ── ONNX Runtime OpenVINO Performance Pack (Intel GPUs/NPUs). Intel's
-        // accelerated path; OpenVINO is Apache-2.0 so it's commercial-clean to
-        // redistribute. Like the CUDA pack, pyke's base ORT lacks the OpenVINO
-        // provider — this pack supplies a matched ORT 1.22.0 build + the Intel
-        // OpenVINO 2025.1 runtime DLLs, assembled verbatim from the official
-        // PyPI wheels `onnxruntime-openvino==1.22.0` + `openvino==2025.1.0`
-        // (license texts bundled inside the zip: ORT MIT + OpenVINO Apache-2.0).
-        // The zip extracts onnxruntime.dll + onnxruntime_providers_openvino.dll
-        // + openvino*.dll + plugins.xml under packs/openvino/; main.rs pins
-        // ORT_DYLIB_PATH to its onnxruntime.dll on Intel GPUs; ep_guard reverts
-        // to DirectML if the bind crashes. UNVERIFIED on Intel hardware (no
-        // Intel GPU in the dev env) — but assembled from the canonical wheels
-        // and safe behind ep_guard. Hosted on HF (CI-allowlisted).
-        "ort_openvino_x64" => {
-            let dir = models_root.join("packs").join("openvino");
-            LookupResult::Found(Model {
-                id: "ort_openvino_x64",
-                display_name: "ONNX Runtime OpenVINO pack",
-                files: vec![FileEntry {
-                    url: "https://huggingface.co/Web-World-Wide/OpenVINO/resolve/main/ort-openvino-win-x64-1.22.0.zip"
-                        .to_string(),
-                    dest: dir.join("ort-openvino.zip"),
-                    sha256: Some("de3d73e9fd9bc33931343ec4e11c21bc8fe5d1ae0921e24ffc574de171118154".into()),
-                    approx_bytes: 41_300_000,
-                }],
-            })
-        }
-
-        // ── llama.cpp CUDA runtime ZIP. Same extract-in-place flow as
-        // the Vulkan sibling above, but installed into a separate dir
-        // (`llama.cpp-cuda`) so both runtimes can coexist. Auto-installed
-        // on NVIDIA hardware by `CudaAutoInstaller.cs`; manually
-        // installable from Settings → Performance → "CUDA llama.cpp".
-        // SentinelDir in the C# auto-installer is keyed to this folder
-        // name — keep them in sync.
-        "llama_runtime_cuda_x64" => {
-            let dir = models_root.join("llama.cpp-cuda");
-            LookupResult::Found(Model {
-                id: "llama_runtime_cuda_x64",
-                display_name: "llama.cpp runtime (CUDA)",
-                files: vec![
-                    // CUDA-backend llama binaries. b9254 ships
-                    // `llama-mtmd-cli.exe` + `llama-server.exe` + `mtmd.dll`
-                    // (same surface as the Vulkan build), so the VLM can use the
-                    // faster CUDA path on NVIDIA. The prior b4475 pin had none of
-                    // the mtmd surface.
-                    FileEntry {
-                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip"
-                            .to_string(),
-                        dest: dir.join("llama-runtime.zip"),
-                        sha256: Some("61280c0e77da6422e0c07e9c930a48903d403cd6f577fe330c1bf94cb7495889".into()),
-                        approx_bytes: 259_875_510,
-                    },
-                    // CUDA runtime DLLs (cudart / cublas). b9254 ships these as a
-                    // SEPARATE asset (b4475 bundled them). Extract into the same
-                    // dir so the CUDA binaries are self-contained — the engine
-                    // AddDllDirectory's `llama.cpp-cuda`, so the loader finds
-                    // cudart64_12.dll / cublas64_12.dll beside the exes. Without
-                    // this the CUDA server won't load and the VLM falls back to
-                    // the Vulkan runtime.
-                    FileEntry {
-                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip"
-                            .to_string(),
-                        dest: dir.join("cudart.zip"),
-                        sha256: Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6".into()),
-                        approx_bytes: 391_443_627,
-                    },
-                ],
-            })
-        }
-
-        // ── BGE-small-en-v1.5 text embeddings (Phase 4b). MIT. ONNX from
-        // Xenova's community export; the WordPiece vocab travels with it.
-        // Used for semantic search over document text.
-        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
+            // Executable runtimes are shipped in the signed application package. Only
+    // model weights remain in the downloader registry.
+    "whisper" => {
+        let model_dir = models_root.join("whisper");
+        LookupResult::Found(Model {
+            id: "whisper",
+            display_name: "Whisper (audio transcription)",
+            files: vec![FileEntry {
+                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+                    .to_string(),
+                dest: model_dir.join("ggml-base.bin"),
+                sha256: Some("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into()),
+                approx_bytes: 147_951_465,
+            }],
+        })
+    }        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
             let dir = models_root.join("bge_text");
             LookupResult::Found(Model {
                 id: "bge_text",

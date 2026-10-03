@@ -289,34 +289,21 @@ public sealed class AdversarialUiSafetyContractTests
     }
 
     [Fact]
-    public void ExcludedFolderPurgeFencesRemovalAndStaleCompletionUi()
+    public void RemovedFolderExclusionsDoNotLeaveDeadSettingsControls()
     {
-        var settings = File.ReadAllText(PathInRepo(
+        var settingsXaml = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "Views", "Settings",
+            "SettingsView.xaml"));
+        var settingsCode = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "Settings",
             "SettingsView.xaml.cs"));
+        var appSettings = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "src", "FileID.App", "Services", "AppSettings.cs"));
 
-        Assert.Contains(
-            "IsEnabled = !_excludedPurgeGenerations.ContainsKey(path)",
-            settings, StringComparison.Ordinal);
-        Assert.Contains(
-            "if (_excludedPurgeGenerations.ContainsKey(path))",
-            settings, StringComparison.Ordinal);
-        Assert.Contains(
-            "if (IsCurrentExcludedPurge(picked, purgeGeneration))",
-            settings, StringComparison.Ordinal);
-        Assert.Contains(
-            "_excludedPurgeGenerations.Remove(picked)",
-            settings, StringComparison.Ordinal);
-
-        var guard = Slice(
-            settings,
-            "private bool IsCurrentExcludedPurge",
-            "private void OnRemoveExcludedFolderClicked");
-        Assert.Contains("!_unloaded", guard, StringComparison.Ordinal);
-        Assert.Contains("_excludedPurgeGenerations.TryGetValue",
-            guard, StringComparison.Ordinal);
-        Assert.Contains("Settings.ExcludedFolders.Exists",
-            guard, StringComparison.Ordinal);
+        Assert.DoesNotContain("ExcludedFolders", settingsXaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("OnAddExcludedFolderClicked", settingsCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("OnRemoveExcludedFolderClicked", settingsCode, StringComparison.Ordinal);
+        Assert.DoesNotContain("ExcludedFolders", appSettings, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -336,7 +323,7 @@ public sealed class AdversarialUiSafetyContractTests
     }
 
     [Fact]
-    public void EngineLifecycleCallbacksCarryAndRecheckIntentRevision()
+    public void EngineLifecycleCallbacksRejectSupersededProcesses()
     {
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels",
@@ -348,59 +335,41 @@ public sealed class AdversarialUiSafetyContractTests
         var start = Slice(
             client,
             "public async Task StartAsync()",
-            "private void TerminateSupersededStart");
-        Assert.Contains("_lifecycle.Begin(shouldRun: true)",
-            start, StringComparison.Ordinal);
-        Assert.Contains("StartCoreAsync(intent.Revision, intent.Token)",
-            start, StringComparison.Ordinal);
-        Assert.Contains(
-            "ThrowIfStartSuperseded(lifecycleRevision, lifecycleToken)",
-            start, StringComparison.Ordinal);
+            "private async Task StartCoreAsync()");
+        Assert.Contains("_ui.TryEnqueue(async () =>", start, StringComparison.Ordinal);
+        Assert.Contains("await StartCoreAsync();", start, StringComparison.Ordinal);
+        var startCore = Slice(
+            client,
+            "private async Task StartCoreAsync()",
+            "internal static async Task<string?> ReadBoundedFrameAsync");
+        Assert.Contains("Interlocked.CompareExchange(ref _isStarting, 1, 0)",
+            startCore, StringComparison.Ordinal);
 
         var exit = Slice(
             client,
             "private void OnProcessExited",
-            "private async Task StartAfterCrashDelayAsync");
-        Assert.Contains("ResolveCurrentExpectedExitRestartRevision()",
+            "private void Cleanup()");
+        Assert.Contains("ConsumeExpectedExit(exited)", exit, StringComparison.Ordinal);
+        Assert.Contains("if (!ReferenceEquals(sender, _process))",
             exit, StringComparison.Ordinal);
-        Assert.Contains("StartAfterCrashDelayAsync(delay, respawnRevision)",
-            exit, StringComparison.Ordinal);
-        Assert.DoesNotContain("StartAsync()", exit, StringComparison.Ordinal);
-
-        var delayed = Slice(
-            client,
-            "private async Task StartAfterCrashDelayAsync",
-            "private void ResetProcessBoundScanState");
-        Assert.Contains("StartIfCurrentAsync",
-            delayed, StringComparison.Ordinal);
-        Assert.Contains(
-            "_lifecycle.IsCurrent",
-            delayed, StringComparison.Ordinal);
+        Assert.Contains("ResetProcessBoundScanState();", exit, StringComparison.Ordinal);
+        Assert.Contains("if (expectedExit)", exit, StringComparison.Ordinal);
 
         var shutdown = Slice(
             commands,
             "public async Task ShutdownAsync()",
             "public async Task<bool> StopAndWaitForExitAsync");
-        Assert.Contains("_lifecycle.Begin(shouldRun: false)",
-            shutdown, StringComparison.Ordinal);
         Assert.Contains("new ShutdownCommand()",
             shutdown, StringComparison.Ordinal);
-        Assert.Contains("intent.Token",
-            shutdown, StringComparison.Ordinal);
-        Assert.True(
-            shutdown.Split(
-                "ThrowIfLifecycleIntentSuperseded(intent)",
-                StringSplitOptions.None).Length >= 4);
+        Assert.Contains("_expectedExitProcesses[expectedExitProcess]", shutdown, StringComparison.Ordinal);
 
         var restart = Slice(
             commands,
             "public async Task RestartAsync",
             "public Task RunFaceClusteringAsync");
-        Assert.Contains("_lifecycle.Begin(",
+        Assert.Contains("StopAndWaitForExitAsync",
             restart, StringComparison.Ordinal);
-        Assert.Contains("StopAndWaitForExitCoreAsync",
-            restart, StringComparison.Ordinal);
-        Assert.Contains("StartCoreAsync(intent.Revision, intent.Token)",
+        Assert.Contains("StartAsync()",
             restart, StringComparison.Ordinal);
         Assert.Contains("WaitForReadyAsync(",
             restart, StringComparison.Ordinal);

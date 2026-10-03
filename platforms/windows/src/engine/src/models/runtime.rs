@@ -484,14 +484,21 @@ fn pick_provider(
 }
 
 fn pack_present(name: &str) -> bool {
-    let Ok(root) = crate::paths::models_dir() else {
-        return false;
-    };
-    let pack_dir: PathBuf = root.join("packs").join(name);
-    if !pack_dir.exists() {
-        return false;
+    pack_dir(name).is_some_and(|directory| has_any_dll(&directory))
+}
+
+pub fn pack_dir(name: &str) -> Option<PathBuf> {
+    if let Ok(root) = crate::paths::models_dir() {
+        let installed = root.join("packs").join(name);
+        if installed.is_dir() {
+            return Some(installed);
+        }
     }
-    has_any_dll(&pack_dir)
+
+    let executable = std::env::current_exe().ok()?;
+    let application_dir = executable.parent()?;
+    let bundled = application_dir.join("RuntimeBundles").join("packs").join(name);
+    bundled.is_dir().then_some(bundled)
 }
 
 /// CUDA is usable only if ORT's own CUDA provider DLL is on disk. pyke's
@@ -521,14 +528,13 @@ fn cuda_provider_present() -> bool {
 /// build pyke's base lacks. AMD/Qualcomm/None use DirectML/CPU — no pinned
 /// runtime, so this returns None.
 pub fn active_pack_dir() -> Option<(&'static str, PathBuf)> {
-    let root = crate::paths::models_dir().ok()?;
     let (vendor, _, _) = probe_gpu_vendor();
     let ep = match vendor {
         GpuVendor::Nvidia => "cuda",
         GpuVendor::Intel => "openvino",
         _ => return None,
     };
-    Some((ep, root.join("packs").join(ep)))
+    Some((ep, pack_dir(ep)?))
 }
 
 fn has_any_dll(dir: &PathBuf) -> bool {

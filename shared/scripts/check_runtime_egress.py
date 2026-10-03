@@ -12,17 +12,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 APPROVED_HOSTS = {"huggingface.co", "hf.co"}
-KNOWN_EXTRA_HOSTS = {
-    "github.com", "githubusercontent.com", "download.nvidia.com", "developer.nvidia.com"
-}
-KNOWN_OFF_POLICY_URLS = {
-    "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-vulkan-x64.zip",
-    "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip",
-    "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip",
-    "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip",
-    "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip",
-    "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip",
-}
+KNOWN_EXTRA_HOSTS: set[str] = set()
+KNOWN_OFF_POLICY_URLS: set[str] = set()
 ALLOWLIST_RE = re.compile(
     r"const ALLOWED_DOWNLOAD_HOSTS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", re.DOTALL
 )
@@ -151,37 +142,37 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "b629b5893d9910be387d73d7e18cae1099e18d637e1c148b3ce4bb532dbf882f",
-  "platforms/linux/src/app/src/engine_client.rs": "6cdafa6d9ab86c248456f7ad63f922af2f4974685200c59192139058fc636a11",
-  "platforms/linux/src/app/src/tabs/settings.rs": "a8b8be35ff2c5a496a1bd3f795ae12fb4b0b674256bcc5e6d7c75e6bafe7675f",
+  "platforms/linux/src/app/src/engine_client.rs": "bc1713c3610fac2c4a1d6d4c99cfcbdf7ca4ecbce549597143cdd5f8bcca64b6",
+  "platforms/linux/src/app/src/tabs/settings.rs": "afe0bcc010f14e85a4fa14f7c83de2da6fcc302552c7776341033bc995c747a7",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "3fc5136a054247f27278bd7e3050272038e828c6bfd8fcee54ddcb3e3d3a7983",
-  "platforms/windows/src/FileID.App/App.xaml.cs": "5e0c0c3dd9d861b23bf5271b52e77802422ce149cdbb65fc0d47d1fc09414891",
-  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "fcdc4b46c4451f3dfac9cff8f26c7166aef96153c1fef81eca82175accef1774",
-  "platforms/windows/src/FileID.App/Program.cs": "9b54df9561ad3a2e4276851bf0c8be38e97748e02409f27894d48e3077c75be2",
-  "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "1f78bb2431791bd623cd655d240c2d84e7374e9b9df8d031e65e2db4ccc2525f",
+  "platforms/windows/src/FileID.App/App.xaml.cs": "9bd73d30158ea4a757b1ec29030261c51a37b5d566bce2cf0be44826c1bb3580",
+  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "bf3b62781682e398764bf24bfa07507a6149c9cd9580d8789c47be0ba470ce3c",
+  "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
+  "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "ba8cbf1070795fb5fb4a2ea5fdaa3f7828c834e9b16783d6c864e70a915e8c79",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
-  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "717209d1c5e474c05d2980cc2fcdc50971692815fd357c98d88002e74a6396e5",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "b78abba5e4eaa5902d44d2a53b7f4cfc4ff55e1e1580dc35603ea6b4c28c954d",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "35ef9a30935f57d0e45c11bb54684b55a92b9767f2169cbf474ceb5ff1e87d15",
-  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "621742b6e22b5f92e8ac7913e3a70827e689ae368f67a7de4b7d40ffd84ea4c5",
-  "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "e6028cf4955464a0ec5bd9bbad5e6a63ecd83996e79d9dd9bc769c733b6758b6",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "4ff9adb1b061ed0cbcb367079fb7018bd0d62247576fe5a7c0d58b93bea22842",
+  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "acc2ed85e0bb405c85f57e38391c3b4962660a93c9f4b317f148bcefd3bea18f",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "7513ecd8307d20632a9043c5dd0995707f42e83c9ce057a323ce8648a3650304",
+  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "300899ceec51d41fcacf0c34648b334c657f5f5cc1a70149bb6273b6972425b9",
+  "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "f06fa0c923507f380f64a1b0aedb6951466cf1b33441ecd6ac99fa1c6cf663ca",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "b0a5ee159ccbc24fee7c5159175139224334a2753fe9c0961ffb9a1be8cde9e6",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "012df8c2af64b890a6b1dedfc979111fab85e7817a7b4b42a5e3877fbfa1fe1f",
   "platforms/windows/src/engine/src/commands/restructure.rs": "84ddce8ba3e2644ece29ab71b8d36fcd36bdddacd10ed82d7737015299fd784c",
-  "platforms/windows/src/engine/src/commands/trash.rs": "8d414920e54782ed1d14d52cc729a2b46a2b7ee6840f9f8a5fc163e4ee92d742",
-  "platforms/windows/src/engine/src/downloader.rs": "292535105b30db2d62b5545313ba08890c42d5c8a5f9c1210f88c9f3d9c9ab3a",
-  "platforms/windows/src/engine/src/main.rs": "a839aabb076cbbe1dcc6bedc17bc414971e3abc80441c48125268c16818ddf37",
-  "platforms/windows/src/engine/src/models/runtime.rs": "16c282a4c31756a25773da9b543ec829a081fd16370827102f3ae4ca7fbb8121",
-  "platforms/windows/src/engine/src/models/vlm.rs": "c067a9a7647fe418fe47c91d1afaf280f1e6874d10df421d19bd4f326c505807",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "15607034d409483ea54d3265e1c95432353afe110a3057c8041879fc118a6fcd",
-  "platforms/windows/src/engine/src/models/whisper.rs": "22bc6786f637487f82483732e16e43af38d54b590699d4bcd71640460f791bde",
-  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "ef3064472f36335d281e949be001cef042d986cfe9f31e151d96f9903e06814b",
+  "platforms/windows/src/engine/src/commands/trash.rs": "196629996b04c3d6c8db3cc76936a5e3af73905cecdd7ee95bf33eaf368091fa",
+  "platforms/windows/src/engine/src/downloader.rs": "3ec3a3da33b8b42eff58676e378b6268809dceb24b29385c305604f7e060263a",
+  "platforms/windows/src/engine/src/main.rs": "d86fdfda0b70c8f66f1691a787c7bcd2a6cfb3a53852e28ad45f60a70d2bf73f",
+  "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
+  "platforms/windows/src/engine/src/models/vlm.rs": "fa13b0ec9f0f0a7d996a3cb0bdd061017e66ebe569f1eef9e312bc5ad8a78507",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "c269203ae291937b3c62ae87faff6c2396cef987191176b0557e2d02f4e51ec8",
+  "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
+  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "73a0e672c362f2123f7ba2138c65449aad1aa4cfca9ee86afb487031f12a4ec8",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "e6ec521ac65aaab03c5918d6bc3b04854b2c6a878eed6b8fad82cf0aa50f1267",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "ed0a6da9d9a5afc32ca0056f0c8d92b416164d1ae2c70e0c4f2a258e60a15129",
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
   "platforms/windows/src/engine/src/platform.rs": "4dac3644093f2125abb378b38ba803419a2c7bfd5b6441d39d881bd710032b3b",
   "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
-  "platforms/windows/src/engine/src/shell/mod.rs": "cb91258f3d59ce9d5a5d978e461b541035a34beacf724717c4a37cec58208080",
+  "platforms/windows/src/engine/src/shell/mod.rs": "124a726bb56800635f3a318405060285ebc99e2c0cd61a63a7a64f861a38bfcd",
   "platforms/windows/src/engine/src/shell/ocr.rs": "7942ee66691670d93fc5725697a817c634c10d32acafb06df9a76a5ed97995a0",
   "platforms/windows/src/engine/src/shell/reveal.rs": "99fffa994961644a9695812f9388599f233742ff85105c107e6a76dafa30591b",
   "platforms/windows/src/engine/src/shell/tags.rs": "ab399dfb160d51bcc0dd13120ba45ff2c156b62b3dac58d691adb4bb8d5b17e2",

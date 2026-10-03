@@ -1,20 +1,17 @@
 ﻿# Authenticode codesigning helper.
 #
 # Signs every .exe and .dll under the given directory using signtool.exe
-# with an EV certificate identified by SHA1 thumbprint. Used by:
+# with a certificate-store code-signing key identified by SHA1 thumbprint. Used by:
 #   - publish-bundle.ps1 (post-build, pre-MSI)
 #   - build-all.ps1 -Sign flag
 #
-# Without an actual EV cert in your store, this script no-ops with a
-# friendly message. Once you've purchased + installed an EV cert
-# (DigiCert / SSL.com / Sectigo, ~$300/year + identity verification),
-# pass the thumbprint via -Thumbprint or set FILEID_EV_THUMBPRINT in
-# your shell. Then this script + the existing wixproj produce a fully
-# signed MSI + Burn bundle on every build.
+# This helper is fail-closed: invoking it explicitly always signs and verifies
+# each unsigned FileID payload or returns a nonzero exit. Release packaging also
+# supports managed providers through publish-bundle.ps1.
 #
 # Usage:
 #   pwsh build/sign.ps1 -Path dist/x64/FileID -Thumbprint ABC123...
-#   $env:FILEID_EV_THUMBPRINT = 'ABC123...'; pwsh build/sign.ps1 -Path ...
+#   $env:FILEID_SIGN_THUMBPRINT = 'ABC123...'; pwsh build/sign.ps1 -Path ...
 
 param(
     [Parameter(Mandatory=$true)]
@@ -27,13 +24,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+if (-not $Thumbprint) { $Thumbprint = $env:FILEID_SIGN_THUMBPRINT }
 if (-not $Thumbprint) { $Thumbprint = $env:FILEID_EV_THUMBPRINT }
 if (-not $Thumbprint) {
-    if (-not $Quiet) {
-        Write-Host "sign.ps1: no EV thumbprint provided. Pass -Thumbprint or set FILEID_EV_THUMBPRINT." -ForegroundColor Yellow
-        Write-Host "          Skipping codesigning. Build artifacts will ship as Unsigned (engine WinVerifyTrust warns + allows in dev)." -ForegroundColor DarkGray
-    }
-    exit 0
+    throw "sign.ps1: explicit signing requires -Thumbprint or FILEID_SIGN_THUMBPRINT."
+}
+$Thumbprint = $Thumbprint.Replace(" ", "").Replace(":", "")
+$signingCertificate = @(
+    Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+) | Where-Object { $_.Thumbprint -eq $Thumbprint } | Select-Object -First 1
+if (-not $signingCertificate) {
+    throw "sign.ps1: certificate '$Thumbprint' was not found in CurrentUser or LocalMachine certificate stores."
 }
 
 # Locate signtool.exe -- ships with the Windows SDK; vswhere can find the
@@ -62,8 +63,7 @@ if (-not (Test-Path $Path)) {
 # targets; we skip .pdb, .json, etc.
 $targets = Get-ChildItem -Path $Path -Recurse -Include *.exe, *.dll -File
 if ($targets.Count -eq 0) {
-    Write-Host "sign.ps1: no .exe / .dll found under $Path" -ForegroundColor Yellow
-    exit 0
+    throw "sign.ps1: no .exe / .dll found under $Path"
 }
 
 if (-not $Quiet) {
@@ -71,6 +71,22 @@ if (-not $Quiet) {
 }
 
 foreach ($target in $targets) {
+    $existing = Get-AuthenticodeSignature -LiteralPath $target.FullName
+    if ($existing.Status -eq "Valid") {
+        $fileIdOwned = $target.BaseName -eq "FileID" `
+            -or $target.BaseName -eq "FileIDEngine" `
+            -or $target.BaseName.StartsWith("FileID.", [StringComparison]::OrdinalIgnoreCase)
+        if ($fileIdOwned -and (
+            $existing.SignerCertificate.Thumbprint -ne $Thumbprint `
+            -or -not $existing.TimeStamperCertificate)) {
+            throw "sign.ps1: existing FileID signature does not match the requested signer/timestamp: $($target.FullName)."
+        }
+        if (-not $Quiet) { Write-Host "  preserved verified signature: $($target.Name)" -ForegroundColor DarkGray }
+        continue
+    }
+    if ($existing.Status -ne "NotSigned") {
+        throw "sign.ps1: refusing to replace invalid signature on $($target.FullName). Status=$($existing.Status)."
+    }
     & $signtool sign `
         /fd SHA256 `
         /tr $TimestampUrl /td SHA256 `
@@ -78,11 +94,20 @@ foreach ($target in $targets) {
         /d $Description `
         $target.FullName | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "  FAILED: $($target.FullName)" -ForegroundColor Red
-        exit 1
+        throw "sign.ps1: signing failed for $($target.FullName)."
+    }
+    & $signtool verify /pa /all /v $target.FullName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "sign.ps1: signature verification failed for $($target.FullName)."
+    }
+    $verified = Get-AuthenticodeSignature -LiteralPath $target.FullName
+    if (($verified.Status -ne "Valid") -or
+        ($verified.SignerCertificate.Thumbprint -ne $Thumbprint) -or
+        (-not $verified.TimeStamperCertificate)) {
+        throw "sign.ps1: signer identity or trusted timestamp verification failed for $($target.FullName)."
     }
     if (-not $Quiet) {
-        Write-Host "  signed: $($target.Name)" -ForegroundColor DarkGreen
+        Write-Host "  signed + verified: $($target.Name)" -ForegroundColor DarkGreen
     }
 }
 

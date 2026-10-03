@@ -87,6 +87,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private Process? _process;
     private int _spawnGeneration;
+    private int _gpuDeviceRemovedGeneration = -1;
     private CancellationTokenSource? _readCts;
     private Task? _stdoutLoop;
     private Task? _stderrLoop;
@@ -233,6 +234,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
+    public const string GpuRestartRequiredMessage =
+        "The graphics device was removed while FileID was using it. Restart the engine before starting another scan.";
+
+    private bool _gpuDeviceRemoved;
+    public bool GpuDeviceRemoved
+    {
+        get => _gpuDeviceRemoved;
+        private set => Set(ref _gpuDeviceRemoved, value);
+    }
+
     private EngineError? _lastWarning;
     /// Non-fatal events the engine still wants the user to see (skipped
     /// stages, partial discovery, stale-WAL warning). Kept in a separate
@@ -279,6 +290,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     public bool DeepAnalyzeCommandInFlight => _deepAnalyzeSlot.Current is not null;
+    public long DeepAnalyzeCommandAttemptId => _deepAnalyzeSlot.Current?.AttemptId ?? 0;
 
     private ModelDownloadProgress? _modelDownloadProgress;
     public ModelDownloadProgress? ModelDownloadProgress
@@ -324,6 +336,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// Set by UndoRestructureAsync so the next RestructureApplyResult is read as
     /// the undo's reply (clears CanUndoRestructure) rather than a fresh apply.
     internal bool UndoRestructureInFlight { get; set; }
+    private string? UndoRestructureShortcutToken { get; set; }
 
     private BulkActionResult? _lastBulkAction;
     public BulkActionResult? LastBulkAction
@@ -502,7 +515,34 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // dev build — accept Unsigned with a warning. Once a real cert is
             // in play, ship with the constant defined and the strict path
             // refuses Unsigned + tamper-mismatched binaries.
-            var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+            var expectedThumb = Environment.GetEnvironmentVariable("FILEID_SIGN_THUMBPRINT");
+            var expectedSubject = ReleaseSigningPolicy.ExpectedSignerSubject;
+            var requireSignedEngine = ReleaseSigningPolicy.RequireSignedEngine
+                || !string.IsNullOrWhiteSpace(expectedThumb);
+            var expectedSignerPublicKey = ReleaseSigningPolicy.ExpectedSignerPublicKeySha256;
+            if (ReleaseSigningPolicy.RequireSignedEngine)
+            {
+                if (string.IsNullOrWhiteSpace(expectedSignerPublicKey))
+                {
+                    CrashReason = "Engine signature verification failed because the release signer identity is missing.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: signed-release signer public-key policy is missing.");
+                    return;
+                }
+
+                var appAssemblyPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                var appVerdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
+                    appAssemblyPath,
+                    expectedSignerSubject: expectedSubject,
+                    expectedSignerPublicKeySha256: expectedSignerPublicKey));
+                if (appVerdict != IntegrityVerdict.Trusted)
+                {
+                    CrashReason = "Engine signature verification failed because the FileID app signer could not be verified.";
+                    State = LifecycleState.Crashed;
+                    DebugLog.Error("EngineClient: signed-release app assembly did not match the approved signer identity.");
+                    return;
+                }
+            }
             FileStream? spawnPin = null;
             try
             {
@@ -531,7 +571,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // waits for the verdict) while unblocking first paint; the continuation
             // resumes on the UI thread. (audit Pc / H11)
             var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
-                enginePath, expectedThumbprintHex: expectedThumb));
+                enginePath,
+                expectedThumbprintHex: expectedThumb,
+                expectedSignerSubject: expectedSubject,
+                expectedSignerPublicKeySha256: expectedSignerPublicKey));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -549,7 +592,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 case IntegrityVerdict.Unsigned:
                     // If a thumbprint was pinned (release mode), refuse to
                     // spawn. Otherwise warn + continue (dev build).
-                    if (!string.IsNullOrEmpty(expectedThumb))
+                    if (requireSignedEngine)
                     {
                         CrashReason = "Engine binary is unsigned but signature verification is required.";
                         State = LifecycleState.Crashed;
@@ -1024,6 +1067,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         });
     }
 
+    private void RefreshPersistedRestructureUndo(string? excludedToken)
+    {
+        var next = PersistedUndoReader.ReadPersistedShortcutUndo(AppPaths.Root, excludedToken);
+        UndoRestructureShortcutToken = next?.Token;
+        CanUndoRestructure = next is not null;
+    }
+
     private void Cleanup()
     {
         var retiringGeneration = SpawnGeneration;
@@ -1320,6 +1370,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
+                        if (GpuDeviceRemoved && _gpuDeviceRemovedGeneration != generation)
+                        {
+                            GpuDeviceRemoved = false;
+                            _gpuDeviceRemovedGeneration = -1;
+                            if (LastError?.Kind == "gpu_device_removed") LastError = null;
+                            if (Phase == ScanPhase.Failed)
+                            {
+                                Phase = null;
+                                _shownPhaseRank = -1;
+                            }
+                        }
                         break;
                     case ProgressEvent p:
                         ObserveAuthoritativeScanEvent(generation);
@@ -1435,6 +1496,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
+                        if (e.Error.Kind == "gpu_device_removed")
+                        {
+                            _gpuDeviceRemovedGeneration = generation;
+                            GpuDeviceRemoved = true;
+                        }
                         if (e.Error.Kind == "scan_already_running")
                         {
                             RejectScanStartCommand(generation);
@@ -1547,12 +1613,24 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             if (UndoRestructureInFlight)
                             {
                                 UndoRestructureInFlight = false;
-                                CanUndoRestructure = rar.Result.Failed > 0
-                                    || (rar.Result.Cancelled && rar.Result.Remaining.GetValueOrDefault() > 0);
+                                if (UndoRestructureShortcutToken is not null)
+                                {
+                                    RefreshPersistedRestructureUndo(UndoRestructureShortcutToken);
+                                }
+                                else
+                                {
+                                    CanUndoRestructure = rar.Result.Failed > 0
+                                        || (rar.Result.Cancelled && rar.Result.Remaining.GetValueOrDefault() > 0);
+                                }
                             }
                             else
                             {
-                                CanUndoRestructure = !_restructureApplyUsesSymlinks && rar.Result.Applied > 0;
+                                UndoRestructureShortcutToken = _restructureApplyUsesSymlinks
+                                    ? rar.Result.ShortcutUndoToken
+                                        ?? PersistedUndoReader.ReadPersistedShortcutUndo(AppPaths.Root)?.Token
+                                    : null;
+                                CanUndoRestructure = UndoRestructureShortcutToken is not null
+                                    || (!_restructureApplyUsesSymlinks && rar.Result.Applied > 0);
                             }
                             if (!LastRestructureResultWasUndo
                                 && RestructureUndoPolicy.ShouldRecord(LastRestructureResultWasShortcutApply, rar.Result.Applied, CanUndoRestructure)

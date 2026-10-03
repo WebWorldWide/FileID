@@ -1,4 +1,4 @@
-// ModelInstallerService — per-model install state for the Welcome sheet.
+﻿// ModelInstallerService — per-model install state for the Welcome sheet.
 //
 // 1:1 port of the state shape used by macOS WelcomeSheet.swift +
 // CLIPModelInstaller.swift + ArcFaceModelInstaller.swift. Each model
@@ -178,26 +178,11 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // as the engine reports detected hardware. Until then, the row
         // shows "Detecting GPU…" so the user knows it's waiting.
         Accelerator = new ModelSlot(
-            displayLabel: "GPU Acceleration Pack",
-            // ORT CUDA provider (~313 MB) + cuDNN (~430 MB). cudart/cublas come
-            // from the llama.cpp-cuda pack / system toolkit.
-            approxBytes: 745UL * 1024 * 1024,
-            // Install cuDNN AND the ORT CUDA provider. The provider
-            // (ort_cuda_x64) goes LAST because it's the completion gate
-            // (AcceleratorSentinelIds): finishing it last means its 100% is the
-            // final event, so the slot lands cleanly on Installed instead of
-            // flickering Installed→Downloading→Installed, and a cuDNN failure
-            // can't leave the slot wrongly "Installed". A prewarm short-circuits
-            // at the engine if files + sentinel are already on disk. The engine's
-            // cuda_provider_present() + ORT_DYLIB_PATH pinning light up the CUDA
-            // EP once the provider lands.
-            installAction: async () =>
-            {
-                ClearCancelMarks("cudnn_runtime_x64", "ort_cuda_x64");
-                await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
-                await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
-            }, uiDispatcher: _ui);
-        Accelerator.Message = "Detecting GPU…";
+            displayLabel: "Bundled GPU acceleration",
+            approxBytes: 0,
+            installAction: () => Task.CompletedTask,
+            uiDispatcher: _ui);
+        Accelerator.Message = "FileID selects an available local provider automatically.";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
         Arcface.PropertyChanged += OnSlotPropertyChanged;
@@ -217,67 +202,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// engine Info changes + at construction time.</summary>
     private void UpdateAcceleratorForVendor(string? gpuVendor)
     {
-        // If user already installed cuDNN earlier, sentinel-seed already
-        // flipped to Installed. Don't downgrade that.
-        if (Accelerator.Status == ModelInstallStatus.Installed
-            && SentinelExistsForAnyOf(AcceleratorSentinelIds))
-        {
-            Accelerator.Message = "GPU acceleration active — scanning runs on your GPU's native execution provider (up to 3-5x faster than DirectML).";
-            return;
-        }
         var vendor = (gpuVendor ?? string.Empty).ToLowerInvariant();
-        switch (vendor)
-        {
-            case "nvidia":
-                Accelerator.DisplayLabel = "GPU Acceleration Pack (NVIDIA)";
-                Accelerator.Message = "Unlocks the CUDA execution provider — up to 3-5x faster ML inference vs DirectML (~745 MB).";
-                if (Accelerator.Status != ModelInstallStatus.Downloading
-                    && Accelerator.Status != ModelInstallStatus.Installed)
-                {
-                    Accelerator.Status = ModelInstallStatus.NotInstalled;
-                }
-                break;
-            case "amd":
-                Accelerator.DisplayLabel = "GPU Acceleration (AMD)";
-                Accelerator.Message = "DirectML is already optimal for your AMD GPU — no install needed.";
-                Accelerator.Status = ModelInstallStatus.Installed;
-                Accelerator.Fraction = 1.0;
-                break;
-            case "intel":
-                Accelerator.DisplayLabel = "GPU Acceleration (Intel)";
-                // OpenVINO (Apache-2.0) auto-installs on Intel when the pack is
-                // available; DirectML runs meanwhile. Pseudo-Installed so no
-                // failing manual button appears before the pack is hosted.
-                Accelerator.Message = "Intel GPU — running on DirectML; OpenVINO acceleration auto-installs when available.";
-                Accelerator.Status = ModelInstallStatus.Installed;
-                Accelerator.Fraction = 1.0;
-                break;
-            case "qualcomm":
-                Accelerator.DisplayLabel = "GPU Acceleration (Snapdragon)";
-                // QNN's SDK is proprietary (can't redistribute under commercial-
-                // clean), so we never host it — the NPU is used only if the
-                // device already provides QNN; otherwise DirectML.
-                Accelerator.Message = "Snapdragon — DirectML active; the Hexagon NPU (QNN) is used automatically if your device provides it.";
-                Accelerator.Status = ModelInstallStatus.Installed;
-                Accelerator.Fraction = 1.0;
-                break;
-            case "none":
-                Accelerator.DisplayLabel = "GPU Acceleration";
-                Accelerator.Message = "No GPU detected — scanning will run on CPU.";
-                Accelerator.Status = ModelInstallStatus.Installed;
-                Accelerator.Fraction = 1.0;
-                break;
-            case "":
-                Accelerator.DisplayLabel = "GPU Acceleration Pack";
-                Accelerator.Message = "Detecting GPU…";
-                break;
-            default:
-                Accelerator.DisplayLabel = "GPU Acceleration";
-                Accelerator.Message = "DirectML is the production path on your GPU.";
-                Accelerator.Status = ModelInstallStatus.Installed;
-                Accelerator.Fraction = 1.0;
-                break;
-        }
+        Accelerator.DisplayLabel = string.IsNullOrEmpty(vendor)
+            ? "Bundled GPU acceleration"
+            : $"Bundled acceleration ({vendor})";
+        Accelerator.Message = "FileID selects an available local provider automatically. Vulkan, OpenVINO and DirectML runtimes are included; CPU remains available.";
+        Accelerator.Status = ModelInstallStatus.Installed;
+        Accelerator.Fraction = 1.0;
     }
 
     /// <summary>

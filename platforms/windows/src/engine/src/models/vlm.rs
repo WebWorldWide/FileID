@@ -108,6 +108,19 @@ impl VlmRunner {
                 }
             }
         }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("RuntimeBundles/llama.cpp")))
+        {
+            for cand in [
+                dir.join("llama-mtmd-cli.exe"),
+                dir.join("bin").join("llama-mtmd-cli.exe"),
+            ] {
+                if cand.exists() && sanity_check_binary(&cand).is_ok() {
+                    return Ok(VlmRunner { binary: cand });
+                }
+            }
+        }
         // Distinguish "not installed at all" from "installed but too old".
         // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
         // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but

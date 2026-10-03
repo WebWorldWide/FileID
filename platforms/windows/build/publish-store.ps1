@@ -65,11 +65,28 @@ foreach ($line in $runtimeOutput) {
         Copy-Item -LiteralPath $Matches[1] -Destination $stage
     }
 }
-foreach ($required in @('FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'onnxruntime.dll', 'DirectML.dll', 'pdfium.dll')) {
+$runtimeBundleDir = Join-Path $stage 'RuntimeBundles'
+Invoke-Checked 'pwsh' @(
+    '-NoProfile',
+    '-File', (Join-Path $PSScriptRoot 'fetch-store-runtimes.ps1'),
+    '-OutputRoot', $runtimeBundleDir,
+    '-CacheDir', (Join-Path $platformRoot 'dist/runtime-cache')
+)
+foreach ($required in @(
+    'FileID.exe', 'FileIDEngine.exe', 'FileID.pri', 'onnxruntime.dll', 'DirectML.dll', 'pdfium.dll',
+    'RuntimeBundles/llama.cpp/llama-server.exe',
+    'RuntimeBundles/llama.cpp/llama-mtmd-cli.exe',
+    'RuntimeBundles/whisper.cpp/Release/whisper-cli.exe',
+    'RuntimeBundles/packs/openvino/onnxruntime.dll',
+    'RuntimeBundles/THIRD-PARTY-NOTICES.txt'
+)) {
     if (-not (Test-Path (Join-Path $stage $required))) { throw "Missing package payload: $required" }
 }
 Copy-Item -Path (Join-Path $platformRoot 'store/Assets/*.png') -Destination (Join-Path $stage 'Assets')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $stage 'LICENSE.txt')
+$docsStage = Join-Path $stage 'Docs'
+New-Item -ItemType Directory -Force -Path $docsStage | Out-Null
+Copy-Item -LiteralPath (Join-Path $repoRoot 'shared/docs/PRIVACY.md') -Destination (Join-Path $docsStage 'PRIVACY.md')
 
 [xml]$manifest = Get-Content (Join-Path $platformRoot 'store/AppxManifest.xml') -Raw
 $manifest.Package.Identity.Version = $packageVersion

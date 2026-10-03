@@ -63,10 +63,10 @@ public class UndoStackTests
     }
 
     [Fact]
-    public async Task Capacity_DropsOldestEntriesPast16()
+    public async Task SessionHistoryRetainsEntriesBeyondLegacyUndoStackCapacity()
     {
         await DrainAsync();
-        // Push 20; only the most recent 16 should remain.
+        // Session history keeps every entry; reverse callbacks are capped separately.
         for (int i = 0; i < 20; i++)
         {
             int captured = i;
@@ -78,6 +78,6 @@ public class UndoStackTests
             await UndoStack.Instance.UndoAsync();
             count++;
         }
-        Assert.Equal(16, count);
+        Assert.Equal(20, count);
     }
 }

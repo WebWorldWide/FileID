@@ -740,6 +740,7 @@ pub(crate) async fn emit_bulk_result(
 
 /// Save the structured-name fields (title/first/middle/last/suffix) for a
 /// person cluster through the engine's single-writer connection.
+#[cfg(test)]
 fn update_person_name(
     tx: &rusqlite::Transaction<'_>,
     payload: &ipc::RenamePersonPayload,

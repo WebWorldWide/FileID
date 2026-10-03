@@ -178,7 +178,19 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
+        shell: pwsh
+        run: |
+          $formatOutput = & dotnet format FileID.sln --verify-no-changes 2>&1
+          $formatExit = $LASTEXITCODE
+          $formatText = $formatOutput | Out-String
+          $formatOutput | ForEach-Object { Write-Host $_ }
+          if ($formatExit -eq 4 -and $formatText -match 'Unable (to )?locate dotnet CLI') {
+            Write-Host 'Retrying dotnet format after its one-time CLI discovery race.'
+            $formatOutput = & dotnet format FileID.sln --verify-no-changes 2>&1
+            $formatExit = $LASTEXITCODE
+            $formatOutput | ForEach-Object { Write-Host $_ }
+          }
+          if ($formatExit -ne 0) { exit $formatExit }
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'

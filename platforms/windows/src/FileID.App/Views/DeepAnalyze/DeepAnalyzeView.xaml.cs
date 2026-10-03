@@ -275,6 +275,19 @@ public sealed partial class DeepAnalyzeView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
+                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    var ec = EngineClient.Instance;
+                    var attemptId = ec.DeepAnalyzeCommandAttemptId;
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded || ec.DeepAnalyzeCommandAttemptId != attemptId) return;
+                        SyncDeepAnalyzeControls();
+                    });
+                    break;
+                case nameof(EngineClient.GpuDeviceRemoved):
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncDeepAnalyzeControls(); });
+                    break;
                 case nameof(EngineClient.Phase):
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
@@ -525,6 +538,21 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : $"Done — {complete.Processed} captioned in {complete.TotalSeconds:0.#}s ({complete.Failed} failed)";
             SyncProposedNamesPill();
         }
+
+        SyncDeepAnalyzeControls();
+    }
+
+    private void SyncDeepAnalyzeControls()
+    {
+        var ec = EngineClient.Instance;
+        var busy = ec.DeepAnalyzeCommandInFlight
+                   || ec.DeepAnalyzeStarting is not null
+                   || ec.DeepAnalyzeProgress is not null;
+        var canStart = !busy && !ec.GpuDeviceRemoved;
+        CancelButton.IsEnabled = busy;
+        AnalyzeAllButton.IsEnabled = canStart;
+        AnalyzeSelectedButton.IsEnabled = canStart && SelectionRegistry.Instance.LibrarySelection.Count > 0;
+        AnalyzeCurrentButton.IsEnabled = canStart && SelectionRegistry.Instance.PreviewedFileId is not null;
     }
 
     // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
@@ -836,6 +864,12 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
+        if (EngineClient.Instance.GpuDeviceRemoved)
+        {
+            var reason = EngineClient.GpuRestartRequiredMessage;
+            await ShowAlertAsync("Deep Analyze stopped", reason);
+            return;
+        }
         // Set the optimistic/working UI state BEFORE the await: if the send
         // throws, the catch reverts it and surfaces the error. Setting it after
         // the await meant a send failure showed the user nothing — the run
@@ -852,14 +886,22 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
+            var reason = EngineClient.Instance.GpuDeviceRemoved
+                ? EngineClient.GpuRestartRequiredMessage
+                : ex.Message;
             // Revert the optimistic state so the UI doesn't falsely look like a
             // run is in flight, then surface a dismissible error.
             StreamCard.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
-            await ShowAlertAsync("Couldn't start Deep Analyze",
-                "Deep Analyze couldn't be started: " + ex.Message +
-                "\n\nMake sure the model is installed and the engine is running, then try again.");
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Deep Analyze stopped", reason);
+            }
+            else
+            {
+                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
+            }
         }
     }
 
@@ -965,6 +1007,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
         {
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Restart engine", EngineClient.GpuRestartRequiredMessage
+                    + " Use Restart Engine in the sidebar.");
+                return;
+            }
             var sel = SelectionRegistry.Instance.LibrarySelection;
             if (sel.Count == 0) return;
             _selectedRunCancelled = false;
@@ -984,6 +1032,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeCurrentClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeCurrentClicked), async () =>
         {
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Restart engine", EngineClient.GpuRestartRequiredMessage
+                    + " Use Restart Engine in the sidebar.");
+                return;
+            }
             var id = SelectionRegistry.Instance.PreviewedFileId;
             if (id is null) return;
             StreamCard.Visibility = Visibility.Visible;

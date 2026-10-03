@@ -81,12 +81,8 @@
                 </Grid>
             </Border>
 
-            <!-- RuntimeBanner + CudnnInfoBanner were removed.
-                 Both are now auto-installed at engine-ready time:
-                 LlamaRuntimeAutoInstaller fires the Vulkan runtime fetch
-                 for every Windows user; CudnnAutoInstaller fires the
-                 cuDNN fetch on NVIDIA hardware. Users see the install
-                 progress through the welcome-sheet style download cards. -->
+            <!-- The Store package includes the Vulkan llama.cpp runtime; only
+                 Hugging Face model weights are fetched after the user selects Install. -->
 
             <!-- "Name people first" gate banner. Visible when any
                  person cluster has both name + first_name NULL — Deep

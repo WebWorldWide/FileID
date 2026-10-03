@@ -1,6 +1,8 @@
 # NEXT — resume here
 
-## Active priority — macOS first (2026-10-03)
+## Active owner request — Windows Store readiness (2026-10-03)
+Continue on `codex/windows-store-readiness`; `git fetch --all --prune` confirms `origin/main` at `759a6ab1`, already merged here (8 ahead, 0 behind). Partner Center has the existing FileID product, Store ID `9PC8HSD86887`, package identity `AdamNolle.FileID`; Properties are saved Complete; IARC answers are complete in the open form; preview/submission and Terms acceptance are still pending. Pricing and markets need publisher choice, and screenshots/listing details remain to finish. Current verified unsigned upload artifact: `platforms/windows/dist/store/FileID-0.1.0-x64.msix`, SHA-256 `6bde5a99232f216ccc4b721711fdee3d427420e16aeac8acacf67476d896e11c`. Identity/payload validation and the 608-binary privacy scan pass. The package stages pinned Vulkan llama.cpp, whisper.cpp, and OpenVINO runtimes; startup no longer fetches runtime binaries. Strict runtime-egress audit passes. Rust tests/Clippy, Windows app tests (429/429), IPC tests (48/48), solution build, and formatting pass. Before submission, obtain exact-head hosted CI, a successful Windows App Certification Kit report, fresh-profile install/launch and upgrade checks, and physical GPU/model validation. The first local WACK CLI attempt hung without producing a report. Finish pricing/markets/listing assets with the owner, then get explicit approval before upload/submission.
+## Secondary priority — macOS first (2026-10-03)
 
 Continue the full next-version plan on Mac. The owner has deferred new Windows/Linux feature implementation and physical acceptance until they are on that PC. The Mac app is not complete or release-ready.
 

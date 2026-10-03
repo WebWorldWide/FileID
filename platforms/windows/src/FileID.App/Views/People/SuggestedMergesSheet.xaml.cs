@@ -44,16 +44,20 @@ public sealed partial class SuggestedMergesSheet : UserControl
             // LastMergeSuggestions PropertyChanged subscription — nothing extra
             // to do here.
             HeaderText.Text = "Looking for similar clusters…";
+            SetBusy(true);
             try
             {
                 await EngineClient.Instance.WaitForMergeSuggestionsAsync(TimeSpan.FromSeconds(30));
+                SetBusy(false);
             }
             catch (TimeoutException)
             {
+                SetBusy(false);
                 HeaderText.Text = "Still preparing — clustering may be running. Try reopening this in a moment.";
             }
             catch (Exception ex)
             {
+                SetBusy(false);
                 Services.DebugLog.Error($"FindMergeSuggestions failed: {ex.Message}");
                 HeaderText.Text = "Couldn't fetch suggestions — see logs.";
             }
@@ -81,8 +85,10 @@ public sealed partial class SuggestedMergesSheet : UserControl
     {
         if (_unloaded) return;
         var sug = EngineClient.Instance.LastMergeSuggestions;
+        if (sug is null) return;
+        SetBusy(false);
         _rows.Clear();
-        if (sug is null || sug.Pairs.Count == 0)
+        if (sug.Pairs.Count == 0)
         {
             HeaderText.Text = "No likely merges found. (Try after a fresh scan + re-cluster.)";
             return;
@@ -92,6 +98,12 @@ public sealed partial class SuggestedMergesSheet : UserControl
         {
             _rows.Add(new MergeSuggestionVm { Model = p });
         }
+    }
+
+    private void SetBusy(bool busy)
+    {
+        BusyPanel.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        BusyRing.IsActive = busy;
     }
 
     private async void OnMergeClicked(object sender, RoutedEventArgs e)

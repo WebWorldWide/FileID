@@ -27,23 +27,36 @@ impl WhisperRunner {
     /// Err if the runtime pack isn't installed — callers fall back to metadata naming.
     pub fn find() -> Result<Self> {
         let root = crate::paths::models_dir().context("resolving Models dir")?;
-        let dir = root.join("whisper.cpp");
+        let mut dirs = vec![root.join("whisper.cpp")];
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(application_dir) = executable.parent() {
+                dirs.push(application_dir.join("RuntimeBundles/whisper.cpp"));
+            }
+        }
         // The official release zip lays the CLI out under `Release\` (and recent builds
         // renamed `main` → `whisper-cli`); accept both names and the common subdirs.
-        for name in ["whisper-cli", "main"] {
-            let file = format!("{name}{BIN_EXT}");
-            for sub in ["", "Release", "bin"] {
-                let cand = if sub.is_empty() {
-                    dir.join(&file)
-                } else {
-                    dir.join(sub).join(&file)
-                };
-                if cand.exists() {
-                    return Ok(WhisperRunner { binary: cand });
+        for dir in &dirs {
+            for name in ["whisper-cli", "main"] {
+                let file = format!("{name}{BIN_EXT}");
+                for sub in ["", "Release", "bin"] {
+                    let cand = if sub.is_empty() {
+                        dir.join(&file)
+                    } else {
+                        dir.join(sub).join(&file)
+                    };
+                    if cand.exists() {
+                        return Ok(WhisperRunner { binary: cand });
+                    }
                 }
             }
         }
-        bail!("whisper.cpp runtime not found under {}", dir.display())
+        bail!(
+            "whisper.cpp runtime not found under {}",
+            dirs.iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )
     }
 
     /// The installed ggml whisper model — the largest `.bin` under `Models\whisper\`

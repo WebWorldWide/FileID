@@ -22,9 +22,9 @@ pwsh -NoProfile -File build/publish-store.ps1
 pwsh -NoProfile -File build/verify-store-package.ps1 -Path dist/store/FileID-0.1.0-x64.msix
 ```
 
-The script builds the native engine, publishes the existing WinUI app with `FileIDStoreBuild=true`, stages ONNX Runtime/DirectML/PDFium, checks binary privacy, and runs MakeAppx validation. Version comes from `platforms/windows/VERSION`; the fourth MSIX version component is zero. Initial Store packaging is **x64 only**; native ARM64 remains a separate runtime/hardware verification gate.
+The script builds the native engine, publishes the existing WinUI app with `FileIDStoreBuild=true`, stages ONNX Runtime/DirectML/PDFium, and stages SHA-256-pinned Vulkan llama.cpp, whisper.cpp, and OpenVINO provider bundles with license notices. It checks binary privacy and runs MakeAppx validation. Bundled runtime assets are resolved from the installed package; app runtime downloads remain explicit user actions for Hugging Face model artifacts only. Version comes from `platforms/windows/VERSION`; the fourth MSIX version component is zero. Initial Store packaging is **x64 only**; native ARM64 remains a separate runtime/hardware verification gate.
 
-The existing Windows App Runtime 1.7 and VC++ Desktop frameworks are declared Store-managed dependencies. .NET is self-contained. Store builds skip the unpackaged bootstrapper; MSI/dev builds retain it. The engine remains a bundled child process using the existing IPC contract. No new library dependencies or web UI are introduced.
+The existing Windows App Runtime 1.7 and VC++ Desktop frameworks are declared Store-managed dependencies. .NET is self-contained. Store builds skip the unpackaged bootstrapper; MSI/dev builds retain it. The engine remains a bundled child process using the existing IPC contract. Store builds do not silently fetch runtime binaries. No new library dependencies or web UI are introduced.
 
 `dist/store/FileID-<version>-x64.msix` and its checksum are upload artifacts. Partner Center accepts unsigned MSIX uploads; Microsoft signs the distributed package. Local sideloading requires a trusted matching publisher certificate and the declared frameworks. Do not create/install trust certificates as part of normal build verification. The **Windows Store package** GitHub workflow builds artifacts without publishing or submitting them.
 
@@ -33,11 +33,11 @@ The existing Windows App Runtime 1.7 and VC++ Desktop frameworks are declared St
 Packaging success is not release acceptance. Before submission:
 
 - Pass Rust Clippy/tests, **both** C# test projects with nonempty passing reports, solution formatting, IPC parity, binary privacy, and hosted CI on the exact release commit. `dotnet test FileID.sln` currently discovers no tests; run the projects explicitly.
-- Resolve the existing strict runtime-egress blocker. Optional runtime artifacts include GitHub/NVIDIA URLs. `python shared/scripts/check_runtime_egress.py --known-blockers` is a regression baseline only; the command **without** that flag must pass before release. Preserve the Hugging Face-only runtime policy and provision other runtimes through vetted packaging.
+- The strict runtime-egress gate now passes without `--known-blockers`. Runtime archives are provisioned through the Store package; normal app startup does not fetch them. Keep user-initiated model downloads Hugging Face-only.
 - Verify installed MSIX launch from Start, engine startup, model install/cancel/retry, all six tabs, folder access, scanning, duplicate safety, restructure preview/Undo, restart, upgrade and uninstall on a fresh Windows profile. Use copies for mutation checks. Verify WinUI/GPU behavior on hardware.
 - Run Windows App Certification Kit and inspect its report. MakeAppx validation does not substitute for certification or installed-app testing.
 - Review and include approved native dependency redistribution notices and optional model terms.
-- Complete Partner Center pricing/markets, properties/category, age rating, privacy/support URLs, English listing, screenshots, capability justification and certification notes. The owner chooses pricing and markets; Apache-2.0 licensing does not imply a Store price.
+- Partner Center properties/category and privacy/support URLs are complete. The IARC answers are filled in the open form; previewing/submitting them is the next step and requires action-time confirmation for IARC terms acceptance. Set the reversible pricing draft to free worldwide unless the publisher supplies a different choice. Finish the English listing, screenshots, capability justification and certification notes.
 - Upload the exact validated package and verify Partner Center accepts identity/dependencies. Submit after the remaining gates pass.
 
 ## Listing draft

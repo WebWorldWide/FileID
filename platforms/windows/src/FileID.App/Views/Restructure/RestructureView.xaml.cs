@@ -211,6 +211,24 @@ public sealed partial class RestructureView : UserControl
                 case nameof(EngineClient.DeepAnalyzeProgress):
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) UpdateDeepAnalyzeBanner(); });
                     break;
+                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
+                    {
+                        var engine = EngineClient.Instance;
+                        var attemptId = engine.DeepAnalyzeCommandAttemptId;
+                        DispatcherQueue.TryEnqueue(() =>
+                        {
+                            if (_unloaded || engine.DeepAnalyzeCommandAttemptId != attemptId) return;
+                            if (engine.DeepAnalyzeCommandInFlight)
+                            {
+                                UpdateDeepAnalyzeBanner();
+                            }
+                            else
+                            {
+                                UpdateDeepAnalyzeBanner();
+                            }
+                        });
+                        break;
+                    }
                 case nameof(EngineClient.DeepAnalyzeComplete):
                     {
                         // macOS parity: re-plan when Deep Analyze finishes so the
@@ -678,7 +696,8 @@ public sealed partial class RestructureView : UserControl
 
     private void UpdateDeepAnalyzeBanner()
     {
-        if (EngineClient.Instance.DeepAnalyzeProgress != null)
+        var engine = EngineClient.Instance;
+        if (engine.DeepAnalyzeCommandInFlight || engine.DeepAnalyzeProgress != null)
         {
             DeepAnalyzeHintBanner.Visibility = Visibility.Visible;
             DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
@@ -766,6 +785,7 @@ public sealed partial class RestructureView : UserControl
     private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnRunDeepAnalyzeClicked), async () =>
         {
+            if (EngineClient.Instance.DeepAnalyzeCommandInFlight) return;
             var model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
             DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
             DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
