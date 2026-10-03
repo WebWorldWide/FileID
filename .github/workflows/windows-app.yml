@@ -235,9 +235,9 @@ jobs:
               }
             }
           }
-          $appRuntimeConfig = Join-Path $appOutputRoot 'FileID.runtimeconfig.json'
-          if (-not (Test-Path $appRuntimeConfig -PathType Leaf)) { throw "App runtime config is missing: $appRuntimeConfig" }
-          Copy-Item -LiteralPath $appRuntimeConfig -Destination (Join-Path $testOutputRoot 'testhost.runtimeconfig.json') -Force
+          $testHostRuntimeConfig = Join-Path $testOutputRoot 'testhost.runtimeconfig.json'
+          $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net8.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '8.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '8.0.0' }) } } | ConvertTo-Json -Depth 4
+          Set-Content -LiteralPath $testHostRuntimeConfig -Value $runtimeConfig -Encoding utf8
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
