@@ -179,20 +179,24 @@ jobs:
           $deps = Get-Content $depsFile -Raw | ConvertFrom-Json
           $stagedShim = Join-Path (Split-Path -Parent $depsFile) "Microsoft.CodeCoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
           $shimSource = Join-Path $env:NUGET_PACKAGES $relativeShim
-          if (-not (Test-Path $shimSource)) { $shimSource = $stagedShim }
-          if (-not (Test-Path $shimSource)) { throw "CodeCoverage shim missing from NuGet and test output: $relativeShim" }
+          if (-not (Test-Path $shimSource -PathType Leaf)) { $shimSource = $stagedShim }
+          if (-not (Test-Path $shimSource -PathType Leaf)) { throw "CodeCoverage shim missing from NuGet and test output: $relativeShim" }
           $packageFolders = @()
           if ($deps.packageFolders) { $packageFolders = @($deps.packageFolders.PSObject.Properties.Name | Where-Object { $_ }) }
           if ($packageFolders.Count -eq 0 -and $env:NUGET_PACKAGES) { $packageFolders = @($env:NUGET_PACKAGES) }
           if ($packageFolders.Count -eq 0) { $packageFolders = @((Join-Path $env:USERPROFILE '.nuget/packages')) }
           foreach ($packageFolder in $packageFolders) {
             $packageShim = Join-Path $packageFolder $relativeShim
-            Write-Host "CodeCoverage package folder: $packageFolder; shim present: $(Test-Path $packageShim)"
-            if (-not (Test-Path $packageShim)) {
+            Write-Host "CodeCoverage package folder: $packageFolder; shim file present: $(Test-Path $packageShim -PathType Leaf)"
+            if (-not (Test-Path $packageShim -PathType Leaf)) {
               Write-Host "Staging CodeCoverage shim in test-host package folder: $packageFolder"
               New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageShim) | Out-Null
               Copy-Item -LiteralPath $shimSource -Destination $packageShim
             }
+          }
+          $testOutputRootShim = Join-Path (Split-Path -Parent $depsFile) 'Microsoft.VisualStudio.CodeCoverage.Shim.dll'
+          if (-not (Test-Path $testOutputRootShim -PathType Leaf)) {
+            Copy-Item -LiteralPath $shimSource -Destination $testOutputRootShim
           }
           dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

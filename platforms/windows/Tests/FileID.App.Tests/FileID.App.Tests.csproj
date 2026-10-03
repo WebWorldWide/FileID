@@ -63,5 +63,6 @@
     <Error Condition="!Exists('$(CodeCoverageShim)')" Text="CodeCoverage test-host runtime asset is missing: $(CodeCoverageShim)" />
     <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(CodeCoverageShimTarget)'))" />
     <Copy SourceFiles="$(CodeCoverageShim)" DestinationFiles="$(CodeCoverageShimTarget)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(CodeCoverageShim)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>
