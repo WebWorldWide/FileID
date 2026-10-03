@@ -140,12 +140,12 @@ jobs:
             "dist/installer/FileID-x64.msi",
             "dist/installer/FileID-arm64.msi"
           )
-        foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
-        $checksums = Get-ChildItem -LiteralPath $stage -File | Sort-Object Name | ForEach-Object {
-          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
-          "$hash  $($_.Name)"
-        }
-        $checksums | Set-Content -LiteralPath (Join-Path $stage "SHA256SUMS.txt") -Encoding ascii
+          foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
+          $checksums = Get-ChildItem -LiteralPath $stage -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $checksums | Set-Content -LiteralPath (Join-Path $stage "SHA256SUMS.txt") -Encoding ascii
 
       - name: Upload release-ready assets
         if: steps.mode.outputs.publish == 'true'
