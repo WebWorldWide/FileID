@@ -11,7 +11,7 @@
 #   ./build.sh -windows --debug       # Debug build (faster iteration)
 #   ./build.sh -windows --no-run      # Build only, don't launch
 #   ./build.sh -mac                   # macOS dev launch (run.sh)
-#   ./build.sh -linux                 # Phase 5 — not yet supported
+#   ./build.sh -linux                 # Build/stage Linux app + engine, launch with a display
 #
 # Defaults for -windows:
 #   - Wipe: ON          (destructive: clears Desktop\FileID + %LOCALAPPDATA%\FileID)
@@ -19,7 +19,7 @@
 #   - Desktop: ON       (drops a folder at ~/Desktop/FileID/)
 #   - Run: ON           (launches FileID.exe after build completes)
 #
-# Override any of these with --no-<flag> to disable.
+# Windows defaults can be adjusted with the flags listed in --help.
 #
 # Exit code: 0 on success, 1 on any failure.
 
@@ -38,6 +38,7 @@ ARM64="false"
 SIGN="false"
 VLM_NATIVE="false"
 FAST="false"
+LINUX_REQUESTED_ARGS=("$@")
 
 show_help() {
     cat <<'EOF'
@@ -47,9 +48,13 @@ FileID — unified build dispatcher
                                  questions instead of flag soup)
   ./build.sh -windows [flags]    Build and launch on Windows
   ./build.sh -mac     [flags]    Build and launch on macOS
-  ./build.sh -linux   [flags]    Linux (Phase 5 — deferred)
+  ./build.sh -linux [--debug] [--no-run]  Build/stage GTK app + engine; launch if a display is available; never wipe user data
 
-Common flags (after the target):
+Linux flags (only these are supported):
+  --debug           Build debug binaries (default: release)
+  --no-run          Build/stage only; do not launch even when a display is available
+
+Windows/macOS flags (availability varies by target):
   --no-wipe        Don't destructively clear prior install + user data
                    (default: wipe ON for fresh-install verification)
   --preserve-models Keep downloaded model weights when wiping (Windows only;
@@ -72,12 +77,14 @@ Common flags (after the target):
   --help           Show this message
 
 Examples:
-  ./build.sh                                # interactive wizard
-  ./build.sh -windows                       # full fresh-install build + run
-  ./build.sh -windows --no-wipe --debug     # iterate without wiping models
-  ./build.sh -windows --no-run --tests      # CI-style verification
-  ./build.sh -windows --arm64 --no-run      # cross-compile for Snapdragon
-  ./build.sh -mac                           # macOS dev launch
+  ./build.sh                                  # interactive wizard
+  ./build.sh -windows                         # full fresh-install build + run
+  ./build.sh -windows --no-wipe --debug       # iterate without wiping models
+  ./build.sh -windows --no-run --tests        # CI-style verification
+  ./build.sh -windows --arm64 --no-run        # cross-compile for Snapdragon
+  ./build.sh -mac                             # macOS dev launch
+  ./build.sh -linux                           # Linux release build/stage; launch with a display
+  ./build.sh -linux --debug --no-run          # Linux debug build/stage, no launch
 EOF
     exit 0
 }
@@ -144,7 +151,7 @@ EOF
     plat=$(ask_choice "Where are we building?" 1 \
         "Windows" \
         "macOS" \
-        "Linux (Phase 5 — not yet supported)")
+        "Linux (build/stage GTK app + engine; launch with a display)")
     case "$plat" in
         1) TARGET="windows" ;;
         2) TARGET="mac" ;;
@@ -152,10 +159,16 @@ EOF
     esac
     echo ""
 
-    # Linux isn't wired up yet — short-circuit before the rest of the
-    # wizard so the user doesn't answer irrelevant questions just to be
-    # told the platform is deferred.
-    if [ "$TARGET" = "linux" ]; then return; fi
+    if [ "$TARGET" = "linux" ]; then
+        echo "Linux builds/stages the GTK app + shared engine and launches with a display; it never wipes user data."
+        local linux_confirm
+        linux_confirm=$(ask_yes_no "Build Linux app and launch if a display is available?" "y")
+        if [ "$linux_confirm" = "false" ]; then
+            echo "Aborted." >&2
+            exit 0
+        fi
+        return
+    fi
 
     local preset
     preset=$(ask_choice "What kind of build?" 2 \
@@ -353,19 +366,36 @@ case "$TARGET" in
         ;;
 
     linux)
-        cat <<'EOF' >&2
-Linux is deferred to Phase 5 (see shared/docs/SHIP.md).
+        for arg in "${LINUX_REQUESTED_ARGS[@]}"; do
+            case "$arg" in
+                -linux|--linux|--debug|--no-run) ;;
+                *)
+                    echo "ERROR: '$arg' is unsupported for Linux. Use ./build.sh -linux [--debug] [--no-run]." >&2
+                    echo "Linux never wipes user data; use --no-run to skip launching the staged app." >&2
+                    exit 1
+                    ;;
+            esac
+        done
 
-The Rust engine is cross-platform-clean and will build on Linux today
-(`cargo build --release` from platforms/windows/src/engine/ — works on
-any *nix). The blocker is the UI: WinUI 3 is Windows-only, so the
-Linux app needs an Avalonia or GTK4-Rust port.
+        SCRIPT="$REPO_ROOT/platforms/linux/build/build.sh"
+        if [ ! -f "$SCRIPT" ]; then
+            echo "ERROR: Linux build script not found at $SCRIPT" >&2
+            exit 1
+        fi
+        if [ "$RELEASE" = "false" ]; then
+            PROFILE=debug "$SCRIPT"
+        else
+            "$SCRIPT"
+        fi
 
-If you need the engine standalone for headless use, run:
-    cd platforms/windows/src/engine && cargo build --release
-
-For UI: cross that bridge when we get there.
-EOF
-        exit 1
+        if [ "$RUN" = "false" ]; then
+            echo "Linux app staged (--no-run; not launching)."
+        elif [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+            echo "Linux app staged; no graphical display detected, so it was not launched."
+        else
+            LINUX_DIST_DIR="${FILEID_LINUX_DIST_DIR:-$REPO_ROOT/platforms/linux/dist/fileid}"
+            echo "→ Launching $LINUX_DIST_DIR/fileid-linux"
+            exec "$LINUX_DIST_DIR/fileid-linux"
+        fi
         ;;
 esac

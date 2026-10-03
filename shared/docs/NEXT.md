@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## 2026-09-24 — Current priorities after isolated benchmarking and Linux Library/People/Settings smoke
+
+1. Install both required Linux scan bundles with genuine pinned weights and verify the installed-bundle UI and an inference-backed scan; the fake-engine Settings smoke (queued/42% progress, cancellation, error/retry, rejection of unpinned fake completion) did not exercise a live download or prove model availability.
+2. Wire and verify the remaining three Linux tabs (Cleanup, Deep Analyze, Restructure) and complete Settings parity; the current Settings surface covers only `mobileclip_s2` and `arcface`.
+3. Establish a native Linux VLM runtime and packaging, rather than treating pinned Windows Qwen3 model resolution or selectable UI IDs as proof of Linux inference.
+4. Exercise on-hardware inference, rerun isolated IPC benchmarks under comparable conditions, and calibrate model quality and performance against labeled data; the Adlon H: 231-entry metadata-only sample is not an engine scan or speed/accuracy measurement.
+5. Restore WinUI NuGet packages and recheck build and actual UI interactions/rendering, including Qwen3 selection and the overlapping Welcome InstallAll / optional-model Cancel and retry flows. Package-free C# and .NET 10 harness checks do not replace WinUI verification.
+
 ## Owner priority — macOS first (2026-10-02)
 
 Continue the full next-version plan on the Mac. The owner has a Windows/Linux PC and explicitly deferred new port implementation and physical validation until working there. Preserve the archived Windows safety restoration; do not discard tests or claim port acceptance. Shared contracts must remain coherent, and already-running CI still requires inspection. On macOS, finish verified embedding provenance and persistent hybrid retrieval, then the remaining scheduler, chat, rename, face, timeline, best-take and Tools milestones from NEXT_VERSION.md. The Mac version is not complete or perfect yet.

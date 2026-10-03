@@ -26,6 +26,9 @@ pub(super) fn icon_for_kind(kind: &str) -> &'static str {
 pub(super) fn format_bytes(b: i64) -> String {
     const MB: f64 = 1024.0 * 1024.0;
     const GB: f64 = MB * 1024.0;
+    if b < 1024 {
+        return format!("{b} B");
+    }
     let bytes = b as f64;
     if bytes >= GB {
         format!("{:.1} GB", bytes / GB)
@@ -42,6 +45,7 @@ pub(super) fn fmt_date(secs: Option<f64>) -> Option<String> {
     dt.format("%Y-%m-%d").ok().map(|g| g.to_string())
 }
 
+#[allow(dead_code)]
 pub(super) fn glass_card() -> gtk::Box {
     // Inner padding comes from the `.glass-card` CSS (16); the parent box's
     // `spacing` provides the gap between cards — so no margins here.

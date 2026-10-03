@@ -29,8 +29,8 @@ use gtk::glib;
 
 use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    BulkActionResult, CommandPayload, DeepAnalyzeAllPayload, Empty, MarkPersonsAsUnknownPayload,
-    MergeClustersPayload, ReassignFacePayload, RenamePersonPayload,
+    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload,
+    MergeClustersPayload, RenamePersonPayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -352,9 +352,6 @@ fn classify_rename_terminal(result: &BulkActionResult, person_id: i64) -> Rename
     classify_person_terminal(result, "renamePerson", person_id)
 }
 
-fn classify_face_terminal(result: &BulkActionResult, face_id: i64) -> RenameTerminal {
-    classify_person_terminal(result, "reassignFace", face_id)
-}
 
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
@@ -364,6 +361,7 @@ struct Ui {
     suggestions: RefCell<Vec<Candidate>>,
     pending_suggestions: RefCell<VecDeque<PendingSuggestion>>,
     merge_results_pending: Cell<usize>,
+    merge_failed: Cell<bool>,
     person_actions: PersonActionGate,
     total_faces: Cell<i64>,
     hidden_unknown: Cell<i64>,
@@ -376,14 +374,10 @@ struct Ui {
     // Keyed by (representative photo path, face bbox): two people can share a
     // representative photo but crop different faces from it, so the path alone
     // would make the second card reuse the first card's face crop.
-    thumb_cache: RefCell<BoundedLru<PersonThumbKey, gtk::gdk::MemoryTexture>>,
+    thumb_cache: RefCell<BoundedLru<PersonThumbKey, gtk::gdk::Texture>>,
 
     count_label: gtk::Label,
     status_label: gtk::Label,
-    flow_banner: gtk::Box,
-    flow_banner_label: gtk::Label,
-    flow_banner_button: gtk::Button,
-    switch_tab: Rc<dyn Fn(&str)>,
     actions_box: gtk::Box,
     bulk_strip: gtk::Box,
     bulk_label: gtk::Label,
@@ -400,7 +394,7 @@ struct Ui {
     anchor: gtk::Box,
 }
 
-pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) -> gtk::Widget {
+pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header ────────────────────────────────────────────────────────────────
     let title = gtk::Label::builder()
         .label("People")
@@ -434,24 +428,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
         .css_classes(["dim-label"])
         .build();
 
-    let flow_banner_label = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .hexpand(true)
-        .css_classes(["dim-label"])
-        .build();
-    let flow_banner_button = gtk::Button::builder()
-        .css_classes(["pill"])
-        .sensitive(crate::tabs::deep_analyze::vlm_runtime_available())
-        .build();
-    let flow_banner = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(10)
-        .visible(false)
-        .css_classes(["glass-card", "people-flow-banner"])
-        .build();
-    flow_banner.append(&flow_banner_label);
-    flow_banner.append(&flow_banner_button);
 
     let bulk_label = gtk::Label::builder()
         .label("")
@@ -477,7 +453,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
         .build();
     header.append(&title_row);
     header.append(&status_label);
-    header.append(&flow_banner);
     header.append(&bulk_strip);
 
     // ── Content: grid / empty / no-clusters ──────────────────────────────────
@@ -574,6 +549,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
         suggestions: RefCell::new(Vec::new()),
         pending_suggestions: RefCell::new(VecDeque::new()),
         merge_results_pending: Cell::new(0),
+        merge_failed: Cell::new(false),
         person_actions: PersonActionGate::default(),
         total_faces: Cell::new(0),
         hidden_unknown: Cell::new(0),
@@ -586,10 +562,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
         thumb_cache: RefCell::new(BoundedLru::new(PERSON_THUMB_CACHE_CAP)),
         count_label: count_label.clone(),
         status_label: status_label.clone(),
-        flow_banner: flow_banner.clone(),
-        flow_banner_label: flow_banner_label.clone(),
-        flow_banner_button: flow_banner_button.clone(),
-        switch_tab,
         actions_box: actions_box.clone(),
         bulk_strip: bulk_strip.clone(),
         bulk_label: bulk_label.clone(),
@@ -609,27 +581,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
     {
         let ui = ui.clone();
         bulk_button.connect_clicked(move |_| on_bulk_clicked(&ui));
-    }
-    {
-        let ui = ui.clone();
-        flow_banner_button.connect_clicked(move |button| {
-            let kind = crate::tabs::deep_analyze::recommended_vlm_kind_for_host();
-            if !crate::model_license::ensure_or_prompt(button, kind) {
-                return;
-            }
-            let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-                model_kind: kind.to_string(),
-                skip_existing: true,
-                file_ids: None,
-                tags_only: false,
-                propose_renames: true,
-                excluded_folders: crate::app_settings::deep_analyze_excluded_folders(),
-            });
-            if send_cmd(&ui, payload) {
-                set_status(&ui, "Deep Analyze started.".to_string());
-                (ui.switch_tab)("deep");
-            }
-        });
     }
     {
         let ui = ui.clone();
@@ -676,8 +627,11 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
                         set_status(
                             &ui,
                             format!(
-                                "Grouped {} faces into {} people.",
-                                result.face_count, result.person_count
+                                "Grouped {} face{} into {} {}.",
+                                result.face_count,
+                                plural(result.face_count as i64),
+                                result.person_count,
+                                if result.person_count == 1 { "person" } else { "people" },
                             ),
                         );
                         reload(&ui);
@@ -708,6 +662,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
                             continue;
                         }
                         ui.merge_results_pending.set(outstanding - 1);
+                        if result.failed > 0 {
+                            ui.merge_failed.set(true);
+                        }
                         if let Some(pending) = ui.pending_suggestions.borrow_mut().pop_front() {
                             if result.failed == 0 && result.succeeded > 0 {
                                 if let Some(row) = pending.row.upgrade() {
@@ -718,7 +675,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
                                 }
                                 ui.suggestions.borrow_mut().clear();
                                 set_status(&ui, "Merge complete.".to_string());
-                                schedule_reload_burst(&ui);
                             } else {
                                 if let Some(button) = pending.button.upgrade() {
                                     button.set_sensitive(true);
@@ -744,6 +700,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
                             set_status(&ui, format!("Merge failed: {detail}"));
                         }
                         if ui.merge_results_pending.get() == 0 {
+                            if !ui.merge_failed.get() {
+                                set_status(&ui, "Merge complete.".to_string());
+                            }
                             schedule_reload_burst(&ui);
                         }
                     }
@@ -769,42 +728,40 @@ pub fn build(engine: Rc<RefCell<EngineClient>>, switch_tab: Rc<dyn Fn(&str)>) ->
 
 fn refresh_view(ui: &Rc<Ui>) {
     let clustering = ui.face_clustering.borrow().is_active();
+    let total_faces = ui.total_faces.get();
     let (has_persons, count_text, persons_len) = {
         let persons = ui.persons.borrow();
         (
             !persons.is_empty(),
-            count_line(&persons, ui.total_faces.get(), clustering),
+            count_line(&persons, total_faces, clustering),
             persons.len(),
         )
     };
-    ui.count_label.set_text(&count_text);
-
-    let named = ui.persons.borrow().iter().any(PersonRow::has_any_name);
-    if named {
-        ui.flow_banner_label.set_text(
-            "Names set — keep going. Generate captions and smart filenames using the people you've named.",
-        );
-        ui.flow_banner_button.set_label("Continue to Deep Analyze");
-        ui.flow_banner_button.remove_css_class("flat");
-        ui.flow_banner_button.add_css_class("gold-button");
+    let all_hidden = !has_persons && ui.hidden_unknown.get() > 0;
+    if all_hidden {
+        ui.count_label.set_text(&format!("{} marked unknown", ui.hidden_unknown.get()));
     } else {
-        ui.flow_banner_label
-            .set_text("Don't want to name anyone? Run Deep Analyze with generic captions.");
-        ui.flow_banner_button.set_label("Skip — run without names");
-        ui.flow_banner_button.remove_css_class("gold-button");
-        ui.flow_banner_button.add_css_class("flat");
+        ui.count_label.set_text(&count_text);
     }
-    ui.flow_banner.set_visible(persons_len > 0);
 
-    let has_faces = ui.total_faces.get() > 0;
+    let has_faces = total_faces > 0;
     ui.grid_scroller.set_visible(has_persons);
     ui.empty_page.set_visible(!has_persons && !has_faces);
     ui.no_clusters_page.set_visible(!has_persons && has_faces);
-    if !has_persons && has_faces {
+    ui.group_button.set_visible(!all_hidden);
+    if all_hidden {
+        ui.no_clusters_page.set_title("All people are hidden");
+        ui.no_clusters_page.set_description(
+            Some("These people were marked unknown. Use Show them below to review their photos."),
+        );
+    } else {
         ui.no_clusters_page.set_title(&format!(
-            "{} faces detected — ready to group",
-            ui.total_faces.get()
+            "{total_faces} face{} detected — ready to group",
+            plural(total_faces),
         ));
+        ui.no_clusters_page.set_description(
+            Some("Click Group photos by face to create one card per person. Open a card to add a name."),
+        );
     }
 
     let can_start_clustering = ui.face_clustering.borrow().can_start();
@@ -819,7 +776,7 @@ fn refresh_view(ui: &Rc<Ui>) {
     rebuild_actions(ui, persons_len);
     update_bulk_strip(ui);
 
-    let show_footer = has_persons && ui.hidden_unknown.get() > 0;
+    let show_footer = ui.hidden_unknown.get() > 0;
     ui.footer.set_visible(show_footer);
     if show_footer {
         let n = ui.hidden_unknown.get();
@@ -846,15 +803,16 @@ fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> Stri
     }
     if p == 0 {
         return if clustering {
-            format!("{total_faces} faces · clustering…")
+            format!("{total_faces} face{} · clustering…", plural(total_faces))
         } else {
-            format!("{total_faces} faces · not grouped yet")
+            format!("{total_faces} face{} · not grouped yet", plural(total_faces))
         };
     }
+    let people = if p == 1 { "person" } else { "people" };
     if unnamed > 0 {
-        format!("{p} people · {unnamed} still unnamed")
+        format!("{p} {people} · {unnamed} still unnamed")
     } else {
-        format!("{p} people · all named")
+        format!("{p} {people} · all named")
     }
 }
 
@@ -1176,20 +1134,14 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = ui
-        .engine
-        .borrow()
-        .request_thumbnail_with(key.path.clone(), {
-            let bbox = key.bbox.clone();
-            move |bytes| cropped_texture(bytes, bbox.as_deref(), CARD_THUMB_PX)
-        });
+    let rx = request_face_thumbnail(key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
         let Ok(Some(decoded)) = rx.recv().await else {
             return;
         };
-        let tex = texture_from_decoded(&decoded);
+        let tex = texture_from_decoded(decoded);
         ui.thumb_cache.borrow_mut().insert(key, tex.clone());
         if let Some(pic) = pic_weak.upgrade() {
             pic.set_paintable(Some(&tex));
@@ -1289,13 +1241,23 @@ fn start_clustering(ui: &Rc<Ui>) {
 
 fn set_person_dialog_busy(
     group: &adw::PreferencesGroup,
+    unknown_check: &gtk::CheckButton,
     done_button: &gtk::Button,
     mark_button: &gtk::Button,
+    discard_button: &gtk::Button,
     busy: bool,
 ) {
     group.set_sensitive(!busy);
+    unknown_check.set_sensitive(!busy);
     done_button.set_sensitive(!busy);
     mark_button.set_sensitive(!busy);
+    discard_button.set_sensitive(!busy);
+}
+
+fn show_person_dialog_error(ui: &Rc<Ui>, label: &gtk::Label, message: String) {
+    label.set_text(&message);
+    label.set_visible(true);
+    set_status(ui, message);
 }
 
 fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
@@ -1360,6 +1322,14 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     group.set_visible(!person.is_unknown);
     body.append(&unknown_check);
     body.append(&group);
+    let error_label = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .selectable(true)
+        .visible(false)
+        .css_classes(["error"])
+        .build();
+    body.append(&error_label);
 
     let btn_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -1367,12 +1337,14 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         .build();
     let mark_btn = gtk::Button::with_label("I don't know who this is");
     let btn_spacer = gtk::Box::builder().hexpand(true).build();
+    let discard_btn = gtk::Button::with_label("Discard changes");
     let done_btn = gtk::Button::builder()
         .label("Done")
         .css_classes(["gold-button"])
         .build();
     btn_row.append(&mark_btn);
     btn_row.append(&btn_spacer);
+    btn_row.append(&discard_btn);
     btn_row.append(&done_btn);
     body.append(&btn_row);
 
@@ -1397,6 +1369,23 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
 
     dialog.set_can_close(false);
     let lifecycle = Rc::new(PersonDialogLifecycle::default());
+    {
+        let dialog = dialog.clone();
+        let lifecycle = lifecycle.clone();
+        let ui = ui.clone();
+        let error_label = error_label.clone();
+        discard_btn.connect_clicked(move |_| {
+            if lifecycle.operation.get() != PersonDialogOperation::Idle {
+                return;
+            }
+            let failed = error_label.is_visible();
+            dialog.set_can_close(true);
+            dialog.close();
+            if failed {
+                reload(&ui);
+            }
+        });
+    }
 
     {
         let ui = ui.clone();
@@ -1405,6 +1394,8 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let done_btn = done_btn.clone();
         let mark_btn = mark_btn.clone();
         let unknown_check = unknown_check.clone();
+        let discard_btn = discard_btn.clone();
+        let error_label = error_label.clone();
         let (t, f, m, l, s) = (
             title_row.clone(),
             first_row.clone(),
@@ -1420,9 +1411,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             if !lifecycle.begin(PersonDialogOperation::Renaming) {
                 return;
             }
+            error_label.set_visible(false);
             if !begin_person_action(&ui, "renamePerson") {
                 lifecycle.reset();
-                set_status(&ui, "Another person rename is still saving.".to_string());
+                show_person_dialog_error(
+                    &ui, &error_label, "Another person rename is still saving.".to_string(),
+                );
                 return;
             }
             let payload = RenamePersonPayload {
@@ -1434,11 +1428,19 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                 suffix: norm(s.text().as_str()),
             };
             let events = ui.engine.borrow_mut().subscribe();
-            set_person_dialog_busy(&group, &done_btn, &mark_btn, true);
-            if !send_cmd(&ui, CommandPayload::RenamePerson(payload)) {
+            set_person_dialog_busy(
+                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, true,
+            );
+            let sent = ui.engine.borrow_mut().send(CommandPayload::RenamePerson(payload));
+            if let Err(error) = sent {
                 finish_person_action(&ui, "renamePerson");
                 lifecycle.reset();
-                set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                set_person_dialog_busy(
+                    &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                );
+                show_person_dialog_error(
+                    &ui, &error_label, format!("Couldn't save person: {error}"),
+                );
                 return;
             }
             set_status(&ui, "Saving person…".to_string());
@@ -1448,6 +1450,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let group = group.clone();
             let done_btn = done_btn.clone();
             let mark_btn = mark_btn.clone();
+            let unknown_check = unknown_check.clone();
+            let discard_btn = discard_btn.clone();
+            let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
                 while let Ok(event) = events.recv().await {
@@ -1466,14 +1471,21 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                 RenameTerminal::Failure => {
                                     finish_person_action(&ui, "renamePerson");
                                     lifecycle.reset();
-                                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                                    set_person_dialog_busy(
+                                        &group, &unknown_check, &done_btn, &mark_btn,
+                                        &discard_btn, false,
+                                    );
                                     let detail = result
                                         .messages
                                         .iter()
                                         .find(|item| !item.ok)
                                         .and_then(|item| item.message.as_deref())
                                         .unwrap_or("the engine rejected the change");
-                                    set_status(&ui, format!("Couldn't save person: {detail}"));
+                                    show_person_dialog_error(
+                                        &ui,
+                                        &error_label,
+                                        format!("Couldn't save person: {detail}"),
+                                    );
                                 }
                             }
                             handled = true;
@@ -1482,8 +1494,14 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                         EngineEvent::Exited => {
                             finish_person_action(&ui, "renamePerson");
                             lifecycle.reset();
-                            set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
-                            set_status(&ui, "Couldn't save person: the engine exited.".to_string());
+                            set_person_dialog_busy(
+                                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                            );
+                            show_person_dialog_error(
+                                &ui,
+                                &error_label,
+                                "Couldn't save person: the engine exited.".to_string(),
+                            );
                             handled = true;
                             break;
                         }
@@ -1493,9 +1511,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                 if !handled {
                     finish_person_action(&ui, "renamePerson");
                     lifecycle.reset();
-                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
-                    set_status(
-                        &ui,
+                    set_person_dialog_busy(
+                        &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                    );
+                    show_person_dialog_error(
+                        &ui, &error_label,
                         "Couldn't save person: the engine connection closed.".to_string(),
                     );
                 }
@@ -1521,29 +1541,40 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let group = group.clone();
         let done_btn = done_btn.clone();
         let mark_btn = mark_btn.clone();
+        let unknown_check = unknown_check.clone();
+        let discard_btn = discard_btn.clone();
+        let error_label = error_label.clone();
         mark_btn.clone().connect_clicked(move |_| {
             if !lifecycle.begin(PersonDialogOperation::MarkingUnknown) {
                 return;
             }
+            error_label.set_visible(false);
             if !begin_person_action(&ui, "markPersonsAsUnknown") {
                 lifecycle.reset();
-                set_status(
-                    &ui,
+                show_person_dialog_error(
+                    &ui, &error_label,
                     "Another Mark Unknown action is still saving.".to_string(),
                 );
                 return;
             }
             let events = ui.engine.borrow_mut().subscribe();
-            set_person_dialog_busy(&group, &done_btn, &mark_btn, true);
-            if !send_cmd(
-                &ui,
+            set_person_dialog_busy(
+                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, true,
+            );
+            let sent = ui.engine.borrow_mut().send(
                 CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
                     person_ids: vec![pid],
                 }),
-            ) {
+            );
+            if let Err(error) = sent {
                 finish_person_action(&ui, "markPersonsAsUnknown");
                 lifecycle.reset();
-                set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                set_person_dialog_busy(
+                    &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                );
+                show_person_dialog_error(
+                    &ui, &error_label, format!("Couldn't mark as unknown: {error}"),
+                );
                 return;
             }
             set_status(&ui, "Saving…".to_string());
@@ -1553,6 +1584,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             let group = group.clone();
             let done_btn = done_btn.clone();
             let mark_btn = mark_btn.clone();
+            let unknown_check = unknown_check.clone();
+            let discard_btn = discard_btn.clone();
+            let error_label = error_label.clone();
             glib::MainContext::default().spawn_local(async move {
                 let mut handled = false;
                 while let Ok(event) = events.recv().await {
@@ -1571,7 +1605,10 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                 RenameTerminal::Failure => {
                                     finish_person_action(&ui, "markPersonsAsUnknown");
                                     lifecycle.reset();
-                                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
+                                    set_person_dialog_busy(
+                                        &group, &unknown_check, &done_btn, &mark_btn,
+                                        &discard_btn, false,
+                                    );
                                     let message = result
                                         .messages
                                         .iter()
@@ -1579,7 +1616,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                             (!item.ok).then_some(item.message.as_deref()).flatten()
                                         })
                                         .unwrap_or("The engine did not confirm the change.");
-                                    set_status(&ui, format!("Couldn't mark as unknown: {message}"));
+                                    show_person_dialog_error(
+                                        &ui,
+                                        &error_label,
+                                        format!("Couldn't mark as unknown: {message}"),
+                                    );
                                 }
                             }
                             handled = true;
@@ -1588,9 +1629,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                         EngineEvent::Exited => {
                             finish_person_action(&ui, "markPersonsAsUnknown");
                             lifecycle.reset();
-                            set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
-                            set_status(
-                                &ui,
+                            set_person_dialog_busy(
+                                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                            );
+                            show_person_dialog_error(
+                                &ui, &error_label,
                                 "Couldn't mark as unknown: the engine exited.".to_string(),
                             );
                             handled = true;
@@ -1602,9 +1645,11 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                 if !handled {
                     finish_person_action(&ui, "markPersonsAsUnknown");
                     lifecycle.reset();
-                    set_person_dialog_busy(&group, &done_btn, &mark_btn, false);
-                    set_status(
-                        &ui,
+                    set_person_dialog_busy(
+                        &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                    );
+                    show_person_dialog_error(
+                        &ui, &error_label,
                         "Couldn't mark as unknown: the engine connection closed.".to_string(),
                     );
                 }
@@ -1616,7 +1661,6 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
 
     // Photos load off the main loop, then tiles stream in.
     let rx = read_person_files_async(pid);
-    let ui = ui.clone();
     let photos_weak = photos.downgrade();
     glib::MainContext::default().spawn_local(async move {
         let files = rx.recv().await.unwrap_or_default();
@@ -1624,13 +1668,13 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             return;
         };
         for face in files {
-            let tile = build_photo_tile(&ui, &face, pid);
+            let tile = build_photo_tile(&face);
             photos.append(&tile);
         }
     });
 }
 
-fn build_photo_tile(ui: &Rc<Ui>, face: &PersonFace, current_person_id: i64) -> gtk::Widget {
+fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .height_request(118)
@@ -1654,170 +1698,20 @@ fn build_photo_tile(ui: &Rc<Ui>, face: &PersonFace, current_person_id: i64) -> g
     vbox.append(&pic);
     vbox.append(&name);
 
-    let move_button = gtk::Button::builder()
-        .label("Move…")
-        .css_classes(["flat"])
-        .tooltip_text(format!("Move face #{} to another person", face.face_id))
-        .build();
-    vbox.append(&move_button);
 
     let (thumbnail_path, thumbnail_bbox) =
         face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
-    let rx = ui.engine.borrow().request_thumbnail_with(thumbnail_path, {
-        let bbox = thumbnail_bbox;
-        move |bytes| cropped_texture(bytes, bbox.as_deref(), PHOTO_THUMB_PX)
-    });
+    let rx = request_face_thumbnail(thumbnail_path, thumbnail_bbox, PHOTO_THUMB_PX);
     let pic_weak = pic.downgrade();
-    let tile_weak = vbox.downgrade();
-    let ui_for_move = ui.clone();
-    let face_for_move = face.clone();
-    move_button.connect_clicked(move |_| {
-        open_face_move_picker(&ui_for_move, current_person_id, &face_for_move, &tile_weak);
-    });
     glib::MainContext::default().spawn_local(async move {
         let Ok(Some(decoded)) = rx.recv().await else {
             return;
         };
         if let Some(pic) = pic_weak.upgrade() {
-            pic.set_paintable(Some(&texture_from_decoded(&decoded)));
+            pic.set_paintable(Some(&texture_from_decoded(decoded)));
         }
     });
     vbox.upcast()
-}
-
-fn open_face_move_picker(
-    ui: &Rc<Ui>,
-    current_person_id: i64,
-    face: &PersonFace,
-    tile: &glib::WeakRef<gtk::Box>,
-) {
-    let candidates: Vec<PersonRow> = ui
-        .person_by_id
-        .borrow()
-        .values()
-        .filter(|person| person.id != current_person_id)
-        .cloned()
-        .collect();
-    if candidates.is_empty() {
-        set_status(
-            ui,
-            "No other people are available to move this face to.".to_string(),
-        );
-        return;
-    }
-
-    let dialog = adw::Dialog::new();
-    dialog.set_title("Move face to…");
-    dialog.set_content_width(460);
-    dialog.set_content_height(420);
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    let body = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(10)
-        .margin_top(16)
-        .margin_bottom(16)
-        .margin_start(16)
-        .margin_end(16)
-        .build();
-    let explanation = gtk::Label::builder()
-        .label(
-            "Pick the person this face actually belongs to. The change is saved transactionally.",
-        )
-        .wrap(true)
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .build();
-    body.append(&explanation);
-    let list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .css_classes(["boxed-list"])
-        .build();
-    for person in candidates {
-        let row = adw::ActionRow::builder()
-            .title(person.display_name())
-            .subtitle(person.counts())
-            .activatable(true)
-            .build();
-        let target_id = person.id;
-        let ui = ui.clone();
-        let dialog = dialog.clone();
-        let tile = tile.clone();
-        let face_id = face.face_id;
-        row.connect_activated(move |_| {
-            if !begin_person_action(&ui, "reassignFace") {
-                set_status(&ui, "Another face move is still saving.".to_string());
-                return;
-            }
-            let events = ui.engine.borrow_mut().subscribe();
-            if !send_cmd(
-                &ui,
-                CommandPayload::ReassignFace(ReassignFacePayload {
-                    face_id,
-                    destination_person_id: Some(target_id),
-                    create_new_person: false,
-                }),
-            ) {
-                finish_person_action(&ui, "reassignFace");
-                return;
-            }
-            dialog.set_can_close(false);
-            set_status(&ui, "Moving face…".to_string());
-            let ui = ui.clone();
-            let dialog = dialog.clone();
-            let tile = tile.clone();
-            glib::MainContext::default().spawn_local(async move {
-                while let Ok(event) = events.recv().await {
-                    match event {
-                        EngineEvent::BulkActionResult(result) => {
-                            match classify_face_terminal(&result, face_id) {
-                                RenameTerminal::Ignore => continue,
-                                RenameTerminal::Success => {
-                                    finish_person_action(&ui, "reassignFace");
-                                    if let Some(tile) = tile.upgrade() {
-                                        tile.set_visible(false);
-                                    }
-                                    set_status(
-                                        &ui,
-                                        "Face moved to the selected person.".to_string(),
-                                    );
-                                    schedule_reload_burst(&ui);
-                                    dialog.set_can_close(true);
-                                    dialog.close();
-                                }
-                                RenameTerminal::Failure => {
-                                    finish_person_action(&ui, "reassignFace");
-                                    set_status(
-                                        &ui,
-                                        "Couldn't move face; the engine rejected the change."
-                                            .to_string(),
-                                    );
-                                    dialog.set_can_close(true);
-                                }
-                            }
-                            break;
-                        }
-                        EngineEvent::Exited => {
-                            finish_person_action(&ui, "reassignFace");
-                            set_status(&ui, "Couldn't move face: the engine exited.".to_string());
-                            dialog.set_can_close(true);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        });
-        list.append(&row);
-    }
-    let scroll = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .child(&list)
-        .build();
-    body.append(&scroll);
-    toolbar.set_content(Some(&body));
-    dialog.set_child(Some(&toolbar));
-    dialog.present(Some(&ui.anchor));
 }
 
 // ── Merge-target picker (manual merge mode) ───────────────────────────────────
@@ -1887,6 +1781,7 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                 set_status(&ui2, "Wait for the current merge to finish.".to_string());
                 return;
             }
+            ui2.merge_failed.set(false);
             let sources: Vec<i64> = ids2
                 .iter()
                 .copied()
@@ -1905,6 +1800,9 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
                 })
                 .count();
             ui2.merge_results_pending.set(sent);
+            if sent < sources.len() {
+                ui2.merge_failed.set(true);
+            }
             if sent > 0 {
                 let status = if sent == sources.len() {
                     format!("Merging {} clusters into one…", ids2.len())
@@ -1959,6 +1857,13 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                         .collect();
                 }
                 Ok(EngineEvent::Exited) | Err(_) => break Vec::new(),
+                Ok(EngineEvent::Error { kind, message, .. })
+                    if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" => {
+                    set_status(&ui, format!("Couldn't find merge suggestions: {message}"));
+                    btn.set_sensitive(true);
+                    btn.set_label("Suggest merges");
+                    return;
+                }
                 _ => {}
             }
         };
@@ -2048,6 +1953,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
                         destination_person_id: target_id,
                     }),
                 ) {
+                    ui2.merge_failed.set(false);
                     button.set_sensitive(false);
                     button.set_label("Merging…");
                     ui2.merge_results_pending.set(1);
@@ -2220,7 +2126,11 @@ fn read_snapshot() -> anyhow::Result<Snapshot> {
     if !db_path.exists() {
         return Ok(Snapshot::default());
     }
-    let conn = fileid_engine::db::open_read(&db_path)?;
+    read_snapshot_at_path(&db_path)
+}
+
+fn read_snapshot_at_path(db_path: &std::path::Path) -> anyhow::Result<Snapshot> {
+    let conn = fileid_engine::db::open_read(db_path)?;
     let total_faces: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.failed = 0",
@@ -2231,36 +2141,33 @@ fn read_snapshot() -> anyhow::Result<Snapshot> {
 
     let mut stmt = conn.prepare(PERSON_SNAPSHOT_SQL)?;
     let rows = stmt
-        .query_map([], map_person)?
-        .collect::<rusqlite::Result<Vec<PersonRow>>>()?;
+        .query_map([], |row| {
+            Ok(PersonRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                first_name: row.get(2)?,
+                middle_name: row.get(3)?,
+                last_name: row.get(4)?,
+                suffix: row.get(5)?,
+                name: row.get(6)?,
+                is_unknown: row.get::<_, i64>(7)? != 0,
+                file_count: row.get(8)?,
+                face_count: row.get(9)?,
+                rep_face_id: row.get(10)?,
+                rep_path: row.get(11)?,
+                rep_bbox: row.get(12)?,
+                rep_size_bytes: row.get(13)?,
+                rep_modified: row.get(14)?,
+                rep_file_ref: row.get(15)?,
+                rep_content_hash: row.get(16)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Snapshot {
         all_with_faces: rows,
         total_faces,
     })
 }
-
-fn map_person(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonRow> {
-    Ok(PersonRow {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        first_name: row.get(2)?,
-        middle_name: row.get(3)?,
-        last_name: row.get(4)?,
-        suffix: row.get(5)?,
-        name: row.get(6)?,
-        is_unknown: row.get::<_, i64>(7)? != 0,
-        file_count: row.get(8)?,
-        face_count: row.get(9)?,
-        rep_face_id: row.get(10)?,
-        rep_path: row.get(11)?,
-        rep_bbox: row.get(12)?,
-        rep_size_bytes: row.get(13)?,
-        rep_modified: row.get(14)?,
-        rep_file_ref: row.get(15)?,
-        rep_content_hash: row.get(16)?,
-    })
-}
-
 fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
     let Ok(db_path) = fileid_engine::paths::db_path() else {
         return Ok(Vec::new());
@@ -2276,7 +2183,7 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
          AND f.failed = 0 ORDER BY f.scanned_at DESC, fp.id LIMIT ?2",
     )?;
     let rows = stmt
-        .query_map(rusqlite::params![pid, PERSON_FILE_LIMIT], |r| {
+        .query_map((pid, PERSON_FILE_LIMIT), |r| {
             Ok(PersonFace {
                 face_id: r.get(0)?,
                 file_id: r.get(1)?,
@@ -2284,7 +2191,7 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
                 bbox: r.get(3)?,
             })
         })?
-        .collect::<rusqlite::Result<Vec<PersonFace>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -2320,10 +2227,21 @@ fn face_thumbnail_source_in(
     }
 }
 
-fn cropped_texture(bytes: Vec<u8>, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
-    let gbytes = glib::Bytes::from_owned(bytes);
-    let stream = gio::MemoryInputStream::from_bytes(&gbytes);
-    let full = gtk::gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE).ok()?;
+fn request_face_thumbnail(
+    path: String,
+    bbox: Option<String>,
+    max_px: i32,
+) -> async_channel::Receiver<Option<DecodedImage>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let image = cropped_texture(&path, bbox.as_deref(), max_px);
+        let _ = tx.send_blocking(image);
+    });
+    rx
+}
+
+fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
+    let full = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
     let cropped = bbox.and_then(|b| crop_to_bbox(&full, b)).unwrap_or(full);
 
     let (w, h) = (cropped.width(), cropped.height());
@@ -2341,7 +2259,20 @@ fn cropped_texture(bytes: Vec<u8>, bbox: Option<&str>, max_px: i32) -> Option<De
     } else {
         cropped
     };
-    Some(DecodedImage::from_pixbuf(&scaled))
+    let pixels = scaled.read_pixel_bytes();
+    let data = pixels.as_ref();
+    let channels = scaled.n_channels() as usize;
+    let width = scaled.width() as usize;
+    let height = scaled.height() as usize;
+    let stride = scaled.rowstride() as usize;
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        for pixel in data[row * stride..row * stride + width * channels].chunks_exact(channels) {
+            rgba.extend_from_slice(&pixel[..3]);
+            rgba.push(if channels == 4 { pixel[3] } else { 255 });
+        }
+    }
+    Some(DecodedImage { width: width as u32, height: height as u32, rgba })
 }
 
 fn crop_to_bbox(full: &gtk::gdk_pixbuf::Pixbuf, bbox: &str) -> Option<gtk::gdk_pixbuf::Pixbuf> {
@@ -2424,14 +2355,39 @@ mod tests {
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
 
-    // PR #106 shipped a snapshot query SQLite can't prepare (outer reference
-    // inside a scalar subquery's ORDER BY) and the swallowed error blanked the
-    // whole tab. Preparing against the real migrated schema catches any drift.
     #[test]
-    fn person_snapshot_sql_prepares_against_current_schema() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        fileid_engine::db::migrations::apply(&conn).unwrap();
-        conn.prepare(super::PERSON_SNAPSHOT_SQL).unwrap();
+    fn snapshot_uses_active_faces_and_falls_back_from_stale_representative() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-people-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let db_path = dir.join("people.sqlite");
+        let conn = fileid_engine::db::open_writer(&db_path).unwrap();
+        for (id, failed) in [(1, 0), (2, 1), (3, 0)] {
+            let path = dir.join(format!("{id}.jpg"));
+            conn.execute(
+                "INSERT INTO files (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES (?1,?2,?1,17,1,'image','jpg',?3)",
+                (id, path.to_str().unwrap(), failed),
+            ).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO persons (id, first_name, created_at, representative_face_id) VALUES (1,'Ada',1,3);
+             INSERT INTO persons (id, created_at) VALUES (2,1);
+             INSERT INTO persons (id, created_at) VALUES (3,1);
+             INSERT INTO face_prints (id,file_id,person_id,print_data,bbox) VALUES
+                (1,1,1,X'00','{}'), (2,1,1,X'00','{}'),
+                (3,2,1,X'00','{}'), (4,3,2,X'00','{}');"
+        ).unwrap();
+        let snapshot = super::read_snapshot_at_path(&db_path).unwrap();
+        assert_eq!(snapshot.total_faces, 3);
+        assert_eq!(snapshot.all_with_faces.len(), 2);
+        let named = &snapshot.all_with_faces[0];
+        assert_eq!(named.first_name.as_deref(), Some("Ada"));
+        assert_eq!((named.file_count, named.face_count, named.rep_face_id), (1, 2, Some(1)));
+        assert_eq!(snapshot.all_with_faces[1].id, 2);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

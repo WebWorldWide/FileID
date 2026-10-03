@@ -34,8 +34,15 @@ where
     W: IsA<gtk::Widget>,
     F: Fn(f64) + 'static,
 {
+    let animations_enabled = gtk::Settings::default()
+        .map_or(true, |settings| settings.property::<bool>("gtk-enable-animations"));
+    if !animations_enabled {
+        setter(to);
+    }
     let target = adw::CallbackAnimationTarget::new(setter);
     let anim = adw::SpringAnimation::new(widget, from, to, brand_params(), target);
-    anim.play();
+    if animations_enabled {
+        anim.play();
+    }
     anim
 }

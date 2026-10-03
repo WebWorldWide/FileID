@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "pr
 # IPC payloads. Reuse the engine's IpcCommand / IpcEvent types directly
 # so the contract can never drift between the GTK app and the engine.
 fileid-engine = { path = "../../../windows/src/engine" }
+rusqlite = "0.31" # Already provided by the shared engine; Cleanup queries its read-only DB.
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 

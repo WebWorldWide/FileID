@@ -1,20 +1,20 @@
 #![allow(deprecated)]
 
-// Main window — minimal scaffold. Mirror of macOS ContentView /
-// Windows MainWindow. Phase 1 lands the 6 tabs (Library, People,
-// Cleanup, Deep Analyze, Restructure, Settings) as adw::NavigationPage
-// stacks. Today: HeaderBar + sidebar placeholder + main pane placeholder
-// + "Pick folder" + "Start scan" hooked up to the engine.
+// Library and People share the engine connection with scan controls.
 
 use adw::prelude::*;
 use gtk::glib::clone;
 use gtk::glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::engine_client::{EngineClient, EngineState};
 
 pub fn on_activate(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("FileID")
@@ -32,6 +32,8 @@ pub fn on_activate(app: &adw::Application) {
     // macOS SidebarFolderHeader / Windows SidebarFolderHeader.
     let folder_label = gtk::Label::builder()
         .label("No folder selected")
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(32)
         .css_classes(["dim-label"])
         .build();
     header.set_title_widget(Some(&folder_label));
@@ -41,6 +43,12 @@ pub fn on_activate(app: &adw::Application) {
         .css_classes(["suggested-action"])
         .build();
     header.pack_start(&pick_btn);
+    let pages = gtk::Stack::new();
+    pages.set_hexpand(true);
+    pages.set_vexpand(true);
+    let switcher = gtk::StackSwitcher::new();
+    switcher.set_stack(Some(&pages));
+    header.pack_start(&switcher);
 
     let start_btn = gtk::Button::builder()
         .label("Start scan")
@@ -50,12 +58,12 @@ pub fn on_activate(app: &adw::Application) {
 
     let status_label = gtk::Label::builder()
         .label("Engine: spawning…")
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(40)
         .css_classes(["caption"])
         .build();
     header.pack_end(&status_label);
 
-    // Main content area. Placeholder for the tab navigation that lands
-    // in Phase 1. Six adw::NavigationPage children, one per tab.
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .css_classes(["fileid-glass"])
@@ -64,13 +72,11 @@ pub fn on_activate(app: &adw::Application) {
         .margin_start(16)
         .margin_end(16)
         .build();
-
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("folder-symbolic")
-        .title("FileID for Linux")
-        .description("Phase 0 scaffold. Library / People / Cleanup / Deep Analyze / Restructure / Settings tabs land in Phase 1. Engine is shared with the Windows port.")
-        .build();
-    content.append(&placeholder);
+    pages.add_titled(&crate::tabs::library::build(engine.clone()), Some("library"), "Library");
+    pages.add_titled(&crate::tabs::cleanup::build_cleanup_tab(engine.clone()), Some("cleanup"), "Cleanup");
+    pages.add_titled(&crate::tabs::people::build(engine.clone()), Some("people"), "People");
+    pages.add_titled(&crate::tabs::settings::build(engine.clone()), Some("settings"), "Settings");
+    content.append(&pages);
 
     let root = adw::ToolbarView::new();
     root.add_top_bar(&header);
@@ -78,18 +84,21 @@ pub fn on_activate(app: &adw::Application) {
     window.set_content(Some(&root));
 
     let selected_folder: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let can_scan = Rc::new(Cell::new(false));
 
     // Pick folder → GTK native FileDialog (folder mode).
     pick_btn.connect_clicked(clone!(
-        @weak window, @weak folder_label, @weak start_btn, @strong selected_folder
-        => move |_| {
+        #[weak] window, #[weak] folder_label, #[weak] start_btn,
+        #[strong] selected_folder, #[strong] can_scan,
+        move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Pick a folder to organize")
                 .modal(true)
                 .build();
             dialog.select_folder(Some(&window), gtk::gio::Cancellable::NONE, clone!(
-                @weak folder_label, @weak start_btn, @strong selected_folder
-                => move |result| {
+                #[weak] folder_label, #[weak] start_btn,
+                #[strong] selected_folder, #[strong] can_scan,
+                move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
                             let display = path.file_name()
@@ -97,7 +106,7 @@ pub fn on_activate(app: &adw::Application) {
                                 .unwrap_or_else(|| path.to_string_lossy().into_owned());
                             folder_label.set_label(&display);
                             *selected_folder.borrow_mut() = Some(path.to_string_lossy().into_owned());
-                            start_btn.set_sensitive(true);
+                    start_btn.set_sensitive(can_scan.get());
                         }
                     }
                 }
@@ -107,13 +116,22 @@ pub fn on_activate(app: &adw::Application) {
 
     // Start scan → IPC startScan to the engine.
     start_btn.connect_clicked(clone!(
-        @strong engine, @strong selected_folder, @weak status_label
-        => move |_| {
+        #[strong] engine, #[strong] selected_folder, #[strong] can_scan,
+        #[weak] start_btn, #[weak] status_label,
+        move |_| {
             let Some(folder) = selected_folder.borrow().clone() else { return; };
             let mut e = engine.borrow_mut();
             match e.start_scan(&folder) {
-                Ok(()) => status_label.set_label("Engine: scanning…"),
-                Err(err) => status_label.set_label(&format!("scan failed: {err}")),
+                Ok(()) => {
+                    can_scan.set(false);
+                    start_btn.set_sensitive(false);
+                    status_label.set_label("Engine: scanning…");
+                }
+                Err(err) => {
+                    can_scan.set(false);
+                    start_btn.set_sensitive(false);
+                    status_label.set_label(&format!("scan failed: {err}"));
+                }
             }
         }
     ));
@@ -123,18 +141,48 @@ pub fn on_activate(app: &adw::Application) {
     // the GTK main context so UI updates stay single-threaded.
     let rx = engine.borrow_mut().spawn();
     glib::MainContext::default().spawn_local(clone!(
-        @weak status_label => async move {
-            while let Ok(state) = rx.recv().await {
-                let label = match state {
-                    EngineState::Spawning => "Engine: spawning…".to_string(),
-                    EngineState::Ready    => "Engine: ready".to_string(),
-                    EngineState::Scanning => "Engine: scanning…".to_string(),
-                    EngineState::Done(n)  => format!("Scan complete — {n} files"),
-                    EngineState::Failed(m)=> format!("Engine: {m}"),
-                };
-                status_label.set_label(&label);
+        #[weak] status_label, #[weak] start_btn, #[weak] pages,
+        #[strong] selected_folder, #[strong] can_scan,
+        async move {
+        while let Ok(state) = rx.recv().await {
+            if matches!(&state, EngineState::ModelDownloadProgress(_)
+                | EngineState::Error { model_kind: Some(_), .. }
+                | EngineState::FaceClusteringComplete(_)
+                | EngineState::FaceClusteringFailed(_)
+                | EngineState::FaceClusteringBusy(_)
+                | EngineState::BulkActionResult(_)
+                | EngineState::MergeSuggestions(_)) {
+                continue;
             }
+            let available = matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::Error { .. });
+            let label = match state {
+                EngineState::Spawning => "Engine: spawning…".to_string(),
+                EngineState::Ready => "Engine: ready".to_string(),
+                EngineState::Scanning => "Engine: scanning…".to_string(),
+                EngineState::BatchLanded(n) => format!("Engine: scanning… {n} files processed"),
+                EngineState::ScanComplete(n) => format!("Scan complete — {n} files processed"),
+                EngineState::Error { kind, message, .. } if kind == "models_not_installed" => {
+                    pages.set_visible_child_name("settings");
+                    let missing = message.split_once("Missing:").map(|(_, kinds)| kinds.trim())
+                        .unwrap_or("required scan models");
+                    format!("Last scan blocked: {missing} Install missing bundles in Settings if needed, then return to Library and retry.")
+                }
+                EngineState::Error { message, .. } => format!("Engine: {message}"),
+                EngineState::ModelDownloadProgress(_) => continue,
+                EngineState::FaceClusteringComplete(_)
+                | EngineState::FaceClusteringFailed(_)
+                | EngineState::FaceClusteringBusy(_)
+                | EngineState::BulkActionResult(_)
+                | EngineState::MergeSuggestions(_) => continue,
+                EngineState::Failed(message) => format!("Engine: {message}"),
+                EngineState::Exited => "Engine: exited".to_string(),
+            };
+            can_scan.set(available);
+            start_btn.set_sensitive(can_scan.get() && selected_folder.borrow().is_some());
+            status_label.set_label(&label);
+            status_label.set_tooltip_text(Some(&label));
         }
+            }
     ));
 
     window.present();
