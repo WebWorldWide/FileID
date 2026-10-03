@@ -92,3 +92,8 @@ Together with main Linux run 37028488104 and Windows app packaging run 370169585
 ### Health-contract follow-up (under review, 2026-10-02)
 
 A dedicated Windows IPC schema suite/report/format gate replaces the prior absence of IPC test execution. The isolated Adlon Windows VM passes 48 IPC tests and nine report-guard fixtures; new exact-head CI is still pending. The legacy app-service test discovery is still broken, so the full Windows safety/test repair and app-suite release gate remain open. Actual-process nonce/PID and invalid-probe checks are now required in macOS, Linux and native Windows engine CI. No server runner or corpus configuration changed in this follow-up.
+
+
+## 2026-10-02 — health merged-main runner acceptance
+
+All nineteen checks passed at `db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf`. Adlon Linux run `37075835327`, Windows engine run `37075835430` and Windows app run `37075835456` completed successfully. Both Windows app architecture jobs used `adlon-fileid-windows`; ARM64 is a cross-build on this x64 VM, not a native ARM64 hardware test. The x64 NetworkService job `111065416100` ran 48 IPC tests with zero failures/skips, report validation and formatting. Its genuine IPC gate does not replace the broader legacy service-test discovery, which still skips. Native Mac and physical PC/GPU release gates remain separate. Long Windows cache compression delayed completion after tests; no passing jobs were restarted to shorten that wait.

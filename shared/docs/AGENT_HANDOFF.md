@@ -4,7 +4,7 @@ The accepted next-version goal remains active after the owner resumed sustained 
 
 ## Current owner priority
 
-The owner has a Windows/Linux PC and deferred new port implementation and hardware validation until working there. Continue the full macOS plan first; retain the port backlog below for that machine. Health PR #194 passed all eighteen checks at 455f3f0e55eda40f654ee476e510138f5c3e9de8 and merged at db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf. Fresh merged-main CI is running and still requires inspection.
+The owner has a Windows/Linux PC and deferred new port implementation and hardware validation until working there. Continue the full macOS plan first; retain the port backlog below for that machine. Health PR #194 passed all eighteen checks at 455f3f0e55eda40f654ee476e510138f5c3e9de8 and merged at db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf. All nineteen health merged-main checks passed, including the Adlon Linux/Windows jobs.
 
 The rebased, unvalidated thirteen-file Windows restoration is preserved at remote annotated tag archive/2026-10-02/windows-safety-restore-rebased, commit e5f51dbe621a285327b15a07e984e36125ca6b22. Inspect its final commit narrowly from a new branch based on latest main when resuming on the PC. The earlier stage-one worktree is archived; its tag and broader WIP remain available.
 
@@ -14,13 +14,13 @@ Foundation PR #186, runner bootstrap #188, stable People identities #189, and tr
 
 ## macOS continuation
 
-Cache-compatibility PR #195 passed both required checks and is merged as `144bc4b20851e8b0baf873103200225e0c57192d`. The native graph/snapshot follow-up adds diversified neighbour pruning and a synthetic clustered-retrieval regression; inspect its final CI before acceptance. Benchmark instructions are in `platforms/apple/benchmarks/README.md`, with raw parameters/results/source hashes in `shared/test-corpus/benchmarks/macos-hnsw-2026-10-02.json`. Real face and semantic-search accuracy remain unvalidated.
+Cache-compatibility PR #195 passed both required checks and is merged as `144bc4b20851e8b0baf873103200225e0c57192d`. Graph/snapshot PR #196 passed both exact-head checks at `dff844f9be1fdcfcc9e98c8783f5bdcf43332960` and merged as `f9c2c6b461087c84d70a441eec92cc32a61dd5db`; inspect its fresh merged-main check before recording final acceptance. All 450 native tests across 93 suites, engine build and actual-process health probes pass. Benchmark instructions are in `platforms/apple/benchmarks/README.md`, with raw parameters/results/source hashes in `shared/test-corpus/benchmarks/macos-hnsw-2026-10-02.json`. Real face and semantic-search accuracy remain unvalidated.
 
 The verified CLIP-space change is the active milestone. Run native Swift tests with `FILEID_TEST_ENGINE_PATH` pointing at the freshly built worker, and serialize native builds on this 16 GB Mac. New cache rows use the pinned artifact/preprocessing identity; old rows are refreshed through inference during rescans, never relabeled by dimension. Persistent indexing, engine-owned hybrid retrieval, the scheduler and the rest of `NEXT_VERSION.md` remain unfinished. The native HNSW snapshot API is not connected to retrieval yet; its source-revision argument must come from validated SQLite change tracking, and external entity IDs still need a persistent mapping. Do not reuse it by checking only file timestamps. Do not equate passing synthetic fixtures with model accuracy or hardware acceptance.
 
 ## Health contract follow-up (merged)
 
-PR #194 passed all eighteen checks at `455f3f0e55eda40f654ee476e510138f5c3e9de8` and merged to `db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf`. Rust 1.90 and all 438 then-current Swift tests passed; actual-process health probes passed for both engines. The dedicated Windows IPC gate executes all 48 tests, TRX validation and formatting. Inspect fresh merged-main CI; legacy full app service-test discovery still skips. On the PC, wire generation-bound health waiters into the UI lifecycle and retire old-generation waiters before publishing a replacement generation.
+PR #194 passed all eighteen checks at `455f3f0e55eda40f654ee476e510138f5c3e9de8` and merged to `db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf`. Rust 1.90 and all 438 then-current Swift tests passed; actual-process health probes passed for both engines. The dedicated Windows IPC gate executes all 48 tests, TRX validation and formatting. All nineteen health merged-main checks passed; the actual Adlon x64 job executed all 48 IPC tests with no skips. Legacy full app service-test discovery still skips. On the PC, wire generation-bound health waiters into the UI lifecycle and retire old-generation waiters before publishing a replacement generation.
 
 ## Deferred PC priority: Windows safety and real test execution
 
@@ -63,3 +63,8 @@ Every deleted GitHub branch must have a verified remote annotated archive tag wh
 Persistent model-separated ANN/hybrid retrieval; durable resource-budgeted scheduling and measured multi-model routing; typed reversible chat operations; companion-aware/preference-driven names; incremental calibrated faces and exemplars; dense audio/shot/person/outcome analysis and automatic chapters/best takes; portable media workers, stabilization/upscale/reframing and fidelity checks; licensed document/archive/data/ebook/CAD tools and saved recipes; real Windows and GTK feature parity; strict privacy, model/hardware, performance, recovery, signing and distribution gates.
 
 Strict runtime-egress still fails six existing artifact URLs. --known-blockers only proves no additions. New model research candidates have not been promoted: exact weights/licenses/hashes/runtime compatibility and identical-fixture benchmarks are required. No new model downloads or accuracy claims were made. SQLite committed migrations are immutable; append the next migration when required. Keep engine sole-writer migration work explicit.
+
+
+## Checkpoint recovery and checkout selection
+
+The implementation worktree path formerly attached to this task is no longer present. The primary checkout is `/Users/adamnolle/Desktop/Code/FileID`; inspect Git status and current artifacts before creating or reusing a worktree. All source work in this checkpoint is merged. The republished Store proposal is preserved at `archive/2026-10-02/store-msix-republished` (`07c0ad8e688e0293484ae628e9f3c7aeac862e90`); it diverges extensively from main and is unvalidated, so inspect narrowly. Its separate local Store checkout remains untouched. Do not infer that archived proposals were integrated or accepted.

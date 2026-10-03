@@ -1,6 +1,15 @@
 # FileID — State
 
 
+## 2026-10-02 — Mac retrieval checkpoint merged; Adlon CI accepted
+
+Cache compatibility PR #195 merged as `144bc4b20851e8b0baf873103200225e0c57192d` after both exact-head checks passed; its fresh main Mac/policy checks also passed. Native graph/snapshot PR #196 merged as `f9c2c6b461087c84d70a441eec92cc32a61dd5db` after both checks passed at `dff844f9be1fdcfcc9e98c8783f5bdcf43332960`. The final code passed all 450 native tests across 93 suites, native engine build and actual-process health probes. Fresh graph merged-main validation is still running. Benchmark source/results are committed; real accuracy and end-to-end search gates remain open.
+
+All nineteen health merged-main checks passed at `db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf`. Adlon Linux run `37075835327`, Windows engine run `37075835430` and Windows app run `37075835456` completed successfully. The actual NetworkService x64 app job executed all 48 IPC tests with zero skips, report verification and formatting. The broader legacy app-service discovery still skips and remains a separate release blocker; green CI does not establish full port acceptance.
+
+The republished Store proposal was preserved in verified remote tag `archive/2026-10-02/store-msix-republished` at `07c0ad8e688e0293484ae628e9f3c7aeac862e90`, then removed with an exact-head lease. Its old local checkout is untouched. GitHub has only main after source-branch cleanup. The implementation worktree is no longer present; continue from the primary checkout or create a new managed worktree from latest main. Mac catalog integration and the full `NEXT_VERSION.md` scope remain active; new port implementation and physical PC validation remain deferred.
+
+
 ## 2026-10-02 — native index recall regression and benchmark
 
 Release-mode benchmarking exposed loss of routes between dense clusters in the existing closest-only HNSW pruning. Diversified neighbour selection during insertion and trimming improved synthetic mean recall at ten from 62.5% to 100% on 100,000 × 512 vectors, and from 57% to 100% on 16,000 × 128 vectors. Each run uses twenty unseen queries and exact top-ten comparison. The final 100k run measured 1.07 ms warm index-only p95, 62.91 s build, 1.07 s save and 0.58 s load; restored results were identical. These are synthetic index measurements, not face precision or end-to-end search claims.
