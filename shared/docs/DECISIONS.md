@@ -3489,3 +3489,14 @@ Keep the existing Accelerate-backed Swift graph and add a versioned binary stora
 ## 2026-10-02 — Preserve diverse routes in native HNSW
 
 A release-mode synthetic benchmark exposed poor nearest-neighbour recall from closest-only insertion/pruning: 62.5% mean recall at ten on 100,000 × 512 vectors, and 57% on the smaller 16,000 × 128 fixture, including zero-recall queries. Apply diversified neighbour selection during both insertion and trimming, following the [original HNSW paper](https://arxiv.org/abs/1603.09320). Candidate ordering breaks equal-distance ties by node ID to preserve deterministic behavior. Both fixtures reached 100% on their twenty unseen queries; the final 100k run measured 1.07 ms warm index-only p95. Snapshots use construction version 2 so earlier closest-only graphs cannot be reused silently. The committed benchmark and JSON preserve parameters, compiler and source hashes. This does not establish real face accuracy or semantic retrieval acceptance; those gates remain open.
+
+
+## 2026-10-02 — SQLite epochs own native vector-cache validity
+
+Use per-namespace transactional generation, instance and checkpoint nonce records instead of SQLite file timestamps or cache mtimes. The same generation can occur after a database rollback/replacement or divergent write history; nonce/history validation distinguishes those cases and rebuilds when coverage is missing. Persist the bounded graph with a checksummed model-specific mapping manifest, publishing the manifest last. SQLite remains authoritative; snapshot corruption cannot change catalog records. Eligibility updates remove failed files before ANN ranking, and publication checks current vector fingerprints to reject a raced stale candidate. Hybrid reciprocal-rank fusion retains independent chapter/page evidence. Extend optional IPC fields without changing existing keyword requests; PC vector execution is explicitly deferred rather than silently treated as keyword search. No new shipped dependency was needed.
+
+
+The worker result carries an immutable revision receipt alongside its transferred cache. Delayed coalesced awaiters must not read a cache after a newer worker owns it. Refreshed matching waits for actor ownership and performs graph access without another suspension; current vector fingerprints are still checked during SQLite hydration. File-focused results deduplicate with an eager pass before limits: a stateful lazy filter can evaluate its predicate repeatedly and lose eligible hits.
+
+
+Re-reviewed the EngineClient egress inventory after adding only local catalog IPC polling/cancellation. No URL, HTTP request, download path or transport behavior changed; update only its reviewed-source digest and retain all runtime-egress mutation tests and six existing Windows release blockers.

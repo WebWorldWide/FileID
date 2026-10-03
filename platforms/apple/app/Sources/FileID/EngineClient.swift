@@ -30,6 +30,27 @@ public final class EngineClient {
     private var catalogResponseOrder: [String] = []
     public private(set) var catalogResponses: [String: CatalogResponse] = [:]
     public private(set) var catalogJobs: [CatalogJob] = []
+    public func searchCatalog(query: String? = nil, vector: [Float]? = nil, seedID: Int64? = nil, limit: Int = 60) async -> CatalogResponse? {
+        for _ in 0..<120 {
+            guard !Task.isCancelled else { return nil }
+            let id = UUID().uuidString
+            let request = CatalogRequest(requestID: id, action: "search", query: query, fileID: seedID,
+                                         searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
+                                         embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: limit, resultScope: "files")
+            guard send(.catalogRequest(request: request)) else { return nil }
+            var received: CatalogResponse?
+            for _ in 0..<100 {
+                guard !Task.isCancelled else { return nil }
+                if let response = catalogResponses[id] { received = response; break }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { return nil }
+            }
+            guard let response = received else { return nil }
+            if response.status != "indexing" { return response }
+            do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
+        }
+        return nil
+    }
+
     func applyCatalogJobsSnapshot(_ jobs: [CatalogJob]) { catalogJobs = jobs }
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?

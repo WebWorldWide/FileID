@@ -2,6 +2,14 @@
 
 The accepted next-version goal remains active after the owner resumed sustained work. Preserve the requested recovery checkpoint, validated main integrations, GitHub branch cleanup and Adlon CI evidence while continuing the full plan. A milestone does not complete the release or authorize pausing the resumed goal. Continue from shared/docs/NEXT_VERSION.md and NEXT.md; do not infer release readiness from a green packaging workflow.
 
+## Active Mac retrieval checkpoint
+
+Use the current main/PR state, not historical branch names below. Catalog v23 adds transactional embedding epochs/change history and source/eligibility triggers; `CatalogVectorIndex` restores or rebuilds pinned CLIP snapshots and applies deltas. `CatalogSearch` validates vector/model/limit inputs, hydrates against current SQLite fingerprints, and merges keyword/evidence/visual ranks. File scope deduplicates moments before limits; refreshed matching keeps graph ownership safe across concurrent requests. Native Library uses engine IPC v1.6. Cold index preparation is asynchronous and returns `indexing`; keyword fallback remains visible. Rust/C# mirror the optional fields and PC execution explicitly rejects unsupported visual mode.
+
+Next: make index work a durable cancellable/budgeted job, add text/catalog indexes and richer filters, verify actual end-to-end performance, then continue all remaining NEXT_VERSION.md milestones. Preserve the PC deferral, Adlon corpus protections, six native tabs/palette/springs, sole-writer direction, offline inference and exact model/license promotion gates. Do not claim the full plan or release gates are complete.
+
+Local native test command must set `FILEID_TEST_ENGINE_PATH` to the freshly built executable and use `--no-parallel`. Otherwise spawned conversion/cancellation workers cannot find the helper in an external scratch directory. Build/test sources stay frozen while a local compiler is running. Use pinned Rust 1.90 and external `CARGO_TARGET_DIR`; inspect required exact-head and merged-main checks. All source work must reach main with recovery tags for any unrelated branches; never touch the separate Store checkout or merge its divergent WIP wholesale.
+
 ## Current owner priority
 
 The owner has a Windows/Linux PC and deferred new port implementation and hardware validation until working there. Continue the full macOS plan first; retain the port backlog below for that machine. Health PR #194 passed all eighteen checks at 455f3f0e55eda40f654ee476e510138f5c3e9de8 and merged at db7e4e9fbd1cd65ca0219de5a6384fd5fad9c5cf. All nineteen health merged-main checks passed, including the Adlon Linux/Windows jobs.

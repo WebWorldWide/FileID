@@ -232,6 +232,10 @@ struct FileIDEngineMain {
                 await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
                 return
             }
+            if request.action == "search" {
+                Task { await sink.emit(.catalogResponse(await CatalogStore.handle(request, database: database))) }
+                return
+            }
             let response: CatalogResponse
             if request.action == "enqueueTimeline" {
                 response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)

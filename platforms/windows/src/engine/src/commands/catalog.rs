@@ -29,9 +29,19 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
     let mut result = response(&request.request_id, "ok", None);
     match request.action.as_str() {
         "search" => {
+            if request.search_mode.as_deref().is_some_and(|mode| mode != "keyword")
+                || request.query_vector.is_some() || request.embedding_model.is_some()
+                || request.result_scope.as_deref().is_some_and(|scope| scope != "all")
+            {
+                bail!("Catalog vector search is currently available on macOS; PC integration is deferred")
+            }
+            if request.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
+                bail!("Invalid catalog result limit")
+            }
             let query = request.query.as_deref().unwrap_or_default();
             if query.trim().is_empty() || query.chars().count() > 2000 { bail!("Invalid search query") }
             result.hits = search(conn,query,&[])?;
+            result.hits.truncate(request.limit.unwrap_or(100));
         }
         "detail" => result.chapters = chapters(conn, request.file_id.ok_or_else(|| anyhow::anyhow!("File selection required"))?)?,
         "saveChapter" => {

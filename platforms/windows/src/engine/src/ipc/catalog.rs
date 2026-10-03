@@ -66,6 +66,16 @@ pub struct CatalogRequest {
     pub job_id: Option<String>,
     #[serde(rename = "fileIDs", default, skip_serializing_if = "Option::is_none")]
     pub file_ids: Option<Vec<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_vector: Option<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

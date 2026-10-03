@@ -43,7 +43,12 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogChapter? Chapter,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ChapterID,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? JobID,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? FileIDs);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? FileIDs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SearchMode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<float>? QueryVector = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingModel = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Limit = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ResultScope = null);
 
 public sealed record CatalogResponse(
     string RequestID,

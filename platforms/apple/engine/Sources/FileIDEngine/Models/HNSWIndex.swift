@@ -89,6 +89,11 @@ final class HNSWIndex {
     var count: Int { nodes.count - deletedCount }
     var rawCount: Int { nodes.count }
 
+    func isActive(id: Int32) -> Bool {
+        let position = Int(id)
+        return position >= 0 && position < nodes.count && !nodes[position].deleted
+    }
+
     /// Insert a vector. Returns its node id. Mismatched-dim vectors are
     /// rejected and return -1 — callers should treat that as "not added"
     /// (the same pattern FaceClusteringService.l2 uses for safety).
