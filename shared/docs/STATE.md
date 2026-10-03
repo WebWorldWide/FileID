@@ -76,6 +76,14 @@
 
 # FileID — State
 
+## 2026-10-03 — Event and timestamp chat retrieval merged; main CI green
+
+PR #210 merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. macOS chat now resolves exact titles of explicitly user-edited event groups, parses `MM:SS` and `HH:MM:SS`, and searches timestamped chapter/passage/person evidence within the selected event. Chapter and passage intervals must contain the requested time; point observations may be within 15 seconds. Stale chapter/passage evidence is excluded, and event/time filters survive conversational refinements. This retrieves existing evidence; it does not generate chapters, fill coverage gaps, or claim complete event detection. No schema, IPC, model, dependency, or network changes.
+
+Four focused event/time tests pass. The full native Swift suite passes 483 tests in 96 suites; Release engine/app builds pass. Current-document, catalog-schema, runtime-egress, and diff checks pass. Exact-head PR checks: macOS `37124464429`, repository policy `37124464443`. All five main workflows pass on `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`: macOS `37125792358`; repository policy `37125792306`; Linux `37125802324`; Windows engine `37125802333`; Windows app `37126581678`. Linux jobs ran on `adlon-fileid-linux`. Windows x64 and ARM64 cross-builds ran on `adlon-fileid-windows`; native ARM64 engine tests ran on hosted ARM hardware. Adlon's example-data volume was not mounted or accessed. The feature branch was deleted; `origin` has only `main`. Preserve the unrelated existing local `codex/store-msix` worktree.
+
+Next Mac slice: populate the timeline with bounded, cancellable timestamped evidence and explicit coverage; then measure scheduler contention before tuning resource limits. The full next-version goal remains active. Windows/Linux feature work and physical acceptance remain deferred until the owner is on that PC. See `AGENT_HANDOFF.md`.
+
 ## 2026-10-03 — Confirmed-person chat retrieval merged; main CI green
 
 PR #208 merged to `main` as `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. macOS chat resolves exact saved People labels and first-name aliases, applies identity filters before limits, returns timestamped appearance evidence, labels user-confirmed and unverified model-linked observations distinctly, and carries identity filters through refinements. Four focused tests and the complete native suite (480 tests in 96 suites) passed. Current-document, catalog-schema, runtime-egress, and diff checks passed; both Release products rebuilt locally. No IPC, schema, dependency, model, or network changes.

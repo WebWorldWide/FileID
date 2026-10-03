@@ -1,24 +1,24 @@
 # FileID next-version handoff — 2026-10-03
 
-## Current checkpoint — PR #208 merged and main CI green
+## Current checkpoint — Mac event/time retrieval merged and CI green
 
-PR #208, “Improve Mac chat identity retrieval and scan diagnostics,” is merged to `main` as `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. Chat search resolves exact saved People labels and first-name aliases, filters by confirmed identities before result limits, and returns timestamped person-appearance evidence. Manually confirmed observations are labeled separately from unverified model-linked observations. Follow-up filters retain the selected identities. Scan JSONL diagnostics also report background-admission wait percentiles without adding paths or changing IPC, database schema, models, dependencies, or network behavior.
+PR #210 is merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. Chat search resolves exact titles from user-edited event groups and explicit `MM:SS` or `HH:MM:SS` requests. It filters files by event membership and returns existing chapter/passage intervals that contain the requested time plus person observations within 15 seconds. Stale chapter/passage evidence is excluded, and refinements retain event/time filters. This is retrieval over catalog evidence; automatic timeline population and open-ended event detection remain unimplemented. No schema, IPC, model, dependency, or network changes.
 
-All five GitHub Actions workflows passed on that exact merge commit:
+All five GitHub Actions workflows passed against that exact merge commit:
 
-- macOS app and engine: [run 37121130979](https://github.com/WebWorldWide/FileID/actions/runs/37121130979), GitHub-hosted Apple runner; 480 Swift tests in 96 suites plus release builds, recovery probes, and privacy checks.
-- Repository policy: [run 37121130970](https://github.com/WebWorldWide/FileID/actions/runs/37121130970).
-- Linux engine, CLI, TUI, and GTK app: [run 37121199441](https://github.com/WebWorldWide/FileID/actions/runs/37121199441), all jobs on `adlon-fileid-linux`.
-- Windows engine: [run 37121199224](https://github.com/WebWorldWide/FileID/actions/runs/37121199224); x64 and ARM64 cross-build on `adlon-fileid-windows`, native ARM64 on GitHub-hosted ARM hardware.
-- Windows app: [run 37121917095](https://github.com/WebWorldWide/FileID/actions/runs/37121917095), x64 and ARM64 cross-builds on `adlon-fileid-windows`.
+- macOS app and engine: [run 37125792358](https://github.com/WebWorldWide/FileID/actions/runs/37125792358), including 483 tests in 96 suites, Release builds, recovery probes, and privacy checks.
+- Repository policy: [run 37125792306](https://github.com/WebWorldWide/FileID/actions/runs/37125792306).
+- Linux engine, CLI, TUI, and GTK app: [run 37125802324](https://github.com/WebWorldWide/FileID/actions/runs/37125802324), all jobs on `adlon-fileid-linux`.
+- Windows engine: [run 37125802333](https://github.com/WebWorldWide/FileID/actions/runs/37125802333); x64 and ARM64 cross-builds on `adlon-fileid-windows`, native ARM64 on GitHub-hosted hardware.
+- Windows app: [run 37126581678](https://github.com/WebWorldWide/FileID/actions/runs/37126581678), x64 and ARM64 cross-builds on `adlon-fileid-windows`.
 
-Adlon is example data only. The CI guests do not mount its data volume; no Adlon files were read, copied, indexed, or written. The feature branch was deleted after merge and `origin` currently has only `main`. An unrelated existing local `codex/store-msix` worktree is preserved; inspect its handoff before considering cleanup.
+Adlon remains example data only. CI guests do not mount its data volume; no example files were read, copied, indexed, or written. The feature branch was deleted after merge and `origin` currently contains only `main`. An unrelated existing local `codex/store-msix` worktree is preserved; inspect its handoff before considering cleanup.
 
 ## Next agent instructions
 
-Continue the active next-version goal on macOS. Mac is not complete or release-ready. Read `shared/docs/NEXT_VERSION.md`, `shared/docs/NEXT.md`, `shared/docs/ARCHITECTURE.md`, `shared/docs/CHAT.md`, and `shared/docs/SCHEDULER.md` before selecting the next slice. The next Mac increment should extend chat/catalog retrieval to event and temporal evidence already represented by chapters, observations, events, and takes; add focused engine tests and keep uncertainty/coverage explicit. Then continue the timeline, best-take, tools, people, and scheduler backlog in the implementation ledger.
+Continue the active next-version goal on macOS. The Mac app is not complete or release-ready. Read `shared/docs/NEXT_VERSION.md`, `shared/docs/NEXT.md`, `shared/docs/ARCHITECTURE.md`, `shared/docs/CHAT.md`, and `shared/docs/SCHEDULER.md` before selecting the next slice. Next, turn the timeline foundation into bounded, cancellable population of timestamped evidence and coverage; never report an unexamined interval as evidence that an event did not happen. Then measure scheduler contention on internal-drive fixtures before changing resource caps, and continue People accuracy, best takes, and media tools.
 
-The owner explicitly deferred new Windows/Linux product work and physical acceptance until they are on their Windows/Linux PC. Keep shared contracts coherent, but do not start those platform feature ports yet. Adlon remains read-only example data; use internal-drive temporary fixtures for mutation tests. Keep the CI runners on their guest disks and serialize Windows engine/app workflows because they share one Windows VM. Start implementation on a fresh `codex/` branch, validate the exact head, merge through a PR, remove the feature branch, and update `STATE.md`, `NEXT.md`, and this handoff. Do not describe a green packaging workflow as full release acceptance.
+The owner explicitly deferred new Windows/Linux product work and physical acceptance until they are on that PC. Keep shared contracts coherent, but do not start those ports yet. Adlon is read-only example data; mutation tests use internal-drive fixtures. Keep CI jobs on guest disks and serialize Windows engine/app workflows because they share one Windows VM. Start implementation on a fresh `codex/` branch, validate the exact head, merge through a PR, delete its feature branch, and update `STATE.md`, `NEXT.md`, `CHAT.md`, `DECISIONS.md`, and this handoff. A green packaging workflow is not full release acceptance.
 
 The accepted goal remains active; this checkpoint is not completion or a request to pause it.
 

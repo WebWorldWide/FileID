@@ -7,6 +7,11 @@
 
 ---
 
+## 2026-10-03 — Chat event/time search stays grounded in edited catalog evidence
+
+Resolve event names only from user-edited event rows until generated event confidence and provenance are available. Accept explicit `MM:SS` and `HH:MM:SS`; chapter and passage intervals qualify only when they contain the requested time, while point observations can match within 15 seconds. Exclude stale evidence. This keeps retrieval deterministic and avoids treating missing timeline analysis as a negative event result; the change needs no IPC or catalog migration.
+
+## 2026-09-24 — Offer official Qwen3-VL GGUF without switching the default
 ## 2026-09-24 — Offer official Qwen3-VL GGUF without switching the default
 
 Official Apache-2.0 Qwen3-VL 4B/8B GGUF + F16 projector pairs now exist (superseding the 2026-05-21 “no 4B GGUF” finding). Pin each file's HF LFS SHA256 **and** its immutable repository revision in the canonical manifest rather than using a moving `main` URL; the pinned llama.cpp b9254 source supports both model and vision architectures. Add them as user-initiated Windows choices, but keep Qwen2.5-VL 7B as the default: source compatibility and disk sizes are verified, while FileID image inference, peak RAM/VRAM, and comparative quality/throughput have not been benchmarked. Linux and Windows ARM64 need a verified native runner before advertising these choices there.
