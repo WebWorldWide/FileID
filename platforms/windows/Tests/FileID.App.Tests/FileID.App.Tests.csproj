@@ -54,7 +54,8 @@
 
   <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
     <PropertyGroup>
-      <CodeCoveragePackageRoot Condition="'$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</CodeCoveragePackageRoot>
+      <CodeCoveragePackageRoot Condition="'$(NUGET_PACKAGES)' != ''">$(NUGET_PACKAGES)\</CodeCoveragePackageRoot>
+      <CodeCoveragePackageRoot Condition="'$(CodeCoveragePackageRoot)' == '' and '$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</CodeCoveragePackageRoot>
       <CodeCoveragePackageRoot Condition="'$(CodeCoveragePackageRoot)' == ''">$(USERPROFILE)\.nuget\packages\</CodeCoveragePackageRoot>
       <CodeCoverageShim>$(CodeCoveragePackageRoot)microsoft.codecoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
       <CodeCoverageShimTarget>$(TargetDir)Microsoft.CodeCoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShimTarget>
