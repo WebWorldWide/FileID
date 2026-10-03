@@ -972,18 +972,22 @@ public final class EngineClient {
         Task.detached(priority: .utility) { [weak self] in
             guard let rootURL = SecurityScopedBookmark.retainAccess(for: bookmark) else { return }
             guard let ipcBookmark = try? SecurityScopedBookmark.makeIPCBookmark(for: rootURL) else {
-                await MainActor.run {
-                    self?.lastError = EngineError(
-                        kind: "bookmark_unavailable",
-                        message: "FileID couldn't grant the selected folder to its local engine. Choose the folder again."
-                    )
-                }
+                await self?.setSavedFolderBookmarkError()
                 return
             }
-            _ = await MainActor.run {
-                self?.send(.grantFolderAccess(rootPath: rootURL.path, rootBookmark: ipcBookmark))
-            }
+            await self?.grantSavedFolderAccess(path: rootURL.path, bookmark: ipcBookmark)
         }
+    }
+
+    private func setSavedFolderBookmarkError() {
+        lastError = EngineError(
+            kind: "bookmark_unavailable",
+            message: "FileID couldn't grant the selected folder to its local engine. Choose the folder again."
+        )
+    }
+
+    private func grantSavedFolderAccess(path: String, bookmark: Data) {
+        _ = send(.grantFolderAccess(rootPath: path, rootBookmark: bookmark))
     }
 
     public func startScan(rootURL: URL) {
