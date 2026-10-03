@@ -1,6 +1,13 @@
 # FileID — State
 
 
+## 2026-10-02 — Durable native search index jobs
+
+Native index preparation now has persistent catalogIndex state/progress, explicit pause/cancel/retry, startup interruption recovery and conservative memory admission. Controls dispatch by worker kind and index retry needs no visual model. Tools displays search-index jobs and polls local snapshots while open. Cancellation checks cover row processing, compaction, snapshot loops and chunked cache reads. Retry uses verified snapshots and SQLite revision history, preserving the prior snapshot during a cancelled partial update. Admission counts historical disk caches as well as live/raw vectors. No dependency, model or migration was added; existing string-kind DTOs mirror the canonical description.
+
+Focused native validation passed 20 tests across two suites, covering recovery/memory, mid-update cancellation, failure retry, historical-cache budget and graph cancellation alongside existing restart/delta/eligibility/ownership tests. All 466 native tests passed across 94 suites (162 Shared, 20 App, 284 Engine). Fresh native health and Swift → Rust → Swift catalog/evidence/face-provenance/Undo probes passed. A new actual-process native fixture proves interruption recovery, cancellation, explicit retry without a visual model and usable semantic IPC; both catalog round trip and index-job recovery now run in macOS CI. Exact-head/main CI remains pending. Baseline main PR #198 app x64/ARM64 jobs passed on Adlon; x64 executed all 48 IPC tests with no skips. Legacy full-service discovery remains skipped. The general atomic resource scheduler/model routing, text/catalog indexes and all remaining NEXT_VERSION.md features remain open. PC new features and physical acceptance stay deferred. Adlon corpus locations remain untouched.
+
+
 ## 2026-10-02 — Native persistent hybrid retrieval validation
 
 Catalog v23 adds transactional model-separated embedding epochs/change logs, source invalidation and failed-file eligibility. The engine-owned CLIP HNSW cache restores a bounded checksummed graph/mapping pair, incrementally applies changes, and rebuilds on missing history, divergent database checkpoints, model mismatch or corruption. IPC v1.6 exposes optional keyword/semantic/hybrid mode, compatible query vectors and bounded limits. Native Library search/similarity now uses the engine; hybrid results preserve chapter/page evidence and verify current vector fingerprints. Cold preparation returns `indexing` and leaves keyword results available. PC DTOs/migrations remain coherent; new PC visual execution is explicitly deferred.

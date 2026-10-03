@@ -11,6 +11,7 @@ on:
       - 'shared/scripts/check_people_merge_roundtrip.py'
       - 'shared/scripts/check_health_roundtrip.py'
       - 'shared/scripts/check_catalog_roundtrip.py'
+      - 'shared/scripts/check_catalog_index_jobs.py'
       - '.github/workflows/macos.yml'
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - 'shared/scripts/check_people_merge_roundtrip.py'
       - 'shared/scripts/check_health_roundtrip.py'
       - 'shared/scripts/check_catalog_roundtrip.py'
+      - 'shared/scripts/check_catalog_index_jobs.py'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
 
@@ -128,6 +130,11 @@ jobs:
         run: |
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_health_roundtrip.py" --engine "$PWD/.build/release/FileIDEngine" --swift
           python3 "$GITHUB_WORKSPACE/shared/scripts/check_health_roundtrip.py" --engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
+
+      - name: Verify catalog and index recovery
+        run: |
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_roundtrip.py" --swift-engine "$PWD/.build/release/FileIDEngine" --rust-engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
+          python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"
 
       - name: Verify binaries exist
         run: |

@@ -108,17 +108,18 @@ struct CatalogWorkbench: View {
                             Text("Markers are stored in the internal catalog. Original files are never changed.").font(.caption).foregroundStyle(.secondary)
                         } else { Text("Select a result to play a matching moment or edit chapters.").foregroundStyle(.secondary) }
                         Divider()
-                        Text("Timeline jobs").font(.headline)
+                Text("Analysis jobs").font(.headline)
                         Text("Visual sampling can miss events between frames. Load a model in Deep Analyze before starting.").font(.caption).foregroundStyle(.secondary)
                         ForEach(engine.catalogJobs, id: \.id) { job in
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("\(job.fileIDs.count) video(s) · \(job.state)").font(.subheadline)
+                        Text(job.kind == "catalogIndex" ? "Search index · \(job.state)" : "\(job.fileIDs.count) video(s) · \(job.state)").font(.subheadline)
                                 ProgressView(value: job.progress)
                                 if let error = job.error { Text(error).font(.caption).foregroundStyle(.secondary) }
                                 HStack {
                                     if ["running", "queued"].contains(job.state) { Button("Pause") { control(job, action: "pauseJob") } }
                                 if job.state == "paused" { Button("Resume") { control(job, action: "resumeJob") } }
-                                if job.state == "failed" { Button("Retry") { send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: job.fileIDs)) } }
+                            if job.kind == "catalogIndex", ["failed", "cancelled"].contains(job.state) { Button("Retry") { control(job, action: "resumeJob") } }
+                            else if job.state == "failed" { Button("Retry") { send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: job.fileIDs)) } }
                                     if ["running", "queued", "paused"].contains(job.state) { Button("Cancel") { control(job, action: "cancelJob") } }
                                 }
                             }
@@ -129,6 +130,12 @@ struct CatalogWorkbench: View {
         }
         .padding(20).frame(minWidth: 900, minHeight: 680)
         .tint(Theme.gold)
+        .task {
+            while !Task.isCancelled {
+                _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
+            }
+        }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
         .onDisappear { player?.pause() }
     }

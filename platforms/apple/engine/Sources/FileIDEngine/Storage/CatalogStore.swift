@@ -64,6 +64,8 @@ public enum CatalogStore {
                 return CatalogResponse(requestID: request.requestID, status: "ok", jobs: try await jobs(database))
             case "pauseJob", "resumeJob", "cancelJob":
                 guard let jobID = request.jobID else { throw InvalidRequest() }
+                let kind = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT kind FROM catalog_jobs WHERE id=?", arguments: [jobID]) }
+                if kind == CatalogIndexJob.kind { return await database.vectorIndex.control(request) }
                 let target = request.action == "pauseJob" ? "paused" : request.action == "resumeJob" ? "queued" : "cancelled"
                 try await database.pool.write { db in
                     let current = try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=?", arguments: [jobID])
@@ -147,12 +149,14 @@ public enum CatalogStore {
     }
 
     public static func jobs(_ database: Database) async throws -> [CatalogJob] {
-        try await database.pool.read { db in
-            try Row.fetchAll(db, sql: "SELECT * FROM catalog_jobs ORDER BY created_at DESC LIMIT 200").map { row in
+        try await database.pool.read { try jobs($0) }
+    }
+
+    static func jobs(_ db: GRDB.Database) throws -> [CatalogJob] {
+        try Row.fetchAll(db, sql: "SELECT * FROM catalog_jobs ORDER BY created_at DESC LIMIT 200").map { row in
                 let json: String = row["file_ids_json"]
                 let ids = try JSONDecoder().decode([Int64].self, from: Data(json.utf8))
                 return CatalogJob(id: row["id"], kind: row["kind"], fileIDs: ids, state: row["state"], progress: row["progress"], error: row["error"], createdAt: row["created_at"], updatedAt: row["updated_at"])
-            }
         }
     }
 

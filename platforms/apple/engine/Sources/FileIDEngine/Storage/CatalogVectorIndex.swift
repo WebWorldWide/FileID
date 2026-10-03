@@ -64,15 +64,20 @@ actor CatalogVectorIndex {
     private let pool: DatabasePool
     private let directory: URL
     private let maximumFiles: Int
+    private let memoryInfo: @Sendable () -> (total: UInt64, available: UInt64)
     private var cache: Cache?
     private var worker: Task<Prepared, Error>?
     private var workerID: UUID?
     private(set) var failed = false
 
-    init(pool: DatabasePool, directory: URL, maximumFiles: Int = 200_000) {
+    init(pool: DatabasePool, directory: URL, maximumFiles: Int = 200_000,
+         memoryInfo: @escaping @Sendable () -> (total: UInt64, available: UInt64) = {
+             (ProcessInfo.processInfo.physicalMemory / 1_048_576, UInt64(max(0, Hardware.availableMemoryMB())))
+         }) {
         self.pool = pool
         self.directory = directory
         self.maximumFiles = maximumFiles
+        self.memoryInfo = memoryInfo
     }
 
     func synchronize() async throws -> Revision {
@@ -84,11 +89,37 @@ actor CatalogVectorIndex {
             let pool = self.pool
             let directory = self.directory
             let maximumFiles = self.maximumFiles
+            let memoryInfo = self.memoryInfo
             let id = UUID()
             workerID = id
             worker = Task.detached(priority: .utility) {
-                let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
-                return Prepared(cache: cache, revision: cache.revision)
+                try Task.checkCancellation()
+                let latest = try pool.read { try Self.revision($0) }
+                if let previous, previous.revision == latest {
+                    try CatalogIndexJob.finishCached(pool)
+                    return Prepared(cache: previous, revision: latest)
+                }
+                try CatalogIndexJob.begin(pool)
+                do {
+                    let count = try pool.read { db in
+                        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0", arguments: [CLIPEmbeddingSpace.modelID]) ?? 0
+                    }
+                    let memory = memoryInfo()
+                    let (graphURL, manifestURL) = Self.paths(directory)
+                    let graphBytes = max(0, (try? graphURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                    let manifestBytes = max(0, (try? manifestURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                    guard graphBytes <= 512 * 1024 * 1024, manifestBytes <= 64 * 1024 * 1024 else { throw IndexError.capacityExceeded }
+                    let requested = UInt64(max(min(250_000, max(count, previous?.graph.rawCount ?? 0)) * 9 / 1024, (graphBytes * 3 + manifestBytes * 2) / 1_048_576) + 64)
+                    if ModelMemoryAdmission.rejection(totalMB: memory.total, availableMB: memory.available, requestedMB: requested) != nil {
+                        throw CatalogIndexJob.AdmissionDeferred(message: "Search index preparation needs about \(requested) MB plus system headroom. Free memory and resume its job in Tools.")
+                    }
+                    let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
+                    try CatalogIndexJob.finish(pool)
+                    return Prepared(cache: cache, revision: cache.revision)
+                } catch {
+                    try? CatalogIndexJob.finish(pool, error: error)
+                    throw error
+                }
             }
         }
         let id = workerID
@@ -122,6 +153,38 @@ actor CatalogVectorIndex {
 
     func currentRevision() -> Revision? { cache?.revision }
 
+    func recover() async throws { try await CatalogIndexJob.recover(pool) }
+
+    func control(_ request: CatalogRequest) async -> CatalogResponse {
+        do {
+            guard request.jobID == CatalogIndexJob.id, !request.requestID.isEmpty, request.requestID.count <= 200 else { throw CatalogStore.InvalidRequest() }
+            guard ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) else { throw CatalogStore.InvalidRequest() }
+            if request.action == "resumeJob" {
+                let state = try await pool.read { db in try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=? AND kind=?", arguments: [CatalogIndexJob.id,CatalogIndexJob.kind]) }
+                guard let state, ["paused", "failed", "cancelled"].contains(state) else { throw CatalogStore.InvalidRequest() }
+                if worker != nil { _ = try? await synchronize() }
+            }
+            try await pool.write { db in
+                let state = try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=? AND kind=?", arguments: [CatalogIndexJob.id,CatalogIndexJob.kind])
+                let allowed = request.action == "resumeJob" ? ["paused", "failed", "cancelled"] : request.action == "pauseJob" ? ["queued", "running"] : ["queued", "running", "paused"]
+                guard let state, allowed.contains(state) else { throw CatalogStore.InvalidRequest() }
+                let target = request.action == "resumeJob" ? "queued" : request.action == "pauseJob" ? "paused" : "cancelled"
+                try db.execute(sql: "UPDATE catalog_jobs SET state=?,error=NULL,updated_at=? WHERE id=?", arguments: [target,Date().timeIntervalSince1970,CatalogIndexJob.id])
+            }
+            if request.action == "resumeJob" { failed = false; prepare() }
+            else {
+                failed = true
+                worker?.cancel()
+                if worker != nil { _ = try? await synchronize() }
+                failed = true
+            }
+            let jobs = try await pool.read { db in try CatalogStore.jobs(db) }
+            return CatalogResponse(requestID: request.requestID, status: "ok", jobs: jobs)
+        } catch {
+            return CatalogResponse(requestID: request.requestID, status: "error", message: error.localizedDescription)
+        }
+    }
+
     func refreshedMatches(_ query: [Float], limit: Int) async throws -> [Match] {
         repeat {
             try Task.checkCancellation()
@@ -137,26 +200,32 @@ actor CatalogVectorIndex {
     }
 
     private static func synchronize(_ previous: Cache?, pool: DatabasePool, directory: URL, maximumFiles: Int) throws -> Cache {
-        try pool.read { db in
+        try Task.checkCancellation()
+        return try pool.read { db in
             let latest = try revision(db)
             let base = previous ?? (try? load(db, directory: directory, latest: latest))
+            try Task.checkCancellation()
             if let base, base.revision == latest { return base }
             let result: Cache
             if let base, try canAdvance(base.revision, to: latest, db: db) {
                 result = base
                 let rows = try Row.fetchAll(db, sql: "SELECT DISTINCT file_id FROM catalog_vector_changes WHERE namespace='clip' AND generation>? AND generation<=?", arguments: [base.revision.generation, latest.generation])
-                for row in rows {
+                try CatalogIndexJob.progress(pool, revision: latest, processed: 0, total: rows.count)
+                for (processed, row) in rows.enumerated() {
+                    try Task.checkCancellation()
+                    if processed % 128 == 0 { try CatalogIndexJob.progress(pool, revision: latest, processed: processed, total: rows.count) }
                     guard let fileID: Int64 = row["file_id"], fileID > 0 else { throw IndexError.corruptCache }
                     if let old = result.nodesByFile.removeValue(forKey: fileID) { result.graph.remove(id: old) }
                     if let blob = try Data.fetchOne(db, sql: "SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id=? AND e.model=? AND f.failed=0", arguments: [fileID, CLIPEmbeddingSpace.modelID]), let vector = normalized(blob) {
                         try append(fileID: fileID, blob: blob, vector: vector, cache: result, maximumFiles: maximumFiles)
                     }
                 }
-                compact(result)
+                try compact(result)
                 result.revision = latest
             } else {
-                result = try rebuild(db, revision: latest, maximumFiles: maximumFiles)
+                result = try rebuild(db, pool: pool, revision: latest, maximumFiles: maximumFiles)
             }
+            try Task.checkCancellation()
             try save(result, directory: directory)
             return result
         }
@@ -176,10 +245,16 @@ actor CatalogVectorIndex {
         return changes == latest.generation - old.generation
     }
 
-    private static func rebuild(_ db: GRDB.Database, revision: Revision, maximumFiles: Int) throws -> Cache {
+    private static func rebuild(_ db: GRDB.Database, pool: DatabasePool, revision: Revision, maximumFiles: Int) throws -> Cache {
         let result = try Cache(graph: HNSWIndex(dim: CLIPEmbeddingSpace.dimension), entries: [], revision: revision)
+        let total = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0", arguments: [CLIPEmbeddingSpace.modelID]) ?? 0
+        var processed = 0
+        try CatalogIndexJob.progress(pool, revision: revision, processed: 0, total: total)
         let rows = try Row.fetchCursor(db, sql: "SELECT e.file_id,e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0 ORDER BY e.file_id", arguments: [CLIPEmbeddingSpace.modelID])
         while let row = try rows.next() {
+            try Task.checkCancellation()
+            processed += 1
+            if processed % 128 == 0 { try CatalogIndexJob.progress(pool, revision: revision, processed: processed, total: total) }
             let blob: Data = row["embedding"]
             if let vector = normalized(blob) { try append(fileID: row["file_id"], blob: blob, vector: vector, cache: result, maximumFiles: maximumFiles) }
         }
@@ -193,7 +268,7 @@ actor CatalogVectorIndex {
     }
 
     private static func append(fileID: Int64, blob: Data, vector: [Float], cache: Cache, maximumFiles: Int) throws {
-        if cache.graph.rawCount >= 250_000 { compact(cache) }
+        if cache.graph.rawCount >= 250_000 { try compact(cache) }
         guard cache.graph.count < maximumFiles, cache.graph.rawCount < 250_000 else { throw IndexError.capacityExceeded }
         let node = cache.graph.insert(vector)
         guard node >= 0, Int(node) == cache.entries.count else { throw IndexError.corruptCache }
@@ -201,9 +276,9 @@ actor CatalogVectorIndex {
         cache.nodesByFile[fileID] = node
     }
 
-    private static func compact(_ cache: Cache) {
+    private static func compact(_ cache: Cache) throws {
         guard cache.graph.deletedFraction > 0.2 || cache.graph.rawCount >= 250_000 else { return }
-        let mapping = cache.graph.compact()
+        let mapping = try cache.graph.compact(checkpoint: { try Task.checkCancellation() })
         cache.entries = cache.entries.enumerated().compactMap { old, entry in mapping[Int32(old)].map { (Int($0), entry) } }.sorted { $0.0 < $1.0 }.map(\.1)
         cache.nodesByFile = Dictionary(uniqueKeysWithValues: cache.entries.enumerated().map { ($0.element.fileID, Int32($0.offset)) })
     }
@@ -244,8 +319,13 @@ actor CatalogVectorIndex {
         guard properties.isRegularFile == true, let size = properties.fileSize, size > 0, size <= limit else { throw IndexError.corruptCache }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        guard let data = try handle.read(upToCount: size + 1), data.count <= limit,
-              try handle.read(upToCount: 1)?.isEmpty != false else { throw IndexError.corruptCache }
+        var data = Data()
+        data.reserveCapacity(size)
+        while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty {
+            try Task.checkCancellation()
+            guard chunk.count <= limit - data.count else { throw IndexError.corruptCache }
+            data.append(chunk)
+        }
         return data
     }
 
