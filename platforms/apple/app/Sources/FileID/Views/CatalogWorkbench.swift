@@ -19,6 +19,7 @@ struct CatalogWorkbench: View {
     @State private var end = 0.0
     @State private var player: AVPlayer?
     @State private var editingID: String?
+    @State private var refreshedTimelineJobs: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -71,6 +72,10 @@ struct CatalogWorkbench: View {
                                 }
                             }
                             Text("Chapters").font(.headline)
+                            if chapters.contains(where: { $0.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") && !$0.userEdited && !$0.stale }) {
+                                Text("Draft suggestions use sparse frame samples. Review before relying on them; brief events can be missed.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                             Button("Undo last chapter edit") {
                                 send(CatalogRequest(requestID: UUID().uuidString, action: "undoChapterEdit", fileID: selected.fileID))
                             }
@@ -86,6 +91,9 @@ struct CatalogWorkbench: View {
                                     } label: {
                                         Text("\(chapter.startSeconds, specifier: "%.1f")s · \(chapter.title)\(chapter.stale ? " · stale" : "")")
                                     }.buttonStyle(.plain)
+                                    if chapter.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") && !chapter.userEdited {
+                                        Text("Draft").font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Spacer()
                                     Button(role: .destructive) {
                                         send(CatalogRequest(requestID: UUID().uuidString, action: "deleteChapter", fileID: selected.fileID, chapterID: chapter.id))
@@ -137,6 +145,15 @@ struct CatalogWorkbench: View {
             }
         }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
+        .onChange(of: engine.catalogJobs) { _, jobs in
+            guard let selected,
+                  let completed = jobs.first(where: {
+                      $0.kind == "timelineSample" && $0.state == "completed"
+                          && $0.fileIDs.contains(selected.fileID) && !refreshedTimelineJobs.contains($0.id)
+                  }) else { return }
+            refreshedTimelineJobs.insert(completed.id)
+            send(CatalogRequest(requestID: UUID().uuidString, action: "detail", fileID: selected.fileID))
+        }
         .onDisappear { player?.pause() }
     }
 
