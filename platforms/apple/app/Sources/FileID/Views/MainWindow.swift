@@ -28,8 +28,6 @@ struct MainWindow: View {
     @AppStorage("sidebarVisible") private var sidebarVisible: Bool = true
     private let sidebarWidth: CGFloat = 260
 
-    private static let pickedFolderBookmarkKey = "pickedFolderBookmark.v2"
-
     /// Order matches the workflow taught by the onboarding splash:
     /// Browse → Identify people → Dedupe → Caption → Reorganize → Settings.
     /// Review was folded into Settings → Advanced.
@@ -176,16 +174,16 @@ struct MainWindow: View {
 
     private func persistPickedFolder(_ url: URL?) {
         guard let url else {
-            UserDefaults.standard.removeObject(forKey: Self.pickedFolderBookmarkKey)
+            UserDefaults.standard.removeObject(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey)
+            SecurityScopedBookmark.releaseRetainedAccess()
             return
         }
         // bookmarkData can do filesystem I/O on slow disks / network
         // volumes, hanging the main thread for seconds. Off-thread.
-        let key = Self.pickedFolderBookmarkKey
+        let key = SecurityScopedBookmark.pickedFolderDefaultsKey
         Task.detached(priority: .utility) {
-            if let data = try? url.bookmarkData(options: [],
-                                                  includingResourceValuesForKeys: nil,
-                                                  relativeTo: nil) {
+            if let data = try? SecurityScopedBookmark.make(for: url) {
+                guard SecurityScopedBookmark.retainAccess(for: data) != nil else { return }
                 await MainActor.run {
                     UserDefaults.standard.set(data, forKey: key)
                 }
@@ -195,34 +193,27 @@ struct MainWindow: View {
 
     private func restorePickedFolderIfPossible() {
         guard pickedURL == nil,
-              let data = UserDefaults.standard.data(forKey: Self.pickedFolderBookmarkKey)
+              let data = UserDefaults.standard.data(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey)
         else { return }
-        // Resolve off-thread too — URL(resolvingBookmarkData:) can
-        // round-trip to disk (slow first-launch when the previous
-        // folder lives on a sleeping NAS).
-        let key = Self.pickedFolderBookmarkKey
+        let key = SecurityScopedBookmark.pickedFolderDefaultsKey
         Task.detached(priority: .utility) {
-            do {
-                var stale = false
-                let url = try URL(resolvingBookmarkData: data, options: [],
-                                    relativeTo: nil, bookmarkDataIsStale: &stale)
-                var isDir: ObjCBool = false
-                let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+            guard let accessibleURL = SecurityScopedBookmark.retainAccess(for: data) else {
                 await MainActor.run {
-                    // A folder picked while the bookmark was resolving
-                    // (slow NAS) is the user's live choice — don't let a
-                    // stale restore clobber it, nor delete the bookmark it
-                    // just persisted.
                     guard self.pickedURL == nil else { return }
-                    if exists {
-                        self.pickedURL = url
-                    } else {
-                        UserDefaults.standard.removeObject(forKey: key)
-                    }
+                    UserDefaults.standard.removeObject(forKey: key)
                 }
-            } catch {
-                await MainActor.run {
-                    guard self.pickedURL == nil else { return }
+                return
+            }
+            var isDir: ObjCBool = false
+            let exists = FileManager.default.fileExists(
+                atPath: accessibleURL.path,
+                isDirectory: &isDir
+            ) && isDir.boolValue
+            await MainActor.run {
+                guard self.pickedURL == nil else { return }
+                if exists {
+                    self.pickedURL = accessibleURL
+                } else {
                     UserDefaults.standard.removeObject(forKey: key)
                 }
             }

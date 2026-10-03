@@ -3,9 +3,8 @@
 //      (the resulting payload's structure matches).
 //   2. The wire bytes for empty-payload variants are `{"variantName": {}}`,
 //      NOT a bare string.
-//   3. The wire bytes for the breaking-change `startScan(rootPath, rootDisplay)`
-//      payload match the schema (no `rootBookmark` field; rootDisplay is null
-//      when omitted, not absent).
+//   3. Optional bookmark and exclusion fields match the shared schema and
+//      are omitted when null.
 
 using System.Text.Json;
 using Xunit;
@@ -144,5 +143,15 @@ public class IpcCommandTests
         {
             Assert.NotEqual((byte)'\n', bytes[i]);
         }
+    }
+
+    [Fact]
+    public void StartScan_WithRootBookmark_RoundTrips()
+    {
+        var cmd = new IpcCommand("t", new StartScanCommand("/abs/path", null, RootBookmark: "AQID"));
+        var json = IpcCoder.Encode(cmd);
+        Assert.Contains("\"rootBookmark\":\"AQID\"", json);
+        var payload = Assert.IsType<StartScanCommand>(IpcCoder.Decode<IpcCommand>(json).Payload);
+        Assert.Equal("AQID", payload.RootBookmark);
     }
 }

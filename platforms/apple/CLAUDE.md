@@ -27,7 +27,7 @@ Storage: GRDB.swift on SQLite WAL. Single writer (engine), many readers (app via
 
 ## AI models (commercial-clean target)
 
-Under `~/Library/Application Support/FileID/Models/` (VLMs under `~/Documents/huggingface/models/<repo>/`). The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
+Under `~/Library/Application Support/FileID/Models/`; VLMs use Documents in Developer ID builds and the app container in App Store builds. The project is **Apache-2.0**; every default weight is Apache/MIT (see `shared/docs/MODELS.md`):
 - **Faces** — SFace embedder (Apache, 128-d ONNX via the CoreML EP) + 5-point alignment; detection stays Apple Vision.
 - **CLIP** — OpenAI/OpenCLIP ViT-B/32 (MIT) image + text, 512-d.
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.

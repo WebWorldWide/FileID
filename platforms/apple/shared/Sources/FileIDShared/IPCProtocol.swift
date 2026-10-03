@@ -16,13 +16,17 @@ public struct IPCCommand: Codable, Sendable {
     }
 
     public enum Payload: Codable, Sendable {
+        /// Grant the engine access through an implicit-scope bookmark created for
+        /// process handoff in sandboxed macOS builds.
+        case grantFolderAccess(rootPath: String, rootBookmark: Data)
         /// Absolute filesystem `rootPath`, an optional human-readable
         /// `rootDisplay` (defaults to `rootPath` when nil), `rescan` (force
         /// every file through the pipeline), and optional `excludedPaths`
         /// (folders to prune from the walk). Mirrors the schema's StartScan
-        /// shape byte-for-byte — the app resolves the security-scoped bookmark
-        /// to a path before sending.
-        case startScan(rootPath: String, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
+        /// shape byte-for-byte.
+        /// `rootBookmark` carries a base64-encoded implicit-scope grant for the
+        /// receiving helper in sandboxed macOS builds; other platforms omit it.
+        case startScan(rootPath: String, rootBookmark: Data?, rootDisplay: String?, rescan: Bool?, excludedPaths: [String]?)
         case pauseScan
         case resumeScan
         case cancelScan

@@ -171,6 +171,7 @@ fn run_scan(
         id: "fileid-tui-scan".to_string(),
         payload: CommandPayload::StartScan(StartScanPayload {
             root_path: root_abs.to_string_lossy().into_owned(),
+            root_bookmark: None,
             root_display: None,
             rescan: false,
             excluded_paths: None,

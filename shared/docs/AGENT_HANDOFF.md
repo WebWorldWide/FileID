@@ -1,5 +1,21 @@
 # FileID next-version handoff — 2026-10-03
 
+## Current checkpoint — TestFlight sandbox scaffold and account records
+
+The current feature branch adds a Mac App Store-only sandbox build path. The app keeps an explicit security-scope bookmark for its own persistent access and creates a separate implicit-scope bookmark for engine IPC. The helper resolves IPC bookmarks with default options, starts and validates access, and holds reference-counted leases only for the lifetime of root scans or destination operations. Model weights move into the app's Application Support container only under `FILEID_APP_STORE`; Developer builds keep their current cache path. The TestFlight script assembles, signs, verifies, and uploads a `.pkg` when account assets exist, and fails closed if the required MLX metallib is missing. Swift/Rust/C# IPC mirrors include optional bookmark DTOs and `grantFolderAccess`.
+
+Apple portal setup is done: App ID `com.fileid.app`, macOS App Store Connect record [6818813859](https://appstoreconnect.apple.com/apps/6818813859/distribution), and internal TestFlight group `FileID Internal Testers` (0 testers, 0 builds, automatic distribution off). Nothing has been uploaded. Local Apple Distribution signing exists, but the Mac App Store provisioning profile, Mac Installer Distribution certificate, and App Store Connect API key are missing. The `--package-only` preflight reports the missing profile before building. Keep the `.p8` key and certificates local; do not place them in Git or on Adlon.
+
+Corrected PR-head validation: Swift Debug tests and normal/Store Release builds pass locally; Rust engine/CLI/TUI tests and formatting, bootstrap-integrity tests, catalog/schema checks, entitlements, shell syntax, and runtime-egress checks are being verified. `dotnet` is not installed locally, so require Windows CI tests and format gates. Package signing, upload/processing, internal TestFlight installation, and runtime sandboxed scan/export/model-download acceptance still require owner-managed Apple assets.
+
+## Instructions for the next agent
+
+Finish TestFlight after the owner installs the Mac App Store provisioning profile, Apple Distribution app identity, Mac Installer Distribution identity, and App Store Connect API key. Expected local variables and checks are documented by `platforms/apple/scripts/testflight.sh`. Build and upload using that script, wait for processing in record `6818813859`, then add the processed build to `FileID Internal Testers`; invite only testers explicitly requested by the owner. Preserve disabled auto-distribution. Keep the `.p8` key and certificates out of Git and Adlon. Run real sandboxed scan/export/model-download acceptance after installation.
+
+After TestFlight is unblocked, resume the next Mac feature milestone: bounded, cancellable timeline population with timestamped speech, shots/tracks, and explicit coverage. Keep uncovered intervals unknown, measure scheduler contention with internal-drive fixtures, then continue face calibration, best-take ranking, and media tools. Windows/Linux product work and physical acceptance remain deferred until the owner is on that PC. Adlon is read-only example data; CI may use only the established isolated runner guest disks.
+
+Before finishing, record the corrected PR head, exact-head and merged-main workflow results, merge SHA, and branch cleanup here. If TestFlight credentials remain unavailable, state that explicitly and leave upload/runtime acceptance as the next owner-enabled step.
+
 ## Current checkpoint — Mac event/time retrieval merged and CI green
 
 PR #210 is merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. Chat search resolves exact titles from user-edited event groups and explicit `MM:SS` or `HH:MM:SS` requests. It filters files by event membership and returns existing chapter/passage intervals that contain the requested time plus person observations within 15 seconds. Stale chapter/passage evidence is excluded, and refinements retain event/time filters. This is retrieval over catalog evidence; automatic timeline population and open-ended event detection remain unimplemented. No schema, IPC, model, dependency, or network changes.

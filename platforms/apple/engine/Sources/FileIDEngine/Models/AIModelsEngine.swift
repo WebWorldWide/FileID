@@ -29,7 +29,6 @@ extension AIModelKind {
     }
 
     private static func huggingFaceCacheDir() -> URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("huggingface/models", isDirectory: true)
+        ModelCachePaths.huggingFaceModels
     }
 }

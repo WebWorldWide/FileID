@@ -42,6 +42,21 @@ public actor MediaTools {
         defer { if let id = request.operationID { activeOperations.remove(id) } }
         do {
             guard !request.requestID.isEmpty, request.requestID.count <= 200 else { throw Failure(text: "Invalid tools request.") }
+        var destinationLease: SecurityScopedAccessLease?
+            if ["preview", "execute", "undo"].contains(request.action) {
+                guard let destination = request.destination else {
+                    throw Failure(text: "Choose an output folder before running this operation.")
+                }
+                do {
+                    destinationLease = try SecurityScopedAccessRegistry.shared.acquire(
+                        path: destination,
+                        bookmark: request.destinationBookmark
+                    )
+                } catch {
+                    throw Failure(text: "FileID couldn't access that output folder. Choose it again.")
+                }
+            }
+        defer { destinationLease?.release() }
             switch request.action {
             case "capabilities":
                 return ToolResponse(requestID: request.requestID, capabilities: Self.capabilities)

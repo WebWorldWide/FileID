@@ -281,10 +281,10 @@ mod tests {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?1,1,100,0,'image','png')",[source.to_str().unwrap()]).unwrap();
             Self{root,source,conn}
         }
-        fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16}),operation_id:None}}
+ fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16}),operation_id:None,destination_bookmark:None}}
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
-    fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None}}
+ fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None,destination_bookmark:None}}
     #[test]
     fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
         let mut fixture=Fixture::new();

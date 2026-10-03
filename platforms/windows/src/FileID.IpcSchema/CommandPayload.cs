@@ -18,6 +18,7 @@ public abstract record CommandPayload;
 public sealed record ChatRequestCommand(ChatRequest Request) : CommandPayload;
 public sealed record ToolRequestCommand(ToolRequest Request) : CommandPayload;
 public sealed record CatalogRequestCommand(CatalogRequest Request) : CommandPayload;
+public sealed record GrantFolderAccessCommand(string RootPath, string RootBookmark) : CommandPayload;
 
 public sealed record StartScanCommand(
     string RootPath,
@@ -25,7 +26,9 @@ public sealed record StartScanCommand(
     // `rescan = false` (default) is incremental: engine skips files where
     // `scanned_at >= modified_at`. `rescan = true` forces every file to
     // be re-tagged.
-    bool Rescan = false) : CommandPayload;
+    bool Rescan = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RootBookmark = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? ExcludedPaths = null) : CommandPayload;
 
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
@@ -196,6 +199,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "chatRequest" => JsonSerializer.Deserialize<ChatRequestCommand>(ref reader, options) ?? throw new JsonException("chatRequest: null body"),
             "toolRequest" => JsonSerializer.Deserialize<ToolRequestCommand>(ref reader, options) ?? throw new JsonException("toolRequest: null body"),
             "catalogRequest" => JsonSerializer.Deserialize<CatalogRequestCommand>(ref reader, options) ?? throw new JsonException("catalogRequest: null body"),
+            "grantFolderAccess" => JsonSerializer.Deserialize<GrantFolderAccessCommand>(ref reader, options) ?? throw new JsonException("grantFolderAccess: null body"),
             "startScan" => JsonSerializer.Deserialize<StartScanCommand>(ref reader, options) ?? throw new JsonException("startScan: null body"),
             "deepAnalyzeFile" => JsonSerializer.Deserialize<DeepAnalyzeFileCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFile: null body"),
             "deepAnalyzeFolder" => JsonSerializer.Deserialize<DeepAnalyzeFolderCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFolder: null body"),
@@ -250,6 +254,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case ChatRequestCommand c: WriteVariant(writer, "chatRequest", c, options); break;
             case ToolRequestCommand c: WriteVariant(writer, "toolRequest", c, options); break;
             case CatalogRequestCommand c: WriteVariant(writer, "catalogRequest", c, options); break;
+            case GrantFolderAccessCommand c: WriteVariant(writer, "grantFolderAccess", c, options); break;
             case StartScanCommand c: WriteVariant(writer, "startScan", c, options); break;
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;

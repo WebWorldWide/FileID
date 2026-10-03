@@ -23,15 +23,11 @@ public class SchemaConformanceTests
     private static readonly JsonDocument _schema = JsonDocument.Parse(
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ipc.schema.json")));
 
-    // Platform-divergence allowlists for the two-way tag comparison. A tag
-    // belongs here only when the schema deliberately carries a variant for
-    // one platform (or a platform carries one the schema doesn't), and each
-    // entry needs a matching note in the schema description. The known
-    // historical divergence is macOS's startScan(rootBookmark:) shape — the
-    // schema standardized on rootPath and the Swift app now resolves the
-    // security-scoped bookmark to a path before sending (IpcCommandTests
-    // pins the no-rootBookmark wire bytes), so every variant is currently
-    // shared and all four lists are empty.
+    // The allowlists cover only variants intentionally present on one platform.
+    // The canonical schema includes optional root bookmarks on startScan.
+    // App Store builds send a security-scoped bookmark with the root path.
+    // IpcCommandTests covers default omission and bookmark round trips.
+    // All current command and event variants are shared across platforms.
     private static readonly IReadOnlySet<string> _schemaOnlyCommandTags = new HashSet<string>(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> _csharpOnlyCommandTags = new HashSet<string>(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> _schemaOnlyEventTags = new HashSet<string>(StringComparer.Ordinal);
@@ -138,9 +134,10 @@ public class SchemaConformanceTests
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
         new ChatRequestCommand(new ChatRequest("chat", "c", "send", "birthday", true)),
-        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("video", "mp4", 1920), "plan")),
+        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("video", "mp4", 1920), "plan", DestinationBookmark: "AQID")),
+        new GrantFolderAccessCommand(@"C:\Users\adam\Pictures", "AQID"),
         new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
-        new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true),
+        new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true, RootBookmark: "AQID", ExcludedPaths: [@"C:\Users\adam\Pictures\.cache"]),
         new PauseScanCommand(),
         new ResumeScanCommand(),
         new CancelScanCommand(),

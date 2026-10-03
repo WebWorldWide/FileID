@@ -827,6 +827,7 @@ async fn handle_line(
                     .await;
             });
         }
+        CommandPayload::GrantFolderAccess(_) => {}
         CommandPayload::StartScan(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "startScan").await;
@@ -1198,5 +1199,4 @@ mod tests {
         assert_eq!(t1, t2, "creation time pins a stable identity for a given PID");
     }
 }
-
 

@@ -1,6 +1,10 @@
 # Architecture — cross-platform overview
 
-## Native persistent retrieval (catalog v23 / IPC v1.6)
+## Mac App Store sandbox file access
+
+The `FILEID_APP_STORE` build keeps persistent user-selected roots as app-scoped bookmarks in the app. For helper IPC, it creates a distinct implicit-scope bookmark; the engine resolves it with default bookmark options, verifies that the resolved standardized path matches the request, and releases the security scope through an idempotent lease after the scan or file operation ends. Root access is replaceable and destination access is operation-scoped. Store-only behavior is compiled out of Developer builds. This path requires real signed sandbox acceptance before TestFlight distribution is considered complete; see [`NEXT.md`](NEXT.md).
+
+## Native persistent retrieval (catalog v23 / IPC v1.7)
 
 The macOS engine owns a model-specific CLIP HNSW index and a bounded file-ID/fingerprint manifest next to its internal catalog. SQLite v23 records per-namespace instance IDs, generations, random checkpoint nonces, and bounded change logs for CLIP, text, and catalog embeddings. Transactions roll these back together. Missing history, database divergence/reset, incompatible models, corrupt snapshots, or mismatched graph/manifest hashes cause a rebuild from SQLite. Source size/mtime changes discard derived CLIP/text vectors; failed-file changes update index eligibility without discarding accepted names, tags, people, or Undo.
 

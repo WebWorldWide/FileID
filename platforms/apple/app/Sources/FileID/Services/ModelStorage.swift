@@ -12,8 +12,7 @@ struct ModelRemovalReport: Sendable {
 
 enum ModelStorage {
     static var deepAnalyzeModelsRoot: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("huggingface/models", isDirectory: true)
+        ModelCachePaths.huggingFaceModels
     }
 
     static func deepAnalyzeDirectory(

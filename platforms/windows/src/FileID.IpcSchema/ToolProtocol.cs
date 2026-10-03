@@ -12,7 +12,8 @@ public sealed record ToolRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<long>? FileIDs = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Destination = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ToolRecipe? Recipe = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? OperationID = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? OperationID = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? DestinationBookmark = null);
 public sealed record ToolResponse(
     string RequestID,
     string Status,

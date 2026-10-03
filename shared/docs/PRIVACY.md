@@ -25,9 +25,9 @@ FileID reads only files and folders you select or explicitly ask it to scan. Ind
 | Platform | Database | Logs | Models | Thumbnails | Face crops |
 |---|---|---|---|---|---|
 | Windows | `%LOCALAPPDATA%\FileID\fileid.sqlite` | `%LOCALAPPDATA%\FileID\logs\` | `%LOCALAPPDATA%\FileID\Models\` | `%LOCALAPPDATA%\FileID\thumbs.cache\` | `%LOCALAPPDATA%\FileID\face_crops\` |
-| macOS | `~/Library/Application Support/FileID/fileid.sqlite` | `~/Library/Application Support/FileID/logs/` | `~/Library/Application Support/FileID/Models/` + `~/Documents/huggingface/models/` | `~/Library/Application Support/FileID/thumbs.cache/` | `~/Library/Application Support/FileID/face_crops/` |
+| macOS | `~/Library/Application Support/FileID/fileid.sqlite` | `~/Library/Application Support/FileID/logs/` | `~/Library/Application Support/FileID/Models/` + Developer ID `~/Documents/huggingface/models/` or the Mac App Store sandbox container | `~/Library/Application Support/FileID/thumbs.cache/` | `~/Library/Application Support/FileID/face_crops/` |
 
-The engine owns the SQLite WAL database (migrations v1–v12, byte-faithful with the macOS GRDB schema). Downloaded VLM weights cache under `%LOCALAPPDATA%\FileID\Models\HuggingFace\` (Windows) / `~/Documents/huggingface/models/` (macOS).
+The engine owns the SQLite WAL database (migrations v1–v12, byte-faithful with the macOS GRDB schema). Downloaded VLM weights cache under `%LOCALAPPDATA%\FileID\Models\HuggingFace\` (Windows); macOS Developer ID builds use `~/Documents/huggingface/models/`, while the Mac App Store build uses its sandbox container.
 
 Uninstalling deletes the binaries. The user-data directory is intentionally **not** auto-deleted on uninstall — we don't want to surprise-wipe a multi-GB model + thumbnail cache. Clear it explicitly: `scripts/wipe_local_state.sh` on macOS, or delete `%LOCALAPPDATA%\FileID\` on Windows (a one-click Settings button is planned).
 

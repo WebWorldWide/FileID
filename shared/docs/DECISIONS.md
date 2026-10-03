@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-10-03 — Isolate Mac App Store sandbox behavior behind a build flag
+
+Keep Developer builds unchanged and compile `FILEID_APP_STORE` only for the Mac App Store package. The Store app and inherited CLI helper require bookmark grants for selected source/output folders, while model weights live in the app container. This avoids weakening the Store sandbox or breaking the existing Developer ID workflow. IPC v1.7 mirrors the bookmark contract across Swift, Rust, and C#; Windows treats the grant as a no-op. Signing and API credentials remain owner-managed and are not stored in the repository.
+
+## 2026-10-03 — Use separate bookmark forms across the sandbox helper boundary
+
+The app retains a security-scoped bookmark created and resolved with `.withSecurityScope` for its own persistent library access. Before IPC it creates a separate implicit-scope bookmark using default options; the inherited helper resolves that bookmark with default options and releases a reference-counted access lease after the scan or destination operation. Apple documents this implicit-scope form for interprocess handoff. This avoids depending on the app-scoped bookmark in the helper and prevents destination scopes from accumulating for the process lifetime. See [Apple sandbox file-access guidance](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox?changes=_4). This supersedes the initial implementation assumption that the app-scoped bookmark could be passed directly to the helper.
+
 ## 2026-10-03 — Chat event/time search stays grounded in edited catalog evidence
 
 Resolve event names only from user-edited event rows until generated event confidence and provenance are available. Accept explicit `MM:SS` and `HH:MM:SS`; chapter and passage intervals qualify only when they contain the requested time, while point observations can match within 15 seconds. Exclude stale evidence. This keeps retrieval deterministic and avoids treating missing timeline analysis as a negative event result; the change needs no IPC or catalog migration.
