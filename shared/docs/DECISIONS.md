@@ -3484,3 +3484,8 @@ The owner deferred new Windows/Linux implementation and physical validation unti
 ## 2026-10-02 — Reuse native HNSW for persistent-index groundwork
 
 Keep the existing Accelerate-backed Swift graph and add a versioned binary storage API, avoiding a new package. Preserve graph IDs, tombstones and RNG state across restart so incremental insertion does not silently change identities or approximate results. Bind snapshots to both model identity and a caller-supplied source revision; verify checksums and graph structure before accepting them. Bound disk reads, dimensions, graph size, neighbour counts and layer depth, and enforce read-only output guards. Catalog integration must supply durable SQLite invalidation and external entity mapping before any automatic reuse; this API alone does not satisfy persistent retrieval acceptance.
+
+
+## 2026-10-02 — Preserve diverse routes in native HNSW
+
+A release-mode synthetic benchmark exposed poor nearest-neighbour recall from closest-only insertion/pruning: 62.5% mean recall at ten on 100,000 × 512 vectors, and 57% on the smaller 16,000 × 128 fixture, including zero-recall queries. Apply diversified neighbour selection during both insertion and trimming, following the [original HNSW paper](https://arxiv.org/abs/1603.09320). Candidate ordering breaks equal-distance ties by node ID to preserve deterministic behavior. Both fixtures reached 100% on their twenty unseen queries; the final 100k run measured 1.07 ms warm index-only p95. Snapshots use construction version 2 so earlier closest-only graphs cannot be reused silently. The committed benchmark and JSON preserve parameters, compiler and source hashes. This does not establish real face accuracy or semantic retrieval acceptance; those gates remain open.

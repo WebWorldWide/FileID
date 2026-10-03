@@ -1,0 +1,75 @@
+{
+  "kind": "synthetic-index-only",
+  "hardware": "Apple M1 Pro, 16 GiB",
+  "compiler": "Apple Swift 6.4 (swiftlang-6.4.0.34.1), release -O, arm64-apple-macosx27.0.0",
+  "dataset": {
+    "seed": "0xF11E1D12345",
+    "clusters": 64,
+    "noiseScale": 0.08,
+    "queries": 20,
+    "normalized": true
+  },
+  "baselineSourceSHA256": "6a088289216e8b09da0641c0035cafd4f74f4a57001b23544ecdc6e1873cec63",
+  "finalSourceSHA256": "4b59ba9aae5632fe55e76579903a36651bf7edc191b31e67c09331fd188ce907",
+  "baseline100k": {
+    "buildSeconds": 44.14909291267395,
+    "dimension": 512,
+    "ef": 256,
+    "loadSeconds": 0.6024279594421387,
+    "queries": 20,
+    "queryP95Milliseconds": 0.8620023727416992,
+    "recallAt10Mean": 0.6249999999999999,
+    "recallAt10Min": 0,
+    "restoredResultsIdentical": true,
+    "saveSeconds": 1.1229990720748901,
+    "snapshotBytes": 218650916,
+    "vectors": 100000
+  },
+  "diversified100k": {
+    "buildSeconds": 62.90821897983551,
+    "dimension": 512,
+    "ef": 256,
+    "loadSeconds": 0.5772280693054199,
+    "queries": 20,
+    "queryP95Milliseconds": 1.0679960250854492,
+    "recallAt10Mean": 1,
+    "recallAt10Min": 1,
+    "restoredResultsIdentical": true,
+    "saveSeconds": 1.069793939590454,
+    "snapshotBytes": 215698588,
+    "vectors": 100000
+  },
+  "baseline16k": {
+    "buildSeconds": 2.3780949115753174,
+    "dimension": 128,
+    "ef": 64,
+    "loadSeconds": 0.0391840934753418,
+    "queries": 20,
+    "queryP95Milliseconds": 0.08893013000488281,
+    "recallAt10Mean": 0.5700000000000001,
+    "recallAt10Min": 0,
+    "restoredResultsIdentical": true,
+    "saveSeconds": 0.06787800788879395,
+    "snapshotBytes": 10404555,
+    "vectors": 16000
+  },
+  "diversified16k": {
+    "buildSeconds": 2.8365520238876343,
+    "dimension": 128,
+    "ef": 64,
+    "loadSeconds": 0.0355989933013916,
+    "queries": 20,
+    "queryP95Milliseconds": 0.07808208465576172,
+    "recallAt10Mean": 1,
+    "recallAt10Min": 1,
+    "restoredResultsIdentical": true,
+    "saveSeconds": 0.053968071937561035,
+    "snapshotBytes": 9485191,
+    "vectors": 16000
+  },
+  "limitations": [
+    "One deterministic synthetic fixture; twenty unseen queries per run.",
+    "No catalog, inference, UI, IPC or user-corpus work is measured.",
+    "No claim of real semantic accuracy, identity precision or end-to-end retrieval acceptance."
+  ]
+}

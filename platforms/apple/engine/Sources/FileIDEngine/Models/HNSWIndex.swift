@@ -146,7 +146,7 @@ final class HNSWIndex {
             )
             // Pick M (or Mmax0 at layer 0) best neighbours.
             let mForLayer = layer == 0 ? Mmax0 : M
-            let neighbours = selectNeighboursSimple(
+            let neighbours = selectNeighbours(
                 candidates: nearest,
                 m: mForLayer
             )
@@ -440,18 +440,26 @@ final class HNSWIndex {
         return results.sortedAscending()
     }
 
-    /// Heuristic neighbour selection — for now, take the top-M by distance.
-    /// Could swap in the "diverse neighbour" heuristic from the paper if
-    /// recall ever proves an issue.
-    private func selectNeighboursSimple(
+    // Closest-only pruning loses routes between dense clusters.
+    private func selectNeighbours(
         candidates: [(Int32, Float)],
         m: Int
     ) -> [(Int32, Float)] {
-        Array(candidates.prefix(m))
+        let ordered = candidates.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 < $1.1 }
+        guard ordered.count > m else { return ordered }
+        var selected: [(Int32, Float)] = []
+        selected.reserveCapacity(m)
+        for candidate in ordered {
+            let vector = nodes[Int(candidate.0)].vec
+            if selected.allSatisfy({ l2(vector, nodes[Int($0.0)].vec) >= candidate.1 }) {
+                selected.append(candidate)
+                if selected.count == m { break }
+            }
+        }
+        return selected
     }
 
-    /// Trim a node's neighbour list at a layer to `cap` by keeping the
-    /// closest neighbours. Run after a new edge tips it over Mmax/Mmax0.
+    /// Trim overfull layers using the same diversity rule as insertion.
     private func trimNeighbours(of id: Int32, layer: Int, cap: Int) -> [Int32] {
         let node = nodes[Int(id)]
         let scored = node.levels[layer].compactMap { nID -> (Int32, Float)? in
@@ -459,8 +467,7 @@ final class HNSWIndex {
             guard nIdx < nodes.count, !nodes[nIdx].deleted else { return nil }
             return (nID, l2(node.vec, nodes[nIdx].vec))
         }
-        let kept = scored.sorted { $0.1 < $1.1 }.prefix(cap)
-        return kept.map { $0.0 }
+        return selectNeighbours(candidates: scored, m: cap).map { $0.0 }
     }
 
     /// L2 distance via Accelerate. Same metric and dim-mismatch semantics
@@ -506,7 +513,7 @@ extension HNSWIndex {
               (1...4096).contains(dim), (4...64).contains(M),
               (1...4096).contains(efConstruction), (1...4096).contains(efSearch),
               nodes.count <= 250_000 else { throw SnapshotError.invalidFormat }
-        var result = Data("FileID-HNSW-1".utf8)
+        var result = Data("FileID-HNSW-2".utf8)
         func append<T: FixedWidthInteger>(_ value: T) {
             var littleEndian = value.littleEndian
             withUnsafeBytes(of: &littleEndian) { result.append(contentsOf: $0) }
@@ -548,7 +555,7 @@ extension HNSWIndex {
         let payload = Data(data.dropLast(32))
         guard Data(SHA256.hash(data: payload)) == Data(data.suffix(32)) else { throw SnapshotError.invalidFormat }
         var reader = SnapshotReader(data: payload)
-        guard try reader.bytes(13) == Data("FileID-HNSW-1".utf8) else { throw SnapshotError.invalidFormat }
+        guard try reader.bytes(13) == Data("FileID-HNSW-2".utf8) else { throw SnapshotError.invalidFormat }
         guard try reader.string() == modelID else { throw SnapshotError.incompatibleSpace }
         guard try reader.string() == sourceRevision else { throw SnapshotError.staleRevision }
         let dim = Int(try reader.integer(UInt32.self))
