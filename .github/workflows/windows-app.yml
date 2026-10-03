@@ -200,22 +200,41 @@ jobs:
           }
           dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $sqlitePackage = $deps.libraries.PSObject.Properties.Name | Where-Object { $_ -like 'Microsoft.Data.Sqlite.Core/*' } | Select-Object -First 1
-          if (-not $sqlitePackage) { throw 'Microsoft.Data.Sqlite.Core is missing from the app test dependency manifest' }
-          $sqliteVersion = $sqlitePackage.Split('/', 2)[1]
-          $relativeSqlite = "microsoft.data.sqlite.core/$sqliteVersion/lib/net8.0/Microsoft.Data.Sqlite.dll"
-          $sqliteSource = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/Microsoft.Data.Sqlite.dll'
-          if (-not (Test-Path $sqliteSource -PathType Leaf)) { throw "SQLite app output assembly is missing: $sqliteSource" }
-          $testOutputSqlite = Join-Path (Split-Path -Parent $depsFile) 'Microsoft.Data.Sqlite.dll'
-          Copy-Item -LiteralPath $sqliteSource -Destination $testOutputSqlite -Force
-          foreach ($packageFolder in $packageFolders) {
-            $packageSqlite = Join-Path $packageFolder $relativeSqlite
-            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageSqlite) | Out-Null
-            Copy-Item -LiteralPath $sqliteSource -Destination $packageSqlite -Force
-            if (-not (Test-Path $packageSqlite -PathType Leaf)) { throw "SQLite package asset was not staged as a file: $packageSqlite" }
-            Write-Host "Staged SQLite runtime asset in test-host package folder: $packageSqlite"
+          $testOutputRoot = Split-Path -Parent $depsFile
+          $appOutputRoot = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64'
+          $runtimeTarget = $deps.targets.PSObject.Properties[$deps.runtimeTarget.name].Value
+          foreach ($library in $deps.libraries.PSObject.Properties) {
+            if ($library.Value.type -ne 'package') { continue }
+            $libraryParts = $library.Name.Split('/', 2)
+            if ($libraryParts.Count -ne 2) { continue }
+            $targetLibraryProperty = $runtimeTarget.PSObject.Properties[$library.Name]
+            if (-not $targetLibraryProperty) { continue }
+            foreach ($assetKind in @('runtime', 'runtimeTargets')) {
+              $assets = $targetLibraryProperty.Value.$assetKind
+              if (-not $assets) { continue }
+              foreach ($asset in $assets.PSObject.Properties) {
+                if ([IO.Path]::GetExtension($asset.Name) -ne '.dll') { continue }
+                if ($assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -notin @('runtime', 'native')) { continue }
+                $relativeAsset = "$($libraryParts[0].ToLowerInvariant())/$($libraryParts[1])/$($asset.Name)"
+                $assetName = [IO.Path]::GetFileName($asset.Name)
+                $packageAssets = @($packageFolders | ForEach-Object { Join-Path $_ $relativeAsset })
+                $assetCandidates = @($packageAssets) + @((Join-Path $testOutputRoot $assetName), (Join-Path $appOutputRoot $assetName))
+                $assetSource = $assetCandidates | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
+                if (-not $assetSource) { throw "Runtime asset source is missing: $relativeAsset" }
+                foreach ($packageFolder in $packageFolders) {
+                  $packageAsset = Join-Path $packageFolder $relativeAsset
+                  if (-not (Test-Path $packageAsset -PathType Leaf)) {
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageAsset) | Out-Null
+                    Copy-Item -LiteralPath $assetSource -Destination $packageAsset -Force
+                  }
+                }
+                $testOutputAsset = Join-Path $testOutputRoot $assetName
+                if (-not (Test-Path $testOutputAsset -PathType Leaf)) {
+                  Copy-Item -LiteralPath $assetSource -Destination $testOutputAsset
+                }
+              }
+            }
           }
-          Write-Host "Staged SQLite runtime asset in test output: $testOutputSqlite"
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
