@@ -1,5 +1,17 @@
 # FileID — State
 
+## 2026-10-03 — Confirmed-person chat retrieval
+
+macOS chat now resolves exact saved People labels and first-name aliases to existing face-print and non-stale video-observation evidence. It applies the identity filter before result limits to file and timestamp/page matches, returns timestamped person observations that seek directly into matching videos and labels unedited model matches unverified, retains action words for keyword retrieval, and carries selected identities through follow-up filters. Unknown clusters are excluded; ambiguous exact first names include all matching confirmed identities. Four focused chat-search tests and the full Swift suite (480 tests in 96 suites) pass, including an end-to-end request against an internal temporary catalog. Current-document, catalog-schema, runtime-egress, and diff checks pass. Both Release products rebuild locally. The instrumentation-only PR head passed macOS Release/tests/privacy and action-policy checks; updated-head checks must include this chat increment before landing. No schema, IPC, dependency, model, or network changes. Adlon remains read-only.
+
+## 2026-10-03 — Scan admission timing instrumentation
+
+Scan workers now measure time spent waiting for their background CPU reservation. `TaggedFile.admissionWaitMs` stays engine-internal and ephemeral; the existing local JSONL `batch` event reports admission-wait P50/P95/max and count delayed over 1 ms, separately from `perFileTotalMs`. No file paths, database fields, IPC fields, dependencies, or network behavior were added.
+
+The focused foreground-contention test passes, as do all 478 Swift tests across 96 suites. Both Release products build, and `bash run.sh --no-wipe` launched FileID and FileIDEngine while retaining the local library. The eight existing `ScanPipelinePerfTests` are synthetic discovery/writer checks: their 3,339–6,012 files/s batches show `visionP50Ms: 0` and `utilization: 0`, so they do not measure tagging throughput. Both standard FileID model directories contain no files, so no model-backed scan benchmark was run and no capacity tuning is justified yet. The no-new-egress audit passed. Adlon data was not used.
+
+Next, capture actual scan and admission-wait percentiles with installed local inference weights and internal-drive fixtures while foreground work runs. Compare stage timings and memory before changing scheduler capacity or adding I/O/memory estimates. The full next-version feature plan remains active; keep Windows/Linux implementation and hardware acceptance deferred until the owner is on that PC.
+
 ## 2026-10-03 — Scan tagging scheduler accepted on main
 
 Each macOS scan worker now reserves one background CPU unit while `Tagging.processFile` runs. The permit yields to interactive inference, retries temporary capacity conflicts with cancellation checks, and releases after the file completes. `Hardware.workerCap` remains the outer worker bound. Per-file scan I/O and memory are not estimated yet; throughput under contention still needs measurement before changing either bound.

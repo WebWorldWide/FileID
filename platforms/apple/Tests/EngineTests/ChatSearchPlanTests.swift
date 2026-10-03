@@ -5,6 +5,38 @@ import FileIDShared
 @testable import FileIDEngine
 
 @Suite struct ChatSearchPlanTests {
+    @Test func confirmedPersonNamesBecomeIdentityFilters() {
+        let grandma = ChatSearchPlan.KnownPerson(id: 7, names: ["Grandma"])
+        let first = ChatSearchPlan.resolve(
+            "Show videos of Grandma opening presents",
+            knownPeople: [grandma]
+        )
+        #expect(first.query == "opening presents")
+        #expect(first.kinds == ["video"])
+        #expect(first.personIDs == [7])
+        #expect(first.personNames == ["Grandma"])
+
+        let refined = ChatSearchPlan.resolve("only videos", previous: first, knownPeople: [grandma])
+        #expect(refined.query == "opening presents")
+        #expect(refined.kinds == ["video"])
+        #expect(refined.personIDs == [7])
+        #expect(refined.personNames == ["Grandma"])
+
+        let unconfirmed = ChatSearchPlan.resolve("Grandma opening presents")
+        #expect(unconfirmed.query == "Grandma opening presents")
+        #expect(unconfirmed.personIDs.isEmpty)
+
+        let alex = ChatSearchPlan.resolve(
+            "Find videos where Alex gets a hit",
+            knownPeople: [
+                ChatSearchPlan.KnownPerson(id: 8, names: ["Alex Johnson", "Alex"]),
+                ChatSearchPlan.KnownPerson(id: 9, names: ["Alex Smith", "Alex"])
+            ]
+        )
+        #expect(alex.query == "gets hit")
+        #expect(alex.personIDs == [8, 9])
+    }
+
     @Test func sharedPlansPreserveSubjectsAndExplicitFilters() throws {
         struct Fixture: Decodable { let messages: [String]; let query: String; let kinds: [String] }
         var root = URL(fileURLWithPath: #filePath)
@@ -41,5 +73,47 @@ import FileIDShared
         #expect(replies.last?.hits.map(\.fileID) == [1])
         #expect(replies.last?.message.contains("birthday") == true)
         #expect(replies.last?.message.contains("(video)") == true)
+    }
+
+    @Test func personFilterRequiresAConfirmedObservation() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await db.pool.write { sql in
+            for id in 1...2 {
+                try sql.execute(
+                    sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?,?,?,100,0,'video','mov','Opening presents')",
+                    arguments: [id, "/offline/presents-\(id).mov", id]
+                )
+            }
+            try sql.execute(sql: "INSERT INTO persons(id,name,file_count,created_at,is_unknown) VALUES(7,'Grandma',1,0,0)")
+            try sql.execute(sql: "INSERT INTO catalog_observations(id,file_id,person_id,start_seconds,end_seconds,source_revision,model_version,confidence,stale) VALUES('grandma-in-video',1,7,12,13,'1:1','test',1,0)")
+            try sql.execute(sql: "INSERT INTO catalog_observations(id,file_id,person_id,start_seconds,end_seconds,source_revision,model_version,confidence,user_edited,stale) VALUES('grandma-confirmed',1,7,14,15,'1:1','test',1,1,0)")
+
+            let hits = try CatalogStore.search(sql, query: "opening presents", kinds: ["video"], personIDs: [7])
+            #expect(Set(hits.map(\.fileID)) == [1])
+            #expect(hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
+            #expect(hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.text.contains("unverified appearance") })
+            #expect(hits.contains { $0.evidenceID == "person:grandma-confirmed" && $0.text.contains("user-confirmed appearance") })
+            let personOnly = try CatalogStore.search(sql, query: "", kinds: ["video"], personIDs: [7])
+            #expect(personOnly.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
+        }
+        let capture = WireCapture()
+        await ChatService().handle(
+            ChatRequest(requestID: "grandma-chat", conversationID: "grandma-chat", action: "send", text: "Show videos of Grandma opening presents", useModel: false),
+            database: db,
+            sink: capture.sink
+        )
+        await capture.finish()
+        let events = try capture.bytes().split(separator: 10).map {
+            try IPCCoder.decoder.decode(IPCEvent.self, from: Data($0))
+        }
+        let response = events.compactMap { event -> ChatResponse? in
+            if case .chatResponse(let value) = event.payload { return value }
+            return nil
+        }.last
+        #expect(Set(response?.hits.map(\.fileID) ?? []) == [1])
+        #expect(response?.hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 } == true)
+        #expect(response?.message.contains("people: Grandma") == true)
     }
 }
