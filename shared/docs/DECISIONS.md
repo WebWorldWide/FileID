@@ -3561,3 +3561,8 @@ Apple's macOS App Store provisioning profile uses `com.apple.application-identif
 ## 2026-10-03 — Defer stale Windows app test-suite repair to the PC session
 
 The Windows app job's nested-path check silently skipped `FileID.App.Tests`. A hosted discovery experiment found 157 compilation diagnostics because existing tests reference missing or changed app members. Keep the current packaging/IPC gate documented as incomplete app-suite coverage. On the owner's PC, reconcile tests with current APIs and add fail-closed discovery; do not hide the mismatch by excluding tests. No Windows product or test source is changed before that session.
+
+
+## 2026-10-03 — Fail Windows app CI when xUnit discovers zero tests
+
+After PR #213 updated the app test sources and workflow, the app test assembly built but VSTest reported `No test is available` and exited zero; the 49-test IPC suite was separate. Supply the xUnit adapter path explicitly and require the app TRX report to show at least one executed test with all passing. This supersedes the earlier decision to defer stale test-source repair: those 157 diagnostics came from the pre-#213 tree and are not current-main evidence. Do not accept build success or a zero-test VSTest exit as app-suite coverage.
